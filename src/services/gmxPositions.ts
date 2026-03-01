@@ -314,7 +314,7 @@ export async function getGmxPositionsSummary(
     totalSize += parseUsdString(p.sizeInUsd);
   }
 
-  const formattedReport = formatPositionsReport(positions, pendingOrders, totalPnl, totalCollateral, totalSize);
+  const formattedReport = formatPositionsReport(positions, pendingOrders, totalPnl, totalCollateral, totalSize, vaultAddress);
 
   return {
     positions,
@@ -358,6 +358,7 @@ function formatPositionsReport(
   totalPnl: number,
   totalCollateral: number,
   totalSize: number,
+  vaultAddress?: string,
 ): string {
   const lines: string[] = [];
 
@@ -411,6 +412,11 @@ function formatPositionsReport(
 
   lines.push("─".repeat(56));
   lines.push("📍 Network: Arbitrum One  •  Protocol: GMX v2");
+
+  if (vaultAddress) {
+    const portfolioUrl = `https://app.gmx.io/#/accounts/${vaultAddress}?network=arbitrum&v=2`;
+    lines.push(`🔗 Portfolio: ${portfolioUrl}`);
+  }
 
   return lines.join("\n");
 }
