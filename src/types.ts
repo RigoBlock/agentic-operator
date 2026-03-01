@@ -43,6 +43,8 @@ export interface ToolCallResult {
   arguments: Record<string, unknown>;
   result?: string;
   error?: boolean;
+  /** Quick-action suggestions shown as clickable chips */
+  suggestions?: string[];
 }
 
 /** An unsigned transaction returned to the frontend for operator signing */
@@ -73,6 +75,8 @@ export interface ChatResponse {
   chainSwitch?: number;
   /** The DEX / API provider used in this response (e.g. "0x", "Uniswap") */
   dexProvider?: string;
+  /** Quick-action suggestions shown as clickable chips */
+  suggestions?: string[];
 }
 
 // ── Swap intent ───────────────────────────────────────────────────────

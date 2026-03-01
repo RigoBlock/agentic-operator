@@ -84,6 +84,7 @@ You build the transaction; they approve it.`;
   let pendingTransaction: UnsignedTransaction | undefined;
   let pendingChainSwitch: number | undefined;
   let detectedDex: string | undefined;
+  let pendingSuggestions: string[] | undefined;
 
   // If the LLM wants to call tools
   if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
@@ -118,6 +119,9 @@ You build the transaction; they approve it.`;
           pendingChainSwitch = toolResult.chainSwitch;
           // Update context for subsequent tool calls in this turn
           ctx.chainId = toolResult.chainSwitch;
+        }
+        if (toolResult.suggestions?.length) {
+          pendingSuggestions = toolResult.suggestions;
         }
         // Detect DEX from tool call args
         if ((name === "get_swap_quote" || name === "build_vault_swap") && args.dex) {
@@ -157,6 +161,23 @@ You build the transaction; they approve it.`;
         transaction: pendingTransaction,
         chainSwitch: pendingChainSwitch,
         dexProvider: detectedDex,
+        suggestions: pendingSuggestions,
+      };
+    }
+
+    // If we have suggestions (e.g., positions dashboard), the report is self-contained.
+    // Skip follow-up LLM call to return verbatim instead of wrapping.
+    if (pendingSuggestions?.length) {
+      console.log("[processChat] Skipping follow-up LLM call — self-contained report with suggestions");
+      const report = toolCallResults
+        .filter(tc => !tc.error && tc.result)
+        .map(tc => tc.result)
+        .join("\n");
+      return {
+        reply: report,
+        toolCalls: [],
+        chainSwitch: pendingChainSwitch,
+        suggestions: pendingSuggestions,
       };
     }
 
@@ -263,6 +284,8 @@ interface ToolResult {
   message: string;
   transaction?: UnsignedTransaction;
   chainSwitch?: number;
+  /** Quick-action suggestions shown as clickable chips */
+  suggestions?: string[];
 }
 
 /**
@@ -757,7 +780,18 @@ async function executeToolCall(
         env.ALCHEMY_API_KEY,
       );
 
-      return { message: summary.formattedReport, chainSwitch: chainSwitched };
+      // Build context-aware suggestions
+      const suggestions: string[] = [];
+      if (summary.positions.length > 0) {
+        suggestions.push("Close position", "Add collateral", "Set stop-loss", "Open new position");
+      } else {
+        suggestions.push("Open a long", "Open a short", "Show GMX markets");
+      }
+      if (summary.pendingOrders.length > 0) {
+        suggestions.push("Cancel order");
+      }
+
+      return { message: summary.formattedReport, chainSwitch: chainSwitched, suggestions };
     }
 
     case "gmx_cancel_order": {

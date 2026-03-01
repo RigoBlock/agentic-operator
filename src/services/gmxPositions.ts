@@ -350,7 +350,8 @@ function parseUsdString(s: string): number {
 }
 
 /**
- * Generate a graphically nice positions report in markdown-style text for the chat.
+ * Generate a positions report with a markdown-style table for the chat.
+ * URLs are rendered clickable by the frontend.
  */
 function formatPositionsReport(
   positions: GmxPosition[],
@@ -363,59 +364,51 @@ function formatPositionsReport(
   const lines: string[] = [];
 
   if (positions.length === 0 && pendingOrders.length === 0) {
-    return "📋 No open GMX positions or pending orders for this vault on Arbitrum.";
+    return "📋 No open GMX positions or pending orders for this vault.";
   }
 
-  lines.push("╔══════════════════════════════════════════════════════╗");
-  lines.push("║           GMX v2 PERPETUALS DASHBOARD               ║");
-  lines.push("╚══════════════════════════════════════════════════════╝");
+  lines.push("📊 GMX Positions");
   lines.push("");
 
   if (positions.length > 0) {
     // Summary bar
     const pnlEmoji = totalPnl >= 0 ? "🟢" : "🔴";
-    lines.push(`${pnlEmoji} Total PnL: ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}  |  Total Size: ${formatUsd(totalSize)}  |  Positions: ${positions.length}`);
-    lines.push("─".repeat(56));
+    lines.push(`${pnlEmoji} Total PnL: ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}  |  Size: ${formatUsd(totalSize)}  |  Positions: ${positions.length}`);
     lines.push("");
 
+    // Table header
+    lines.push("| Market | Side | Size | Collateral | Leverage | Entry | Mark | PnL |");
+    lines.push("|--------|------|------|------------|----------|-------|------|-----|");
+
     for (const pos of positions) {
-      const direction = pos.isLong ? "🟢 LONG" : "🔴 SHORT";
+      const side = pos.isLong ? "🟢 LONG" : "🔴 SHORT";
       const pnlValue = parseUsdString(pos.unrealizedPnl);
-      const pnlColor = pnlValue >= 0 ? "✅" : "❌";
-
-      lines.push(`┌──────────────────────────────────────────────────┐`);
-      lines.push(`│ ${direction}  ${pos.marketSymbol}  •  ${pos.leverage} leverage`);
-      lines.push(`├──────────────────────────────────────────────────┤`);
-      lines.push(`│  Size:        ${pos.sizeInUsd} (${pos.sizeInTokens} ${pos.indexTokenSymbol})`);
-      lines.push(`│  Collateral:  ${pos.collateralAmount} ${pos.collateralSymbol}`);
-      lines.push(`│  Entry:       ${pos.entryPrice}  →  Mark: ${pos.markPrice}`);
-      lines.push(`│  ${pnlColor} PnL:  ${pos.unrealizedPnl} (${pos.unrealizedPnlPercent})`);
-      lines.push(`│  Borrow:      ${pos.borrowingFee}`);
-      lines.push(`└──────────────────────────────────────────────────┘`);
-      lines.push("");
-    }
-  }
-
-  if (pendingOrders.length > 0) {
-    lines.push("─".repeat(56));
-    lines.push(`⏳ PENDING ORDERS (${pendingOrders.length})`);
-    lines.push("─".repeat(56));
-
-    for (const order of pendingOrders) {
-      const dir = order.isLong ? "LONG" : "SHORT";
+      const pnlIcon = pnlValue >= 0 ? "✅" : "❌";
       lines.push(
-        `  • ${order.orderType} ${dir} ${order.marketSymbol} | Size: ${order.sizeDeltaUsd} | Trigger: ${order.triggerPrice}`,
+        `| ${pos.marketSymbol} | ${side} | ${pos.sizeInUsd} (${pos.sizeInTokens} ${pos.indexTokenSymbol}) | ${pos.collateralAmount} ${pos.collateralSymbol} | ${pos.leverage} | ${pos.entryPrice} | ${pos.markPrice} | ${pnlIcon} ${pos.unrealizedPnl} (${pos.unrealizedPnlPercent}) |`,
       );
     }
     lines.push("");
   }
 
-  lines.push("─".repeat(56));
-  lines.push("📍 Network: Arbitrum One  •  Protocol: GMX v2");
+  if (pendingOrders.length > 0) {
+    lines.push(`⏳ Pending Orders (${pendingOrders.length})`);
+    lines.push("");
+    lines.push("| Market | Side | Type | Size | Trigger |");
+    lines.push("|--------|------|------|------|---------|");
+
+    for (const order of pendingOrders) {
+      const dir = order.isLong ? "LONG" : "SHORT";
+      lines.push(
+        `| ${order.marketSymbol} | ${dir} | ${order.orderType} | ${order.sizeDeltaUsd} | ${order.triggerPrice} |`,
+      );
+    }
+    lines.push("");
+  }
 
   if (vaultAddress) {
     const portfolioUrl = `https://app.gmx.io/#/accounts/${vaultAddress}?network=arbitrum&v=2`;
-    lines.push(`🔗 Portfolio: ${portfolioUrl}`);
+    lines.push(`🔗 ${portfolioUrl}`);
   }
 
   return lines.join("\n");

@@ -130,6 +130,40 @@
     .typing::after { content: '▋'; animation: blink 1s step-end infinite; }
     @keyframes blink { 50% { opacity: 0; } }
 
+    /* ── Rich message content (tables, links) ───────────── */
+    .msg.assistant .msg-content a {
+      color: var(--accent); text-decoration: none; word-break: break-all;
+    }
+    .msg.assistant .msg-content a:hover { text-decoration: underline; }
+    .msg.assistant .msg-content table {
+      border-collapse: collapse; margin: 8px 0; font-size: 13px; width: 100%;
+      white-space: nowrap;
+    }
+    .msg.assistant .msg-content th,
+    .msg.assistant .msg-content td {
+      padding: 4px 10px; border: 1px solid var(--border); text-align: left;
+    }
+    .msg.assistant .msg-content th {
+      background: var(--bg); font-weight: 600; font-size: 12px; color: var(--muted);
+    }
+    .msg.assistant .msg-content td { font-size: 12px; }
+    .msg.assistant .msg-content { overflow-x: auto; }
+
+    /* ── Suggestion chips ───────────────────────────────── */
+    .suggestions {
+      display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding-top: 8px;
+      border-top: 1px solid var(--border);
+    }
+    .suggestion-chip {
+      font-size: 12px; padding: 6px 14px; border-radius: 16px;
+      border: 1px solid var(--accent-dim); background: rgba(31, 111, 235, 0.08);
+      color: var(--accent); cursor: pointer; font-weight: 500;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .suggestion-chip:hover {
+      background: rgba(31, 111, 235, 0.18); border-color: var(--accent);
+    }
+
     /* ── Input ──────────────────────────────────────────── */
     #input-area { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; gap: 12px; }
     #input-area textarea {
@@ -226,6 +260,10 @@
       #chat { padding: 10px; gap: 10px; }
       .msg { max-width: 100%; padding: 8px 10px; font-size: 13px; }
       .msg .tool-result { font-size: 11px; padding: 6px 8px; }
+      .msg.assistant .msg-content table { font-size: 11px; }
+      .msg.assistant .msg-content th,
+      .msg.assistant .msg-content td { padding: 3px 6px; font-size: 11px; }
+      .suggestion-chip { font-size: 11px; padding: 5px 10px; }
       #input-area { padding: 8px 10px; gap: 8px; }
       #input-area textarea { padding: 10px 12px; font-size: 16px; min-height: 44px; }
       #input-area button { padding: 0 14px; font-size: 14px; min-height: 44px; }
@@ -533,14 +571,49 @@
       inputEl.style.height = 'auto';
       inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
     });
+
+    // Command history (up/down arrow)
+    const commandHistory = [];
+    let historyIndex = -1;
+    let historyDraft = '';
+
     inputEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); return; }
+
+      if (e.key === 'ArrowUp' && inputEl.selectionStart === 0 && !e.shiftKey) {
+        if (commandHistory.length === 0) return;
+        e.preventDefault();
+        if (historyIndex === -1) historyDraft = inputEl.value;
+        if (historyIndex < commandHistory.length - 1) {
+          historyIndex++;
+          inputEl.value = commandHistory[commandHistory.length - 1 - historyIndex];
+        }
+        return;
+      }
+
+      if (e.key === 'ArrowDown' && !e.shiftKey) {
+        if (historyIndex === -1) return;
+        e.preventDefault();
+        historyIndex--;
+        inputEl.value = historyIndex === -1 ? historyDraft : commandHistory[commandHistory.length - 1 - historyIndex];
+        return;
+      }
     });
 
     function appendMessage(role, content, extras) {
       const div = document.createElement('div');
       div.className = `msg ${role}`;
-      div.textContent = content;
+
+      if (role === 'assistant' && content) {
+        // Rich rendering: markdown tables + clickable links
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'msg-content';
+        contentDiv.innerHTML = renderRichContent(content);
+        div.appendChild(contentDiv);
+      } else if (content) {
+        div.textContent = content;
+      }
+
       if (extras?.toolCall) {
         const tc = document.createElement('div');
         tc.className = 'tool-call';
@@ -553,14 +626,92 @@
         tr.textContent = extras.toolResult;
         div.appendChild(tr);
       }
+      if (extras?.suggestions?.length) {
+        const chips = document.createElement('div');
+        chips.className = 'suggestions';
+        for (const label of extras.suggestions) {
+          const chip = document.createElement('button');
+          chip.className = 'suggestion-chip';
+          chip.textContent = label;
+          chip.onclick = () => {
+            inputEl.value = label;
+            sendMessage();
+          };
+          chips.appendChild(chip);
+        }
+        div.appendChild(chips);
+      }
       chatEl.appendChild(div);
       chatEl.scrollTop = chatEl.scrollHeight;
       return div;
     }
 
+    /**
+     * Render assistant text with markdown tables and clickable URLs.
+     * Sanitizes HTML entities first, then processes patterns.
+     */
+    function renderRichContent(text) {
+      const lines = text.split('\n');
+      let html = '';
+      let inTable = false;
+      let isHeader = true;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        // Detect markdown table rows: | ... | ... |
+        if (/^\|(.+)\|$/.test(line.trim())) {
+          const cells = line.trim().slice(1, -1).split('|').map(c => c.trim());
+
+          // Skip separator rows (|---|---|)
+          if (cells.every(c => /^[-:]+$/.test(c))) {
+            continue;
+          }
+
+          if (!inTable) {
+            html += '<table>';
+            inTable = true;
+            isHeader = true;
+          }
+
+          const tag = isHeader ? 'th' : 'td';
+          html += '<tr>' + cells.map(c => `<${tag}>${escapeHtml(c)}</${tag}>`).join('') + '</tr>';
+          if (isHeader) isHeader = false;
+          continue;
+        }
+
+        // Close table if we were in one
+        if (inTable) {
+          html += '</table>';
+          inTable = false;
+        }
+
+        // Regular line: escape then linkify URLs
+        html += linkifyUrls(escapeHtml(line)) + '\n';
+      }
+
+      if (inTable) html += '</table>';
+      return html;
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function linkifyUrls(str) {
+      return str.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+    }
+
     async function sendMessage() {
       const text = inputEl.value.trim();
       if (!text) return;
+
+      // Push to command history
+      if (!commandHistory.length || commandHistory[commandHistory.length - 1] !== text) {
+        commandHistory.push(text);
+      }
+      historyIndex = -1;
+      historyDraft = '';
 
       const vault = vaultInput.value.trim();
       const chainId = currentChainId;
@@ -667,7 +818,7 @@
       }
 
       if (data.reply) {
-        appendMessage('assistant', data.reply);
+        appendMessage('assistant', data.reply, { suggestions: data.suggestions });
         // Store tool results inline so the LLM has full context.
         // IMPORTANT: Do NOT use any bracket/prefix format that looks like a tool call —
         // gpt-4.1-nano reproduced such patterns as text instead of calling actual tools.
