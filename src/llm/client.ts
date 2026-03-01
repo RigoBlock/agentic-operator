@@ -573,28 +573,51 @@ async function executeToolCall(
 
       const marketSymbol = (args.market as string).toUpperCase();
       const isLong = args.isLong as boolean;
-      const collateralSymbol = (args.collateral as string) || (isLong ? "WETH" : "USDC");
-      const collateralAmount = args.collateralAmount as string;
+      const collateralSymbol = (args.collateral as string) || "USDC";
 
       // Find market and get price
       const market = await findGmxMarket(marketSymbol);
       const collateralAddr = resolveGmxCollateral(collateralSymbol);
       const collateralDecimals = getGmxTokenDecimals(collateralAddr);
+      const collateralPrice = await getGmxTokenPrice(collateralAddr);
 
-      // Resolve sizeDeltaUsd from leverage or direct value
+      // Determine collateralAmount and sizeDeltaUsd.
+      // Three modes:
+      //   A) notionalUsd + leverage → collateral = notional / leverage, size = notional
+      //   B) collateralAmount + leverage → size = collateralValue * leverage
+      //   C) collateralAmount + sizeDeltaUsd → explicit
+      let collateralAmount: string;
       let sizeDeltaUsd: string;
-      if (args.sizeDeltaUsd && (args.sizeDeltaUsd as string) !== "") {
-        sizeDeltaUsd = args.sizeDeltaUsd as string;
-      } else if (args.leverage) {
+
+      if (args.notionalUsd && args.leverage) {
+        // Mode A: "long 1000 ETHUSDC 5x" → notionalUsd=1000, leverage=5
+        const notional = parseFloat(args.notionalUsd as string);
         const leverageNum = parseFloat(args.leverage as string);
-        const collateralPrice = await getGmxTokenPrice(collateralAddr);
-        const collateralValueUsd = parseFloat(collateralAmount) * collateralPrice.mid;
-        sizeDeltaUsd = (collateralValueUsd * leverageNum).toFixed(2);
+        sizeDeltaUsd = notional.toFixed(2);
+        const collateralValueUsd = notional / leverageNum;
+        // Convert USD value to collateral token units
+        collateralAmount = (collateralValueUsd / collateralPrice.mid).toFixed(collateralDecimals <= 8 ? collateralDecimals : 6);
+      } else if (args.collateralAmount) {
+        collateralAmount = args.collateralAmount as string;
+        if (args.sizeDeltaUsd && (args.sizeDeltaUsd as string) !== "") {
+          sizeDeltaUsd = args.sizeDeltaUsd as string;
+        } else if (args.leverage) {
+          const leverageNum = parseFloat(args.leverage as string);
+          const collateralValueUsd = parseFloat(collateralAmount) * collateralPrice.mid;
+          sizeDeltaUsd = (collateralValueUsd * leverageNum).toFixed(2);
+        } else {
+          // Default 2x leverage
+          const collateralValueUsd = parseFloat(collateralAmount) * collateralPrice.mid;
+          sizeDeltaUsd = (collateralValueUsd * 2).toFixed(2);
+        }
+      } else if (args.notionalUsd) {
+        // notionalUsd without leverage → default 2x
+        const notional = parseFloat(args.notionalUsd as string);
+        sizeDeltaUsd = notional.toFixed(2);
+        const collateralValueUsd = notional / 2;
+        collateralAmount = (collateralValueUsd / collateralPrice.mid).toFixed(collateralDecimals <= 8 ? collateralDecimals : 6);
       } else {
-        // Default 2x leverage
-        const collateralPrice = await getGmxTokenPrice(collateralAddr);
-        const collateralValueUsd = parseFloat(collateralAmount) * collateralPrice.mid;
-        sizeDeltaUsd = (collateralValueUsd * 2).toFixed(2);
+        throw new Error("Please specify either collateralAmount or notionalUsd for the position.");
       }
 
       const calldata = buildCreateIncreaseOrderCalldata({
@@ -606,8 +629,9 @@ async function executeToolCall(
         isLong,
       });
 
-      const leverage = args.leverage || (parseFloat(sizeDeltaUsd) / (parseFloat(collateralAmount) * (await getGmxTokenPrice(collateralAddr)).mid)).toFixed(1);
+      const leverage = args.leverage || (parseFloat(sizeDeltaUsd) / (parseFloat(collateralAmount) * collateralPrice.mid)).toFixed(1);
       const gasLimit = getGmxGasLimit();
+      const collateralValueUsdDisplay = (parseFloat(collateralAmount) * collateralPrice.mid).toFixed(2);
 
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
@@ -615,18 +639,19 @@ async function executeToolCall(
         value: "0x0",
         chainId: ARBITRUM_CHAIN_ID,
         gas: `0x${gasLimit.toString(16)}`,
-        description: `[GMX] ${isLong ? "Long" : "Short"} ${marketSymbol} ${leverage}x — ${collateralAmount} ${collateralSymbol} collateral, $${sizeDeltaUsd} size`,
+        description: `[GMX] ${isLong ? "Long" : "Short"} ${marketSymbol} ${leverage}x — ${collateralAmount} ${collateralSymbol} collateral (~$${collateralValueUsdDisplay}), $${sizeDeltaUsd} size`,
       };
 
       const message = [
         `✅ GMX ${name === "gmx_increase_position" ? "Increase" : "Open"} Position ready`,
         `Direction: ${isLong ? "🟢 LONG" : "🔴 SHORT"} ${marketSymbol}/USD`,
-        `Size: $${parseFloat(sizeDeltaUsd).toLocaleString()}`,
-        `Collateral: ${collateralAmount} ${collateralSymbol}`,
+        `Size (notional): $${parseFloat(sizeDeltaUsd).toLocaleString()}`,
+        `Collateral: ${collateralAmount} ${collateralSymbol} (~$${collateralValueUsdDisplay})`,
         `Leverage: ~${leverage}x`,
         `Market: ${market.marketToken}`,
         `Chain: Arbitrum`,
-        `Gas limit: ${gasLimit.toString()}`,
+        ``,
+        `💡 Collateral is the amount deposited into the position. Size is the leveraged notional exposure.`,
       ].join("\n");
 
       return { message, transaction, chainSwitch: chainSwitched };
@@ -648,7 +673,7 @@ async function executeToolCall(
       const market = await findGmxMarket(marketSymbol);
 
       // Resolve collateral from args or from position
-      let collateralSymbol = (args.collateral as string) || (isLong ? "WETH" : "USDC");
+      let collateralSymbol = (args.collateral as string) || "USDC";
       const collateralAddr = resolveGmxCollateral(collateralSymbol);
       const collateralDecimals = getGmxTokenDecimals(collateralAddr);
 

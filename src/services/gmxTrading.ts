@@ -149,8 +149,8 @@ export async function findGmxMarket(
     tokenSymbolMap.set(t.tokenAddress.toLowerCase(), t.tokenSymbol);
   }
 
-  // Find matching markets
-  const symbol = indexTokenSymbol.toUpperCase();
+  // Find matching markets — strip trailing USD/USDC/PERP suffixes
+  const symbol = indexTokenSymbol.toUpperCase().replace(/(?:USD[CT]?|PERP)$/i, "");
   const matching = markets.filter((m) => {
     const idxSymbol = tokenSymbolMap.get(m.indexToken.toLowerCase());
     return idxSymbol?.toUpperCase() === symbol;
@@ -302,6 +302,7 @@ export function buildCreateIncreaseOrderCalldata(params: {
     shouldUnwrapNativeToken: false,       // overridden by adapter
     autoCancel: false,
     referralCode: ZERO_BYTES32,           // overridden by adapter
+    dataList: [] as Hex[],                // overridden by adapter
   };
 
   return encodeFunctionData({
@@ -390,6 +391,7 @@ export function buildCreateDecreaseOrderCalldata(params: {
     shouldUnwrapNativeToken: false,
     autoCancel: orderType === GmxOrderType.StopLossDecrease,
     referralCode: ZERO_BYTES32,
+    dataList: [] as Hex[],                // overridden by adapter
   };
 
   return encodeFunctionData({

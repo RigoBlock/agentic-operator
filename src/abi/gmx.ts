@@ -67,6 +67,7 @@ export const GMX_CREATE_ORDER_PARAMS_TUPLE = {
     { name: "shouldUnwrapNativeToken", type: "bool" },
     { name: "autoCancel", type: "bool" },
     { name: "referralCode", type: "bytes32" },
+    { name: "dataList", type: "bytes32[]" },
   ],
 } as const;
 

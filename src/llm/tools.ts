@@ -160,22 +160,26 @@ export const TOOL_DEFINITIONS = [
       description:
         "Open a new leveraged perpetual position on GMX v2 (Arbitrum only). " +
         "Builds an unsigned createIncreaseOrder transaction. " +
-        "If not on Arbitrum, auto-switches. The vault must have sufficient collateral (WETH, USDC, etc.). " +
-        "The adapter handles execution fees automatically.",
+        "If not on Arbitrum, auto-switches. The vault must have sufficient collateral. " +
+        "The adapter handles execution fees automatically. Default collateral is always USDC.",
       parameters: {
         type: "object",
         properties: {
           market: {
             type: "string",
-            description: "Market to trade — index token symbol (e.g., 'ETH', 'BTC', 'ARB', 'SOL', 'LINK')",
+            description: "Market to trade — index token symbol (e.g., 'ETH', 'BTC', 'ARB', 'SOL', 'LINK'). May include 'USD'/'USDC' suffix (e.g. 'ETHUSDC') — the suffix is ignored.",
           },
           collateral: {
             type: "string",
-            description: "Collateral token symbol (e.g., 'ETH', 'WETH', 'USDC', 'USDT'). Default: WETH for longs, USDC for shorts.",
+            description: "Collateral token symbol (e.g., 'USDC', 'WETH', 'USDT'). Default: USDC for all positions.",
           },
           collateralAmount: {
             type: "string",
-            description: "Amount of collateral in human-readable units (e.g., '0.5' ETH, '1000' USDC)",
+            description: "Amount of collateral in human-readable units (e.g., '200' USDC). If notionalUsd and leverage are given instead, collateral = notionalUsd / leverage.",
+          },
+          notionalUsd: {
+            type: "string",
+            description: "Notional position size in USD (e.g., '1000'). When used with leverage, collateral is derived as notionalUsd / leverage. Use when user says 'long 1000 ETHUSDC 5x'.",
           },
           sizeDeltaUsd: {
             type: "string",
@@ -190,7 +194,7 @@ export const TOOL_DEFINITIONS = [
             description: "Desired leverage (e.g., '5' for 5x). If provided without sizeDeltaUsd, the system computes sizeDeltaUsd = collateralValue * leverage.",
           },
         },
-        required: ["market", "collateralAmount", "isLong"],
+        required: ["market", "isLong"],
       },
     },
   },
@@ -414,15 +418,19 @@ CHAIN HANDLING:
 
 GMX PERPETUALS:
 - GMX is ONLY available on Arbitrum. If on another chain, auto-switch to Arbitrum.
-- To open a position: use gmx_open_position. Requires market (e.g. "ETH"), collateralAmount, and isLong.
+- To open a position: use gmx_open_position. Requires market (e.g. "ETH") and isLong.
 - To close: use gmx_close_position. sizeDeltaUsd="all" closes the full position.
 - To increase: use gmx_increase_position (same flow as open).
 - To view positions: use gmx_get_positions. Shows a dashboard with PnL, leverage, entry/mark prices.
 - To cancel pending order: use gmx_cancel_order with the orderKey from gmx_get_positions.
 - To set stop-loss or take-profit: use gmx_close_position with orderType="stop_loss" or "limit" and a triggerPrice.
-- Default collateral: WETH for longs, USDC for shorts, unless user specifies.
-- If user says "long ETH 5x with 1 ETH" → market="ETH", isLong=true, collateralAmount="1", leverage="5".
-- If user says "short BTC 10x with 5000 USDC" → market="BTC", isLong=false, collateralAmount="5000", collateral="USDC", leverage="10".
+- Default collateral: ALWAYS USDC (for both longs and shorts), unless user explicitly specifies otherwise.
+- Market symbols may include USD/USDC suffix (ETHUSDC, ETHUSD, ETH all mean the ETH/USD market).
+- NOTIONAL (USD) SYNTAX: "long 1000 ETHUSDC 5x" means notionalUsd=1000, leverage=5, so collateral = 1000/5 = 200 USDC.
+  When a number appears before a market pair like ETHUSDC/BTCUSD, it is the NOTIONAL USD SIZE, not collateral.
+- COLLATERAL SYNTAX: "long ETH 5x with 0.5 ETH" means collateral 0.5 ETH, leverage 5x → explicit collateral.
+- If user says "long ETH 5x with 200 USDC" → market="ETH", isLong=true, collateralAmount="200", leverage="5".
+- If user says "short BTC 10x with 5000 USDC" → market="BTC", isLong=false, collateralAmount="5000", leverage="10".
 - If no leverage/sizeDeltaUsd given, ask for one or default to moderate leverage (e.g. 2x-5x).
 - claimFundingFees: use gmx_claim_funding_fees to claim accumulated funding.
 - Available markets: use gmx_get_markets to see what's tradeable.
@@ -448,9 +456,12 @@ NEVER set amountIn when the user says "buy" — "buy" ALWAYS means amountOut.
 Provide exactly ONE of amountIn or amountOut, never both.
 
 GMX INTENT PARSING:
-- "long ETH 5x with 0.5 ETH" → gmx_open_position: market="ETH", isLong=true, collateralAmount="0.5", leverage="5"
-- "short BTC with 5000 USDC at 10x" → gmx_open_position: market="BTC", isLong=false, collateral="USDC", collateralAmount="5000", leverage="10"
-- "open a $10000 long on ETH with 1 ETH" → gmx_open_position: market="ETH", isLong=true, collateralAmount="1", sizeDeltaUsd="10000"
+- "long 1000 ETHUSDC 5x" → gmx_open_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5" (collateral = 1000/5 = 200 USDC)
+- "long 500 BTCUSD 10x" → gmx_open_position: market="BTC", isLong=true, notionalUsd="500", leverage="10" (collateral = 500/10 = 50 USDC)
+- "long ETH 5x with 0.5 ETH" → gmx_open_position: market="ETH", isLong=true, collateralAmount="0.5", collateral="ETH", leverage="5"
+- "long ETH 5x with 200 USDC" → gmx_open_position: market="ETH", isLong=true, collateralAmount="200", leverage="5"
+- "short BTC with 5000 USDC at 10x" → gmx_open_position: market="BTC", isLong=false, collateralAmount="5000", leverage="10"
+- "open a $10000 long on ETH with 1 ETH" → gmx_open_position: market="ETH", isLong=true, collateralAmount="1", collateral="ETH", sizeDeltaUsd="10000"
 - "close my ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all"
 - "reduce ETH long by $5000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="5000"
 - "set stop loss on ETH long at $3000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all", orderType="stop_loss", triggerPrice="3000"
