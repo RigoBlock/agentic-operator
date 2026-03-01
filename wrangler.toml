@@ -1,0 +1,23 @@
+name = "agentic-operator"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# No [vars] needed — vault address and chain come from the frontend per-request.
+
+[assets]
+directory = "./public"
+
+# KV namespace for storing operator vault lists (future: delegation config)
+# For local dev (`wrangler dev`), KV works automatically without a real id.
+# For deployment, create with: wrangler kv namespace create KV
+# then paste the id below.
+[[kv_namespaces]]
+binding = "KV"
+id = "2c0f24cd5916471ab4e2cd8d3fd1b1b7"
+# preview_id = ""  # optional: separate namespace for `wrangler dev --remote`
+
+# Secrets (set via `wrangler secret put <KEY>`):
+# OPENAI_API_KEY        — LLM provider (gpt-5-mini)
+# UNISWAP_API_KEY       — Uniswap Trading API key (https://developers.uniswap.org)
+# ZEROX_API_KEY         — 0x Swap API key (https://dashboard.0x.org)

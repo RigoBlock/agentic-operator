@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <title>Rigoblock Vault Operator</title>
+  <style>
+    :root {
+      --bg: #0d1117; --surface: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+      --accent-dim: #1f6feb; --success: #3fb950; --warn: #d29922; --error: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { overflow: hidden; height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--text);
+      height: 100%; height: 100dvh; display: flex; flex-direction: column;
+      overflow: hidden; width: 100%; max-width: 100vw;
+    }
+
+    /* ── Header ─────────────────────────────────────────── */
+    header {
+      padding: 12px 24px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    }
+    header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; }
+    .header-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .btn-sm {
+      font-size: 12px; padding: 6px 12px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--surface);
+      color: var(--text); cursor: pointer; font-weight: 500;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .btn-sm:hover { border-color: var(--accent); }
+    .btn-sm.active { border-color: var(--success); color: var(--success); }
+    .addr { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px; color: var(--muted); }
+
+    /* ── Setup bar ──────────────────────────────────────── */
+    #setup-bar {
+      padding: 12px 24px; border-bottom: 1px solid var(--border);
+      background: var(--surface); display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    }
+    #setup-bar label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    #setup-bar input {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--text); padding: 6px 10px; font-size: 13px; outline: none;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    #setup-bar input:focus { border-color: var(--accent); }
+    #vault-input { width: 370px; max-width: 100%; }
+    .chain-badge {
+      display: inline-flex; align-items: center; font-size: 12px;
+      padding: 5px 12px; border-radius: 6px;
+      background: rgba(88, 166, 255, 0.1); color: var(--accent);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      border: 1px solid rgba(88, 166, 255, 0.2);
+    }
+    .vault-info-badge {
+      font-size: 11px; padding: 3px 8px; border-radius: 4px;
+      background: rgba(63,185,80,0.1); color: var(--success);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .vault-info-badge.error { background: rgba(248,81,73,0.1); color: var(--error); }
+    .dex-badge {
+      display: inline-flex; align-items: center; font-size: 12px;
+      padding: 5px 12px; border-radius: 6px;
+      background: rgba(210, 153, 34, 0.1); color: var(--warn);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      border: 1px solid rgba(210, 153, 34, 0.2);
+      transition: opacity 0.2s;
+    }
+    .dex-badge.hidden { display: none; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block; width: 12px; height: 12px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    .saved-vaults-btn {
+      font-size: 11px; padding: 4px 8px; border-radius: 4px;
+      border: 1px solid var(--border); background: var(--bg);
+      color: var(--muted); cursor: pointer;
+    }
+    .saved-vaults-btn:hover { color: var(--text); border-color: var(--accent); }
+
+    /* ── Testnet toggle ──────────────────────────────────── */
+    .testnet-toggle {
+      display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted);
+      cursor: pointer; user-select: none;
+    }
+    .testnet-toggle input { display: none; }
+    .testnet-toggle .toggle-track {
+      width: 28px; height: 16px; background: var(--border); border-radius: 8px;
+      position: relative; transition: background 0.2s;
+    }
+    .testnet-toggle .toggle-track::after {
+      content: ''; width: 12px; height: 12px; background: var(--muted); border-radius: 50%;
+      position: absolute; top: 2px; left: 2px; transition: transform 0.2s, background 0.2s;
+    }
+    .testnet-toggle input:checked + .toggle-track {
+      background: var(--warn);
+    }
+    .testnet-toggle input:checked + .toggle-track::after {
+      transform: translateX(12px); background: #000;
+    }
+
+    /* ── Chat ───────────────────────────────────────────── */
+    #chat {
+      flex: 1; overflow-y: auto; padding: 24px;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    .msg {
+      max-width: 720px; padding: 12px 16px; border-radius: 12px;
+      line-height: 1.5; font-size: 14px; white-space: pre-wrap; word-break: break-word;
+    }
+    .msg.user { align-self: flex-end; background: var(--accent-dim); border-bottom-right-radius: 4px; }
+    .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+    .msg.system { align-self: center; color: var(--muted); font-size: 12px; background: none; padding: 4px 0; }
+    .msg .tool-call {
+      margin-top: 8px; padding: 8px 12px; background: rgba(0,0,0,0.3); border-radius: 6px;
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--warn);
+    }
+    .msg .tool-result {
+      margin-top: 8px; padding: 8px 12px; background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.3);
+      border-radius: 6px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--success);
+    }
+    .msg .error-result { background: rgba(248,81,73,0.1); border-color: rgba(248,81,73,0.3); color: var(--error); }
+    .typing::after { content: '▋'; animation: blink 1s step-end infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* ── Input ──────────────────────────────────────────── */
+    #input-area { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; gap: 12px; }
+    #input-area textarea {
+      flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--text); padding: 10px 14px; font-size: 14px; font-family: inherit;
+      resize: none; outline: none; min-height: 44px; max-height: 120px;
+    }
+    #input-area textarea:focus { border-color: var(--accent); }
+    #input-area button {
+      background: var(--accent-dim); color: #fff; border: none; border-radius: 8px;
+      padding: 0 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    #input-area button:hover { background: var(--accent); }
+    #input-area button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Transaction confirm modal ──────────────────────── */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      z-index: 100; justify-content: center; align-items: center;
+    }
+    .modal-overlay.visible { display: flex; }
+    .modal-content {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 24px; min-width: 0; width: 480px; max-width: calc(100vw - 24px);
+      max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px);
+      overflow-y: auto;
+    }
+    .modal-content h3 { font-size: 16px; margin-bottom: 16px; }
+    .modal-close { float: right; background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; }
+    .modal-close:hover { color: var(--text); }
+    .tx-detail {
+      padding: 12px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border);
+      font-size: 13px; margin-bottom: 16px;
+    }
+    .tx-detail .row { display: flex; justify-content: space-between; padding: 4px 0; }
+    .tx-detail .label { color: var(--muted); }
+    .tx-detail .value { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; text-align: right; max-width: 260px; word-break: break-all; }
+    .tx-actions { display: flex; gap: 12px; }
+    .tx-actions .btn-confirm {
+      flex: 1; background: var(--success); color: #000; border: none; border-radius: 8px;
+      padding: 10px; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .tx-actions .btn-confirm:hover { opacity: 0.9; }
+    .tx-actions .btn-cancel {
+      flex: 1; background: transparent; color: var(--error); border: 1px solid var(--error);
+      border-radius: 8px; padding: 10px; font-size: 14px; cursor: pointer;
+    }
+
+    /* ── Wallet picker modal ────────────────────────────── */
+    .wallet-option {
+      display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 8px;
+      border: 1px solid var(--border); background: var(--bg); cursor: pointer; margin-bottom: 8px;
+    }
+    .wallet-option:hover { border-color: var(--accent); }
+    .wallet-option img { width: 32px; height: 32px; border-radius: 6px; }
+    .wallet-option .wallet-name { font-weight: 500; font-size: 14px; }
+    .wallet-option .wallet-rdns { font-size: 11px; color: var(--muted); }
+    .no-wallets { color: var(--muted); font-size: 13px; padding: 12px 0; }
+
+    /* ── Saved vaults dropdown ──────────────────────────── */
+    #saved-vaults-dropdown {
+      display: none; position: absolute; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 8px; padding: 8px; z-index: 50;
+      min-width: 280px; max-width: calc(100vw - 32px);
+      max-height: 200px; overflow-y: auto; margin-top: 4px;
+    }
+    #saved-vaults-dropdown.visible { display: block; }
+    .saved-vault-item {
+      padding: 8px; border-radius: 4px; cursor: pointer; font-size: 12px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .saved-vault-item:hover { background: var(--bg); }
+    .saved-vault-item .vault-label { color: var(--text); }
+    .saved-vault-item .vault-chain { color: var(--muted); font-size: 11px; }
+    .saved-vault-item .remove-vault {
+      color: var(--error); cursor: pointer; padding: 2px 6px; border: none; background: none;
+      font-size: 14px; opacity: 0.6;
+    }
+    .saved-vault-item .remove-vault:hover { opacity: 1; }
+
+    /* ── Mobile responsiveness ───────────────────────────── */
+    @media (max-width: 640px) {
+      header { padding: 8px 12px; gap: 6px; }
+      header h1 { font-size: 13px; }
+      header svg { width: 20px; height: 20px; }
+      .header-actions { gap: 6px; }
+      #setup-bar { padding: 8px 12px; gap: 6px; }
+      #vault-input { width: 100%; min-width: 0; font-size: 16px; padding: 8px 10px; }
+      #setup-bar label { font-size: 11px; }
+      #setup-bar input { font-size: 16px; }
+      .chain-badge, .dex-badge { font-size: 11px; padding: 3px 8px; }
+      .saved-vaults-btn { font-size: 10px; }
+      #chat { padding: 10px; gap: 10px; }
+      .msg { max-width: 100%; padding: 8px 10px; font-size: 13px; }
+      .msg .tool-result { font-size: 11px; padding: 6px 8px; }
+      #input-area { padding: 8px 10px; gap: 8px; }
+      #input-area textarea { padding: 10px 12px; font-size: 16px; min-height: 44px; }
+      #input-area button { padding: 0 14px; font-size: 14px; min-height: 44px; }
+      .modal-content { padding: 16px; border-radius: 10px; }
+      .modal-content h3 { font-size: 15px; margin-bottom: 12px; }
+      .tx-detail { padding: 8px; font-size: 12px; margin-bottom: 12px; }
+      .tx-detail .row { flex-direction: column; gap: 2px; }
+      .tx-detail .value { max-width: 100%; text-align: left; font-size: 11px; }
+      .tx-actions { flex-direction: column; gap: 8px; }
+      .tx-actions .btn-confirm, .tx-actions .btn-cancel { padding: 12px; font-size: 14px; }
+      .addr { font-size: 10px; }
+      .btn-sm { font-size: 11px; padding: 5px 8px; }
+      .vault-info-badge { font-size: 10px; }
+      .wallet-option { padding: 10px; gap: 10px; }
+      .wallet-option img { width: 28px; height: 28px; }
+      .wallet-option .wallet-name { font-size: 13px; }
+    }
+    @media (max-width: 400px) {
+      header h1 { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+    </svg>
+    <h1>Rigoblock Vault Operator</h1>
+    <div class="header-actions">
+      <label class="testnet-toggle" title="Switch between mainnet and testnet chains">
+        <input type="checkbox" id="testnet-toggle" onchange="toggleTestnet()" />
+        <span class="toggle-track"></span>
+        <span id="network-mode-label">Mainnet</span>
+      </label>
+      <span id="wallet-addr" class="addr"></span>
+      <button id="connect-btn" class="btn-sm" onclick="openWalletPicker()">Connect Wallet</button>
+    </div>
+  </header>
+
+  <!-- Setup bar: vault address + chain -->
+  <div id="setup-bar">
+    <label>Vault</label>
+    <div style="position: relative;">
+      <input id="vault-input" placeholder="Paste vault address (0x…)" spellcheck="false" />
+      <div id="saved-vaults-dropdown"></div>
+    </div>
+    <button class="saved-vaults-btn" onclick="toggleSavedVaults()">Saved ▾</button>
+    <span id="vault-status"></span>
+    <label>Chain</label>
+    <span id="chain-display" class="chain-badge">Ethereum</span>
+    <span id="dex-display" class="dex-badge">0x Aggregator</span>
+  </div>
+
+  <!-- Wallet picker modal (EIP-6963) -->
+  <div id="wallet-modal" class="modal-overlay">
+    <div class="modal-content">
+      <button class="modal-close" onclick="closeModal('wallet-modal')">&times;</button>
+      <h3>Connect Wallet</h3>
+      <div id="wallet-list"><div class="no-wallets">Detecting wallets…</div></div>
+    </div>
+  </div>
+
+  <!-- Transaction confirm modal -->
+  <div id="tx-modal" class="modal-overlay">
+    <div class="modal-content">
+      <button class="modal-close" onclick="closeModal('tx-modal')">&times;</button>
+      <h3>Confirm Transaction</h3>
+      <div id="tx-description" style="margin-bottom: 12px; font-size: 14px; color: var(--accent);"></div>
+      <div class="tx-detail" id="tx-details"></div>
+      <div class="tx-actions">
+        <button class="btn-cancel" onclick="closeModal('tx-modal')">Cancel</button>
+        <button class="btn-confirm" id="tx-confirm-btn" onclick="confirmTransaction()">Swap</button>
+      </div>
+      <div id="tx-status" style="margin-top: 12px; font-size: 12px;"></div>
+    </div>
+  </div>
+
+  <div id="chat">
+    <div class="msg system">Connect your wallet, enter a vault address, and describe a swap.</div>
+  </div>
+
+  <div id="input-area">
+    <textarea id="input" placeholder="e.g. Swap 0.5 ETH for USDC" rows="1"></textarea>
+    <button id="send" onclick="sendMessage()">Send</button>
+  </div>
+
+  <script>
+    /* ================================================================
+       State
+       ================================================================ */
+    const chatEl = document.getElementById('chat');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+    const vaultInput = document.getElementById('vault-input');
+
+    let currentChainId = 1;
+    let conversationHistory = [];
+    let pendingTx = null; // unsigned transaction awaiting signature
+    const discoveredProviders = [];
+    let activeProvider = null;
+    let connectedAddress = null;
+    let authSignature = null;  // EIP-191 sig proving wallet ownership
+    let authTimestamp = null;  // timestamp used in signed message
+
+    const CHAIN_NAMES = {
+      1: 'Ethereum', 8453: 'Base', 42161: 'Arbitrum', 10: 'Optimism',
+      137: 'Polygon', 56: 'BNB Chain', 130: 'Unichain', 11155111: 'Sepolia',
+    };
+
+    /* ================================================================
+       Network Mode (Mainnet / Testnet toggle)
+       ================================================================ */
+    const MAINNET_CHAINS_LIST = [
+      { id: 1, name: 'Ethereum' },
+      { id: 8453, name: 'Base' },
+      { id: 42161, name: 'Arbitrum' },
+      { id: 10, name: 'Optimism' },
+      { id: 137, name: 'Polygon' },
+      { id: 56, name: 'BNB Chain' },
+      { id: 130, name: 'Unichain' },
+    ];
+    const TESTNET_CHAINS_LIST = [
+      { id: 11155111, name: 'Sepolia' },
+    ];
+
+    function toggleTestnet() {
+      const on = document.getElementById('testnet-toggle').checked;
+      localStorage.setItem('rigoblock_testnet', on);
+      currentChainId = on ? 11155111 : 1;
+      updateChainDisplay();
+      applyTestnetState(on);
+    }
+
+    function applyTestnetState(on) {
+      const label = document.getElementById('network-mode-label');
+      if (label) {
+        label.textContent = on ? 'Testnet' : 'Mainnet';
+        label.style.color = on ? 'var(--warn)' : 'var(--success)';
+      }
+    }
+
+    function updateChainDisplay() {
+      const el = document.getElementById('chain-display');
+      if (el) el.textContent = CHAIN_NAMES[currentChainId] || 'Chain ' + currentChainId;
+    }
+
+    /* ================================================================
+       Saved Vaults (localStorage)
+       ================================================================ */
+    const VAULT_STORAGE_KEY = 'rigoblock_operated_vaults';
+
+    function getSavedVaults() {
+      try { return JSON.parse(localStorage.getItem(VAULT_STORAGE_KEY) || '[]'); }
+      catch { return []; }
+    }
+
+    function saveVault(address, chainId, name) {
+      // Deduplicate by address only — a vault address is unique across chains
+      const vaults = getSavedVaults().filter(v => v.address.toLowerCase() !== address.toLowerCase());
+      vaults.unshift({ address, chainId, name: name || '', lastUsed: Date.now() });
+      if (vaults.length > 20) vaults.length = 20;
+      localStorage.setItem(VAULT_STORAGE_KEY, JSON.stringify(vaults));
+    }
+
+    function removeVault(address) {
+      const vaults = getSavedVaults().filter(v => v.address.toLowerCase() !== address.toLowerCase());
+      localStorage.setItem(VAULT_STORAGE_KEY, JSON.stringify(vaults));
+      renderSavedVaults();
+    }
+
+    function toggleSavedVaults() {
+      const dd = document.getElementById('saved-vaults-dropdown');
+      dd.classList.toggle('visible');
+      if (dd.classList.contains('visible')) renderSavedVaults();
+    }
+
+    function renderSavedVaults() {
+      const dd = document.getElementById('saved-vaults-dropdown');
+      const vaults = getSavedVaults();
+      if (vaults.length === 0) {
+        dd.innerHTML = '<div style="padding:8px;color:var(--muted);font-size:12px;">No saved vaults yet.</div>';
+        return;
+      }
+      dd.innerHTML = vaults.map(v => `
+        <div class="saved-vault-item" onclick="loadVault('${v.address}')">
+          <span class="vault-label">${v.name || v.address.slice(0,6) + '…' + v.address.slice(-4)}</span>
+          <button class="remove-vault" onclick="event.stopPropagation(); removeVault('${v.address}')">&times;</button>
+        </div>
+      `).join('');
+    }
+
+    function loadVault(address) {
+      vaultInput.value = address;
+      document.getElementById('saved-vaults-dropdown').classList.remove('visible');
+      // Let validateVault() discover the correct chain via the backend
+      validateVault();
+    }
+
+    // Restore last-used vault on load
+    (function restoreLastVault() {
+      // Restore network mode FIRST
+      const testnetOn = localStorage.getItem('rigoblock_testnet') === 'true';
+      document.getElementById('testnet-toggle').checked = testnetOn;
+      applyTestnetState(testnetOn);
+      if (testnetOn) currentChainId = 11155111;
+
+      const vaults = getSavedVaults();
+      if (vaults.length > 0) {
+        vaultInput.value = vaults[0].address;
+        // Don't restore cached chainId — validateVault() will discover it
+        updateChainDisplay();
+        const status = document.getElementById('vault-status');
+        status.className = 'vault-info-badge';
+        status.textContent = vaults[0].name || 'last used';
+      } else {
+        updateChainDisplay();
+      }
+    })();
+
+    // Close saved vaults dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      const dd = document.getElementById('saved-vaults-dropdown');
+      if (!e.target.closest('.saved-vaults-btn') && !e.target.closest('#saved-vaults-dropdown')) {
+        dd.classList.remove('visible');
+      }
+    });
+
+    /* ================================================================
+       Vault validation
+       ================================================================ */
+    let validateTimer = null;
+    vaultInput.addEventListener('input', () => {
+      clearTimeout(validateTimer);
+      const v = vaultInput.value.trim();
+      if (v.length === 42 && v.startsWith('0x')) {
+        validateTimer = setTimeout(validateVault, 600);
+      } else {
+        document.getElementById('vault-status').textContent = '';
+      }
+    });
+
+    async function validateVault() {
+      const addr = vaultInput.value.trim();
+      const chainId = currentChainId;
+      const status = document.getElementById('vault-status');
+      if (!addr || addr.length !== 42) { status.textContent = ''; return; }
+
+      status.className = 'vault-info-badge';
+      status.textContent = 'checking…';
+
+      try {
+        // Backend tries selected chain first, then all others
+        const res = await fetch(`/api/vault?address=${addr}&chain=${chainId}`);
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Not a vault');
+
+        const name = data.name || '';
+        const foundChainId = data.chainId || chainId;
+
+        // Auto-switch chain within the same network mode (e.g. Ethereum → Base).
+        // NEVER auto-switch between mainnet and testnet — respect the user's toggle.
+        if (foundChainId !== chainId) {
+          const isTestnet = TESTNET_CHAINS_LIST.some(c => c.id === foundChainId);
+          const currentlyTestnet = document.getElementById('testnet-toggle').checked;
+          if (isTestnet !== currentlyTestnet) {
+            // Vault found on other network mode — inform but don't switch
+            const modeLabel = isTestnet ? 'testnet' : 'mainnet';
+            status.className = 'vault-info-badge';
+            status.textContent = `${name || 'valid'} — on ${CHAIN_NAMES[foundChainId] || 'chain ' + foundChainId} (${modeLabel})`;
+            saveVault(addr, foundChainId, name);
+            return;
+          }
+          // Same network mode — safe to auto-switch chain
+          currentChainId = foundChainId;
+          updateChainDisplay();
+        }
+
+        const chainLabel = foundChainId !== chainId
+          ? ` on ${CHAIN_NAMES[foundChainId] || 'chain ' + foundChainId}` : '';
+        status.className = 'vault-info-badge';
+        status.textContent = (name || 'valid') + chainLabel;
+
+        // Check ownership if wallet connected
+        if (connectedAddress && data.owner) {
+          const owner = data.owner.toLowerCase();
+          if (owner !== connectedAddress.toLowerCase()) {
+            status.className = 'vault-info-badge error';
+            status.textContent = `${name} — not owner (owner: ${owner.slice(0,6)}…)`;
+          } else {
+            status.textContent = `${name} — you are the owner ✓` + chainLabel;
+          }
+        }
+
+        saveVault(addr, foundChainId, name);
+      } catch {
+        status.className = 'vault-info-badge error';
+        status.textContent = 'not a vault on any chain';
+      }
+    }
+
+    /* ================================================================
+       Chat
+       ================================================================ */
+    inputEl.addEventListener('input', () => {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    });
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    });
+
+    function appendMessage(role, content, extras) {
+      const div = document.createElement('div');
+      div.className = `msg ${role}`;
+      div.textContent = content;
+      if (extras?.toolCall) {
+        const tc = document.createElement('div');
+        tc.className = 'tool-call';
+        tc.textContent = `⚡ ${extras.toolCall.name}(${JSON.stringify(extras.toolCall.args, null, 2)})`;
+        div.appendChild(tc);
+      }
+      if (extras?.toolResult) {
+        const tr = document.createElement('div');
+        tr.className = `tool-result ${extras.toolError ? 'error-result' : ''}`;
+        tr.textContent = extras.toolResult;
+        div.appendChild(tr);
+      }
+      chatEl.appendChild(div);
+      chatEl.scrollTop = chatEl.scrollHeight;
+      return div;
+    }
+
+    async function sendMessage() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+
+      const vault = vaultInput.value.trim();
+      const chainId = currentChainId;
+      if (!vault || vault.length !== 42) {
+        appendMessage('system', 'Please enter a valid vault address first.');
+        return;
+      }
+      if (!connectedAddress) {
+        openWalletPicker();
+        return;
+      }
+      if (!authSignature) {
+        appendMessage('system', 'Signing authentication…');
+        await signAuthMessage();
+        if (!authSignature) {
+          appendMessage('system', 'Authentication failed. Please try again.');
+          return;
+        }
+      }
+
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+      sendBtn.disabled = true;
+
+      appendMessage('user', text);
+      conversationHistory.push({ role: 'user', content: text });
+
+      const typingEl = appendMessage('assistant', '');
+      typingEl.classList.add('typing');
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: conversationHistory,
+            vaultAddress: vault,
+            chainId,
+            operatorAddress: connectedAddress,
+            authSignature,
+            authTimestamp,
+          }),
+        });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => null);
+          const errMsg = errData?.error || `HTTP ${res.status}`;
+          // If auth error, auto re-sign and retry once
+          if ((res.status === 401 || res.status === 403) && authSignature) {
+            appendMessage('system', 'Session expired, re-authenticating…');
+            authSignature = null;
+            authTimestamp = null;
+            await signAuthMessage();
+            if (authSignature) {
+              const retryRes = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  messages: conversationHistory,
+                  vaultAddress: vault,
+                  chainId,
+                  operatorAddress: connectedAddress,
+                  authSignature,
+                  authTimestamp,
+                }),
+              });
+              if (retryRes.ok) {
+                const retryData = await retryRes.json();
+                typingEl.remove();
+                handleChatResponse(retryData);
+                return;
+              }
+            }
+            throw new Error(`Auth: ${errMsg}`);
+          }
+          throw new Error(errMsg);
+        }
+        const data = await res.json();
+        typingEl.remove();
+        handleChatResponse(data);
+      } catch (err) {
+        typingEl.remove();
+        appendMessage('system', `Error: ${err.message}`);
+      } finally {
+        sendBtn.disabled = false;
+        inputEl.focus();
+      }
+    }
+
+    /** Handle the parsed API response — display tool results, reply, chain switch, transaction modal */
+    function handleChatResponse(data) {
+      // Show tool results but skip the verbose tool call name/args when a transaction is present
+      if (data.toolCalls?.length > 0) {
+        for (const tc of data.toolCalls) {
+          // Only show the result, not the tool call name/args — the result already describes the swap
+          if (tc.result || tc.error) {
+            appendMessage('assistant', '', {
+              toolResult: tc.result,
+              toolError: tc.error,
+            });
+          }
+        }
+      }
+
+      if (data.reply) {
+        appendMessage('assistant', data.reply);
+        // Store tool results inline so the LLM has full context.
+        // IMPORTANT: Do NOT use any bracket/prefix format that looks like a tool call —
+        // gpt-4.1-nano reproduced such patterns as text instead of calling actual tools.
+        let historyContent = data.reply;
+        if (data.toolCalls?.length > 0) {
+          const resultsText = data.toolCalls
+            .filter(tc => !tc.error && tc.result)
+            .map(tc => tc.result)
+            .join('\n');
+          if (resultsText) {
+            historyContent = resultsText + '\n\n' + data.reply;
+          }
+        }
+        conversationHistory.push({ role: 'assistant', content: historyContent });
+      } else if (data.toolCalls?.length > 0) {
+        // Reply is empty (e.g., transaction ready) — still push tool results to history
+        const resultsText = data.toolCalls
+          .filter(tc => !tc.error && tc.result)
+          .map(tc => tc.result)
+          .join('\n');
+        if (resultsText) {
+          conversationHistory.push({ role: 'assistant', content: resultsText });
+        }
+      }
+
+      if (data.chainSwitch) {
+        currentChainId = data.chainSwitch;
+        updateChainDisplay();
+        const isTestnet = TESTNET_CHAINS_LIST.some(c => c.id === currentChainId);
+        const toggle = document.getElementById('testnet-toggle');
+        if (toggle.checked !== isTestnet) {
+          toggle.checked = isTestnet;
+          applyTestnetState(isTestnet);
+          localStorage.setItem('rigoblock_testnet', isTestnet);
+        }
+        appendMessage('system', `Switched to ${CHAIN_NAMES[data.chainSwitch] || 'chain ' + data.chainSwitch}`);
+      }
+
+      // Update DEX provider badge
+      if (data.dexProvider) {
+        const dexEl = document.getElementById('dex-display');
+        dexEl.textContent = data.dexProvider === '0x' ? '0x Aggregator' : data.dexProvider;
+        dexEl.classList.remove('hidden');
+      }
+
+      if (data.transaction) {
+        console.log('[tx-modal] Showing transaction modal:', data.transaction);
+        showTransactionModal(data.transaction);
+      } else {
+        console.log('[tx-modal] No transaction in response:', Object.keys(data));
+      }
+    }
+
+    /* ================================================================
+       Transaction confirmation
+       ================================================================ */
+    function showTransactionModal(tx) {
+      if (!tx || !tx.to || !tx.data) {
+        console.error('[tx-modal] Invalid transaction object:', tx);
+        appendMessage('system', 'Error: Transaction data is missing. Please retry the swap.');
+        return;
+      }
+      pendingTx = tx;
+      document.getElementById('tx-description').textContent = tx.description || 'Vault swap transaction';
+      const gasDisplay = tx.gas ? parseInt(tx.gas, 16).toLocaleString() : 'auto';
+      const dataLength = tx.data ? (tx.data.length - 2) / 2 : 0;
+      document.getElementById('tx-details').innerHTML = `
+        <div class="row"><span class="label">To (vault)</span><span class="value">${tx.to}</span></div>
+        <div class="row"><span class="label">Chain</span><span class="value">${CHAIN_NAMES[tx.chainId] || tx.chainId}</span></div>
+        <div class="row"><span class="label">Value</span><span class="value">0 (vault uses own balance)</span></div>
+        <div class="row"><span class="label">Gas limit</span><span class="value">${gasDisplay}</span></div>
+        <div class="row"><span class="label">Data</span><span class="value">${tx.data.slice(0, 10)}… (${dataLength} bytes)</span></div>
+      `;
+      document.getElementById('tx-status').textContent = '';
+      const confirmBtn = document.getElementById('tx-confirm-btn');
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Swap';
+      confirmBtn.style.display = '';
+      document.getElementById('tx-modal').classList.add('visible');
+    }
+
+    async function confirmTransaction() {
+      if (!pendingTx || !activeProvider) return;
+      const statusEl = document.getElementById('tx-status');
+      const confirmBtn = document.getElementById('tx-confirm-btn');
+      const cancelBtn = document.querySelector('#tx-modal .btn-cancel');
+
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Confirming…';
+      statusEl.style.color = 'var(--accent)';
+      statusEl.textContent = 'Waiting for wallet…';
+
+      try {
+        // Ensure correct chain
+        const currentChainId = await activeProvider.request({ method: 'eth_chainId' });
+        const targetChainHex = '0x' + pendingTx.chainId.toString(16);
+        if (currentChainId !== targetChainHex) {
+          statusEl.textContent = 'Switching chain…';
+          await activeProvider.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: targetChainHex }],
+          });
+        }
+
+        statusEl.textContent = 'Confirm in your wallet…';
+
+        const txHash = await activeProvider.request({
+          method: 'eth_sendTransaction',
+          params: [{
+            from: connectedAddress,
+            to: pendingTx.to,
+            data: pendingTx.data,
+            gas: pendingTx.gas,
+          }],
+        });
+
+        // Show pending state in the modal — hide buttons, show spinner
+        confirmBtn.style.display = 'none';
+        if (cancelBtn) cancelBtn.style.display = 'none';
+        statusEl.style.color = 'var(--accent)';
+        statusEl.innerHTML = `<span style="display:inline-flex;align-items:center;gap:6px;"><span class="spinner"></span> Pending… waiting for on-chain confirmation</span>`;
+        document.getElementById('tx-description').textContent = `Tx: ${txHash.slice(0, 10)}…${txHash.slice(-6)}`;
+
+        // Poll for receipt
+        const confirmedTx = pendingTx;
+        pendingTx = null;
+        pollTransactionReceipt(txHash, confirmedTx, statusEl);
+
+      } catch (err) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = `Error: ${err.message || 'User rejected'}`;
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Swap';
+        confirmBtn.style.display = '';
+      }
+    }
+
+    /**
+     * Poll eth_getTransactionReceipt until the tx is mined.
+     * Uses the wallet provider (same RPC the user is connected to).
+     * L2s with fast/flash blocks typically confirm in 1-3 seconds.
+     */
+    async function pollTransactionReceipt(txHash, tx, statusEl) {
+      const maxAttempts = 60; // ~2 minutes at 2s intervals
+      const interval = 2000;
+      const meta = tx.swapMeta;
+
+      for (let i = 0; i < maxAttempts; i++) {
+        await new Promise(r => setTimeout(r, interval));
+        try {
+          const receipt = await activeProvider.request({
+            method: 'eth_getTransactionReceipt',
+            params: [txHash],
+          });
+          if (receipt) {
+            const success = receipt.status === '0x1';
+
+            if (success) {
+              statusEl.style.color = 'var(--success)';
+              // Show human-readable summary in modal
+              if (meta) {
+                statusEl.textContent = `✓ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}`;
+              } else {
+                statusEl.textContent = '✓ Transaction confirmed';
+              }
+              // Chat message: human-readable, no block number
+              const chatMsg = meta
+                ? `✅ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}${meta.price ? ' (' + meta.price + ')' : ''}`
+                : `✅ Transaction confirmed`;
+              appendMessage('system', chatMsg);
+            } else {
+              statusEl.style.color = 'var(--error)';
+              statusEl.textContent = '✗ Transaction reverted';
+              appendMessage('system', `❌ Transaction reverted — ${txHash}`);
+            }
+            // Keep modal open for 4 seconds so user sees the result
+            setTimeout(() => {
+              closeModal('tx-modal');
+              // Restore button visibility for next tx
+              const cancelBtn = document.querySelector('#tx-modal .btn-cancel');
+              const confirmBtn = document.getElementById('tx-confirm-btn');
+              if (cancelBtn) cancelBtn.style.display = '';
+              if (confirmBtn) { confirmBtn.style.display = ''; confirmBtn.textContent = 'Swap'; confirmBtn.disabled = false; }
+            }, 4000);
+            return;
+          }
+        } catch (e) {
+          console.warn('[poll] Receipt fetch error:', e.message);
+        }
+      }
+
+      // Timeout — still pending
+      statusEl.style.color = 'var(--warn)';
+      statusEl.textContent = `Tx still pending after ${maxAttempts * interval / 1000}s. Check explorer.`;
+      setTimeout(() => {
+        closeModal('tx-modal');
+        const cancelBtn = document.querySelector('#tx-modal .btn-cancel');
+        const confirmBtn = document.getElementById('tx-confirm-btn');
+        if (cancelBtn) cancelBtn.style.display = '';
+        if (confirmBtn) { confirmBtn.style.display = ''; confirmBtn.textContent = 'Swap'; confirmBtn.disabled = false; }
+      }, 5000);
+    }
+
+    /* ================================================================
+       EIP-6963 Multi-Wallet Discovery
+       ================================================================ */
+    window.addEventListener('eip6963:announceProvider', (event) => {
+      const { info, provider } = event.detail;
+      if (!discoveredProviders.some(p => p.info.rdns === info.rdns)) {
+        discoveredProviders.push({ info, provider });
+      }
+      renderWalletList();
+    });
+    window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+    function renderWalletList() {
+      const list = document.getElementById('wallet-list');
+      if (discoveredProviders.length === 0) {
+        list.innerHTML = '<div class="no-wallets">No wallets detected. Install MetaMask or Rabby.</div>';
+        return;
+      }
+      list.innerHTML = '';
+      for (const { info, provider } of discoveredProviders) {
+        const el = document.createElement('div');
+        el.className = 'wallet-option';
+        el.innerHTML = `
+          <img src="${info.icon}" alt="${info.name}" onerror="this.style.display='none'" />
+          <div>
+            <div class="wallet-name">${info.name}</div>
+            <div class="wallet-rdns">${info.rdns}</div>
+          </div>
+        `;
+        el.onclick = () => connectWithProvider(provider, info.name);
+        list.appendChild(el);
+      }
+    }
+
+    function openWalletPicker() {
+      if (connectedAddress) { disconnectWallet(); return; }
+      // Always show the picker so user can choose their preferred wallet
+      if (discoveredProviders.length === 0 && window.ethereum) {
+        // Only one legacy provider — connect directly
+        connectWithProvider(window.ethereum, 'Browser Wallet');
+        return;
+      }
+      document.getElementById('wallet-modal').classList.add('visible');
+    }
+
+    async function connectWithProvider(provider, name) {
+      closeModal('wallet-modal');
+      try {
+        activeProvider = provider;
+        const accounts = await provider.request({ method: 'eth_requestAccounts' });
+        if (accounts.length > 0) {
+          connectedAddress = accounts[0];
+          document.getElementById('wallet-addr').textContent =
+            connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
+          document.getElementById('connect-btn').textContent = 'Disconnect';
+          document.getElementById('connect-btn').classList.add('active');
+          appendMessage('system', `Connected via ${name}: ${connectedAddress}`);
+
+          // Sign auth message to prove wallet ownership
+          await signAuthMessage();
+
+          // Re-validate vault with ownership check
+          if (vaultInput.value.trim().length === 42) validateVault();
+
+          if (provider.on) {
+            provider.on('accountsChanged', (accts) => {
+              if (accts.length === 0) disconnectWallet();
+              else {
+                const newAddr = accts[0];
+                // Only re-auth if the account actually changed (MetaMask fires this spuriously)
+                if (newAddr.toLowerCase() === connectedAddress?.toLowerCase()) return;
+                connectedAddress = newAddr;
+                authSignature = null;
+                authTimestamp = null;
+                document.getElementById('wallet-addr').textContent =
+                  connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
+                appendMessage('system', 'Account changed. Please sign to re-authenticate.');
+                signAuthMessage();
+              }
+            });
+          }
+        }
+      } catch (err) {
+        appendMessage('system', `Wallet error: ${err.message}`);
+      }
+    }
+
+    /**
+     * Sign a human-readable auth message proving wallet ownership.
+     * Wallet-wide — not tied to any specific vault or chain.
+     */
+    async function signAuthMessage() {
+      if (!activeProvider || !connectedAddress) return;
+      const ts = Date.now();
+      const message = [
+        'Welcome to Rigoblock Operator',
+        '',
+        'Sign this message to verify your wallet and access the vault operator assistant.',
+        '',
+        'This request will not trigger a blockchain transaction or cost any gas fees.',
+        '',
+        `Wallet: ${connectedAddress}`,
+        `Timestamp: ${ts}`,
+      ].join('\n');
+      try {
+        const sig = await activeProvider.request({
+          method: 'personal_sign',
+          params: [toHex(message), connectedAddress],
+        });
+        authSignature = sig;
+        authTimestamp = ts;
+        appendMessage('system', 'Authenticated ✓');
+      } catch (err) {
+        appendMessage('system', `Auth sign rejected: ${err.message || 'User rejected'}`);
+        authSignature = null;
+        authTimestamp = null;
+      }
+    }
+
+    /** Convert a string to 0x-prefixed hex (for personal_sign) */
+    function toHex(str) {
+      return '0x' + Array.from(new TextEncoder().encode(str)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function disconnectWallet() {
+      connectedAddress = null;
+      activeProvider = null;
+      authSignature = null;
+      authTimestamp = null;
+      document.getElementById('wallet-addr').textContent = '';
+      document.getElementById('connect-btn').textContent = 'Connect Wallet';
+      document.getElementById('connect-btn').classList.remove('active');
+    }
+
+    function closeModal(id) {
+      document.getElementById(id).classList.remove('visible');
+      if (id === 'tx-modal') pendingTx = null;
+    }
+
+    // Legacy fallback after a brief delay
+    setTimeout(() => {
+      if (discoveredProviders.length === 0 && window.ethereum) {
+        discoveredProviders.push({
+          info: { name: 'Browser Wallet', rdns: 'injected', icon: '' },
+          provider: window.ethereum,
+        });
+        renderWalletList();
+      }
+    }, 500);
+
+  </script>
+</body>
+</html>

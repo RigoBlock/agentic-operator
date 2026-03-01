@@ -1,0 +1,7 @@
+# Secrets — copy to .dev.vars and fill in values
+# These are injected as env vars in local dev (`wrangler dev`)
+#
+# cp .dev.vars.example .dev.vars
+
+OPENAI_API_KEY=sk-...
+UNISWAP_API_KEY=your-uniswap-api-key
