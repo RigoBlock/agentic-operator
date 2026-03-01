@@ -172,13 +172,13 @@ export async function getGmxPositions(
     const indexSymbol = indexTicker?.tokenSymbol || "???";
     const collateralSymbol = collateralTicker?.tokenSymbol || "???";
 
-    // Get current mark price
-    const indexPrice = indexTicker
-      ? (Number(BigInt(indexTicker.minPrice)) + Number(BigInt(indexTicker.maxPrice))) / 2 / 1e30
-      : 0;
-
     const collateralDecimals = getGmxTokenDecimals(collateralAddr);
     const indexDecimals = getGmxTokenDecimals(indexTokenAddr);
+
+    // Get current mark price (price per full token in USD)
+    const indexPrice = indexTicker
+      ? (Number(BigInt(indexTicker.minPrice)) + Number(BigInt(indexTicker.maxPrice))) / 2 / (10 ** (30 - indexDecimals))
+      : 0;
 
     // Entry price = sizeInUsd / sizeInTokens (both are bigints)
     // sizeInUsd is 10^30, sizeInTokens is in token decimals
@@ -199,7 +199,7 @@ export async function getGmxPositions(
 
     const collateralNum = Number(collateralAmount) / 10 ** collateralDecimals;
     const collateralPrice = collateralTicker
-      ? (Number(BigInt(collateralTicker.minPrice)) + Number(BigInt(collateralTicker.maxPrice))) / 2 / 1e30
+      ? (Number(BigInt(collateralTicker.minPrice)) + Number(BigInt(collateralTicker.maxPrice))) / 2 / (10 ** (30 - collateralDecimals))
       : 0;
     const collateralValueUsd = collateralNum * collateralPrice;
 
@@ -260,16 +260,20 @@ export async function getGmxPendingOrders(
   }
 
   const marketMap = new Map<string, string>();
+  const marketIndexDecimalsMap = new Map<string, number>();
   for (const m of markets) {
     const indexTicker = tickerMap.get(m.indexToken.toLowerCase());
     marketMap.set(m.marketToken.toLowerCase(), `${indexTicker?.tokenSymbol || "???"}/USD`);
+    marketIndexDecimalsMap.set(m.marketToken.toLowerCase(), getGmxTokenDecimals(m.indexToken));
   }
 
   return rawOrders.map((o) => {
     const orderType = Number(o.order.numbers.orderType);
     const sizeDelta = Number(o.order.numbers.sizeDeltaUsd) / 1e30;
-    const trigger = Number(o.order.numbers.triggerPrice) / 1e30;
-    const acceptable = Number(o.order.numbers.acceptablePrice) / 1e30;
+    const indexDecimals = marketIndexDecimalsMap.get(o.order.addresses.market.toLowerCase()) ?? 18;
+    const priceDivisor = 10 ** (30 - indexDecimals);
+    const trigger = Number(o.order.numbers.triggerPrice) / priceDivisor;
+    const acceptable = Number(o.order.numbers.acceptablePrice) / priceDivisor;
 
     return {
       orderKey: o.orderKey,

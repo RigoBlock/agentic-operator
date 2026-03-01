@@ -187,7 +187,10 @@ export async function findGmxMarket(
 
 /**
  * Get the current price for a token from GMX tickers.
- * Returns price in USD with standard precision.
+ * Returns price per full token in USD (e.g. ~3000 for ETH, ~1.0 for USDC).
+ *
+ * GMX API prices are per-smallest-unit (wei, micro-USDC) scaled by 10^30.
+ * Formula: pricePerToken = rawPrice / 10^(30 - tokenDecimals)
  */
 export async function getGmxTokenPrice(
   tokenAddress: string,
@@ -201,9 +204,10 @@ export async function getGmxTokenPrice(
     throw new Error(`No GMX price found for token ${tokenAddress}`);
   }
 
-  // GMX prices are in 10^30 format
-  const min = Number(BigInt(ticker.minPrice)) / 1e30;
-  const max = Number(BigInt(ticker.maxPrice)) / 1e30;
+  const decimals = getGmxTokenDecimals(tokenAddress);
+  const divisor = 10 ** (30 - decimals);
+  const min = Number(BigInt(ticker.minPrice)) / divisor;
+  const max = Number(BigInt(ticker.maxPrice)) / divisor;
   return { min, max, mid: (min + max) / 2 };
 }
 

@@ -890,7 +890,8 @@ async function executeToolCall(
 
       const tickerMap = new Map<string, { symbol: string; price: number }>();
       for (const t of tickers) {
-        const mid = (Number(BigInt(t.minPrice)) + Number(BigInt(t.maxPrice))) / 2 / 1e30;
+        const decimals = getGmxTokenDecimals(t.tokenAddress);
+        const mid = (Number(BigInt(t.minPrice)) + Number(BigInt(t.maxPrice))) / 2 / (10 ** (30 - decimals));
         tickerMap.set(t.tokenAddress.toLowerCase(), { symbol: t.tokenSymbol, price: mid });
       }
 
