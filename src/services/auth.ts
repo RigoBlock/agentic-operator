@@ -33,16 +33,13 @@ const OWNERSHIP_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
  * Wallet-wide — NOT tied to any specific vault or chain.
  * Human-readable so the wallet UI shows a clear description of what is being signed.
  */
-export function buildAuthMessage(timestamp: number, address: string): string {
+export function buildAuthMessage(address: string): string {
   return [
     "Welcome to Rigoblock Operator",
     "",
-    "Sign this message to verify your wallet and access the vault operator assistant.",
-    "",
-    "This request will not trigger a blockchain transaction or cost any gas fees.",
+    "Sign this message to verify your wallet and access your smart pool assistant.",
     "",
     `Wallet: ${address}`,
-    `Timestamp: ${timestamp}`,
   ].join("\n");
 }
 
@@ -83,7 +80,7 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   }
 
   // 2. Verify signature (wallet-wide, no vault in message)
-  const message = buildAuthMessage(authTimestamp, operatorAddress);
+  const message = buildAuthMessage(operatorAddress);
   try {
     const valid = await verifyMessage({
       address: operatorAddress as Address,

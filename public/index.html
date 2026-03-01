@@ -613,6 +613,7 @@
             appendMessage('system', 'Session expired, re-authenticating…');
             authSignature = null;
             authTimestamp = null;
+            localStorage.removeItem(AUTH_STORAGE_KEY);
             await signAuthMessage();
             if (authSignature) {
               const retryRes = await fetch('/api/chat', {
@@ -944,6 +945,7 @@
                 connectedAddress = newAddr;
                 authSignature = null;
                 authTimestamp = null;
+                localStorage.removeItem(AUTH_STORAGE_KEY);
                 document.getElementById('wallet-addr').textContent =
                   connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
                 appendMessage('system', 'Account changed. Please sign to re-authenticate.');
@@ -961,18 +963,37 @@
      * Sign a human-readable auth message proving wallet ownership.
      * Wallet-wide — not tied to any specific vault or chain.
      */
+    const AUTH_STORAGE_KEY = 'rigoblock_auth';
+
+    /** Try to restore a cached auth signature from localStorage */
+    function restoreCachedAuth() {
+      try {
+        const cached = JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || 'null');
+        if (!cached) return false;
+        // Must match the currently connected address and be < 24h old
+        if (cached.address?.toLowerCase() !== connectedAddress?.toLowerCase()) return false;
+        if (Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return false; // 23h to add margin
+        authSignature = cached.signature;
+        authTimestamp = cached.timestamp;
+        return true;
+      } catch { return false; }
+    }
+
     async function signAuthMessage() {
       if (!activeProvider || !connectedAddress) return;
+      // Try cached signature first
+      if (restoreCachedAuth()) {
+        appendMessage('system', 'Authenticated ✓ (cached)');
+        return;
+      }
       const ts = Date.now();
+      // Must match backend buildAuthMessage(address) exactly
       const message = [
         'Welcome to Rigoblock Operator',
         '',
-        'Sign this message to verify your wallet and access the vault operator assistant.',
-        '',
-        'This request will not trigger a blockchain transaction or cost any gas fees.',
+        'Sign this message to verify your wallet and access your smart pool assistant.',
         '',
         `Wallet: ${connectedAddress}`,
-        `Timestamp: ${ts}`,
       ].join('\n');
       try {
         const sig = await activeProvider.request({
@@ -981,6 +1002,12 @@
         });
         authSignature = sig;
         authTimestamp = ts;
+        // Cache in localStorage
+        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
+          address: connectedAddress,
+          signature: sig,
+          timestamp: ts,
+        }));
         appendMessage('system', 'Authenticated ✓');
       } catch (err) {
         appendMessage('system', `Auth sign rejected: ${err.message || 'User rejected'}`);
@@ -999,6 +1026,7 @@
       activeProvider = null;
       authSignature = null;
       authTimestamp = null;
+      localStorage.removeItem(AUTH_STORAGE_KEY);
       document.getElementById('wallet-addr').textContent = '';
       document.getElementById('connect-btn').textContent = 'Connect Wallet';
       document.getElementById('connect-btn').classList.remove('active');
