@@ -15,6 +15,23 @@ import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimal
 import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
 import { decodeFunctionData, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
+import {
+  findGmxMarket,
+  getGmxMarkets,
+  getGmxTickers,
+  getGmxTokenPrice,
+  resolveGmxCollateral,
+  getGmxTokenDecimals,
+  buildCreateIncreaseOrderCalldata,
+  buildCreateDecreaseOrderCalldata,
+  buildUpdateOrderCalldata,
+  buildCancelOrderCalldata,
+  buildClaimFundingFeesCalldata,
+  computeLeverage,
+  getGmxGasLimit,
+} from "../services/gmxTrading.js";
+import { getGmxPositionsSummary, getGmxPositions } from "../services/gmxPositions.js";
+import { ARBITRUM_CHAIN_ID, GmxOrderType } from "../abi/gmx.js";
 
 /**
  * Process a chat request: send to LLM, handle tool calls, return response.
@@ -537,6 +554,333 @@ async function executeToolCall(
         message: `Switched to ${match.name} (chain ${match.id}). All subsequent operations will use this chain.`,
         chainSwitch: match.id,
       };
+    }
+
+    // ── GMX Perpetuals ──────────────────────────────────────────────
+
+    case "gmx_open_position":
+    case "gmx_increase_position": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      // Auto-switch to Arbitrum if needed
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== ARBITRUM_CHAIN_ID) {
+        ctx.chainId = ARBITRUM_CHAIN_ID;
+        chainSwitched = ARBITRUM_CHAIN_ID;
+      }
+
+      const marketSymbol = (args.market as string).toUpperCase();
+      const isLong = args.isLong as boolean;
+      const collateralSymbol = (args.collateral as string) || (isLong ? "WETH" : "USDC");
+      const collateralAmount = args.collateralAmount as string;
+
+      // Find market and get price
+      const market = await findGmxMarket(marketSymbol);
+      const collateralAddr = resolveGmxCollateral(collateralSymbol);
+      const collateralDecimals = getGmxTokenDecimals(collateralAddr);
+
+      // Resolve sizeDeltaUsd from leverage or direct value
+      let sizeDeltaUsd: string;
+      if (args.sizeDeltaUsd && (args.sizeDeltaUsd as string) !== "") {
+        sizeDeltaUsd = args.sizeDeltaUsd as string;
+      } else if (args.leverage) {
+        const leverageNum = parseFloat(args.leverage as string);
+        const collateralPrice = await getGmxTokenPrice(collateralAddr);
+        const collateralValueUsd = parseFloat(collateralAmount) * collateralPrice.mid;
+        sizeDeltaUsd = (collateralValueUsd * leverageNum).toFixed(2);
+      } else {
+        // Default 2x leverage
+        const collateralPrice = await getGmxTokenPrice(collateralAddr);
+        const collateralValueUsd = parseFloat(collateralAmount) * collateralPrice.mid;
+        sizeDeltaUsd = (collateralValueUsd * 2).toFixed(2);
+      }
+
+      const calldata = buildCreateIncreaseOrderCalldata({
+        market: market.marketToken as Address,
+        collateralToken: collateralAddr,
+        collateralAmount,
+        collateralDecimals,
+        sizeDeltaUsd,
+        isLong,
+      });
+
+      const leverage = args.leverage || (parseFloat(sizeDeltaUsd) / (parseFloat(collateralAmount) * (await getGmxTokenPrice(collateralAddr)).mid)).toFixed(1);
+      const gasLimit = getGmxGasLimit();
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: calldata,
+        value: "0x0",
+        chainId: ARBITRUM_CHAIN_ID,
+        gas: `0x${gasLimit.toString(16)}`,
+        description: `[GMX] ${isLong ? "Long" : "Short"} ${marketSymbol} ${leverage}x — ${collateralAmount} ${collateralSymbol} collateral, $${sizeDeltaUsd} size`,
+      };
+
+      const message = [
+        `✅ GMX ${name === "gmx_increase_position" ? "Increase" : "Open"} Position ready`,
+        `Direction: ${isLong ? "🟢 LONG" : "🔴 SHORT"} ${marketSymbol}/USD`,
+        `Size: $${parseFloat(sizeDeltaUsd).toLocaleString()}`,
+        `Collateral: ${collateralAmount} ${collateralSymbol}`,
+        `Leverage: ~${leverage}x`,
+        `Market: ${market.marketToken}`,
+        `Chain: Arbitrum`,
+        `Gas limit: ${gasLimit.toString()}`,
+      ].join("\n");
+
+      return { message, transaction, chainSwitch: chainSwitched };
+    }
+
+    case "gmx_close_position": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== ARBITRUM_CHAIN_ID) {
+        ctx.chainId = ARBITRUM_CHAIN_ID;
+        chainSwitched = ARBITRUM_CHAIN_ID;
+      }
+
+      const marketSymbol = (args.market as string).toUpperCase();
+      const isLong = args.isLong as boolean;
+      const market = await findGmxMarket(marketSymbol);
+
+      // Resolve collateral from args or from position
+      let collateralSymbol = (args.collateral as string) || (isLong ? "WETH" : "USDC");
+      const collateralAddr = resolveGmxCollateral(collateralSymbol);
+      const collateralDecimals = getGmxTokenDecimals(collateralAddr);
+
+      // sizeDeltaUsd: "all" means close full position — find position size
+      let sizeDeltaUsd = (args.sizeDeltaUsd as string) || "all";
+      if (sizeDeltaUsd.toLowerCase() === "all") {
+        // Query current positions to find size
+        const positions = await getGmxPositions(ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+        const matchingPos = positions.find(
+          (p) =>
+            p.indexTokenSymbol.toUpperCase() === marketSymbol &&
+            p.isLong === isLong,
+        );
+        if (matchingPos) {
+          // Parse the sizeInUsd string ($X,XXX.XX format)
+          sizeDeltaUsd = matchingPos.sizeInUsd.replace(/[\$,KM]/g, "");
+          // Handle K/M suffixes
+          if (matchingPos.sizeInUsd.includes("K")) sizeDeltaUsd = (parseFloat(sizeDeltaUsd) * 1000).toString();
+          if (matchingPos.sizeInUsd.includes("M")) sizeDeltaUsd = (parseFloat(sizeDeltaUsd) * 1000000).toString();
+          collateralSymbol = matchingPos.collateralSymbol;
+        } else {
+          throw new Error(`No open ${isLong ? "long" : "short"} ${marketSymbol} position found.`);
+        }
+      }
+
+      const collateralDelta = (args.collateralDeltaAmount as string) || "0";
+
+      // Resolve order type
+      let orderType = GmxOrderType.MarketDecrease;
+      const orderTypeStr = ((args.orderType as string) || "market").toLowerCase();
+      if (orderTypeStr === "limit") orderType = GmxOrderType.LimitDecrease;
+      else if (orderTypeStr === "stop_loss" || orderTypeStr === "stoploss") orderType = GmxOrderType.StopLossDecrease;
+
+      const calldata = buildCreateDecreaseOrderCalldata({
+        market: market.marketToken as Address,
+        collateralToken: collateralAddr,
+        collateralDeltaAmount: collateralDelta,
+        collateralDecimals,
+        sizeDeltaUsd,
+        isLong,
+        orderType,
+        triggerPriceUsd: args.triggerPrice as string | undefined,
+        acceptablePriceUsd: args.acceptablePrice as string | undefined,
+      });
+
+      const gasLimit = getGmxGasLimit();
+      const orderLabel = orderTypeStr === "limit" ? "Limit Decrease" : orderTypeStr.includes("stop") ? "Stop-Loss" : "Market Close";
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: calldata,
+        value: "0x0",
+        chainId: ARBITRUM_CHAIN_ID,
+        gas: `0x${gasLimit.toString(16)}`,
+        description: `[GMX] ${orderLabel} ${isLong ? "Long" : "Short"} ${marketSymbol} — $${sizeDeltaUsd} size`,
+      };
+
+      const message = [
+        `✅ GMX ${orderLabel} ready`,
+        `Direction: ${isLong ? "LONG" : "SHORT"} ${marketSymbol}/USD`,
+        `Size to close: $${parseFloat(sizeDeltaUsd).toLocaleString()}`,
+        `Collateral withdraw: ${collateralDelta} ${collateralSymbol}`,
+        ...(args.triggerPrice ? [`Trigger: $${args.triggerPrice}`] : []),
+        `Order type: ${orderLabel}`,
+        `Chain: Arbitrum`,
+      ].join("\n");
+
+      return { message, transaction, chainSwitch: chainSwitched };
+    }
+
+    case "gmx_get_positions": {
+      // Auto-switch to Arbitrum
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== ARBITRUM_CHAIN_ID) {
+        ctx.chainId = ARBITRUM_CHAIN_ID;
+        chainSwitched = ARBITRUM_CHAIN_ID;
+      }
+
+      const summary = await getGmxPositionsSummary(
+        ctx.vaultAddress as Address,
+        env.ALCHEMY_API_KEY,
+      );
+
+      return { message: summary.formattedReport, chainSwitch: chainSwitched };
+    }
+
+    case "gmx_cancel_order": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== ARBITRUM_CHAIN_ID) {
+        ctx.chainId = ARBITRUM_CHAIN_ID;
+        chainSwitched = ARBITRUM_CHAIN_ID;
+      }
+
+      const orderKey = args.orderKey as Hex;
+      const calldata = buildCancelOrderCalldata(orderKey);
+      const gasLimit = getGmxGasLimit();
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: calldata,
+        value: "0x0",
+        chainId: ARBITRUM_CHAIN_ID,
+        gas: `0x${gasLimit.toString(16)}`,
+        description: `[GMX] Cancel order ${orderKey.slice(0, 10)}…`,
+      };
+
+      return {
+        message: `✅ Cancel order ready\nOrder: ${orderKey}\nNote: GMX enforces a 300-second delay before cancellation.`,
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    case "gmx_update_order": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== ARBITRUM_CHAIN_ID) {
+        ctx.chainId = ARBITRUM_CHAIN_ID;
+        chainSwitched = ARBITRUM_CHAIN_ID;
+      }
+
+      const calldata = buildUpdateOrderCalldata({
+        orderKey: args.orderKey as Hex,
+        sizeDeltaUsd: args.sizeDeltaUsd as string,
+        acceptablePriceUsd: args.acceptablePrice as string,
+        triggerPriceUsd: args.triggerPrice as string,
+      });
+
+      const gasLimit = getGmxGasLimit();
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: calldata,
+        value: "0x0",
+        chainId: ARBITRUM_CHAIN_ID,
+        gas: `0x${gasLimit.toString(16)}`,
+        description: `[GMX] Update order ${(args.orderKey as string).slice(0, 10)}…`,
+      };
+
+      return {
+        message: [
+          "✅ Order update ready",
+          `Order: ${args.orderKey}`,
+          `New size: $${args.sizeDeltaUsd}`,
+          `New trigger: $${args.triggerPrice}`,
+          `New acceptable: $${args.acceptablePrice}`,
+        ].join("\n"),
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    case "gmx_claim_funding_fees": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== ARBITRUM_CHAIN_ID) {
+        ctx.chainId = ARBITRUM_CHAIN_ID;
+        chainSwitched = ARBITRUM_CHAIN_ID;
+      }
+
+      let claimMarkets = (args.markets as string[]) || [];
+      let claimTokens = (args.tokens as string[]) || [];
+
+      // Auto-detect from positions if not provided
+      if (claimMarkets.length === 0) {
+        const positions = await getGmxPositions(ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+        for (const p of positions) {
+          claimMarkets.push(p.market);
+          claimTokens.push(p.collateralToken);
+        }
+        if (claimMarkets.length === 0) {
+          throw new Error("No open positions found to claim funding fees from.");
+        }
+      }
+
+      const calldata = buildClaimFundingFeesCalldata({
+        markets: claimMarkets as Address[],
+        tokens: claimTokens as Address[],
+      });
+
+      const gasLimit = getGmxGasLimit();
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: calldata,
+        value: "0x0",
+        chainId: ARBITRUM_CHAIN_ID,
+        gas: `0x${gasLimit.toString(16)}`,
+        description: `[GMX] Claim funding fees from ${claimMarkets.length} market(s)`,
+      };
+
+      return {
+        message: `✅ Claim funding fees ready\nMarkets: ${claimMarkets.length}\nTokens are sent to the vault.`,
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    case "gmx_get_markets": {
+      const [markets, tickers] = await Promise.all([
+        getGmxMarkets(),
+        getGmxTickers(),
+      ]);
+
+      const tickerMap = new Map<string, { symbol: string; price: number }>();
+      for (const t of tickers) {
+        const mid = (Number(BigInt(t.minPrice)) + Number(BigInt(t.maxPrice))) / 2 / 1e30;
+        tickerMap.set(t.tokenAddress.toLowerCase(), { symbol: t.tokenSymbol, price: mid });
+      }
+
+      const seen = new Set<string>();
+      const lines = ["📊 GMX v2 Available Markets (Arbitrum)", "─".repeat(40)];
+      for (const m of markets) {
+        const idx = tickerMap.get(m.indexToken.toLowerCase());
+        if (!idx || seen.has(idx.symbol)) continue;
+        seen.add(idx.symbol);
+        lines.push(`  ${idx.symbol}/USD — $${idx.price.toFixed(2)}`);
+      }
+      lines.push("─".repeat(40));
+      lines.push(`Total: ${seen.size} markets`);
+
+      return { message: lines.join("\n") };
     }
 
     default:

@@ -150,18 +150,252 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+
+  // ── GMX Perpetuals Tools ────────────────────────────────────────────
+
+  {
+    type: "function" as const,
+    function: {
+      name: "gmx_open_position",
+      description:
+        "Open a new leveraged perpetual position on GMX v2 (Arbitrum only). " +
+        "Builds an unsigned createIncreaseOrder transaction. " +
+        "If not on Arbitrum, auto-switches. The vault must have sufficient collateral (WETH, USDC, etc.). " +
+        "The adapter handles execution fees automatically.",
+      parameters: {
+        type: "object",
+        properties: {
+          market: {
+            type: "string",
+            description: "Market to trade — index token symbol (e.g., 'ETH', 'BTC', 'ARB', 'SOL', 'LINK')",
+          },
+          collateral: {
+            type: "string",
+            description: "Collateral token symbol (e.g., 'ETH', 'WETH', 'USDC', 'USDT'). Default: WETH for longs, USDC for shorts.",
+          },
+          collateralAmount: {
+            type: "string",
+            description: "Amount of collateral in human-readable units (e.g., '0.5' ETH, '1000' USDC)",
+          },
+          sizeDeltaUsd: {
+            type: "string",
+            description: "Position size in USD (e.g., '5000' for $5,000 position). Determines leverage = sizeDeltaUsd / collateralValue.",
+          },
+          isLong: {
+            type: "boolean",
+            description: "true for long (profit when price rises), false for short (profit when price falls)",
+          },
+          leverage: {
+            type: "string",
+            description: "Desired leverage (e.g., '5' for 5x). If provided without sizeDeltaUsd, the system computes sizeDeltaUsd = collateralValue * leverage.",
+          },
+        },
+        required: ["market", "collateralAmount", "isLong"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "gmx_close_position",
+      description:
+        "Close (fully or partially) an existing GMX v2 perpetual position. " +
+        "Builds an unsigned createDecreaseOrder transaction. " +
+        "To close fully, set sizeDeltaUsd to the full position size. " +
+        "To partially close, set a smaller sizeDeltaUsd.",
+      parameters: {
+        type: "object",
+        properties: {
+          market: {
+            type: "string",
+            description: "Market index token symbol (e.g., 'ETH', 'BTC')",
+          },
+          isLong: {
+            type: "boolean",
+            description: "true for long, false for short — must match the open position",
+          },
+          sizeDeltaUsd: {
+            type: "string",
+            description: "Amount to decrease in USD (e.g., '5000'). Use 'all' or the full position size to close entirely.",
+          },
+          collateral: {
+            type: "string",
+            description: "Collateral token symbol used in the position (e.g., 'WETH', 'USDC')",
+          },
+          collateralDeltaAmount: {
+            type: "string",
+            description: "Amount of collateral to withdraw (default: '0' — only decrease size)",
+          },
+          orderType: {
+            type: "string",
+            description: "Order type: 'market' (default), 'limit', or 'stop_loss'",
+          },
+          triggerPrice: {
+            type: "string",
+            description: "Trigger price in USD for limit/stop-loss orders",
+          },
+        },
+        required: ["market", "isLong"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "gmx_increase_position",
+      description:
+        "Increase an existing GMX v2 position size or add collateral. " +
+        "Same as gmx_open_position but intended for adding to existing positions.",
+      parameters: {
+        type: "object",
+        properties: {
+          market: {
+            type: "string",
+            description: "Market index token symbol (e.g., 'ETH', 'BTC')",
+          },
+          collateral: {
+            type: "string",
+            description: "Collateral token symbol",
+          },
+          collateralAmount: {
+            type: "string",
+            description: "Additional collateral amount to add",
+          },
+          sizeDeltaUsd: {
+            type: "string",
+            description: "Additional position size in USD",
+          },
+          isLong: {
+            type: "boolean",
+            description: "true for long, false for short",
+          },
+          leverage: {
+            type: "string",
+            description: "Desired leverage for the additional size",
+          },
+        },
+        required: ["market", "collateralAmount", "isLong"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "gmx_get_positions",
+      description:
+        "Get all open GMX v2 perpetual positions and pending orders for the vault. " +
+        "Returns a detailed dashboard with unrealized PnL, entry/mark prices, leverage, and funding costs. " +
+        "Arbitrum only — auto-switches if needed.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "gmx_cancel_order",
+      description:
+        "Cancel a pending GMX v2 order. Recovers collateral and execution fees back to the vault. " +
+        "Note: GMX enforces a 300-second delay before cancellation is allowed.",
+      parameters: {
+        type: "object",
+        properties: {
+          orderKey: {
+            type: "string",
+            description: "The order key (bytes32 hex) to cancel. Get this from gmx_get_positions.",
+          },
+        },
+        required: ["orderKey"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "gmx_update_order",
+      description:
+        "Update a pending limit/stop-loss GMX v2 order. Only works for LimitIncrease, LimitDecrease, or StopLossDecrease orders.",
+      parameters: {
+        type: "object",
+        properties: {
+          orderKey: {
+            type: "string",
+            description: "The order key (bytes32 hex) to update",
+          },
+          sizeDeltaUsd: {
+            type: "string",
+            description: "New size delta in USD",
+          },
+          triggerPrice: {
+            type: "string",
+            description: "New trigger price in USD",
+          },
+          acceptablePrice: {
+            type: "string",
+            description: "New acceptable execution price in USD",
+          },
+        },
+        required: ["orderKey", "sizeDeltaUsd", "triggerPrice", "acceptablePrice"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "gmx_claim_funding_fees",
+      description:
+        "Claim accumulated funding fees from GMX v2 positions. Tokens are sent to the vault.",
+      parameters: {
+        type: "object",
+        properties: {
+          markets: {
+            type: "array",
+            items: { type: "string" },
+            description: "Array of GMX market addresses to claim from. Leave empty to auto-detect from open positions.",
+          },
+          tokens: {
+            type: "array",
+            items: { type: "string" },
+            description: "Array of token addresses (one per market). Leave empty to auto-detect.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "gmx_get_markets",
+      description:
+        "List available GMX v2 perpetual markets on Arbitrum with current prices and symbols.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
 ];
 
 /**
  * System prompt — kept concise for fast inference with gpt-5-mini.
  */
 export const SYSTEM_PROMPT = `You are a trading assistant for a Rigoblock vault.
-You build unsigned swap transactions via DEX aggregators.
+You build unsigned swap and perpetual trading transactions.
 The operator reviews and signs them in their browser wallet.
 
-SUPPORTED DEXs:
+SUPPORTED DEXs (SWAPS):
 - Uniswap: Routes through Universal Router. Supports exact-input AND exact-output.
-- 0x: Routes through AllowanceHolder contract. 150+ liquidity sources. Supports both amountIn and amountOut (system estimates sell amount for exact-output automatically).
+- 0x: Routes through AllowanceHolder contract. 150+ liquidity sources. Supports both amountIn and amountOut.
+
+SUPPORTED PERPS (PERPETUAL FUTURES):
+- GMX v2: Leveraged perpetual positions on Arbitrum only. Markets include ETH, BTC, ARB, SOL, LINK, UNI, and more.
+  The vault adapter handles all GMX interactions (execution fees, collateral transfers, etc.) automatically.
+  No multicall needed — each tool call produces one transaction.
 
 DEX PREFERENCE:
 - If the user explicitly says "uniswap", set dex="uniswap".
@@ -177,6 +411,21 @@ CHAIN HANDLING:
 - The system auto-switches chains. Do NOT call switch_chain before a swap — just include the chain parameter.
 - Only use switch_chain when the user wants to change chain WITHOUT a swap (e.g., "switch to Base").
 - NEVER ask for confirmation when the user already specified the chain in their message.
+
+GMX PERPETUALS:
+- GMX is ONLY available on Arbitrum. If on another chain, auto-switch to Arbitrum.
+- To open a position: use gmx_open_position. Requires market (e.g. "ETH"), collateralAmount, and isLong.
+- To close: use gmx_close_position. sizeDeltaUsd="all" closes the full position.
+- To increase: use gmx_increase_position (same flow as open).
+- To view positions: use gmx_get_positions. Shows a dashboard with PnL, leverage, entry/mark prices.
+- To cancel pending order: use gmx_cancel_order with the orderKey from gmx_get_positions.
+- To set stop-loss or take-profit: use gmx_close_position with orderType="stop_loss" or "limit" and a triggerPrice.
+- Default collateral: WETH for longs, USDC for shorts, unless user specifies.
+- If user says "long ETH 5x with 1 ETH" → market="ETH", isLong=true, collateralAmount="1", leverage="5".
+- If user says "short BTC 10x with 5000 USDC" → market="BTC", isLong=false, collateralAmount="5000", collateral="USDC", leverage="10".
+- If no leverage/sizeDeltaUsd given, ask for one or default to moderate leverage (e.g. 2x-5x).
+- claimFundingFees: use gmx_claim_funding_fees to claim accumulated funding.
+- Available markets: use gmx_get_markets to see what's tradeable.
 
 ONE-STEP FLOW:
 When the user wants to swap, buy, or sell tokens, call build_vault_swap DIRECTLY.
@@ -197,6 +446,16 @@ Key rule: "buy N TOKEN" ALWAYS means amountOut=N with tokenOut=TOKEN.
 The number N is the amount of the TOKEN next to it, NOT the other token.
 NEVER set amountIn when the user says "buy" — "buy" ALWAYS means amountOut.
 Provide exactly ONE of amountIn or amountOut, never both.
+
+GMX INTENT PARSING:
+- "long ETH 5x with 0.5 ETH" → gmx_open_position: market="ETH", isLong=true, collateralAmount="0.5", leverage="5"
+- "short BTC with 5000 USDC at 10x" → gmx_open_position: market="BTC", isLong=false, collateral="USDC", collateralAmount="5000", leverage="10"
+- "open a $10000 long on ETH with 1 ETH" → gmx_open_position: market="ETH", isLong=true, collateralAmount="1", sizeDeltaUsd="10000"
+- "close my ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all"
+- "reduce ETH long by $5000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="5000"
+- "set stop loss on ETH long at $3000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all", orderType="stop_loss", triggerPrice="3000"
+- "show my perps" / "show positions" / "gmx positions" → gmx_get_positions
+- "what markets are available on gmx" → gmx_get_markets
 
 RULES:
 - ALWAYS use actual tool calls, never write tool names as text.

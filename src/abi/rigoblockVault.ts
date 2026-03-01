@@ -100,4 +100,11 @@ export const ALLOWED_VAULT_SELECTORS = {
   execute: "0x24856bc3" as `0x${string}`,
   // modifyLiquidities(bytes,uint256)
   modifyLiquidities: "0xee3e8b0e" as `0x${string}`,
+  // ── GMX v2 Adapter (IAGmxV2) ──
+  cancelOrder: "0x7489ec23" as `0x${string}`,
+  claimCollateral: "0xe9249b57" as `0x${string}`,
+  claimFundingFees: "0xc41b1ab3" as `0x${string}`,
+  createDecreaseOrder: "0xe478512e" as `0x${string}`,
+  createIncreaseOrder: "0x13b4312f" as `0x${string}`,
+  updateOrder: "0xdd5baad2" as `0x${string}`,
 };
