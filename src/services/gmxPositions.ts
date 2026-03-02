@@ -169,8 +169,9 @@ export async function getGmxPositions(
     const indexTicker = tickerMap.get(indexTokenAddr);
     const collateralTicker = tickerMap.get(collateralAddr);
 
-    const indexSymbol = indexTicker?.tokenSymbol || "???";
-    const collateralSymbol = collateralTicker?.tokenSymbol || "???";
+    // Strip version suffixes like .v2 for display
+    const indexSymbol = (indexTicker?.tokenSymbol || "???").replace(/\.v\d+$/i, "");
+    const collateralSymbol = (collateralTicker?.tokenSymbol || "???").replace(/\.v\d+$/i, "");
 
     const collateralDecimals = getGmxTokenDecimals(collateralAddr);
     const indexDecimals = getGmxTokenDecimals(indexTokenAddr);
@@ -263,7 +264,8 @@ export async function getGmxPendingOrders(
   const marketIndexDecimalsMap = new Map<string, number>();
   for (const m of markets) {
     const indexTicker = tickerMap.get(m.indexToken.toLowerCase());
-    marketMap.set(m.marketToken.toLowerCase(), `${indexTicker?.tokenSymbol || "???"}/USD`);
+    const displaySymbol = (indexTicker?.tokenSymbol || "???").replace(/\.v\d+$/i, "");
+    marketMap.set(m.marketToken.toLowerCase(), `${displaySymbol}/USD`);
     marketIndexDecimalsMap.set(m.marketToken.toLowerCase(), getGmxTokenDecimals(m.indexToken));
   }
 

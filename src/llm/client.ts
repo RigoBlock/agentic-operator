@@ -80,6 +80,7 @@ You build the transaction; they approve it.`;
         transaction: toolResult.transaction,
         chainSwitch: toolResult.chainSwitch,
         suggestions: toolResult.suggestions,
+        dexProvider: "GMX",
       };
     } catch (err) {
       // Fast-path failed — fall through to LLM
@@ -143,12 +144,14 @@ You build the transaction; they approve it.`;
         if (toolResult.suggestions?.length) {
           pendingSuggestions = toolResult.suggestions;
         }
-        // Detect DEX from tool call args
+        // Detect DEX/protocol from tool call
         if ((name === "get_swap_quote" || name === "build_vault_swap") && args.dex) {
           const dexArg = (args.dex as string).toLowerCase();
           detectedDex = (dexArg === "uniswap") ? "Uniswap" : "0x";
         } else if ((name === "get_swap_quote" || name === "build_vault_swap") && !args.dex) {
           detectedDex = "0x"; // default
+        } else if (name.startsWith("gmx_")) {
+          detectedDex = "GMX";
         }
       } catch (err) {
         result = `Error: ${sanitizeError(err instanceof Error ? err.message : String(err))}`;
@@ -248,6 +251,8 @@ You build the transaction; they approve it.`;
             detectedDex = (dexArg === "uniswap") ? "Uniswap" : "0x";
           } else if ((name === "get_swap_quote" || name === "build_vault_swap") && !args.dex) {
             detectedDex = "0x";
+          } else if (name.startsWith("gmx_")) {
+            detectedDex = "GMX";
           }
         } catch (err) {
           result = `Error: ${sanitizeError(err instanceof Error ? err.message : String(err))}`;

@@ -860,7 +860,8 @@
       // Update DEX provider badge
       if (data.dexProvider) {
         const dexEl = document.getElementById('dex-display');
-        dexEl.textContent = data.dexProvider === '0x' ? '0x Aggregator' : data.dexProvider;
+        const labels = { '0x': '0x Aggregator', 'Uniswap': 'Uniswap', 'GMX': 'GMX v2 Perps' };
+        dexEl.textContent = labels[data.dexProvider] || data.dexProvider;
         dexEl.classList.remove('hidden');
       }
 
