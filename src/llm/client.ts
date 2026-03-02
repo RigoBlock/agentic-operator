@@ -935,7 +935,9 @@ async function executeToolCall(
         const idx = tickerMap.get(m.indexToken.toLowerCase());
         if (!idx || seen.has(idx.symbol)) continue;
         seen.add(idx.symbol);
-        lines.push(`  ${idx.symbol}/USD — $${idx.price.toFixed(2)}`);
+        // Strip version suffixes like .v2 for display
+        const displaySymbol = idx.symbol.replace(/\.v\d+$/i, "");
+        lines.push(`  ${displaySymbol}/USD — $${idx.price.toFixed(2)}`);
       }
       lines.push("─".repeat(40));
       lines.push(`Total: ${seen.size} markets`);

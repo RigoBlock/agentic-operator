@@ -40,6 +40,8 @@ export interface GmxMarketInfo {
   indexToken: string;
   longToken: string;
   shortToken: string;
+  name?: string;
+  isListed?: boolean;
   indexTokenSymbol?: string;
   longTokenSymbol?: string;
   shortTokenSymbol?: string;
@@ -108,7 +110,9 @@ export async function getGmxMarkets(): Promise<GmxMarketInfo[]> {
   }
 
   const data = (await res.json()) as { markets: GmxMarketInfo[] } | GmxMarketInfo[];
-  marketsCache = Array.isArray(data) ? data : data.markets;
+  const allMarkets = Array.isArray(data) ? data : data.markets;
+  // Filter out delisted / disabled markets (e.g. XAUT deprecated)
+  marketsCache = allMarkets.filter((m) => m.isListed !== false);
   marketsCacheTime = now;
   return marketsCache;
 }
@@ -149,11 +153,13 @@ export async function findGmxMarket(
     tokenSymbolMap.set(t.tokenAddress.toLowerCase(), t.tokenSymbol);
   }
 
-  // Find matching markets — strip trailing USD/USDC/PERP suffixes
+  // Find matching markets — strip trailing USD/USDC/PERP suffixes and version tags
   const symbol = indexTokenSymbol.toUpperCase().replace(/(?:USD[CT]?|PERP)$/i, "");
   const matching = markets.filter((m) => {
     const idxSymbol = tokenSymbolMap.get(m.indexToken.toLowerCase());
-    return idxSymbol?.toUpperCase() === symbol;
+    // Strip version suffixes like .v2, .v3 from ticker symbols for matching
+    const normalised = idxSymbol?.toUpperCase().replace(/\.V\d+$/i, "");
+    return normalised === symbol;
   });
 
   if (matching.length === 0) {
@@ -161,7 +167,8 @@ export async function findGmxMarket(
     const available = new Set<string>();
     for (const m of markets) {
       const s = tokenSymbolMap.get(m.indexToken.toLowerCase());
-      if (s) available.add(s);
+      // Strip .v2 etc. suffix from display
+      if (s) available.add(s.replace(/\.v\d+$/i, ""));
     }
     throw new Error(
       `No GMX market found for "${indexTokenSymbol}". Available: ${[...available].sort().join(", ")}`,
