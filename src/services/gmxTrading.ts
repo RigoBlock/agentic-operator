@@ -63,8 +63,10 @@ const ZERO_BYTES32 = "0x00000000000000000000000000000000000000000000000000000000
 /** GMX uses 10^30 for USD amounts (sizeDeltaUsd, acceptablePrice, etc.) */
 const USD_DECIMALS = 30;
 
-/** Default gas limit for GMX order transactions via the vault adapter */
-const GMX_GAS_LIMIT = 3_000_000n;
+/** Default gas limit for GMX order transactions via the vault adapter.
+ *  Observed usage: ~1.04M for createIncreaseOrder + ~100k Rigoblock proxy overhead.
+ *  1.5M provides ~44% headroom for complex routes. */
+const GMX_GAS_LIMIT = 1_500_000n;
 
 // ── Market cache ───────────────────────────────────────────────────────
 
@@ -144,8 +146,7 @@ export async function getGmxTickers(): Promise<GmxTickerPrice[]> {
 export async function findGmxMarket(
   indexTokenSymbol: string,
 ): Promise<GmxMarketInfo> {
-  const markets = await getGmxMarkets();
-  const tickers = await getGmxTickers();
+  const [markets, tickers] = await Promise.all([getGmxMarkets(), getGmxTickers()]);
 
   // Build token symbol map from tickers
   const tokenSymbolMap = new Map<string, string>();

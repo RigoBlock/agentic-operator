@@ -67,6 +67,26 @@ You build the transaction; they approve it.`;
     })),
   ];
 
+  // ── Fast-path: regex-match common GMX commands to skip the LLM call ──
+  const lastUserMsg = messages.filter(m => m.role === "user").pop()?.content?.trim() || "";
+  const fastPath = tryFastPathGmx(lastUserMsg);
+  if (fastPath) {
+    console.log(`[LLM] Fast-path matched: ${fastPath.name}(${JSON.stringify(fastPath.args)})`);
+    try {
+      const toolResult = await executeToolCall(env, ctx, fastPath.name, fastPath.args);
+      return {
+        reply: "",
+        toolCalls: [{ name: fastPath.name, arguments: fastPath.args, result: toolResult.message, error: false }],
+        transaction: toolResult.transaction,
+        chainSwitch: toolResult.chainSwitch,
+        suggestions: toolResult.suggestions,
+      };
+    } catch (err) {
+      // Fast-path failed — fall through to LLM
+      console.log(`[LLM] Fast-path error, falling back to LLM: ${err}`);
+    }
+  }
+
   // First LLM call
   console.log(`[LLM] Calling OpenAI gpt-5-mini with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
   const response = await openai.chat.completions.create({
@@ -1100,4 +1120,87 @@ function sanitizeSwapArgs(
   }
 
   return corrected;
+}
+
+// ── Fast-path GMX command parser ─────────────────────────────────────
+// Regex-matches well-structured GMX commands to bypass the LLM entirely.
+// Falls through to the full LLM pipeline on mismatch.
+
+interface FastPathResult {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+/**
+ * Attempt to parse a GMX command directly from the user message.
+ * Returns tool name + args if matched, null otherwise.
+ *
+ * Supported patterns:
+ *   "long 100 XAUTUSD 5x"        → gmx_open_position, notionalUsd=100, leverage=5
+ *   "short 500 ethusdc 10x"       → gmx_open_position, notionalUsd=500, leverage=10
+ *   "close my ETH long"           → gmx_close_position
+ *   "show positions" / "my perps" → gmx_get_positions
+ *   "gmx markets"                 → gmx_get_markets
+ */
+function tryFastPathGmx(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+
+  // ── Open position: "long/short <amount> <market> <leverage>x" ──
+  const openMatch = m.match(
+    /^(long|short)\s+([\d.,]+)\s+([a-z0-9.]+?)(?:usd[ct]?|perp)?\s+(\d+(?:\.\d+)?)x$/i,
+  );
+  if (openMatch) {
+    const isLong = openMatch[1].toLowerCase() === "long";
+    const notional = openMatch[2].replace(/,/g, "");
+    const market = openMatch[3].toUpperCase();
+    const leverage = openMatch[4];
+    return {
+      name: "gmx_open_position",
+      args: { market, isLong, notionalUsd: notional, leverage, collateral: "USDC" },
+    };
+  }
+
+  // ── Open position with explicit collateral: "long ETH 5x with 200 USDC" ──
+  const openCollateralMatch = m.match(
+    /^(long|short)\s+([a-z0-9.]+?)(?:usd[ct]?|perp)?\s+(\d+(?:\.\d+)?)x\s+(?:with|using)\s+([\d.,]+)\s+([a-z0-9.]+)$/i,
+  );
+  if (openCollateralMatch) {
+    const isLong = openCollateralMatch[1].toLowerCase() === "long";
+    const market = openCollateralMatch[2].toUpperCase();
+    const leverage = openCollateralMatch[3];
+    const collateralAmount = openCollateralMatch[4].replace(/,/g, "");
+    const collateral = openCollateralMatch[5].toUpperCase();
+    return {
+      name: "gmx_open_position",
+      args: { market, isLong, collateralAmount, collateral, leverage },
+    };
+  }
+
+  // ── Close position: "close [my] ETH long/short" ──
+  const closeMatch = m.match(
+    /^close\s+(?:my\s+)?([a-z0-9.]+?)(?:usd[ct]?|perp)?\s+(long|short)$/i,
+  );
+  if (closeMatch) {
+    return {
+      name: "gmx_close_position",
+      args: {
+        market: closeMatch[1].toUpperCase(),
+        isLong: closeMatch[2].toLowerCase() === "long",
+        sizeDeltaUsd: "all",
+        collateral: "USDC",
+      },
+    };
+  }
+
+  // ── Show positions ──
+  if (/^(?:show\s+)?(?:my\s+)?(?:perps?|positions?|gmx\s+positions?)$/i.test(m)) {
+    return { name: "gmx_get_positions", args: {} };
+  }
+
+  // ── List markets ──
+  if (/^(?:gmx\s+)?markets?$|^(?:list|show|available)\s+(?:gmx\s+)?markets?$/i.test(m)) {
+    return { name: "gmx_get_markets", args: {} };
+  }
+
+  return null;
 }
