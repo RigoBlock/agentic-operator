@@ -17,6 +17,7 @@ import { cors } from "hono/cors";
 import type { Env } from "./types.js";
 import { chat } from "./routes/chat.js";
 import { quote } from "./routes/quote.js";
+import { delegation } from "./routes/delegation.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
@@ -36,6 +37,7 @@ app.use("*", async (c, next) => {
 // ── API Routes ────────────────────────────────────────────────────────
 app.route("/api/chat", chat);
 app.route("/api/quote", quote);
+app.route("/api/delegation", delegation);
 
 // ── Vault info (no auth, no LLM — simple on-chain read) ──────────────
 // Tries the requested chain first, then all other supported chains.
@@ -84,7 +86,8 @@ app.get("/api/chains", (c) => {
 app.get("/api/health", (c) =>
   c.json({
     status: "ok",
-    version: "0.2.0",
+    version: "0.3.0",
+    features: ["manual-execution", "delegated-execution", "eip7702"],
   }),
 );
 

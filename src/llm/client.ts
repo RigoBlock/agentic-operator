@@ -1,9 +1,10 @@
 /**
  * LLM Client — OpenAI-compatible chat completion with tool calling.
  *
- * The agent builds unsigned transactions and returns them to the frontend.
- * The operator reviews and signs/broadcasts from their own wallet.
- * No agent wallet or delegation involved (Phase 1).
+ * Supports two execution modes:
+ *   - Manual: Agent builds unsigned transactions, operator signs from their wallet.
+ *   - Delegated: Agent wallet executes via EIP-7702 delegation after operator
+ *     confirms trade details (no manual signing required).
  */
 
 import OpenAI from "openai";
@@ -48,15 +49,19 @@ export async function processChat(
   });
 
   // Build system prompt with vault context
+  const executionModeNote = ctx.executionMode === "delegated"
+    ? "The operator has enabled DELEGATED mode. After you build a transaction, the agent wallet will execute it automatically once the operator confirms the trade details. The operator does NOT need to sign the transaction manually."
+    : "The operator will sign and broadcast transactions from their own wallet.\nYou build the transaction; they approve it.";
+
   const contextualPrompt = `${SYSTEM_PROMPT}
 
 CURRENT SESSION CONTEXT:
 - Vault address: ${ctx.vaultAddress}
 - Chain ID: ${ctx.chainId}
 - Operator wallet: ${ctx.operatorAddress || "not connected"}
+- Execution mode: ${ctx.executionMode || "manual"}
 
-The operator will sign and broadcast transactions from their own wallet.
-You build the transaction; they approve it.`;
+${executionModeNote}`;
 
   // Prepend system prompt
   const fullMessages: OpenAI.ChatCompletionMessageParam[] = [
