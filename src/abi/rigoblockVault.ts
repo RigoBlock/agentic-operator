@@ -119,6 +119,80 @@ export const RIGOBLOCK_VAULT_ABI = [
     inputs: [{ name: "data", type: "bytes[]" }],
     outputs: [{ name: "results", type: "bytes[]" }],
   },
+
+  // ── Pool data view ──
+
+  // getData() → (string name, string symbol, uint256 decimals, address owner, address baseToken)
+  {
+    name: "getData",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "poolName", type: "string" },
+      { name: "poolSymbol", type: "string" },
+      { name: "poolDecimals", type: "uint256" },
+      { name: "poolOwner", type: "address" },
+      { name: "poolBaseToken", type: "address" },
+    ],
+  },
+
+  // ── Capital provision (minting pool tokens) ──
+
+  // mint(address recipient, uint256 amountIn, uint256 amountOutMin) payable
+  {
+    name: "mint",
+    type: "function",
+    stateMutability: "payable",
+    inputs: [
+      { name: "recipient", type: "address" },
+      { name: "amountIn", type: "uint256" },
+      { name: "amountOutMin", type: "uint256" },
+    ],
+    outputs: [{ name: "recipientAmount", type: "uint256" }],
+  },
+
+  // burn(uint256 amountIn, uint256 amountOutMin)
+  {
+    name: "burn",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "amountIn", type: "uint256" },
+      { name: "amountOutMin", type: "uint256" },
+    ],
+    outputs: [{ name: "netRevenue", type: "uint256" }],
+  },
+
+  // ── AIntents adapter — cross-chain transfers via Across Protocol ──
+
+  // depositV3(AcrossParams params)
+  {
+    name: "depositV3",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "params",
+        type: "tuple",
+        components: [
+          { name: "depositor", type: "address" },
+          { name: "recipient", type: "address" },
+          { name: "inputToken", type: "address" },
+          { name: "outputToken", type: "address" },
+          { name: "inputAmount", type: "uint256" },
+          { name: "outputAmount", type: "uint256" },
+          { name: "destinationChainId", type: "uint256" },
+          { name: "exclusiveRelayer", type: "address" },
+          { name: "quoteTimestamp", type: "uint32" },
+          { name: "fillDeadline", type: "uint32" },
+          { name: "exclusivityDeadline", type: "uint32" },
+          { name: "message", type: "bytes" },
+        ],
+      },
+    ],
+    outputs: [],
+  },
 ] as const;
 
 /**
@@ -215,4 +289,6 @@ export const ALLOWED_VAULT_SELECTORS = {
   createDecreaseOrder: "0xe478512e" as `0x${string}`,
   createIncreaseOrder: "0x13b4312f" as `0x${string}`,
   updateOrder: "0xdd5baad2" as `0x${string}`,
+  // ── AIntents Adapter (cross-chain) ──
+  depositV3: "0x770d096f" as `0x${string}`,
 };

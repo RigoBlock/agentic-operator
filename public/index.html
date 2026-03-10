@@ -336,6 +336,10 @@
       border-color: var(--error); background: rgba(248,81,73,0.08); color: var(--error);
     }
     .btn-delegation.danger:hover { background: rgba(248,81,73,0.18); }
+    .btn-delegation.telegram {
+      border-color: #229ED9; background: rgba(34,158,217,0.08); color: #229ED9;
+    }
+    .btn-delegation.telegram:hover { background: rgba(34,158,217,0.18); }
     .sponsor-toggle {
       display: inline-flex; align-items: center; gap: 4px;
       font-size: 11px; color: var(--muted); cursor: pointer;
@@ -480,8 +484,12 @@
     }
     .deploy-field input, .deploy-field select {
       width: 100%; padding: 8px 10px; border-radius: 6px;
-      border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.2);
+      border: 1px solid rgba(255,255,255,0.12); background: var(--surface);
       color: var(--text); font-size: 13px; box-sizing: border-box;
+    }
+    .deploy-field select { color-scheme: dark; }
+    .deploy-field select option {
+      background: var(--surface); color: var(--text);
     }
     .deploy-field input:focus, .deploy-field select:focus {
       border-color: var(--accent); outline: none;
@@ -554,6 +562,7 @@
     </label>
     <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
     <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
+    <button id="telegram-pair-btn" class="btn-delegation telegram" onclick="openTelegramPairing()" style="display:none;" title="Control this pool from Telegram">⬡ Telegram</button>
   </div>
 
   <!-- Delegation setup modal -->
@@ -597,6 +606,10 @@
       <button class="modal-close" onclick="closeModal('deploy-pool-modal')">&times;</button>
       <h3>Deploy New Smart Pool</h3>
       <div class="deploy-field">
+        <label>Chain</label>
+        <select id="deploy-pool-chain"></select>
+      </div>
+      <div class="deploy-field">
         <label>Pool Name</label>
         <input id="deploy-pool-name" placeholder="e.g. My Trading Pool" />
       </div>
@@ -621,6 +634,36 @@
       <div class="tx-actions">
         <button class="btn-cancel" onclick="closeModal('deploy-pool-modal')">Cancel</button>
         <button class="btn-confirm" id="deploy-pool-btn" onclick="deploySmartPool()">Deploy Pool</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Telegram pairing modal -->
+  <div id="telegram-modal" class="modal-overlay">
+    <div class="modal-content" style="max-width: 380px;">
+      <button class="modal-close" onclick="closeModal('telegram-modal')">&times;</button>
+      <h3>⬡ Pair Telegram</h3>
+      <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;">
+        Control your pool from Telegram via <a href="https://t.me/RigoVibeBot" target="_blank" rel="noopener" style="color: var(--accent);">@RigoVibeBot</a> — trade, check positions, and manage your vault without a wallet app.
+      </p>
+      <div id="telegram-pair-status" style="font-size: 12px; margin-bottom: 12px;"></div>
+      <div id="telegram-pair-code" style="display:none; text-align: center; margin: 16px 0;">
+        <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 8px;">Your pairing code:</div>
+        <code id="telegram-code-value" style="font-size: 28px; letter-spacing: 4px; font-weight: 700; color: var(--accent); user-select: all; cursor: pointer;"></code>
+        <div style="font-size: 11px; color: var(--text-secondary); margin-top: 8px;">Expires in 5 minutes</div>
+      </div>
+      <div id="telegram-bot-link" style="display:none; text-align: center; margin-bottom: 12px;">
+        <a id="telegram-bot-url" href="https://t.me/RigoVibeBot" target="_blank" rel="noopener" class="btn-confirm" style="display: inline-block; text-decoration: none; font-size: 14px; padding: 10px 24px;">Open in Telegram →</a>
+      </div>
+      <div style="font-size: 11px; color: var(--text-secondary); padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px; margin-bottom: 12px;">
+        <b>Steps:</b><br>
+        1. Click "Generate Code" below<br>
+        2. Click the "Open in Telegram" button<br>
+        3. Pairing happens automatically!
+      </div>
+      <div class="tx-actions">
+        <button class="btn-cancel" onclick="closeModal('telegram-modal')">Close</button>
+        <button class="btn-confirm" id="telegram-generate-btn" onclick="generateTelegramCode()">Generate Code</button>
       </div>
     </div>
   </div>
@@ -1672,8 +1715,12 @@
           appendMessage('system', `Account switched. Signing authentication…`);
           signAuthMessage();
         }
-        if (vaultInput.value.trim().length === 42) validateVault();
-        refreshDelegationStatus();
+        // validateVault() now handles delegation refresh (skips if non-owner)
+        if (vaultInput.value.trim().length === 42) {
+          validateVault();
+        } else {
+          refreshDelegationStatus();
+        }
       });
 
       provider.on('chainChanged', (chainIdHex) => {
@@ -1766,6 +1813,10 @@
       document.getElementById('wallet-addr').textContent = '';
       document.getElementById('connect-btn').textContent = 'Connect Wallet';
       document.getElementById('connect-btn').classList.remove('active');
+      // Clear delegation panel — no wallet means no delegation
+      delegationState = null;
+      executionMode = 'manual';
+      updateDelegationUI(null);
     }
 
     function closeModal(id) {
@@ -1861,6 +1912,7 @@
       const statusText = document.getElementById('delegation-status-text');
       const setupBtn = document.getElementById('delegation-setup-btn');
       const revokeBtn = document.getElementById('delegation-revoke-btn');
+      const telegramBtn = document.getElementById('telegram-pair-btn');
       const agentAddr = document.getElementById('agent-addr');
       const balanceEl = document.getElementById('agent-balance-display');
       const sponsorLabel = document.getElementById('sponsor-toggle-label');
@@ -1873,6 +1925,7 @@
         setupBtn.textContent = state?.agentAddress ? 'Set Up on This Chain' : 'Set Up Delegation';
         setupBtn.onclick = () => openDelegationSetup();
         revokeBtn.style.display = 'none';
+        if (telegramBtn) telegramBtn.style.display = 'none';
         agentAddr.style.display = 'none';
         balanceEl.style.display = 'none';
         if (sponsorLabel) sponsorLabel.style.display = 'none';
@@ -1893,6 +1946,7 @@
         setupBtn.textContent = 'Set Up on This Chain';
         setupBtn.onclick = () => openDelegationSetup();
         revokeBtn.style.display = isOnChain ? '' : 'none';
+        if (telegramBtn) telegramBtn.style.display = isOnChain ? '' : 'none';
 
         // Balance is chain-specific — only meaningful when active on current chain
         if (!isOnChain) {
@@ -1964,6 +2018,82 @@
     }
 
     /* ================================================================
+       Telegram Pairing
+       ================================================================ */
+    function openTelegramPairing() {
+      if (!connectedAddress) {
+        appendMessage('system', 'Connect your wallet first.');
+        openWalletPicker();
+        return;
+      }
+      const vault = vaultInput.value.trim();
+      if (!vault || vault.length !== 42) {
+        appendMessage('system', 'Enter a vault address first.');
+        return;
+      }
+      // Reset modal state
+      document.getElementById('telegram-pair-code').style.display = 'none';
+      document.getElementById('telegram-bot-link').style.display = 'none';
+      document.getElementById('telegram-pair-status').textContent = '';
+      document.getElementById('telegram-generate-btn').disabled = false;
+      document.getElementById('telegram-generate-btn').textContent = 'Generate Code';
+      document.getElementById('telegram-modal').classList.add('visible');
+    }
+
+    async function generateTelegramCode() {
+      const vault = vaultInput.value.trim();
+      const statusEl = document.getElementById('telegram-pair-status');
+      const codeEl = document.getElementById('telegram-pair-code');
+      const codeValEl = document.getElementById('telegram-code-value');
+      const botLinkEl = document.getElementById('telegram-bot-link');
+      const genBtn = document.getElementById('telegram-generate-btn');
+
+      genBtn.disabled = true;
+      genBtn.textContent = 'Generating…';
+      statusEl.textContent = '';
+
+      // Get vault name from the UI
+      const vaultNameEl = document.getElementById('vault-name');
+      const vaultName = vaultNameEl ? vaultNameEl.textContent.trim() : vault.slice(0, 10);
+
+      try {
+        const res = await fetch('/api/telegram/pair', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            operatorAddress: connectedAddress,
+            vaultAddress: vault,
+            vaultName,
+            chainId: currentChainId,
+            authSignature,
+            authTimestamp,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'Failed' }));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+
+        // Display the code
+        codeValEl.textContent = data.code;
+        codeEl.style.display = '';
+        genBtn.textContent = 'Regenerate';
+        genBtn.disabled = false;
+
+        // Build deep link — clicking opens the bot and auto-pairs
+        const botUrl = document.getElementById('telegram-bot-url');
+        botUrl.href = `https://t.me/RigoVibeBot?start=${data.code}`;
+        botLinkEl.style.display = '';
+        statusEl.innerHTML = '<span style="color: var(--success);">Code generated! Click the button to open Telegram and pair automatically.</span>';
+      } catch (err) {
+        statusEl.innerHTML = `<span style="color: var(--error);">Error: ${err.message}</span>`;
+        genBtn.textContent = 'Retry';
+        genBtn.disabled = false;
+      }
+    }
+
+    /* ================================================================
        Delegation Setup Flow
        ================================================================ */
     function openDelegationSetup() {
@@ -1983,6 +2113,7 @@
       const confirmBtn = document.getElementById('delegation-confirm-btn');
       confirmBtn.disabled = false;
       confirmBtn.textContent = 'Set Up Agent';
+      confirmBtn.onclick = startDelegationSetup; // restore handler (overwritten on success)
       document.getElementById('delegation-modal').classList.add('visible');
     }
 
@@ -2269,7 +2400,17 @@
     const origValidateVault = validateVault;
     validateVault = async function() {
       await origValidateVault();
-      refreshDelegationStatus();
+      // Only load delegation data when the connected wallet IS the vault owner.
+      // Otherwise clear the panel so stale agent info doesn't persist.
+      const statusEl = document.getElementById('vault-status');
+      const isNonOwner = statusEl && (statusEl.textContent.includes('not owner') || statusEl.className.includes('error'));
+      if (isNonOwner) {
+        delegationState = null;
+        executionMode = 'manual';
+        updateDelegationUI(null);
+      } else {
+        refreshDelegationStatus();
+      }
     };
 
     // Auto-refresh delegation on load
@@ -2303,6 +2444,13 @@
         openWalletPicker();
         return;
       }
+      // Populate chain selector with current network mode chains
+      const chainSelect = document.getElementById('deploy-pool-chain');
+      const isTestnet = document.getElementById('testnet-toggle').checked;
+      const chains = isTestnet ? TESTNET_CHAINS_LIST : MAINNET_CHAINS_LIST;
+      chainSelect.innerHTML = chains.map(c =>
+        `<option value="${c.id}" ${c.id === currentChainId ? 'selected' : ''}>${c.name}</option>`
+      ).join('');
       document.getElementById('deploy-pool-name').value = '';
       document.getElementById('deploy-pool-symbol').value = '';
       document.getElementById('deploy-pool-base-token').value = 'ETH';
@@ -2365,13 +2513,14 @@
       const symbol = document.getElementById('deploy-pool-symbol').value.trim().toUpperCase();
       const baseTokenSelect = document.getElementById('deploy-pool-base-token').value;
       const statusEl = document.getElementById('deploy-pool-status');
+      const deployChainId = parseInt(document.getElementById('deploy-pool-chain').value, 10);
 
       if (!name) { statusEl.textContent = 'Pool name is required.'; return; }
       if (!symbol || symbol.length < 2) { statusEl.textContent = 'Valid symbol required (2-5 chars).'; return; }
 
       let baseToken = '0x0000000000000000000000000000000000000000'; // ETH
       if (baseTokenSelect === 'USDC') {
-        baseToken = USDC_ADDRESSES[currentChainId] || USDC_ADDRESSES[1];
+        baseToken = USDC_ADDRESSES[deployChainId] || USDC_ADDRESSES[1];
       } else if (baseTokenSelect === 'custom') {
         baseToken = document.getElementById('deploy-custom-token').value.trim();
         if (!baseToken || baseToken.length !== 42 || !baseToken.startsWith('0x')) {
@@ -2383,14 +2532,14 @@
       statusEl.style.color = 'var(--text)';
 
       try {
-        // Ensure correct chain
+        // Ensure wallet is on the selected deploy chain
         const walletChainHex = await activeProvider.request({ method: 'eth_chainId' });
         const walletChain = parseInt(walletChainHex, 16);
-        if (walletChain !== currentChainId) {
-          statusEl.textContent = `Switching to ${CHAIN_NAMES[currentChainId] || 'chain ' + currentChainId}…`;
+        if (walletChain !== deployChainId) {
+          statusEl.textContent = `Switching to ${CHAIN_NAMES[deployChainId] || 'chain ' + deployChainId}…`;
           await activeProvider.request({
             method: 'wallet_switchEthereumChain',
-            params: [{ chainId: '0x' + currentChainId.toString(16) }],
+            params: [{ chainId: '0x' + deployChainId.toString(16) }],
           });
         }
 
@@ -2445,14 +2594,17 @@
               }
 
               if (newPoolAddress) {
+                // Switch the app to the deploy chain
+                currentChainId = deployChainId;
+                updateChainDisplay();
                 vaultInput.value = newPoolAddress;
                 updateOnboardingVisibility();
                 statusEl.innerHTML = `✅ Pool deployed at <strong>${newPoolAddress.slice(0,6)}…${newPoolAddress.slice(-4)}</strong>. Address auto-filled!`;
                 validateVault();
-                appendMessage('system', `🏊 New pool "${name}" (${symbol}) deployed at ${newPoolAddress}`);
+                appendMessage('system', `🏊 New pool "${name}" (${symbol}) deployed at ${newPoolAddress} on ${CHAIN_NAMES[deployChainId] || 'chain ' + deployChainId}`);
               } else {
-                statusEl.innerHTML = `✅ Pool deployed! Check the <a href="${getExplorerUrl(currentChainId, txHash)}" target="_blank">transaction</a> for the new address and paste it above.`;
-                appendMessage('system', `🏊 Pool "${name}" (${symbol}) deployed. Tx: ${txHash.slice(0,10)}…`);
+                statusEl.innerHTML = `✅ Pool deployed! Check the <a href="${getExplorerUrl(deployChainId, txHash)}" target="_blank">transaction</a> for the new address and paste it above.`;
+                appendMessage('system', `🏊 Pool "${name}" (${symbol}) deployed on ${CHAIN_NAMES[deployChainId] || 'chain ' + deployChainId}. Tx: ${txHash.slice(0,10)}…`);
               }
               break;
             } else if (receipt && receipt.status === '0x0') {
