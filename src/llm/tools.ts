@@ -473,6 +473,36 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+
+  // ── Pool Funding (Mint) ─────────────────────────────────────────────
+
+  {
+    type: "function" as const,
+    function: {
+      name: "fund_pool",
+      description:
+        "Fund (mint into) the current Rigoblock smart pool by depositing the pool's base token. " +
+        "Returns an unsigned mint() transaction (and approve() if base token is ERC-20). " +
+        "The pool's base token and NAV are read on-chain automatically. " +
+        "Applies 5% slippage protection on the minimum pool tokens received. " +
+        "For ERC-20 base tokens, an approve transaction is built first. " +
+        "For native ETH base tokens, the mint is sent with msg.value.",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: {
+            type: "string",
+            description: "Amount of base token to deposit (human-readable, e.g., '1.5' ETH or '1000' USDC).",
+          },
+          recipient: {
+            type: "string",
+            description: "Address to receive pool tokens. Defaults to the operator's wallet address.",
+          },
+        },
+        required: ["amount"],
+      },
+    },
+  },
 ];
 
 /**
@@ -594,4 +624,14 @@ POOL DEPLOYMENT:
 - The user needs to provide a name and symbol. Base token defaults to ETH if not specified.
 - Common base tokens: ETH (native), USDC.
 - After deployment, the user should paste the new pool address from the receipt into the vault address field.
-- If the user doesn't have a vault/pool yet and asks how to get started, suggest deploying one.`;
+- If the user doesn't have a vault/pool yet and asks how to get started, suggest deploying one.
+
+POOL FUNDING (MINT):
+- Use fund_pool when the user wants to deposit capital into the pool (mint pool tokens).
+- Keywords: fund, deposit, mint, add capital, add liquidity to pool, provide capital.
+- The pool's base token and current NAV are read automatically — the user just specifies the amount.
+- Slippage: 5% is applied automatically to protect against front-running.
+- For ERC-20 base tokens (e.g., USDC), an approve transaction is required first.
+- For native ETH base tokens, the mint is sent with msg.value (no approval needed).
+- After funding, the user's wallet receives pool tokens proportional to the deposit.
+- Suggest funding after a new pool is deployed (the pool needs initial capital).`;

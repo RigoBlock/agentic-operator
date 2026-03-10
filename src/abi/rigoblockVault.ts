@@ -119,6 +119,50 @@ export const RIGOBLOCK_VAULT_ABI = [
     inputs: [{ name: "data", type: "bytes[]" }],
     outputs: [{ name: "results", type: "bytes[]" }],
   },
+
+  // ── Pool data view ──
+
+  // getData() → (string name, string symbol, uint256 decimals, address owner, address baseToken)
+  {
+    name: "getData",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "poolName", type: "string" },
+      { name: "poolSymbol", type: "string" },
+      { name: "poolDecimals", type: "uint256" },
+      { name: "poolOwner", type: "address" },
+      { name: "poolBaseToken", type: "address" },
+    ],
+  },
+
+  // ── Capital provision (minting pool tokens) ──
+
+  // mint(address recipient, uint256 amountIn, uint256 amountOutMin) payable
+  {
+    name: "mint",
+    type: "function",
+    stateMutability: "payable",
+    inputs: [
+      { name: "recipient", type: "address" },
+      { name: "amountIn", type: "uint256" },
+      { name: "amountOutMin", type: "uint256" },
+    ],
+    outputs: [{ name: "recipientAmount", type: "uint256" }],
+  },
+
+  // burn(uint256 amountIn, uint256 amountOutMin)
+  {
+    name: "burn",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "amountIn", type: "uint256" },
+      { name: "amountOutMin", type: "uint256" },
+    ],
+    outputs: [{ name: "netRevenue", type: "uint256" }],
+  },
 ] as const;
 
 /**

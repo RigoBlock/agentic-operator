@@ -286,3 +286,82 @@ export async function isVaultOwner(
     throw err;
   }
 }
+
+// ── Pool data & capital provision ──────────────────────────────────────
+
+/** Pool data returned by vault.getData() */
+export interface PoolData {
+  name: string;
+  symbol: string;
+  decimals: number;
+  owner: Address;
+  baseToken: Address;
+}
+
+/**
+ * Read the pool's core data including base token address.
+ */
+export async function getPoolData(
+  chainId: number,
+  vaultAddress: Address,
+  alchemyKey?: string,
+): Promise<PoolData> {
+  const client = getClient(chainId, alchemyKey);
+  const result = await client.readContract({
+    address: vaultAddress,
+    abi: RIGOBLOCK_VAULT_ABI,
+    functionName: "getData",
+  });
+  const [name, symbol, decimals, owner, baseToken] = result as [string, string, bigint, Address, Address];
+  return {
+    name,
+    symbol,
+    decimals: Number(decimals),
+    owner,
+    baseToken,
+  };
+}
+
+/** NAV data returned by vault.getNavDataView() */
+export interface NavData {
+  totalValue: bigint;
+  unitaryValue: bigint;
+  timestamp: bigint;
+}
+
+/**
+ * Read the pool's current NAV data (total value, unitary value, timestamp).
+ */
+export async function getNavData(
+  chainId: number,
+  vaultAddress: Address,
+  alchemyKey?: string,
+): Promise<NavData> {
+  const client = getClient(chainId, alchemyKey);
+  const result = await client.readContract({
+    address: vaultAddress,
+    abi: RIGOBLOCK_VAULT_ABI,
+    functionName: "getNavDataView",
+  });
+  const navData = result as { totalValue: bigint; unitaryValue: bigint; timestamp: bigint };
+  return {
+    totalValue: navData.totalValue,
+    unitaryValue: navData.unitaryValue,
+    timestamp: navData.timestamp,
+  };
+}
+
+/**
+ * Encode a mint(recipient, amountIn, amountOutMin) call on the vault.
+ */
+export function encodeMint(
+  recipient: Address,
+  amountIn: bigint,
+  amountOutMin: bigint,
+): Hex {
+  return encodeFunctionData({
+    abi: RIGOBLOCK_VAULT_ABI,
+    functionName: "mint",
+    args: [recipient, amountIn, amountOutMin],
+  });
+}

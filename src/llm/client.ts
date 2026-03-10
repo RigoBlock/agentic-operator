@@ -12,11 +12,12 @@ import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, Unsign
 import { TOOL_DEFINITIONS, SYSTEM_PROMPT } from "./tools.js";
 import { getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay, calculateVaultGasLimit } from "../services/uniswapTrading.js";
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../services/zeroXTrading.js";
-import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals } from "../services/vault.js";
+import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint } from "../services/vault.js";
 import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
-import { decodeFunctionData, encodeFunctionData, type Address, type Hex } from "viem";
+import { decodeFunctionData, encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../abi/poolFactory.js";
+import { ERC20_ABI } from "../abi/erc20.js";
 import {
   prepareDelegation,
   prepareRevocation,
@@ -1247,6 +1248,139 @@ async function executeToolCall(
       ].join("\n");
 
       return { message, transaction, chainSwitch: chainSwitched };
+    }
+
+    // ── Pool Funding (Mint) ───────────────────────────────────────────
+
+    case "fund_pool": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      const amountStr = args.amount as string;
+      if (!amountStr) {
+        throw new Error("Amount is required. Specify how much base token to deposit (e.g., '1.5' ETH).");
+      }
+
+      const recipient = (args.recipient as string) || ctx.operatorAddress;
+      const chainName = resolveChainName(ctx.chainId);
+
+      // 1. Read pool data (base token) and NAV in parallel
+      const [poolData, navData] = await Promise.all([
+        getPoolData(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY),
+        getNavData(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY),
+      ]);
+
+      const baseToken = poolData.baseToken;
+      const isNativeBase = baseToken.toLowerCase() === "0x0000000000000000000000000000000000000000";
+
+      // 2. Resolve base token decimals and symbol
+      let baseDecimals: number;
+      let baseSymbol: string;
+      if (isNativeBase) {
+        baseDecimals = 18;
+        // Determine native symbol based on chain
+        const nativeSymbols: Record<number, string> = { 56: "BNB", 137: "POL" };
+        baseSymbol = nativeSymbols[ctx.chainId] || "ETH";
+      } else {
+        baseDecimals = await getTokenDecimals(ctx.chainId, baseToken, env.ALCHEMY_API_KEY);
+        const tokenInfo = await getVaultTokenBalance(ctx.chainId, ctx.vaultAddress as Address, baseToken as Address, env.ALCHEMY_API_KEY);
+        baseSymbol = tokenInfo.symbol;
+      }
+
+      // 3. Parse amount to smallest units
+      const amountInWei = parseUnits(amountStr, baseDecimals);
+
+      // 4. Calculate amountOutMin from NAV with 5% slippage
+      //    unitaryValue = price of 1 pool token in base token units (18 decimals)
+      //    expectedPoolTokens = amountIn * 10^18 / unitaryValue
+      //    amountOutMin = expectedPoolTokens * 0.95
+      const unitaryValue = navData.unitaryValue;
+      let amountOutMin: bigint;
+      if (unitaryValue === 0n) {
+        // First mint (empty pool) — no NAV yet, accept any amount
+        amountOutMin = 0n;
+      } else {
+        const expectedPoolTokens = (amountInWei * (10n ** 18n)) / unitaryValue;
+        amountOutMin = (expectedPoolTokens * 95n) / 100n; // 5% slippage
+      }
+
+      // Format for display
+      const unitaryValueFormatted = unitaryValue > 0n
+        ? formatUnits(unitaryValue, 18)
+        : "N/A (first mint)";
+      const expectedTokensFormatted = unitaryValue > 0n
+        ? formatUnits((amountInWei * (10n ** 18n)) / unitaryValue, 18)
+        : amountStr;
+      const minTokensFormatted = formatUnits(amountOutMin, 18);
+
+      // 5. Build the mint transaction
+      const mintData = encodeMint(
+        recipient as Address,
+        amountInWei,
+        amountOutMin,
+      );
+
+      if (isNativeBase) {
+        // Native base token — send as msg.value, no approval needed
+        const transaction: UnsignedTransaction = {
+          to: ctx.vaultAddress as Address,
+          data: mintData,
+          value: "0x" + amountInWei.toString(16),
+          chainId: ctx.chainId,
+          gas: "0x7A120", // 500k gas
+          description: `Fund pool: deposit ${amountStr} ${baseSymbol} into ${poolData.name}`,
+        };
+
+        const message = [
+          `✅ Pool funding ready`,
+          `Pool: ${poolData.name} (${poolData.symbol})`,
+          `Deposit: ${amountStr} ${baseSymbol}`,
+          `NAV per token: ${unitaryValueFormatted} ${baseSymbol}`,
+          `Expected pool tokens: ~${parseFloat(expectedTokensFormatted).toFixed(6)} ${poolData.symbol}`,
+          `Min pool tokens (5% slippage): ${parseFloat(minTokensFormatted).toFixed(6)} ${poolData.symbol}`,
+          `Chain: ${chainName}`,
+          `Recipient: ${recipient}`,
+          "",
+          "Sign this transaction to deposit capital and receive pool tokens.",
+        ].join("\n");
+
+        return { message, transaction };
+      }
+
+      // ERC-20 base token — need approve first, then mint
+      // Build approve(vaultAddress, amountIn) on the base token
+      const approveData = encodeFunctionData({
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [ctx.vaultAddress as Address, amountInWei],
+      });
+
+      // Return the approve transaction first — the mint follows after approval
+      const transaction: UnsignedTransaction = {
+        to: baseToken as Address,
+        data: approveData,
+        value: "0x0",
+        chainId: ctx.chainId,
+        gas: "0xC350", // 50k gas for approve
+        description: `Approve ${amountStr} ${baseSymbol} for pool ${poolData.name}`,
+      };
+
+      const message = [
+        `✅ Pool funding ready (2 transactions)`,
+        `Pool: ${poolData.name} (${poolData.symbol})`,
+        `Deposit: ${amountStr} ${baseSymbol}`,
+        `NAV per token: ${unitaryValueFormatted} ${baseSymbol}`,
+        `Expected pool tokens: ~${parseFloat(expectedTokensFormatted).toFixed(6)} ${poolData.symbol}`,
+        `Min pool tokens (5% slippage): ${parseFloat(minTokensFormatted).toFixed(6)} ${poolData.symbol}`,
+        `Chain: ${chainName}`,
+        `Recipient: ${recipient}`,
+        "",
+        "**Step 1/2:** Sign the approval transaction to allow the pool to transfer your ${baseSymbol}.",
+        "**Step 2/2:** After approval, you'll be prompted to sign the mint transaction.",
+      ].join("\n");
+
+      return { message, transaction };
     }
 
     default:

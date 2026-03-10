@@ -19,6 +19,7 @@ import { chat } from "./routes/chat.js";
 import { quote } from "./routes/quote.js";
 import { delegation } from "./routes/delegation.js";
 import { gasPolicy } from "./routes/gasPolicy.js";
+import { telegram } from "./routes/telegram.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
@@ -40,6 +41,7 @@ app.route("/api/chat", chat);
 app.route("/api/quote", quote);
 app.route("/api/delegation", delegation);
 app.route("/api/gas-policy", gasPolicy);
+app.route("/api/telegram", telegram);
 
 // ── Vault info (no auth, no LLM — simple on-chain read) ──────────────
 // Tries the requested chain first, then all other supported chains.

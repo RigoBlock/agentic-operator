@@ -24,3 +24,4 @@ id = "2c0f24cd5916471ab4e2cd8d3fd1b1b7"
 # ALCHEMY_API_KEY       — Alchemy RPC key
 # AGENT_WALLET_SECRET   — Encryption key for agent wallet private keys (32+ char random string)
 # ALCHEMY_GAS_POLICY_ID — (Optional) Alchemy Gas Manager policy ID for sponsored agent gas
+# TELEGRAM_BOT_TOKEN    — (Optional) Telegram Bot API token from @BotFather

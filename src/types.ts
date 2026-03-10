@@ -25,6 +25,52 @@ export interface Env {
   ALCHEMY_API_KEY: string;  // Alchemy RPC key (avoids public RPC rate limits)
   AGENT_WALLET_SECRET: string; // Encryption key for agent wallet private keys
   ALCHEMY_GAS_POLICY_ID?: string; // Alchemy Gas Manager policy ID (optional, enables sponsored gas)
+  TELEGRAM_BOT_TOKEN?: string; // Telegram Bot API token (optional, enables Telegram control)
+}
+
+// ── Telegram types ────────────────────────────────────────────────────
+
+/** A Telegram-linked operator — stored in KV as `tg-user:{telegramUserId}` */
+export interface TelegramUser {
+  /** Telegram numeric user ID */
+  telegramUserId: number;
+  /** Telegram @username (for display) */
+  username?: string;
+  /** Linked Ethereum operator address (from web pairing) */
+  operatorAddress: Address;
+  /** Vaults the operator has paired */
+  vaults: TelegramVaultLink[];
+  /** Currently active vault index (into vaults[]) */
+  activeVaultIndex: number;
+  /** When this link was created (ms epoch) */
+  pairedAt: number;
+}
+
+export interface TelegramVaultLink {
+  address: Address;
+  chainId: number;
+  name: string;
+}
+
+/** A pending pairing code — stored in KV as `tg-pair:{code}` with 5 min TTL */
+export interface TelegramPairingCode {
+  code: string;
+  operatorAddress: Address;
+  vaultAddress: Address;
+  vaultName: string;
+  chainId: number;
+  createdAt: number;
+}
+
+/** Per-user Telegram conversation state — stored in KV as `tg-conv:{telegramUserId}` */
+export interface TelegramConversation {
+  messages: ChatMessage[];
+  /** Vault address for this conversation */
+  vaultAddress: Address;
+  /** Chain ID */
+  chainId: number;
+  /** Last activity timestamp (for TTL cleanup) */
+  lastActivity: number;
 }
 
 // ── Chat types ────────────────────────────────────────────────────────
