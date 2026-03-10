@@ -35,10 +35,6 @@ export const TOOL_DEFINITIONS = [
             type: "string",
             description: "Amount to buy (human-readable). Use for EXACT_OUTPUT.",
           },
-          slippageBps: {
-            type: "number",
-            description: "Slippage in basis points. Default 100 (1%).",
-          },
           dex: {
             type: "string",
             description:
@@ -84,10 +80,6 @@ export const TOOL_DEFINITIONS = [
           amountOut: {
             type: "string",
             description: "Amount to buy (human-readable). Use for EXACT_OUTPUT.",
-          },
-          slippageBps: {
-            type: "number",
-            description: "Slippage in basis points. Default 100 (1%).",
           },
           dex: {
             type: "string",
@@ -383,6 +375,104 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+
+  // ── Delegation Management Tools ─────────────────────────────────────
+
+  {
+    type: "function" as const,
+    function: {
+      name: "setup_delegation",
+      description:
+        "Set up delegation so the agent wallet can execute trades on the vault without manual signing. " +
+        "Creates an agent wallet and returns an unsigned updateDelegation() transaction for the operator to sign. " +
+        "The operator must sign and broadcast this transaction to enable delegated execution.",
+      parameters: {
+        type: "object",
+        properties: {
+          chain: {
+            type: "string",
+            description: "Chain to set up delegation on (e.g., 'Arbitrum', 'Base'). Uses current chain if omitted.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "revoke_delegation",
+      description:
+        "Revoke the agent wallet's delegation on the vault. " +
+        "Returns an unsigned revokeAllDelegations() transaction for the operator to sign. " +
+        "After the operator sends this, the agent can no longer execute trades on the vault.",
+      parameters: {
+        type: "object",
+        properties: {
+          chain: {
+            type: "string",
+            description: "Chain to revoke delegation on. Uses current chain if omitted.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "check_delegation_status",
+      description:
+        "Check whether delegation is currently active for the agent on the vault, including on-chain verification. " +
+        "Returns which selectors are delegated and which are not.",
+      parameters: {
+        type: "object",
+        properties: {
+          chain: {
+            type: "string",
+            description: "Chain to check. Uses current chain if omitted.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+
+  // ── Pool Deployment ─────────────────────────────────────────────────
+
+  {
+    type: "function" as const,
+    function: {
+      name: "deploy_smart_pool",
+      description:
+        "Deploy a new Rigoblock smart pool via the RigoblockPoolProxyFactory. " +
+        "Returns an unsigned createPool() transaction for the operator to sign. " +
+        "After deployment, the operator can set the new pool address in the interface. " +
+        "Default base tokens: ETH (address(0)) or USDC. User can also paste a custom token address.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "Pool name (e.g., 'My Trading Pool')",
+          },
+          symbol: {
+            type: "string",
+            description: "Pool symbol (e.g., 'MTP'). 3-5 uppercase chars recommended.",
+          },
+          baseToken: {
+            type: "string",
+            description: "Base token symbol (ETH, USDC) or address. Default: ETH (address(0)).",
+          },
+          chain: {
+            type: "string",
+            description: "Chain to deploy on. Uses current chain if omitted.",
+          },
+        },
+        required: ["name", "symbol"],
+      },
+    },
+  },
 ];
 
 /**
@@ -484,9 +574,24 @@ RULES:
 - ALWAYS use actual tool calls, never write tool names as text.
 - If a previous call errored, still use tools for new requests.
 - Token symbols resolve automatically (CoinGecko). Don't ask for addresses.
+- Users may use full token names (e.g., "chainlink", "uniswap", "wrapped bitcoin"). Always convert to the correct ticker symbol before calling tools: chainlink→LINK, uniswap→UNI, wrapped bitcoin→WBTC, ethereum→ETH, etc.
 - If multiple tokens match, present the list and ask the user to choose.
 - Never check or mention token approvals (vault handles them).
 - Don't check balances unless explicitly asked.
 - On Polygon the native token is POL. On BNB Chain it's BNB, not ETH.
-- Default slippage: 1% (100 bps). Be concise.
-- When the user references a previous request (e.g., "proceed", "do it"), use the same parameters from the earlier message.`;
+- Default slippage: 1% (100 bps) — hardcoded for safety, not adjustable. Be concise.
+- When the user references a previous request (e.g., "proceed", "do it"), use the same parameters from the earlier message.
+
+DELEGATION:
+- Use setup_delegation when the user wants to enable the agent to trade automatically (e.g., "delegate", "enable agent", "auto-trade", "set up delegation").
+- Use revoke_delegation when the user wants to revoke the agent (e.g., "revoke", "disable agent", "remove delegation").
+- Use check_delegation_status when the user asks about delegation status (e.g., "is the agent delegated?", "check delegation").
+- After setup_delegation, the operator must sign the returned transaction from their wallet.
+- Delegation is per-chain: setting up on Arbitrum does NOT apply to Base. Mention this if relevant.
+
+POOL DEPLOYMENT:
+- Use deploy_smart_pool when the user wants to create a new Rigoblock smart pool.
+- The user needs to provide a name and symbol. Base token defaults to ETH if not specified.
+- Common base tokens: ETH (native), USDC.
+- After deployment, the user should paste the new pool address from the receipt into the vault address field.
+- If the user doesn't have a vault/pool yet and asks how to get started, suggest deploying one.`;

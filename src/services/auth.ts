@@ -33,13 +33,11 @@ const OWNERSHIP_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
  * Wallet-wide — NOT tied to any specific vault or chain.
  * Human-readable so the wallet UI shows a clear description of what is being signed.
  */
-export function buildAuthMessage(address: string): string {
+export function buildAuthMessage(_address: string): string {
   return [
     "Welcome to Rigoblock Operator",
     "",
     "Sign this message to verify your wallet and access your smart pool assistant.",
-    "",
-    `Wallet: ${address}`,
   ].join("\n");
 }
 

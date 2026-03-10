@@ -1,9 +1,10 @@
 /**
  * LLM Client — OpenAI-compatible chat completion with tool calling.
  *
- * The agent builds unsigned transactions and returns them to the frontend.
- * The operator reviews and signs/broadcasts from their own wallet.
- * No agent wallet or delegation involved (Phase 1).
+ * Supports two execution modes:
+ *   - Manual: Agent builds unsigned transactions, operator signs from their wallet.
+ *   - Delegated: Agent wallet executes via EIP-7702 delegation after operator
+ *     confirms trade details (no manual signing required).
  */
 
 import OpenAI from "openai";
@@ -13,8 +14,17 @@ import { getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay, 
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../services/zeroXTrading.js";
 import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals } from "../services/vault.js";
 import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
-import { decodeFunctionData, type Address, type Hex } from "viem";
+import { decodeFunctionData, encodeFunctionData, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
+import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../abi/poolFactory.js";
+import {
+  prepareDelegation,
+  prepareRevocation,
+  checkDelegationOnChain,
+  buildDefaultSelectors,
+  getDelegationConfig,
+} from "../services/delegation.js";
+import { getAgentWalletInfo } from "../services/agentWallet.js";
 import {
   findGmxMarket,
   getGmxMarkets,
@@ -48,15 +58,19 @@ export async function processChat(
   });
 
   // Build system prompt with vault context
+  const executionModeNote = ctx.executionMode === "delegated"
+    ? "The operator has enabled DELEGATED mode. After you build a transaction, the agent wallet will execute it automatically once the operator confirms the trade details. The operator does NOT need to sign the transaction manually."
+    : "The operator will sign and broadcast transactions from their own wallet.\nYou build the transaction; they approve it.";
+
   const contextualPrompt = `${SYSTEM_PROMPT}
 
 CURRENT SESSION CONTEXT:
 - Vault address: ${ctx.vaultAddress}
 - Chain ID: ${ctx.chainId}
 - Operator wallet: ${ctx.operatorAddress || "not connected"}
+- Execution mode: ${ctx.executionMode || "manual"}
 
-The operator will sign and broadcast transactions from their own wallet.
-You build the transaction; they approve it.`;
+${executionModeNote}`;
 
   // Prepend system prompt
   const fullMessages: OpenAI.ChatCompletionMessageParam[] = [
@@ -67,11 +81,47 @@ You build the transaction; they approve it.`;
     })),
   ];
 
-  // ── Fast-path: regex-match common GMX commands to skip the LLM call ──
+  // ── Fast-path: regex-match common commands to skip the LLM call ──
   const lastUserMsg = messages.filter(m => m.role === "user").pop()?.content?.trim() || "";
+
+  // Try chain switch first (cheapest — no tool execution)
+  const fastChainSwitch = tryFastPathChainSwitch(lastUserMsg);
+  if (fastChainSwitch) {
+    console.log(`[LLM] Fast-path chain switch: ${fastChainSwitch.args.chain}`);
+    try {
+      const toolResult = await executeToolCall(env, ctx, fastChainSwitch.name, fastChainSwitch.args);
+      return {
+        reply: toolResult.message,
+        toolCalls: [{ name: fastChainSwitch.name, arguments: fastChainSwitch.args, result: toolResult.message, error: false }],
+        chainSwitch: toolResult.chainSwitch,
+      };
+    } catch (err) {
+      console.log(`[LLM] Fast-path chain switch error, falling back to LLM: ${err}`);
+    }
+  }
+
+  // Try swap fast-path
+  const fastSwap = tryFastPathSwap(lastUserMsg);
+  if (fastSwap) {
+    console.log(`[LLM] Fast-path swap: ${fastSwap.name}(${JSON.stringify(fastSwap.args)})`);
+    try {
+      const toolResult = await executeToolCall(env, ctx, fastSwap.name, fastSwap.args);
+      return {
+        reply: "",
+        toolCalls: [{ name: fastSwap.name, arguments: fastSwap.args, result: toolResult.message, error: false }],
+        transaction: toolResult.transaction,
+        chainSwitch: toolResult.chainSwitch,
+        suggestions: toolResult.suggestions,
+      };
+    } catch (err) {
+      console.log(`[LLM] Fast-path swap error, falling back to LLM: ${err}`);
+    }
+  }
+
+  // Try GMX fast-path
   const fastPath = tryFastPathGmx(lastUserMsg);
   if (fastPath) {
-    console.log(`[LLM] Fast-path matched: ${fastPath.name}(${JSON.stringify(fastPath.args)})`);
+    console.log(`[LLM] Fast-path GMX: ${fastPath.name}(${JSON.stringify(fastPath.args)})`);
     try {
       const toolResult = await executeToolCall(env, ctx, fastPath.name, fastPath.args);
       return {
@@ -83,8 +133,7 @@ You build the transaction; they approve it.`;
         dexProvider: "GMX",
       };
     } catch (err) {
-      // Fast-path failed — fall through to LLM
-      console.log(`[LLM] Fast-path error, falling back to LLM: ${err}`);
+      console.log(`[LLM] Fast-path GMX error, falling back to LLM: ${err}`);
     }
   }
 
@@ -339,7 +388,10 @@ async function executeToolCall(
         tokenOut: args.tokenOut as string,
         amountIn: args.amountIn as string | undefined,
         amountOut: args.amountOut as string | undefined,
-        slippageBps: (args.slippageBps as number) || 100,
+        // SECURITY: Slippage is hardcoded server-side at 1% (100 bps).
+        // Not exposed to the LLM to prevent a compromised agent from
+        // setting arbitrary slippage and enabling sandwich attacks.
+        slippageBps: 100,
       };
       if (!intent.amountIn && !intent.amountOut) {
         throw new Error("Either amountIn or amountOut must be specified.");
@@ -374,7 +426,8 @@ async function executeToolCall(
         tokenOut: args.tokenOut as string,
         amountIn: args.amountIn as string | undefined,
         amountOut: args.amountOut as string | undefined,
-        slippageBps: (args.slippageBps as number) || 100,
+        // SECURITY: Slippage hardcoded at 1% — not controllable by the LLM.
+        slippageBps: 100,
       };
       if (!intent.amountIn && !intent.amountOut) {
         throw new Error("Either amountIn or amountOut must be specified.");
@@ -623,11 +676,14 @@ async function executeToolCall(
       const isLong = args.isLong as boolean;
       const collateralSymbol = (args.collateral as string) || "USDC";
 
-      // Find market and get price
+      // Find market and get prices
       const market = await findGmxMarket(marketSymbol);
       const collateralAddr = resolveGmxCollateral(collateralSymbol);
       const collateralDecimals = getGmxTokenDecimals(collateralAddr);
-      const collateralPrice = await getGmxTokenPrice(collateralAddr);
+      const [collateralPrice, indexTokenPrice] = await Promise.all([
+        getGmxTokenPrice(collateralAddr),
+        getGmxTokenPrice(market.indexToken),
+      ]);
 
       // Determine collateralAmount and sizeDeltaUsd.
       // Three modes:
@@ -675,6 +731,7 @@ async function executeToolCall(
         collateralDecimals,
         sizeDeltaUsd,
         isLong,
+        indexTokenPriceUsd: indexTokenPrice.mid.toString(),
       });
 
       const leverage = args.leverage || (parseFloat(sizeDeltaUsd) / (parseFloat(collateralAmount) * collateralPrice.mid)).toFixed(1);
@@ -725,6 +782,9 @@ async function executeToolCall(
       const collateralAddr = resolveGmxCollateral(collateralSymbol);
       const collateralDecimals = getGmxTokenDecimals(collateralAddr);
 
+      // Get index token price for slippage protection
+      const indexTokenPrice = await getGmxTokenPrice(market.indexToken);
+
       // sizeDeltaUsd: "all" means close full position — find position size
       let sizeDeltaUsd = (args.sizeDeltaUsd as string) || "all";
       if (sizeDeltaUsd.toLowerCase() === "all") {
@@ -764,6 +824,7 @@ async function executeToolCall(
         isLong,
         orderType,
         triggerPriceUsd: args.triggerPrice as string | undefined,
+        indexTokenPriceUsd: indexTokenPrice.mid.toString(),
         acceptablePriceUsd: args.acceptablePrice as string | undefined,
       });
 
@@ -970,6 +1031,224 @@ async function executeToolCall(
       return { message: lines.join("\n") };
     }
 
+    // ── Delegation Management ─────────────────────────────────────────
+
+    case "setup_delegation": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      // Handle optional chain switch
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const chainName = resolveChainName(ctx.chainId);
+      const result = await prepareDelegation(
+        env,
+        ctx.operatorAddress,
+        ctx.vaultAddress as Address,
+        ctx.chainId,
+      );
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: result.transaction.data,
+        value: "0x0",
+        chainId: ctx.chainId,
+        gas: "0x30D40", // 200k gas should be plenty
+        description: result.transaction.description,
+      };
+
+      const message = [
+        "✅ Delegation setup ready",
+        `Agent wallet: ${result.agentAddress}`,
+        `Selectors: ${result.selectors.length} vault functions`,
+        `Chain: ${chainName}`,
+        "",
+        "Sign this transaction to grant the agent permission to execute trades on your vault.",
+        "Note: Delegation is per-chain. You'll need to set it up separately on each chain you want to use.",
+      ].join("\n");
+
+      return { message, transaction, chainSwitch: chainSwitched };
+    }
+
+    case "revoke_delegation": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      // Handle optional chain switch
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const chainName = resolveChainName(ctx.chainId);
+      const revocation = await prepareRevocation(
+        env,
+        ctx.vaultAddress as Address,
+        ctx.chainId,
+      );
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: revocation.transaction.data,
+        value: "0x0",
+        chainId: ctx.chainId,
+        gas: "0x30D40", // 200k gas
+        description: revocation.transaction.description,
+      };
+
+      const message = [
+        "✅ Revocation ready",
+        `Chain: ${chainName}`,
+        "",
+        "Sign this transaction to revoke the agent's delegation on your vault.",
+        "After this, the agent will no longer be able to execute trades automatically.",
+      ].join("\n");
+
+      return { message, transaction, chainSwitch: chainSwitched };
+    }
+
+    case "check_delegation_status": {
+      // Handle optional chain switch
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const chainName = resolveChainName(ctx.chainId);
+
+      // Check KV config
+      const config = await getDelegationConfig(env.KV, ctx.vaultAddress as string);
+      const walletInfo = await getAgentWalletInfo(env.KV, ctx.vaultAddress as string);
+
+      if (!walletInfo?.address) {
+        return {
+          message: `No agent wallet has been created for this vault yet.\nUse "set up delegation" to get started.`,
+          chainSwitch: chainSwitched,
+          suggestions: ["Set up delegation"],
+        };
+      }
+
+      // On-chain verification
+      const selectors = buildDefaultSelectors();
+      const onChain = await checkDelegationOnChain(
+        ctx.chainId,
+        ctx.vaultAddress as Address,
+        walletInfo.address,
+        selectors,
+        env.ALCHEMY_API_KEY,
+      );
+
+      const kvActive = config?.enabled && !!config.chains?.[String(ctx.chainId)];
+      const activeChains = config ? Object.keys(config.chains || {}).map(Number) : [];
+
+      const lines = [
+        `🔍 Delegation Status — ${chainName}`,
+        "─".repeat(35),
+        `Agent wallet: ${walletInfo.address}`,
+        `On-chain: ${onChain.allDelegated ? "✅ Fully delegated" : `⚠️ ${onChain.delegatedSelectors.length}/${selectors.length} selectors delegated`}`,
+        `KV state: ${kvActive ? "✅ Active" : "❌ Inactive"}`,
+        `Active chains: ${activeChains.length > 0 ? activeChains.map(id => resolveChainName(id)).join(", ") : "None"}`,
+      ];
+
+      if (onChain.undelegatedSelectors.length > 0 && onChain.delegatedSelectors.length > 0) {
+        lines.push("", `Missing selectors: ${onChain.undelegatedSelectors.length} — re-run delegation setup to fix.`);
+      }
+
+      const suggestions: string[] = [];
+      if (!onChain.allDelegated) {
+        suggestions.push("Set up delegation");
+      } else {
+        suggestions.push("Revoke delegation");
+      }
+
+      return { message: lines.join("\n"), chainSwitch: chainSwitched, suggestions };
+    }
+
+    // ── Pool Deployment ───────────────────────────────────────────────
+
+    case "deploy_smart_pool": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      // Handle optional chain switch
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const chainName = resolveChainName(ctx.chainId);
+      const poolName = args.name as string;
+      const poolSymbol = args.symbol as string;
+
+      // Resolve base token — default to ETH (address(0))
+      let baseTokenAddress: Address = "0x0000000000000000000000000000000000000000";
+      const baseTokenArg = (args.baseToken as string) || "ETH";
+
+      if (baseTokenArg.startsWith("0x") && baseTokenArg.length === 42) {
+        baseTokenAddress = baseTokenArg as Address;
+      } else if (baseTokenArg.toUpperCase() !== "ETH") {
+        baseTokenAddress = await resolveTokenAddress(ctx.chainId, baseTokenArg) as Address;
+      }
+
+      const data = encodeFunctionData({
+        abi: POOL_FACTORY_ABI,
+        functionName: "createPool",
+        args: [poolName, poolSymbol, baseTokenAddress],
+      });
+
+      const transaction: UnsignedTransaction = {
+        to: POOL_FACTORY_ADDRESS as Address,
+        data,
+        value: "0x0",
+        chainId: ctx.chainId,
+        gas: "0x7A120", // 500k gas for pool deployment
+        description: `Deploy new Rigoblock pool: ${poolName} (${poolSymbol})`,
+      };
+
+      const baseLabel = baseTokenArg.toUpperCase() === "ETH"
+        ? "ETH (native)"
+        : baseTokenArg.startsWith("0x")
+          ? `${baseTokenArg.slice(0, 6)}…${baseTokenArg.slice(-4)}`
+          : baseTokenArg.toUpperCase();
+
+      const message = [
+        "✅ Pool deployment ready",
+        `Name: ${poolName}`,
+        `Symbol: ${poolSymbol}`,
+        `Base token: ${baseLabel}`,
+        `Chain: ${chainName}`,
+        `Factory: ${POOL_FACTORY_ADDRESS}`,
+        "",
+        "Sign this transaction to deploy your new smart pool.",
+        "After deployment, the new pool address will appear in the transaction receipt.",
+        "You can then paste it in the vault address field to start trading.",
+      ].join("\n");
+
+      return { message, transaction, chainSwitch: chainSwitched };
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -1127,14 +1406,98 @@ function sanitizeSwapArgs(
   return corrected;
 }
 
-// ── Fast-path GMX command parser ─────────────────────────────────────
-// Regex-matches well-structured GMX commands to bypass the LLM entirely.
+// ── Fast-path command parsers ────────────────────────────────────────
+// Regex-match well-structured commands to bypass the LLM entirely.
 // Falls through to the full LLM pipeline on mismatch.
 
 interface FastPathResult {
   name: string;
   args: Record<string, unknown>;
 }
+
+// ── Fast-path: Chain switching ───────────────────────────────────────
+
+/**
+ * Detect chain-switch commands:
+ *   "switch to base"  / "use arbitrum"  / "change to optimism"
+ *   "go to polygon"   / "set chain ethereum" / "switch chain base"
+ */
+function tryFastPathChainSwitch(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+
+  // "switch (to|chain) X" / "use X" / "change to X" / "go to X" / "set chain X"
+  const match = m.match(
+    /^(?:switch\s+(?:to|chain)|use|change\s+to|go\s+to|set\s+chain)\s+([a-z0-9 ]+)$/i,
+  );
+  if (match) {
+    return { name: "switch_chain", args: { chain: match[1].trim() } };
+  }
+
+  return null;
+}
+
+// ── Fast-path: Swap / Buy / Sell ─────────────────────────────────────
+
+/**
+ * Detect simple swap commands:
+ *   "sell 50 USDC for ETH"                → build_vault_swap (EXACT_INPUT)
+ *   "sell 50 USDC for ETH on base"        → build_vault_swap + chain
+ *   "buy 100 USDC with ETH"               → build_vault_swap (EXACT_OUTPUT)
+ *   "buy 0.5 ETH with USDC on arbitrum"   → build_vault_swap (EXACT_OUTPUT)
+ *   "swap 100 USDC for ETH"               → build_vault_swap (EXACT_INPUT)
+ *   "swap 100 USDC to ETH"                → build_vault_swap (EXACT_INPUT)
+ */
+function tryFastPathSwap(msg: string): FastPathResult | null {
+  const m = msg.trim();
+
+  // ── "sell <amount> <tokenIn> for <tokenOut> [on <chain>]" ──
+  const sellMatch = m.match(
+    /^sell\s+([\d.,]+)\s+([a-z0-9]+)\s+(?:for|to|into)\s+([a-z0-9]+)(?:\s+on\s+([a-z0-9 ]+))?$/i,
+  );
+  if (sellMatch) {
+    const args: Record<string, unknown> = {
+      tokenIn: sellMatch[2].toUpperCase(),
+      tokenOut: sellMatch[3].toUpperCase(),
+      amountIn: sellMatch[1].replace(/,/g, ""),
+    };
+    if (sellMatch[4]) args.chain = sellMatch[4].trim();
+    return { name: "build_vault_swap", args };
+  }
+
+  // ── "buy <amount> <tokenOut> [with <tokenIn>] [on <chain>]" ──
+  const buyMatch = m.match(
+    /^buy\s+([\d.,]+)\s+([a-z0-9]+)(?:\s+(?:with|using|for)\s+([a-z0-9]+))?(?:\s+on\s+([a-z0-9 ]+))?$/i,
+  );
+  if (buyMatch) {
+    const args: Record<string, unknown> = {
+      tokenOut: buyMatch[2].toUpperCase(),
+      amountOut: buyMatch[1].replace(/,/g, ""),
+    };
+    // Default tokenIn to USDC if not specified
+    args.tokenIn = buyMatch[3] ? buyMatch[3].toUpperCase() : "USDC";
+    if (buyMatch[4]) args.chain = buyMatch[4].trim();
+    return { name: "build_vault_swap", args };
+  }
+
+  // ── "swap <amount> <tokenIn> for/to <tokenOut> [on <chain>]" ──
+  const swapMatch = m.match(
+    /^swap\s+([\d.,]+)\s+([a-z0-9]+)\s+(?:for|to|into)\s+([a-z0-9]+)(?:\s+on\s+([a-z0-9 ]+))?$/i,
+  );
+  if (swapMatch) {
+    const args: Record<string, unknown> = {
+      tokenIn: swapMatch[2].toUpperCase(),
+      tokenOut: swapMatch[3].toUpperCase(),
+      amountIn: swapMatch[1].replace(/,/g, ""),
+    };
+    if (swapMatch[4]) args.chain = swapMatch[4].trim();
+    return { name: "build_vault_swap", args };
+  }
+
+  return null;
+}
+
+// ── Fast-path: GMX commands ──────────────────────────────────────────
+// Regex-matches well-structured GMX commands to bypass the LLM entirely.
 
 /**
  * Attempt to parse a GMX command directly from the user message.

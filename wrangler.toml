@@ -8,7 +8,7 @@ compatibility_flags = ["nodejs_compat"]
 [assets]
 directory = "./public"
 
-# KV namespace for storing operator vault lists (future: delegation config)
+# KV namespace for storing operator vault lists, delegation config, agent wallets
 # For local dev (`wrangler dev`), KV works automatically without a real id.
 # For deployment, create with: wrangler kv namespace create KV
 # then paste the id below.
@@ -21,3 +21,6 @@ id = "2c0f24cd5916471ab4e2cd8d3fd1b1b7"
 # OPENAI_API_KEY        — LLM provider (gpt-5-mini)
 # UNISWAP_API_KEY       — Uniswap Trading API key (https://developers.uniswap.org)
 # ZEROX_API_KEY         — 0x Swap API key (https://dashboard.0x.org)
+# ALCHEMY_API_KEY       — Alchemy RPC key
+# AGENT_WALLET_SECRET   — Encryption key for agent wallet private keys (32+ char random string)
+# ALCHEMY_GAS_POLICY_ID — (Optional) Alchemy Gas Manager policy ID for sponsored agent gas

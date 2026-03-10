@@ -1,7 +1,7 @@
 {
   "name": "agentic-operator",
-  "version": "0.2.0",
-  "description": "Agentic trading operator for Rigoblock vaults — Cloudflare Worker + Uniswap Trading API",
+  "version": "0.3.2",
+  "description": "Agentic trading operator for Rigoblock vaults — Cloudflare Worker + EIP-7702 delegation",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,10 @@
     "test:quote": "npx tsx scripts/test-uniswap-quote.ts"
   },
   "dependencies": {
+    "@aa-sdk/core": "^4.84.1",
+    "@account-kit/infra": "^4.84.1",
+    "@account-kit/wallet-client": "^4.84.1",
+    "@metamask/smart-accounts-kit": "^0.4.0-beta.1",
     "hono": "^4.6.0",
     "openai": "^4.70.0",
     "viem": "^2.21.0"
