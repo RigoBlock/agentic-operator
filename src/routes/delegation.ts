@@ -1,23 +1,39 @@
 /**
  * Delegation routes — POST /api/delegation/*
  *
- * API endpoints for managing EIP-7702 delegation between the pool operator
- * and the agent wallet. All endpoints require authentication.
+ * API endpoints for managing vault-based delegation between the pool operator
+ * and the agent wallet.
+ *
+ * The operator delegates specific vault function selectors to the agent by
+ * calling vault.updateDelegation(delegations) on-chain.
  *
  * Routes:
- *   POST /api/delegation/setup    → Prepare delegation (returns unsigned delegation for signing)
- *   POST /api/delegation/confirm  → Confirm delegation was set up on-chain
- *   POST /api/delegation/revoke   → Revoke delegation
- *   GET  /api/delegation/status   → Check delegation status for a vault
+ *   POST /api/delegation/setup    → Prepare delegation (returns unsigned delegate() tx)
+ *   POST /api/delegation/confirm  → Confirm delegation tx was sent on-chain
+ *   POST /api/delegation/revoke   → Prepare revocation (returns unsigned revoke tx + clears KV)
+ *   GET  /api/delegation/status   → Check delegation status (KV + on-chain)
  *   GET  /api/delegation/balance  → Check agent wallet ETH balance
  */
 
 import { Hono } from "hono";
-import type { Env } from "../types.js";
+import type { Env, UnsignedTransaction } from "../types.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
-import { prepareDelegation, confirmDelegation, revokeDelegation, getDelegationConfig } from "../services/delegation.js";
+import {
+  prepareDelegation,
+  confirmDelegation,
+  revokeDelegation,
+  revokeDelegationOnChain,
+  getDelegationConfig,
+  saveDelegationConfig,
+  getActiveChains,
+  buildDefaultSelectors,
+  checkDelegationOnChain,
+  isDelegationActive,
+  prepareRevocation,
+  prepareSelectiveRevocation,
+} from "../services/delegation.js";
 import { getAgentWalletInfo, deleteAgentWallet } from "../services/agentWallet.js";
-import { checkAgentBalance, ExecutionError } from "../services/execution.js";
+import { checkAgentBalance, checkPendingTxStatus, executeViaDelegation, ExecutionError } from "../services/execution.js";
 import { sanitizeError } from "../config.js";
 import type { Address, Hex } from "viem";
 
@@ -26,9 +42,8 @@ const delegation = new Hono<{ Bindings: Env }>();
 /**
  * POST /api/delegation/setup
  *
- * Prepare a delegation for the operator to sign.
- * Creates the agent wallet (if needed) and returns the unsigned
- * delegation object + caveats for the frontend to present to the operator.
+ * Create agent wallet (if needed) and return an unsigned updateDelegation() tx
+ * for the operator to sign and send from their wallet.
  *
  * Body: { operatorAddress, vaultAddress, chainId, authSignature, authTimestamp }
  */
@@ -61,13 +76,9 @@ delegation.post("/setup", async (c) => {
 
     return c.json({
       agentAddress: result.agentAddress,
-      delegation: {
-        ...result.delegation,
-        salt: result.delegation.salt.toString(), // BigInt → string for JSON
-      },
-      caveats: result.caveats,
-      allowedSelectors: result.allowedSelectors,
-      message: `Agent wallet ${result.agentAddress} created. Sign the delegation in your wallet to grant it permission to execute trades on your vault.`,
+      transaction: result.transaction,
+      selectors: result.selectors,
+      message: `Agent wallet ${result.agentAddress} ready. Send the delegation transaction to your vault to grant the agent permission to execute trades.`,
     });
   } catch (err) {
     if (err instanceof AuthError) {
@@ -81,10 +92,11 @@ delegation.post("/setup", async (c) => {
 /**
  * POST /api/delegation/confirm
  *
- * Called after the operator has signed and broadcast the EIP-7702 authorization.
- * Saves the delegation config so the agent can start executing transactions.
+ * Called after the operator sends the updateDelegation() tx.
+ * Records the delegation state in KV so the agent can start executing.
  *
- * Body: { operatorAddress, vaultAddress, chainId, authSignature, authTimestamp, txHash }
+ * Body: { operatorAddress, vaultAddress, chainId, authSignature, authTimestamp,
+ *         txHash, selectors? }
  */
 delegation.post("/confirm", async (c) => {
   try {
@@ -94,7 +106,8 @@ delegation.post("/confirm", async (c) => {
       chainId: number;
       authSignature: string;
       authTimestamp: number;
-      txHash?: string;
+      txHash: string;
+      selectors?: string[];
     }>();
 
     // Auth gate
@@ -107,14 +120,17 @@ delegation.post("/confirm", async (c) => {
       alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
+    if (!body.txHash) {
+      return c.json({ error: "txHash is required." }, 400);
+    }
+
     // Get the agent wallet info
     const walletInfo = await getAgentWalletInfo(c.env.KV, body.vaultAddress);
     if (!walletInfo) {
       return c.json({ error: "No agent wallet found. Call /setup first." }, 400);
     }
 
-    const { ALLOWED_VAULT_SELECTORS } = await import("../abi/rigoblockVault.js");
-    const allowedSelectors = Object.values(ALLOWED_VAULT_SELECTORS) as Hex[];
+    const selectors = (body.selectors?.map((s) => s as Hex)) || buildDefaultSelectors();
 
     const config = await confirmDelegation(
       c.env,
@@ -122,12 +138,14 @@ delegation.post("/confirm", async (c) => {
       body.vaultAddress as Address,
       walletInfo.address,
       body.chainId,
-      allowedSelectors,
+      selectors,
+      body.txHash as Hex,
     );
 
     return c.json({
       delegation: config,
-      message: `Delegation confirmed on chain ${body.chainId}. The agent can now execute trades on your vault. Switch to "Delegated" mode in the chat to use it.`,
+      activeChains: getActiveChains(config),
+      message: `Delegation confirmed on chain ${body.chainId}. The agent can now execute trades on your vault.`,
     });
   } catch (err) {
     if (err instanceof AuthError) {
@@ -141,10 +159,10 @@ delegation.post("/confirm", async (c) => {
 /**
  * POST /api/delegation/revoke
  *
- * Disable the agent's ability to execute transactions.
- * Note: The on-chain delegation should also be revoked by the operator separately.
+ * Prepare an on-chain revocation and clear KV delegation state.
+ * Returns an unsigned vault.revokeAllDelegations() tx for the operator to send.
  *
- * Body: { operatorAddress, vaultAddress, authSignature, authTimestamp }
+ * Body: { operatorAddress, vaultAddress, chainId?, authSignature, authTimestamp, deleteWallet? }
  */
 delegation.post("/revoke", async (c) => {
   try {
@@ -167,14 +185,29 @@ delegation.post("/revoke", async (c) => {
       alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
-    await revokeDelegation(c.env.KV, body.vaultAddress);
+    // Prepare on-chain revocation tx (calls vault.revokeAllDelegations(agentAddress))
+    const revocation = await prepareRevocation(
+      c.env,
+      body.vaultAddress as Address,
+      body.chainId,
+    );
+
+    // Clear KV delegation state
+    if (body.chainId && !body.deleteWallet) {
+      await revokeDelegationOnChain(c.env.KV, body.vaultAddress, body.chainId);
+    } else {
+      await revokeDelegation(c.env.KV, body.vaultAddress);
+    }
 
     if (body.deleteWallet) {
       await deleteAgentWallet(c.env.KV, body.vaultAddress);
     }
 
     return c.json({
-      message: "Delegation revoked. The agent can no longer execute transactions. Remember to also revoke the on-chain delegation in your wallet settings.",
+      transaction: revocation.transaction,
+      message: body.chainId && !body.deleteWallet
+        ? `Delegation revoked on chain ${body.chainId}. Send the revocation transaction to remove the on-chain delegation.`
+        : "Delegation revoked on all chains. Send the revocation transaction(s) to remove the on-chain delegation.",
       walletDeleted: !!body.deleteWallet,
     });
   } catch (err) {
@@ -187,13 +220,15 @@ delegation.post("/revoke", async (c) => {
 });
 
 /**
- * GET /api/delegation/status?vaultAddress=0x…&chainId=42161
+ * GET /api/delegation/status?vaultAddress=0x…&chainId=42161&verify=true
  *
- * Check delegation status for a vault (no auth required for reads).
+ * Check delegation status for a vault.
+ * If verify=true, also checks on-chain via getDelegatedSelectors.
  */
 delegation.get("/status", async (c) => {
   const vaultAddress = c.req.query("vaultAddress");
   const chainId = Number(c.req.query("chainId") || "0");
+  const verifyOnChain = c.req.query("verify") === "true";
 
   if (!vaultAddress) {
     return c.json({ error: "vaultAddress query param required" }, 400);
@@ -201,14 +236,124 @@ delegation.get("/status", async (c) => {
 
   const config = await getDelegationConfig(c.env.KV, vaultAddress);
   const walletInfo = await getAgentWalletInfo(c.env.KV, vaultAddress);
+  const activeChains = config ? getActiveChains(config) : [];
+  const chainDelegation = chainId ? config?.chains?.[String(chainId)] : undefined;
+
+  // Optional on-chain verification
+  let onChainStatus = null;
+  if (verifyOnChain && walletInfo?.address && chainId && vaultAddress) {
+    try {
+      const selectors = buildDefaultSelectors();
+      onChainStatus = await checkDelegationOnChain(
+        chainId,
+        vaultAddress as Address,
+        walletInfo.address,
+        selectors,
+        c.env.ALCHEMY_API_KEY,
+      );
+    } catch (err) {
+      console.warn("[delegation/status] On-chain check failed:", err);
+    }
+  }
 
   return c.json({
     enabled: config?.enabled || false,
     agentAddress: walletInfo?.address || null,
-    activeChains: config?.activeChains || [],
-    isActiveOnChain: chainId ? config?.activeChains?.includes(chainId) || false : undefined,
+    activeChains,
+    sponsoredGas: config?.sponsoredGas ?? true,
+    isActiveOnChain: verifyOnChain ? (onChainStatus?.allDelegated || false) : undefined,
+    isActiveInKV: chainId ? activeChains.includes(chainId) : undefined,
     delegatedChains: walletInfo?.delegatedChains || [],
+    onChainStatus,
+    chainDelegation: chainDelegation
+      ? {
+          confirmedAt: chainDelegation.confirmedAt,
+          delegatedSelectors: chainDelegation.delegatedSelectors,
+          delegateTxHash: chainDelegation.delegateTxHash,
+        }
+      : null,
   });
+});
+
+/**
+ * POST /api/delegation/execute
+ *
+ * Directly execute a pre-built unsigned transaction via the agent wallet.
+ * Skips LLM processing entirely — used when the operator has already reviewed
+ * and approved the transaction details, so we just broadcast immediately.
+ *
+ * This is the fast path: simulate → broadcast → wait for receipt.
+ * No LLM API calls, no DEX API re-fetches.
+ *
+ * Body: { operatorAddress, vaultAddress, chainId, authSignature, authTimestamp, transaction }
+ */
+delegation.post("/execute", async (c) => {
+  try {
+    const body = await c.req.json<{
+      operatorAddress: string;
+      vaultAddress: string;
+      chainId: number;
+      authSignature: string;
+      authTimestamp: number;
+      transaction: {
+        to: string;
+        data: string;
+        value: string;
+        chainId: number;
+        gas?: string;
+        description?: string;
+      };
+    }>();
+
+    if (!body.transaction?.to || !body.transaction?.data) {
+      return c.json({ error: "transaction.to and transaction.data are required" }, 400);
+    }
+
+    // Auth gate
+    await verifyOperatorAuth({
+      operatorAddress: body.operatorAddress,
+      vaultAddress: body.vaultAddress,
+      authSignature: body.authSignature,
+      authTimestamp: body.authTimestamp,
+      preferredChainId: body.chainId,
+      alchemyKey: c.env.ALCHEMY_API_KEY,
+    });
+
+    // Verify delegation is active on this chain
+    const active = await isDelegationActive(c.env.KV, body.vaultAddress, body.chainId);
+    if (!active) {
+      return c.json({ error: `Delegation not active on chain ${body.chainId}` }, 400);
+    }
+
+    const tx: UnsignedTransaction = {
+      to: body.transaction.to as Address,
+      data: body.transaction.data as Hex,
+      value: body.transaction.value || "0x0",
+      chainId: body.transaction.chainId || body.chainId,
+      gas: body.transaction.gas || "0x0",
+      description: body.transaction.description || "",
+    };
+
+    console.log(`[delegation/execute] Executing tx: to=${tx.to} chainId=${tx.chainId} selector=${tx.data.slice(0,10)} vault=${body.vaultAddress}`);
+    const result = await executeViaDelegation(c.env, tx, body.vaultAddress);
+    console.log(`[delegation/execute] Success: txHash=${result.txHash} confirmed=${result.confirmed}`);
+    return c.json({ executionResult: result });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return c.json({ error: err.message }, err.status as 401 | 403);
+    }
+    if (err instanceof ExecutionError) {
+      console.error(`[delegation/execute] ExecutionError: code=${err.code} msg=${err.message}`);
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
+    // Log the FULL error for debugging — the sanitized version hides crucial details
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const errStack = err instanceof Error ? err.stack : undefined;
+    console.error(`[delegation/execute] UNHANDLED ERROR: ${errMsg}`);
+    if (errStack) console.error(`[delegation/execute] Stack: ${errStack}`);
+    // Return the real error message (not sanitized) for debugging
+    return c.json({ error: errMsg }, 500);
+  }
 });
 
 /**
@@ -238,6 +383,83 @@ delegation.get("/balance", async (c) => {
       return c.json({ error: "No agent wallet exists for this vault. Set up delegation first." }, 404);
     }
     console.error("[delegation/balance] Error:", err);
+    return c.json({ error: sanitizeError(err instanceof Error ? err.message : "Internal error") }, 500);
+  }
+});
+
+/**
+ * GET /api/delegation/tx-status?hash=0x…&chainId=8453
+ *
+ * Check the status of a pending agent transaction.
+ */
+delegation.get("/tx-status", async (c) => {
+  const hash = c.req.query("hash");
+  const chainId = Number(c.req.query("chainId") || "1");
+
+  if (!hash) {
+    return c.json({ error: "hash query param required" }, 400);
+  }
+
+  try {
+    const result = await checkPendingTxStatus(c.env, hash, chainId);
+
+    if (!result) {
+      return c.json({ status: "pending", hash, chainId });
+    }
+
+    return c.json({
+      status: result.confirmed ? "confirmed" : "failed",
+      ...result,
+    });
+  } catch (err) {
+    console.error("[delegation/tx-status] Error:", err);
+    return c.json({ error: sanitizeError(err instanceof Error ? err.message : "Internal error") }, 500);
+  }
+});
+
+/**
+ * POST /api/delegation/settings
+ *
+ * Update delegation settings (e.g. sponsoredGas toggle).
+ *
+ * Body: { operatorAddress, vaultAddress, sponsoredGas, authSignature, authTimestamp }
+ */
+delegation.post("/settings", async (c) => {
+  try {
+    const body = await c.req.json<{
+      operatorAddress: string;
+      vaultAddress: string;
+      sponsoredGas?: boolean;
+      authSignature: string;
+      authTimestamp: number;
+    }>();
+
+    await verifyOperatorAuth({
+      operatorAddress: body.operatorAddress,
+      vaultAddress: body.vaultAddress,
+      authSignature: body.authSignature,
+      authTimestamp: body.authTimestamp,
+      preferredChainId: 1, // Auth is chain-independent
+      alchemyKey: c.env.ALCHEMY_API_KEY,
+    });
+
+    const config = await getDelegationConfig(c.env.KV, body.vaultAddress);
+    if (!config) {
+      return c.json({ error: "No delegation config found. Set up delegation first." }, 404);
+    }
+
+    if (body.sponsoredGas !== undefined) {
+      config.sponsoredGas = body.sponsoredGas;
+    }
+
+    await saveDelegationConfig(c.env.KV, config);
+
+    return c.json({ ok: true, sponsoredGas: config.sponsoredGas });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return c.json({ error: err.message }, err.status as 401 | 403);
+    }
+    console.error("[delegation/settings] Error:", err);
     return c.json({ error: sanitizeError(err instanceof Error ? err.message : "Internal error") }, 500);
   }
 });

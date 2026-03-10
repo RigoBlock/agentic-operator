@@ -7,8 +7,8 @@
  *
  * Execution modes:
  *   - "manual" (default): Returns unsigned transaction for operator to sign
- *   - "delegated": Agent wallet executes via EIP-7702 delegation after
- *     operator confirms the trade details (not the transaction itself)
+ *   - "delegated": Agent wallet executes directly on the vault after
+ *     operator confirms the trade details (vault checks delegation mapping)
  */
 
 import { Hono } from "hono";
@@ -95,10 +95,28 @@ chat.post("/", async (c) => {
         );
         response.executionResult = result;
         // Clear the unsigned transaction since we executed it
-        response.transaction = undefined;
-        response.reply = result.confirmed
-          ? `Transaction executed successfully! [View on explorer](${result.explorerUrl || result.txHash})`
-          : `Transaction submitted: ${result.txHash}. Waiting for confirmation...`;
+        // (unless reverted — keep it for manual retry)
+        if (!result.reverted) {
+          response.transaction = undefined;
+        }
+
+        if (result.confirmed) {
+          const gasInfo = result.gasCostEth
+            ? ` Gas: ${result.gasCostEth} ETH.`
+            : '';
+          const link = result.explorerUrl || result.txHash;
+          response.reply = `Transaction confirmed in block ${result.blockNumber || '?'}.${gasInfo} [View on explorer](${link})`;
+        } else if (result.reverted) {
+          // Transaction was mined but reverted on-chain (e.g., slippage exceeded,
+          // market moved, insufficient vault balance, etc.)
+          const gasWasted = result.gasCostEth
+            ? ` (gas spent: ${result.gasCostEth} ETH)`
+            : '';
+          const link = result.explorerUrl || result.txHash;
+          response.reply = `⚠️ Transaction reverted on-chain${gasWasted}. This typically means the market moved beyond slippage tolerance, or the vault balance is insufficient. [View failed tx](${link})\n\nWould you like to retry with fresh parameters?`;
+        } else {
+          response.reply = `Transaction submitted: ${result.txHash}. Waiting for confirmation…`;
+        }
       } catch (execErr) {
         if (execErr instanceof ExecutionError) {
           response.reply = `Delegation execution failed: ${execErr.message}. Falling back to manual mode — please sign the transaction in your wallet.`;

@@ -24,6 +24,7 @@ export interface Env {
   ZEROX_API_KEY: string;    // 0x Swap API key (dashboard.0x.org)
   ALCHEMY_API_KEY: string;  // Alchemy RPC key (avoids public RPC rate limits)
   AGENT_WALLET_SECRET: string; // Encryption key for agent wallet private keys
+  ALCHEMY_GAS_POLICY_ID?: string; // Alchemy Gas Manager policy ID (optional, enables sponsored gas)
 }
 
 // ── Chat types ────────────────────────────────────────────────────────
@@ -108,22 +109,45 @@ export interface AgentWalletInfo {
 }
 
 // ── Delegation ────────────────────────────────────────────────────────
+/**
+ * Per-chain delegation state.
+ *
+ * The operator delegates specific vault function selectors to the agent wallet
+ * by calling vault.updateDelegation(delegations) on-chain.
+ * The vault checks its internal delegation mapping to authorize the agent.
+ */
+export interface ChainDelegation {
+  /** Timestamp of when this chain's delegation was confirmed */
+  confirmedAt: number;
+  /** Function selectors the agent is delegated for on this chain */
+  delegatedSelectors: Hex[];
+  /** Transaction hash of the updateDelegation() call */
+  delegateTxHash?: Hex;
+}
+
 /** Delegation configuration for a vault */
 export interface DelegationConfig {
-  /** Whether delegated execution is enabled */
+  /** Whether delegated execution is enabled globally */
   enabled: boolean;
   /** The agent wallet address that has delegation */
   agentAddress: Address;
   /** Operator address who granted delegation */
   operatorAddress: Address;
-  /** Vault address */
+  /** Vault address (primary target) */
   vaultAddress: Address;
-  /** Allowed function selectors on the vault (e.g., execute, modifyLiquidities) */
-  allowedSelectors: Hex[];
-  /** Chains on which delegation is active */
-  activeChains: number[];
-  /** Expiry timestamp (0 = no expiry, managed by on-chain delegation) */
-  expiresAt: number;
+  /**
+   * Whether to use gas-sponsored transactions via ERC-4337 bundler + paymaster.
+   * When true (default), the agent wallet gas is paid by the Alchemy Gas Manager,
+   * so the operator doesn't need to fund the agent wallet.
+   * When false, the agent wallet pays gas directly (must be funded).
+   * Requires ALCHEMY_GAS_POLICY_ID to be set in the environment.
+   */
+  sponsoredGas: boolean;
+  /**
+   * Per-chain delegation state — keys are stringified chain IDs.
+   * Each chain must be set up independently (operator sends delegate() tx per chain).
+   */
+  chains: Record<string, ChainDelegation>;
 }
 
 /** Result of an agent-executed transaction (delegated mode) */
@@ -132,12 +156,27 @@ export interface ExecutionResult {
   txHash: Hex;
   /** Chain the tx was executed on */
   chainId: number;
-  /** Whether the tx was confirmed */
+  /** Whether the tx was confirmed successfully (receipt.status === "success") */
   confirmed: boolean;
-  /** Block number if confirmed */
+  /** Whether the tx was mined but reverted on-chain */
+  reverted?: boolean;
+  /** Block number if confirmed or reverted */
   blockNumber?: number;
   /** Block explorer URL */
   explorerUrl?: string;
+  // ── Enhanced receipt details ──
+  /** Gas units consumed */
+  gasUsed?: string;
+  /** Effective gas price (wei) */
+  effectiveGasPrice?: string;
+  /** Total gas cost in ETH (human-readable) */
+  gasCostEth?: string;
+  /** Whether this tx was gas-sponsored */
+  sponsored?: boolean;
+  /** UserOperation hash (when submitted via ERC-4337 bundler) */
+  userOpHash?: Hex;
+  /** Number of fee-bump resubmission attempts (0 = first try succeeded) */
+  resubmitAttempts?: number;
 }
 
 // ── Request context (per-request, not env) ────────────────────────────

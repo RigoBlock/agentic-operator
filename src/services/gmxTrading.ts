@@ -63,6 +63,15 @@ const ZERO_BYTES32 = "0x00000000000000000000000000000000000000000000000000000000
 /** GMX uses 10^30 for USD amounts (sizeDeltaUsd, acceptablePrice, etc.) */
 const USD_DECIMALS = 30;
 
+/**
+ * GMX slippage tolerance in basis points.
+ * SECURITY: Hardcoded at 1% to prevent adverse execution. The GMX keeper
+ * executes orders at oracle prices; acceptablePrice bounds that execution.
+ * Without a bound, oracle manipulation or price swings between order creation
+ * and execution could result in extremely adverse fills.
+ */
+const GMX_SLIPPAGE_BPS = 100n; // 1%
+
 /** Default gas limit for GMX order transactions via the vault adapter.
  *  Observed usage: ~1.04M for createIncreaseOrder + ~100k Rigoblock proxy overhead.
  *  1.5M provides ~44% headroom for complex routes. */
@@ -260,7 +269,8 @@ export function resolveGmxCollateral(
  * @param collateralDecimals - Decimals of collateral token
  * @param sizeDeltaUsd - Position size in USD (human-readable, e.g. "5000")
  * @param isLong - true for long, false for short
- * @param acceptablePriceUsd - Max acceptable execution price for longs, min for shorts (human-readable USD)
+ * @param indexTokenPriceUsd - Current index token price in USD (human-readable, e.g. "3000.50")
+ * @param acceptablePriceUsd - Override: max acceptable execution price for longs, min for shorts (human-readable USD)
  */
 export function buildCreateIncreaseOrderCalldata(params: {
   market: Address;
@@ -269,23 +279,24 @@ export function buildCreateIncreaseOrderCalldata(params: {
   collateralDecimals: number;
   sizeDeltaUsd: string;
   isLong: boolean;
+  indexTokenPriceUsd: string;
   acceptablePriceUsd?: string;
 }): Hex {
   const collateralRaw = parseUnits(params.collateralAmount, params.collateralDecimals);
   const sizeRaw = parseUnits(params.sizeDeltaUsd, USD_DECIMALS);
 
-  // Acceptable price: for longs, set very high (type(uint256).max in practice);
-  // for shorts, set 0 — GMX will use market price.
-  // If user specifies, convert to 10^30.
+  // Acceptable price from current oracle price ± slippage.
+  // For longs (buying): willing to pay up to price * (1 + slippage) — max price
+  // For shorts (selling): willing to sell at price * (1 - slippage) — min price
+  // This protects against oracle price movement between order creation and keeper execution.
   let acceptablePrice: bigint;
   if (params.acceptablePriceUsd) {
     acceptablePrice = parseUnits(params.acceptablePriceUsd, USD_DECIMALS);
   } else {
-    // For longs: max acceptable price (willing to pay up to market)
-    // For shorts: 0 (willing to sell at market or better)
+    const currentPrice = parseUnits(params.indexTokenPriceUsd, USD_DECIMALS);
     acceptablePrice = params.isLong
-      ? BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff") // type(uint256).max
-      : 0n;
+      ? currentPrice + (currentPrice * GMX_SLIPPAGE_BPS) / 10_000n  // price + 1%
+      : currentPrice - (currentPrice * GMX_SLIPPAGE_BPS) / 10_000n; // price - 1%
   }
 
   const createOrderParams = {
@@ -335,7 +346,8 @@ export function buildCreateIncreaseOrderCalldata(params: {
  * @param isLong - true for long, false for short (must match existing position)
  * @param orderType - MarketDecrease, LimitDecrease, or StopLossDecrease
  * @param triggerPriceUsd - Trigger price for limit/stop-loss orders (human-readable USD)
- * @param acceptablePriceUsd - Acceptable execution price (human-readable USD)
+ * @param indexTokenPriceUsd - Current index token price in USD (human-readable) for slippage bound
+ * @param acceptablePriceUsd - Override: acceptable execution price (human-readable USD)
  */
 export function buildCreateDecreaseOrderCalldata(params: {
   market: Address;
@@ -346,6 +358,7 @@ export function buildCreateDecreaseOrderCalldata(params: {
   isLong: boolean;
   orderType?: GmxOrderType;
   triggerPriceUsd?: string;
+  indexTokenPriceUsd: string;
   acceptablePriceUsd?: string;
 }): Hex {
   const collateralRaw = parseUnits(params.collateralDeltaAmount, params.collateralDecimals);
@@ -366,15 +379,17 @@ export function buildCreateDecreaseOrderCalldata(params: {
     ? parseUnits(params.triggerPriceUsd, USD_DECIMALS)
     : 0n;
 
-  // For decrease/close: longs want min acceptable price = 0 (any price),
-  // shorts want max acceptable = type(uint256).max
+  // For decrease/close: compute from current price ± slippage
+  // Longs closing (selling): accept price down to price * (1 - slippage)
+  // Shorts closing (buying back): accept price up to price * (1 + slippage)
   let acceptablePrice: bigint;
   if (params.acceptablePriceUsd) {
     acceptablePrice = parseUnits(params.acceptablePriceUsd, USD_DECIMALS);
   } else {
+    const currentPrice = parseUnits(params.indexTokenPriceUsd, USD_DECIMALS);
     acceptablePrice = params.isLong
-      ? 0n // longs selling: accept any
-      : BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // shorts closing: accept any
+      ? currentPrice - (currentPrice * GMX_SLIPPAGE_BPS) / 10_000n  // price - 1%
+      : currentPrice + (currentPrice * GMX_SLIPPAGE_BPS) / 10_000n; // price + 1%
   }
 
   const createOrderParams = {

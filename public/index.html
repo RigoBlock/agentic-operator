@@ -117,7 +117,8 @@
     }
     .msg.user { align-self: flex-end; background: var(--accent-dim); border-bottom-right-radius: 4px; }
     .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
-    .msg.system { align-self: center; color: var(--muted); font-size: 12px; background: none; padding: 4px 0; }
+    .msg.compact { width: fit-content; min-width: 220px; max-width: 340px; white-space: normal; box-sizing: border-box; }
+    .msg.system { align-self: center; color: var(--muted); font-size: 12px; background: none; padding: 2px 0; white-space: normal; }
     .msg .tool-call {
       margin-top: 8px; padding: 8px 12px; background: rgba(0,0,0,0.3); border-radius: 6px;
       font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--warn);
@@ -280,6 +281,219 @@
       .wallet-option { padding: 10px; gap: 10px; }
       .wallet-option img { width: 28px; height: 28px; }
       .wallet-option .wallet-name { font-size: 13px; }
+      #delegation-panel { padding: 8px 12px; gap: 8px; font-size: 11px; }
+      .delegation-status { font-size: 10px; padding: 3px 8px; }
+      .delegated-confirm .row { flex-direction: column; gap: 4px; }
+      .delegated-confirm .confirm-btn, .delegated-confirm .reject-btn { padding: 10px; font-size: 13px; }
+    }
+    @media (max-width: 400px) {
+      header h1 { font-size: 12px; letter-spacing: -0.3px; }
+      .header-actions { gap: 4px; }
+      .chain-badge, .dex-badge { font-size: 10px; padding: 2px 6px; }
+      .msg { padding: 6px 8px; font-size: 12px; }
+      .suggestion-chip { font-size: 10px; padding: 4px 8px; }
+      #input-area textarea { font-size: 16px; padding: 8px 10px; }
+      #delegation-panel { padding: 6px 10px; flex-direction: column; align-items: flex-start; }
+    }
+    /* ── Delegation panel ────────────────────────────── */
+    #delegation-panel {
+      padding: 10px 24px; border-bottom: 1px solid var(--border);
+      background: var(--surface); gap: 12px; align-items: center; flex-wrap: wrap;
+      font-size: 12px;
+    }
+    #delegation-panel.visible { display: flex; }
+    .delegation-status {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px; border-radius: 6px; font-size: 11px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .delegation-status.active {
+      background: rgba(63,185,80,0.1); color: var(--success);
+      border: 1px solid rgba(63,185,80,0.2);
+    }
+    .delegation-status.stale {
+      background: rgba(210,153,34,0.1); color: var(--warn);
+      border: 1px solid rgba(210,153,34,0.25);
+    }
+    .delegation-status.inactive {
+      background: rgba(139,148,158,0.1); color: var(--muted);
+      border: 1px solid rgba(139,148,158,0.2);
+    }
+    .delegation-status .dot {
+      width: 6px; height: 6px; border-radius: 50%; display: inline-block;
+    }
+    .delegation-status.active .dot { background: var(--success); }
+    .delegation-status.stale .dot { background: var(--warn); }
+    .delegation-status.inactive .dot { background: var(--muted); }
+    .btn-delegation {
+      font-size: 11px; padding: 5px 12px; border-radius: 6px;
+      border: 1px solid var(--accent-dim); background: rgba(31,111,235,0.08);
+      color: var(--accent); cursor: pointer; font-weight: 500;
+      transition: background 0.15s;
+    }
+    .btn-delegation:hover { background: rgba(31,111,235,0.18); }
+    .btn-delegation.danger {
+      border-color: var(--error); background: rgba(248,81,73,0.08); color: var(--error);
+    }
+    .btn-delegation.danger:hover { background: rgba(248,81,73,0.18); }
+    .sponsor-toggle {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 11px; color: var(--muted); cursor: pointer;
+      margin: 0 4px;
+    }
+    .sponsor-toggle input { width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent); }
+    .agent-balance {
+      font-size: 11px; color: var(--muted);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .agent-balance.low { color: var(--warn); }
+
+    /* ── Tx receipt card (in-chat) ──────────────────────── */
+    .tx-receipt-card {
+      padding: 10px 12px; border-radius: 8px; font-size: 12px;
+      white-space: normal;
+    }
+    .tx-receipt-card.success {
+      background: rgba(63,185,80,0.06); border: 1px solid rgba(63,185,80,0.2);
+    }
+    .tx-receipt-card.pending {
+      background: rgba(31,111,235,0.06); border: 1px solid rgba(31,111,235,0.15);
+    }
+    .tx-receipt-card.failed {
+      background: rgba(248,81,73,0.06); border: 1px solid rgba(248,81,73,0.2);
+    }
+    .tx-receipt-card .receipt-header {
+      display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px;
+    }
+    .tx-receipt-card .receipt-status { font-size: 14px; }
+    .tx-receipt-card .receipt-trade { color: var(--text); }
+    .tx-receipt-card .receipt-price { font-size: 11px; color: var(--muted); margin: 2px 0 0 0; }
+    .tx-receipt-card .receipt-details {
+      font-size: 11px; color: var(--muted); margin-top: 2px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .tx-receipt-card .receipt-details a {
+      color: var(--accent); text-decoration: none;
+    }
+    .tx-receipt-card .receipt-details a:hover { text-decoration: underline; }
+    /* ── Delegation setup modal ─────────────────────────── */
+    .delegation-step { margin-bottom: 16px; }
+    .delegation-step h4 {
+      font-size: 13px; color: var(--accent); margin-bottom: 6px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .delegation-step .step-num {
+      width: 20px; height: 20px; border-radius: 50%;
+      background: var(--accent-dim); color: #fff; font-size: 11px;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .delegation-step p { font-size: 12px; color: var(--muted); line-height: 1.5; }
+    .delegation-info {
+      padding: 10px; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; font-size: 11px; font-family: 'SF Mono', 'Fira Code', monospace;
+      margin: 8px 0; word-break: break-all;
+    }
+    .delegation-info .row { display: flex; justify-content: space-between; padding: 3px 0; }
+    .delegation-info .label { color: var(--muted); }
+    .delegation-info .value { color: var(--text); }
+    .copyable-addr { cursor: pointer; user-select: all; font-family: monospace; font-size: 11px; word-break: break-all; }
+    .copyable-addr:hover { color: var(--accent); }
+    .copyable-addr::after { content: ' 📋'; font-size: 10px; opacity: 0.5; }
+    .copy-toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #000; padding: 6px 16px; border-radius: 6px; font-size: 12px; z-index: 10000; pointer-events: none; animation: fadeOut 1.5s ease forwards; }
+    @keyframes fadeOut { 0%,60% { opacity: 1; } 100% { opacity: 0; } }
+    .caveat-list { list-style: none; margin: 6px 0; }
+    .caveat-list li {
+      padding: 4px 8px; font-size: 11px; color: var(--success);
+      border-left: 2px solid var(--success); margin-bottom: 4px;
+    }
+
+    /* ── Delegated execution confirmation (in-chat) ────── */
+    .delegated-confirm {
+      padding: 10px 12px; background: rgba(31,111,235,0.06);
+      border: 1px solid rgba(31,111,235,0.15); border-radius: 8px;
+      white-space: normal; word-break: break-word; box-sizing: border-box;
+    }
+    .delegated-confirm .trade-pair {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      font-size: 13px; font-weight: 600;
+    }
+    .delegated-confirm .trade-arrow { color: var(--muted); font-size: 12px; }
+    .delegated-confirm .trade-amount.sell { color: var(--text); }
+    .delegated-confirm .trade-amount.buy { color: var(--success); }
+    .delegated-confirm .trade-meta {
+      font-size: 11px; color: var(--muted); margin: 4px 0 8px;
+    }
+    .delegated-confirm .confirm-actions { display: flex; gap: 6px; }
+    .delegated-confirm .btn-agent-exec {
+      font-size: 11px; padding: 5px 12px; border-radius: 6px;
+      border: none; cursor: pointer; font-weight: 500;
+    }
+    .delegated-confirm .btn-agent-exec.approve {
+      background: var(--success); color: #000;
+    }
+    .delegated-confirm .btn-agent-exec.reject {
+      background: transparent; color: var(--muted); border: 1px solid var(--border);
+    }
+    .delegated-confirm .exec-status {
+      font-size: 11px; margin-top: 6px; white-space: normal;
+      word-break: break-word; overflow-wrap: anywhere;
+    }
+
+    /* ── Pool onboarding ─────────────────────────────── */
+    .onboarding-card {
+      background: rgba(31,111,235,0.06);
+      border: 1px solid rgba(31,111,235,0.2);
+      border-radius: 10px;
+      padding: 16px;
+      margin: 12px 0;
+      text-align: center;
+    }
+    .onboarding-card h3 {
+      font-size: 15px; color: var(--accent); margin: 0 0 8px 0;
+    }
+    .onboarding-card p {
+      font-size: 12px; color: var(--muted); margin: 0 0 12px 0; line-height: 1.5;
+    }
+    .onboarding-actions {
+      display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;
+    }
+    .onboarding-actions button {
+      font-size: 12px; padding: 8px 16px; border-radius: 8px;
+      border: 1px solid rgba(31,111,235,0.3); cursor: pointer;
+      background: transparent; color: var(--accent); font-weight: 500;
+      transition: background 0.15s;
+    }
+    .onboarding-actions button:hover {
+      background: rgba(31,111,235,0.12);
+    }
+    .onboarding-actions button.primary {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+    }
+    .onboarding-actions button.primary:hover {
+      background: #1a6fd8;
+    }
+    /* ── Deploy pool modal ───────────────────────────── */
+    .deploy-field { margin-bottom: 12px; }
+    .deploy-field label {
+      display: block; font-size: 11px; color: var(--muted);
+      margin-bottom: 4px; font-weight: 500;
+    }
+    .deploy-field input, .deploy-field select {
+      width: 100%; padding: 8px 10px; border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.2);
+      color: var(--text); font-size: 13px; box-sizing: border-box;
+    }
+    .deploy-field input:focus, .deploy-field select:focus {
+      border-color: var(--accent); outline: none;
+    }
+    .deploy-field .hint {
+      font-size: 10px; color: var(--muted); margin-top: 3px;
+    }
+
+    @media (max-width: 640px) {
+      #delegation-panel { padding: 8px 12px; }
+      .delegation-status { font-size: 10px; }
+      .btn-delegation { font-size: 10px; padding: 4px 8px; }
     }
     @media (max-width: 400px) {
       header h1 { display: none; }
@@ -326,6 +540,91 @@
     </div>
   </div>
 
+  <!-- Delegation panel (always visible) -->
+  <div id="delegation-panel" style="display: flex;">
+    <span id="delegation-status-badge" class="delegation-status inactive">
+      <span class="dot"></span>
+      <span id="delegation-status-text">Not set up</span>
+    </span>
+    <span id="agent-addr" class="addr copyable-addr" style="display:none;" title="Click to copy full address"></span>
+    <span id="agent-balance-display" class="agent-balance" style="display:none;"></span>
+    <label id="sponsor-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, gas fees are sponsored (no agent funding needed). When disabled, the agent pays gas from its own ETH balance.">
+      <input type="checkbox" id="sponsor-toggle" onchange="toggleSponsoredGas(this.checked)" />
+      <span>Sponsored gas</span>
+    </label>
+    <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
+    <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
+  </div>
+
+  <!-- Delegation setup modal -->
+  <div id="delegation-modal" class="modal-overlay">
+    <div class="modal-content">
+      <button class="modal-close" onclick="closeModal('delegation-modal')">&times;</button>
+      <h3>Delegate to Agent</h3>
+
+      <div class="delegation-step">
+        <h4><span class="step-num">1</span> Agent Wallet</h4>
+        <p>A dedicated wallet will be created for the agent to execute transactions on your behalf. Its keys are encrypted and stored securely.</p>
+        <div id="delegation-agent-info" class="delegation-info" style="display:none;"></div>
+      </div>
+
+      <div class="delegation-step">
+        <h4><span class="step-num">2</span> Delegated Functions</h4>
+        <p>You’ll send a transaction to your vault calling <code>updateDelegation()</code> which grants the agent permission to call specific trading functions:</p>
+        <ul id="delegation-caveats" class="caveat-list">
+          <li>Uniswap execute / modifyLiquidities</li>
+          <li>0x Aggregator execute</li>
+          <li>GMX v2 create / update / cancel orders, claim fees</li>
+        </ul>
+      </div>
+
+      <div class="delegation-step">
+        <h4><span class="step-num">3</span> Confirm Transaction</h4>
+        <p>Sign and send the delegation transaction from your wallet. You can revoke at any time by calling <code>revokeAllDelegations(agentAddress)</code>.</p>
+      </div>
+
+      <div id="delegation-setup-status" style="font-size: 12px; margin-bottom: 12px;"></div>
+      <div class="tx-actions">
+        <button class="btn-cancel" onclick="closeModal('delegation-modal')">Cancel</button>
+        <button class="btn-confirm" id="delegation-confirm-btn" onclick="startDelegationSetup()">Set Up Agent</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Deploy pool modal -->
+  <div id="deploy-pool-modal" class="modal-overlay">
+    <div class="modal-content">
+      <button class="modal-close" onclick="closeModal('deploy-pool-modal')">&times;</button>
+      <h3>Deploy New Smart Pool</h3>
+      <div class="deploy-field">
+        <label>Pool Name</label>
+        <input id="deploy-pool-name" placeholder="e.g. My Trading Pool" />
+      </div>
+      <div class="deploy-field">
+        <label>Symbol</label>
+        <input id="deploy-pool-symbol" placeholder="e.g. MTP" maxlength="5" style="text-transform: uppercase;" />
+        <div class="hint">3-5 uppercase letters</div>
+      </div>
+      <div class="deploy-field">
+        <label>Base Token</label>
+        <select id="deploy-pool-base-token">
+          <option value="ETH" selected>ETH (Native)</option>
+          <option value="USDC">USDC</option>
+          <option value="custom">Custom token address…</option>
+        </select>
+      </div>
+      <div class="deploy-field" id="deploy-custom-token-field" style="display:none;">
+        <label>Custom Token Address</label>
+        <input id="deploy-custom-token" placeholder="0x…" />
+      </div>
+      <div id="deploy-pool-status" style="font-size: 12px; margin-bottom: 12px;"></div>
+      <div class="tx-actions">
+        <button class="btn-cancel" onclick="closeModal('deploy-pool-modal')">Cancel</button>
+        <button class="btn-confirm" id="deploy-pool-btn" onclick="deploySmartPool()">Deploy Pool</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Transaction confirm modal -->
   <div id="tx-modal" class="modal-overlay">
     <div class="modal-content">
@@ -343,6 +642,14 @@
 
   <div id="chat">
     <div class="msg system">Connect your wallet, enter a vault address, and describe a swap.</div>
+    <div id="pool-onboarding" class="onboarding-card" style="display:none;">
+      <h3>🏊 Get Started</h3>
+      <p>You don't have a vault address set. Paste an existing pool address above, or deploy a new smart pool.</p>
+      <div class="onboarding-actions">
+        <button onclick="vaultInput.focus()">Paste Address</button>
+        <button class="primary" onclick="openDeployPoolModal()">Deploy New Pool</button>
+      </div>
+    </div>
   </div>
 
   <div id="input-area">
@@ -367,6 +674,7 @@
     let connectedAddress = null;
     let authSignature = null;  // EIP-191 sig proving wallet ownership
     let authTimestamp = null;  // timestamp used in signed message
+    let providerListenersAttached = false; // prevent duplicate event listeners
 
     const CHAIN_NAMES = {
       1: 'Ethereum', 8453: 'Base', 42161: 'Arbitrum', 10: 'Optimism',
@@ -395,6 +703,7 @@
       currentChainId = on ? 11155111 : 1;
       updateChainDisplay();
       applyTestnetState(on);
+      refreshDelegationStatus();
     }
 
     function applyTestnetState(on) {
@@ -698,6 +1007,28 @@
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
+    /** Copy text to clipboard and show a brief toast notification */
+    async function copyToClipboard(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        const toast = document.createElement('div');
+        toast.className = 'copy-toast';
+        toast.textContent = 'Copied!';
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 1500);
+      } catch {
+        // Fallback for older browsers
+        const el = document.createElement('textarea');
+        el.value = text;
+        el.style.position = 'fixed';
+        el.style.opacity = '0';
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        el.remove();
+      }
+    }
+
     function linkifyUrls(str) {
       return str.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
     }
@@ -753,6 +1084,7 @@
             operatorAddress: connectedAddress,
             authSignature,
             authTimestamp,
+            executionMode,
           }),
         });
 
@@ -777,6 +1109,7 @@
                   operatorAddress: connectedAddress,
                   authSignature,
                   authTimestamp,
+                  executionMode,
                 }),
               });
               if (retryRes.ok) {
@@ -855,6 +1188,7 @@
           localStorage.setItem('rigoblock_testnet', isTestnet);
         }
         appendMessage('system', `Switched to ${CHAIN_NAMES[data.chainSwitch] || 'chain ' + data.chainSwitch}`);
+        refreshDelegationStatus();
       }
 
       // Update DEX provider badge
@@ -867,7 +1201,16 @@
 
       if (data.transaction) {
         console.log('[tx-modal] Showing transaction modal:', data.transaction);
-        showTransactionModal(data.transaction);
+        if (executionMode === 'delegated') {
+          // In delegated mode: show in-chat confirmation instead of wallet modal
+          showDelegatedConfirmation(data.transaction);
+        } else {
+          showTransactionModal(data.transaction);
+        }
+      } else if (data.executionResult) {
+        // Agent already executed the transaction (delegated auto-execute fallback)
+        const r = data.executionResult;
+        showTxReceiptCard(r, data.transaction?.swapMeta);
       } else {
         console.log('[tx-modal] No transaction in response:', Object.keys(data));
       }
@@ -1024,6 +1367,212 @@
     }
 
     /* ================================================================
+       Delegated Execution Confirmation (in-chat)
+       ================================================================ */
+    /** Show an in-chat confirmation for delegated execution (agent signs, not you) */
+    function showDelegatedConfirmation(tx) {
+      const meta = tx.swapMeta;
+
+      let tradeHtml;
+      if (meta) {
+        tradeHtml = `
+          <div class="trade-pair">
+            <span class="trade-amount sell">${escapeHtml(meta.sellAmount)} ${escapeHtml(meta.sellToken)}</span>
+            <span class="trade-arrow">→</span>
+            <span class="trade-amount buy">~${escapeHtml(meta.buyAmount)} ${escapeHtml(meta.buyToken)}</span>
+          </div>
+          <div class="trade-meta">${meta.price ? escapeHtml(meta.price) + ' · ' : ''}${escapeHtml(meta.dex || 'Agent')} · ${CHAIN_NAMES[tx.chainId] || tx.chainId}</div>
+        `;
+      } else {
+        tradeHtml = `<div class="trade-meta">${escapeHtml(tx.description || 'Execute transaction')} · ${CHAIN_NAMES[tx.chainId] || tx.chainId}</div>`;
+      }
+
+      const div = document.createElement('div');
+      div.className = 'msg assistant compact';
+      div.innerHTML = `
+        <div class="delegated-confirm">
+          ${tradeHtml}
+          <div class="confirm-actions">
+            <button class="btn-agent-exec approve" onclick="confirmDelegatedExecution(this)">Execute</button>
+            <button class="btn-agent-exec reject" onclick="rejectDelegatedExecution(this)">Cancel</button>
+          </div>
+          <div class="exec-status"></div>
+        </div>
+      `;
+
+      div._pendingTx = tx;
+      chatEl.appendChild(div);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    /** Confirm delegated execution — call direct execute endpoint (no LLM re-processing) */
+    async function confirmDelegatedExecution(btn) {
+      const container = btn.closest('.delegated-confirm');
+      const msgEl = btn.closest('.msg');
+      const tx = msgEl._pendingTx;
+      if (!tx) return;
+
+      const statusEl = container.querySelector('.exec-status');
+      const buttons = container.querySelectorAll('.btn-agent-exec');
+      buttons.forEach(b => b.disabled = true);
+      btn.textContent = 'Executing…';
+      statusEl.style.color = 'var(--accent)';
+      statusEl.innerHTML = '<span style="display:inline-flex;align-items:center;gap:6px;"><span class="spinner"></span> Broadcasting…</span>';
+
+      try {
+        const vault = vaultInput.value.trim();
+
+        // Direct execution endpoint — skips LLM, sends the pre-built tx immediately
+        const res = await fetch('/api/delegation/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            operatorAddress: connectedAddress,
+            vaultAddress: vault,
+            chainId: currentChainId,
+            authSignature,
+            authTimestamp,
+            transaction: {
+              to: tx.to,
+              data: tx.data,
+              value: tx.value,
+              chainId: tx.chainId,
+              gas: tx.gas,
+              description: tx.description,
+            },
+          }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+
+        if (data.executionResult) {
+          const r = data.executionResult;
+          statusEl.style.color = r.confirmed ? 'var(--success)' : (r.reverted ? 'var(--error)' : 'var(--accent)');
+          statusEl.textContent = r.confirmed
+            ? `✅ Confirmed in block ${r.blockNumber || '?'}`
+            : r.reverted
+              ? '❌ Reverted on-chain'
+              : `⏳ Submitted: ${(r.txHash || '').slice(0,10)}…`;
+          buttons.forEach(b => b.style.display = 'none');
+
+          // Show compact receipt with trade details
+          showTxReceiptCard(r, tx.swapMeta);
+
+          // If not yet final, poll for confirmation
+          if (!r.confirmed && !r.reverted) {
+            pollPendingTx(r, tx.swapMeta);
+          }
+
+          // Refresh agent balance
+          fetchAgentBalance(vault);
+        } else {
+          throw new Error('No execution result returned');
+        }
+      } catch (err) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = `Error: ${err.message}`;
+        buttons.forEach(b => b.disabled = false);
+        btn.textContent = 'Retry';
+      }
+    }
+
+    function rejectDelegatedExecution(btn) {
+      const container = btn.closest('.delegated-confirm');
+      container.innerHTML = '<div style="color:var(--muted);font-size:12px;">Execution cancelled.</div>';
+      appendMessage('system', 'Delegated execution cancelled by operator.');
+    }
+
+    /* ================================================================
+       Rich Tx Receipt Card & Pending Tx Polling
+       ================================================================ */
+
+    /**
+     * Show a compact transaction receipt card in the chat.
+     * Highlights the trade (token amounts + execution price) with gas/explorer in a footer line.
+     */
+    function showTxReceiptCard(r, swapMeta) {
+      const isConfirmed = r.confirmed;
+      const isReverted = r.reverted;
+      const cardClass = isConfirmed ? 'success' : (isReverted ? 'failed' : 'pending');
+
+      const hash = r.txHash;
+      const shortHash = hash ? `${hash.slice(0,10)}…${hash.slice(-6)}` : '—';
+      const explorerLink = r.explorerUrl
+        ? `<a href="${r.explorerUrl}" target="_blank" rel="noopener">${shortHash} ↗</a>`
+        : shortHash;
+
+      const statusIcon = isConfirmed ? '✅' : (isReverted ? '❌' : '⏳');
+      let headerHtml;
+      if (swapMeta) {
+        headerHtml = `<div class="receipt-header"><span class="receipt-status">${statusIcon}</span><span class="receipt-trade">${escapeHtml(swapMeta.sellAmount)} ${escapeHtml(swapMeta.sellToken)} → ${escapeHtml(swapMeta.buyAmount)} ${escapeHtml(swapMeta.buyToken)}</span></div>${swapMeta.price ? `<div class="receipt-price">${escapeHtml(swapMeta.price)}</div>` : ''}`;
+      } else {
+        const label = isConfirmed ? 'Confirmed' : (isReverted ? 'Reverted' : 'Pending');
+        headerHtml = `<div class="receipt-header"><span class="receipt-status">${statusIcon}</span><span class="receipt-trade">${label}</span></div>`;
+      }
+
+      const detailParts = [];
+      if (r.gasCostEth) detailParts.push(`Gas: ${parseFloat(r.gasCostEth).toFixed(6)} ETH`);
+      if (r.blockNumber) detailParts.push(`Block ${r.blockNumber.toLocaleString()}`);
+      detailParts.push(explorerLink);
+
+      const div = document.createElement('div');
+      div.className = 'msg system';
+      div.innerHTML = `<div class="tx-receipt-card ${cardClass}">${headerHtml}<div class="receipt-details">${detailParts.join(' · ')}</div></div>`;
+      div._txResult = r;
+      div._swapMeta = swapMeta;
+      chatEl.appendChild(div);
+      chatEl.scrollTop = chatEl.scrollHeight;
+      return div;
+    }
+
+    /**
+     * Poll the backend for a pending tx until it's confirmed or times out.
+     * Uses faster polling for L2 chains with sub-second block times.
+     */
+    async function pollPendingTx(r, swapMeta) {
+      const hash = r.txHash;
+      if (!hash || hash === '0x') return;
+
+      // L2s and BSC have sub-second blocks — poll faster
+      const fastChains = new Set([10, 42161, 8453, 130, 56, 84532]);
+      const intervalMs = fastChains.has(r.chainId) ? 1000 : 3000;
+      const maxAttempts = fastChains.has(r.chainId) ? 15 : 20;
+      let attempts = 0;
+
+      const pollInterval = setInterval(async () => {
+        attempts++;
+        if (attempts > maxAttempts) {
+          clearInterval(pollInterval);
+          appendMessage('system', `Transaction still pending after ${maxAttempts * intervalMs / 1000}s. Check explorer for status.`);
+          return;
+        }
+
+        try {
+          const res = await fetch(
+            `/api/delegation/tx-status?hash=${hash}&chainId=${r.chainId}`
+          );
+          if (!res.ok) return;
+          const data = await res.json();
+
+          if (data.status === 'confirmed' || data.status === 'failed') {
+            clearInterval(pollInterval);
+            if (data.status === 'confirmed') {
+              showTxReceiptCard({ ...r, ...data, confirmed: true }, swapMeta);
+            } else {
+              showTxReceiptCard({ ...r, ...data, reverted: true }, swapMeta);
+            }
+            fetchAgentBalance(vaultInput.value.trim());
+          }
+        } catch { /* silent retry */ }
+      }, intervalMs);
+    }
+
+    /* ================================================================
        EIP-6963 Multi-Wallet Discovery
        ================================================================ */
     window.addEventListener('eip6963:announceProvider', (event) => {
@@ -1081,34 +1630,69 @@
           document.getElementById('connect-btn').classList.add('active');
           appendMessage('system', `Connected via ${name}: ${connectedAddress}`);
 
+          // Remember provider for auto-reconnect on reload
+          const rdns = discoveredProviders.find(p => p.provider === provider)?.info?.rdns || 'injected';
+          localStorage.setItem('rigoblock_last_provider', rdns);
+
           // Sign auth message to prove wallet ownership
           await signAuthMessage();
 
           // Re-validate vault with ownership check
           if (vaultInput.value.trim().length === 42) validateVault();
 
-          if (provider.on) {
-            provider.on('accountsChanged', (accts) => {
-              if (accts.length === 0) disconnectWallet();
-              else {
-                const newAddr = accts[0];
-                // Only re-auth if the account actually changed (MetaMask fires this spuriously)
-                if (newAddr.toLowerCase() === connectedAddress?.toLowerCase()) return;
-                connectedAddress = newAddr;
-                authSignature = null;
-                authTimestamp = null;
-                localStorage.removeItem(AUTH_STORAGE_KEY);
-                document.getElementById('wallet-addr').textContent =
-                  connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
-                appendMessage('system', 'Account changed. Please sign to re-authenticate.');
-                signAuthMessage();
-              }
-            });
-          }
+          attachProviderListeners(provider);
         }
       } catch (err) {
         appendMessage('system', `Wallet error: ${err.message}`);
       }
+    }
+
+    /**
+     * Attach accountsChanged and chainChanged listeners.
+     * Guarded to prevent duplicate registrations.
+     */
+    function attachProviderListeners(provider) {
+      if (!provider || !provider.on || providerListenersAttached) return;
+      providerListenersAttached = true;
+
+      provider.on('accountsChanged', (accts) => {
+        if (accts.length === 0) { disconnectWallet(); return; }
+        const newAddr = accts[0];
+        // Some wallets fire accountsChanged spuriously on chain change — skip if address is same
+        if (newAddr.toLowerCase() === connectedAddress?.toLowerCase()) return;
+        connectedAddress = newAddr;
+        document.getElementById('wallet-addr').textContent =
+          connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
+        // Try cached auth for the new address (no re-sign needed if still valid)
+        if (restoreCachedAuth()) {
+          appendMessage('system', `Account switched to ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)} ✓`);
+        } else {
+          authSignature = null;
+          authTimestamp = null;
+          appendMessage('system', `Account switched. Signing authentication…`);
+          signAuthMessage();
+        }
+        if (vaultInput.value.trim().length === 42) validateVault();
+        refreshDelegationStatus();
+      });
+
+      provider.on('chainChanged', (chainIdHex) => {
+        const newChainId = parseInt(chainIdHex, 16);
+        if (CHAIN_NAMES[newChainId]) {
+          currentChainId = newChainId;
+          updateChainDisplay();
+          // Update testnet toggle if needed
+          const isTestnet = TESTNET_CHAINS_LIST.some(c => c.id === newChainId);
+          const toggle = document.getElementById('testnet-toggle');
+          if (toggle.checked !== isTestnet) {
+            toggle.checked = isTestnet;
+            applyTestnetState(isTestnet);
+            localStorage.setItem('rigoblock_testnet', isTestnet);
+          }
+          refreshDelegationStatus();
+        }
+        // No re-auth needed — auth is chain-independent
+      });
     }
 
     /**
@@ -1144,8 +1728,6 @@
         'Welcome to Rigoblock Operator',
         '',
         'Sign this message to verify your wallet and access your smart pool assistant.',
-        '',
-        `Wallet: ${connectedAddress}`,
       ].join('\n');
       try {
         const sig = await activeProvider.request({
@@ -1178,7 +1760,9 @@
       activeProvider = null;
       authSignature = null;
       authTimestamp = null;
+      providerListenersAttached = false;
       localStorage.removeItem(AUTH_STORAGE_KEY);
+      localStorage.removeItem('rigoblock_last_provider');
       document.getElementById('wallet-addr').textContent = '';
       document.getElementById('connect-btn').textContent = 'Connect Wallet';
       document.getElementById('connect-btn').classList.remove('active');
@@ -1189,8 +1773,8 @@
       if (id === 'tx-modal') pendingTx = null;
     }
 
-    // Legacy fallback after a brief delay
-    setTimeout(() => {
+    // Legacy fallback after a brief delay + auto-reconnect
+    setTimeout(async () => {
       if (discoveredProviders.length === 0 && window.ethereum) {
         discoveredProviders.push({
           info: { name: 'Browser Wallet', rdns: 'injected', icon: '' },
@@ -1198,7 +1782,714 @@
         });
         renderWalletList();
       }
+
+      // ── Auto-reconnect: silently restore previous session on page reload ──
+      const savedRdns = localStorage.getItem('rigoblock_last_provider');
+      const savedAuth = localStorage.getItem(AUTH_STORAGE_KEY);
+      if (savedRdns && savedAuth && !connectedAddress) {
+        try {
+          const cached = JSON.parse(savedAuth);
+          if (!cached || Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return;
+          // Find the previously-used provider
+          const match = discoveredProviders.find(p => p.info.rdns === savedRdns);
+          const provider = match ? match.provider : (savedRdns === 'injected' ? window.ethereum : null);
+          if (!provider) return;
+          // Silently request accounts (MetaMask auto-approves if already connected)
+          const accounts = await provider.request({ method: 'eth_accounts' });
+          if (accounts.length > 0 && accounts[0].toLowerCase() === cached.address?.toLowerCase()) {
+            activeProvider = provider;
+            connectedAddress = accounts[0];
+            authSignature = cached.signature;
+            authTimestamp = cached.timestamp;
+            document.getElementById('wallet-addr').textContent =
+              connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
+            document.getElementById('connect-btn').textContent = 'Disconnect';
+            document.getElementById('connect-btn').classList.add('active');
+            appendMessage('system', `Reconnected: ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)} ✓`);
+            if (vaultInput.value.trim().length === 42) validateVault();
+            if (executionMode === 'delegated') refreshDelegationStatus();
+            // Listen for account changes
+            attachProviderListeners(provider);
+          }
+        } catch { /* silent — auto-reconnect is best-effort */ }
+      }
     }, 500);
+
+    /* ================================================================
+       Execution Mode — auto-detected from delegation status
+       ================================================================ */
+    let executionMode = 'manual'; // 'manual' | 'delegated'
+    let delegationState = null;   // cached delegation status from backend
+
+    /** Auto-detect execution mode from delegation state */
+    function syncExecutionMode() {
+      if (delegationState && delegationState.enabled && delegationState.isActiveOnChain) {
+        executionMode = 'delegated';
+      } else {
+        executionMode = 'manual';
+      }
+    }
+
+    /* ================================================================
+       Delegation Status & Management
+       ================================================================ */
+    async function refreshDelegationStatus() {
+      const vault = vaultInput.value.trim();
+      if (!vault || vault.length !== 42) {
+        updateDelegationUI(null);
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/delegation/status?vaultAddress=${vault}&chainId=${currentChainId}&verify=true`);
+        if (!res.ok) throw new Error('Failed to fetch');
+        delegationState = await res.json();
+        updateDelegationUI(delegationState);
+        syncExecutionMode();
+
+        // Also fetch balance if delegation is active
+        if (delegationState.enabled && delegationState.agentAddress) {
+          fetchAgentBalance(vault);
+        }
+      } catch {
+        updateDelegationUI(null);
+      }
+    }
+
+    function updateDelegationUI(state) {
+      const badge = document.getElementById('delegation-status-badge');
+      const statusText = document.getElementById('delegation-status-text');
+      const setupBtn = document.getElementById('delegation-setup-btn');
+      const revokeBtn = document.getElementById('delegation-revoke-btn');
+      const agentAddr = document.getElementById('agent-addr');
+      const balanceEl = document.getElementById('agent-balance-display');
+      const sponsorLabel = document.getElementById('sponsor-toggle-label');
+      const sponsorToggle = document.getElementById('sponsor-toggle');
+
+      if (!state || !state.enabled) {
+        badge.className = 'delegation-status inactive';
+        statusText.textContent = state?.agentAddress ? 'Not active on this chain' : 'Not set up';
+        setupBtn.style.display = '';
+        setupBtn.textContent = state?.agentAddress ? 'Set Up on This Chain' : 'Set Up Delegation';
+        setupBtn.onclick = () => openDelegationSetup();
+        revokeBtn.style.display = 'none';
+        agentAddr.style.display = 'none';
+        balanceEl.style.display = 'none';
+        if (sponsorLabel) sponsorLabel.style.display = 'none';
+      } else {
+        // Use on-chain status if available, fall back to KV status
+        const isOnChain = state.isActiveOnChain != null ? state.isActiveOnChain : (state.isActiveInKV || false);
+        badge.className = `delegation-status ${isOnChain ? 'active' : 'stale'}`;
+
+        if (isOnChain) {
+          statusText.textContent = 'Active';
+        } else {
+          // Not active on current chain — chain name is already in the chain badge
+          statusText.textContent = 'Not set up on this chain';
+        }
+
+        // Show setup when not active, revoke when active
+        setupBtn.style.display = isOnChain ? 'none' : '';
+        setupBtn.textContent = 'Set Up on This Chain';
+        setupBtn.onclick = () => openDelegationSetup();
+        revokeBtn.style.display = isOnChain ? '' : 'none';
+
+        // Balance is chain-specific — only meaningful when active on current chain
+        if (!isOnChain) {
+          balanceEl.style.display = 'none';
+        }
+
+        // Gas sponsoring toggle — only visible when active on current chain
+        if (sponsorLabel && sponsorToggle) {
+          if (isOnChain) {
+            sponsorToggle.checked = state.sponsoredGas !== false;
+            sponsorLabel.style.display = '';
+          } else {
+            sponsorLabel.style.display = 'none';
+          }
+        }
+
+        if (state.agentAddress) {
+          agentAddr.textContent = `Agent: ${state.agentAddress}`;
+          agentAddr.dataset.address = state.agentAddress;
+          agentAddr.onclick = () => copyToClipboard(state.agentAddress);
+          agentAddr.style.display = '';
+        }
+      }
+    }
+
+    async function fetchAgentBalance(vault) {
+      try {
+        const res = await fetch(`/api/delegation/balance?vaultAddress=${vault}&chainId=${currentChainId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const balanceEl = document.getElementById('agent-balance-display');
+        // Format balance: show up to 6 decimals, trim trailing zeros
+        const ethBal = data.balanceEth != null ? parseFloat(data.balanceEth.toFixed(6)) : 0;
+        balanceEl.textContent = `Balance: ${ethBal} ETH`;
+        balanceEl.className = `agent-balance ${data.sufficient ? '' : 'low'}`;
+        balanceEl.title = data.sufficient
+          ? 'Agent ETH balance on this chain (sufficient for gas)'
+          : 'Low balance — agent may not be able to execute transactions. Deposit ETH to the agent address.';
+        balanceEl.style.display = '';
+      } catch { /* silent */ }
+    }
+
+    /** Toggle gas sponsoring mode */
+    async function toggleSponsoredGas(checked) {
+      const vault = vaultInput.value.trim();
+      if (!vault || !connectedAddress) return;
+      try {
+        const res = await fetch('/api/delegation/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            operatorAddress: connectedAddress,
+            vaultAddress: vault,
+            sponsoredGas: checked,
+            authSignature,
+            authTimestamp,
+          }),
+        });
+        if (!res.ok) throw new Error('Failed to update');
+        // Update cached state
+        if (delegationState) delegationState.sponsoredGas = checked;
+        appendMessage('system', checked
+          ? 'Gas sponsoring enabled — no agent funding needed.'
+          : 'Gas sponsoring disabled — agent will pay gas from its own ETH balance.');
+      } catch (err) {
+        appendMessage('system', `Failed to update gas setting: ${err.message}`);
+        document.getElementById('sponsor-toggle').checked = !checked; // revert
+      }
+    }
+
+    /* ================================================================
+       Delegation Setup Flow
+       ================================================================ */
+    function openDelegationSetup() {
+      if (!connectedAddress) {
+        appendMessage('system', 'Connect your wallet first to set up delegation.');
+        openWalletPicker();
+        return;
+      }
+      const vault = vaultInput.value.trim();
+      if (!vault || vault.length !== 42) {
+        appendMessage('system', 'Enter a valid vault address first.');
+        return;
+      }
+      // Reset modal state
+      document.getElementById('delegation-agent-info').style.display = 'none';
+      document.getElementById('delegation-setup-status').textContent = '';
+      const confirmBtn = document.getElementById('delegation-confirm-btn');
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Set Up Agent';
+      document.getElementById('delegation-modal').classList.add('visible');
+    }
+
+    async function startDelegationSetup() {
+      const vault = vaultInput.value.trim();
+      const statusEl = document.getElementById('delegation-setup-status');
+      const confirmBtn = document.getElementById('delegation-confirm-btn');
+
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Setting up…';
+      statusEl.style.color = 'var(--accent)';
+      statusEl.textContent = 'Creating agent wallet…';
+
+      try {
+        // ── Step 1: Call setup endpoint to get unsigned updateDelegation() tx ──
+        const setupRes = await fetch('/api/delegation/setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            operatorAddress: connectedAddress,
+            vaultAddress: vault,
+            chainId: currentChainId,
+            authSignature,
+            authTimestamp,
+          }),
+        });
+
+        if (!setupRes.ok) {
+          const err = await setupRes.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${setupRes.status}`);
+        }
+
+        const setupData = await setupRes.json();
+
+        // Show agent wallet info
+        const infoEl = document.getElementById('delegation-agent-info');
+        infoEl.innerHTML = `
+          <div class="row"><span class="label">Agent Wallet</span><span class="value copyable-addr" onclick="copyToClipboard('${setupData.agentAddress}')" title="Click to copy">${setupData.agentAddress}</span></div>
+          <div class="row"><span class="label">Vault</span><span class="value">${vault.slice(0,6)}…${vault.slice(-4)}</span></div>
+          <div class="row"><span class="label">Chain</span><span class="value">${CHAIN_NAMES[currentChainId] || currentChainId}</span></div>
+        `;
+        infoEl.style.display = '';
+
+        // ── Step 2: Ensure wallet is on the correct chain ──
+        statusEl.textContent = 'Checking chain…';
+        confirmBtn.textContent = 'Checking…';
+
+        const targetChainHex = '0x' + currentChainId.toString(16);
+        try {
+          const walletChainHex = await activeProvider.request({ method: 'eth_chainId' });
+          if (walletChainHex !== targetChainHex) {
+            statusEl.textContent = `Switching to ${CHAIN_NAMES[currentChainId] || 'chain ' + currentChainId}…`;
+            await activeProvider.request({
+              method: 'wallet_switchEthereumChain',
+              params: [{ chainId: targetChainHex }],
+            });
+            await new Promise(r => setTimeout(r, 500));
+          }
+        } catch (switchErr) {
+          if (switchErr.code === 4001) {
+            throw new Error('Chain switch rejected. You must be on the target chain to send the delegation transaction.');
+          }
+          if (switchErr.code === 4902) {
+            throw new Error(`Chain ${currentChainId} not configured in your wallet. Please add it manually.`);
+          }
+          throw new Error('Failed to switch chain: ' + (switchErr.message || switchErr));
+        }
+
+        // ── Step 3: Send the updateDelegation() transaction ──
+        statusEl.textContent = 'Approve delegation transaction in your wallet…';
+        confirmBtn.textContent = 'Waiting for wallet…';
+
+        const tx = setupData.transaction;
+        let txHash;
+        try {
+          // Estimate gas dynamically — delegation methods accept dynamic arrays,
+          // so gas usage varies with the number of selectors being delegated.
+          const estimatedGas = await activeProvider.request({
+            method: 'eth_estimateGas',
+            params: [{
+              from: connectedAddress,
+              to: tx.to,
+              data: tx.data,
+              value: '0x0',
+            }],
+          });
+          // Add 20% buffer over the estimate
+          const gasWithBuffer = '0x' + Math.ceil(parseInt(estimatedGas, 16) * 1.2).toString(16);
+          console.log('[Delegation] Estimated gas:', parseInt(estimatedGas, 16), '→ with buffer:', parseInt(gasWithBuffer, 16));
+
+          txHash = await activeProvider.request({
+            method: 'eth_sendTransaction',
+            params: [{
+              from: connectedAddress,
+              to: tx.to,
+              data: tx.data,
+              value: '0x0',
+              gas: gasWithBuffer,
+            }],
+          });
+        } catch (sendErr) {
+          if (sendErr.code === 4001 || sendErr.message?.includes('rejected') || sendErr.message?.includes('denied')) {
+            throw new Error('Delegation transaction rejected by user');
+          }
+          throw new Error('Transaction failed: ' + sendErr.message);
+        }
+
+        console.log('[Delegation] updateDelegation() tx sent:', txHash);
+        statusEl.textContent = 'Transaction submitted. Waiting for confirmation…';
+
+        // ── Step 4: Wait for transaction receipt ──
+        let confirmed = false;
+        for (let i = 0; i < 60; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            const receipt = await activeProvider.request({
+              method: 'eth_getTransactionReceipt',
+              params: [txHash],
+            });
+            if (receipt && receipt.status === '0x1') {
+              confirmed = true;
+              break;
+            } else if (receipt && receipt.status === '0x0') {
+              throw new Error('Delegation transaction reverted on-chain');
+            }
+          } catch (e) {
+            if (e.message.includes('reverted')) throw e;
+          }
+        }
+        if (!confirmed) {
+          throw new Error('Transaction not confirmed after 2 minutes. Check block explorer.');
+        }
+
+        statusEl.textContent = 'Transaction confirmed! Saving to backend…';
+
+        // ── Step 5: Confirm with backend (store txHash + delegated selectors) ──
+        const confirmRes = await fetch('/api/delegation/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            operatorAddress: connectedAddress,
+            vaultAddress: vault,
+            chainId: currentChainId,
+            authSignature,
+            authTimestamp,
+            txHash,
+          }),
+        });
+
+        if (!confirmRes.ok) {
+          const err = await confirmRes.json().catch(() => ({}));
+          throw new Error(err.error || 'Confirmation failed');
+        }
+
+        statusEl.style.color = 'var(--success)';
+        statusEl.textContent = '✓ Delegation active! The agent can now execute vault functions.';
+        confirmBtn.textContent = 'Done';
+        confirmBtn.onclick = () => closeModal('delegation-modal');
+        confirmBtn.disabled = false;
+
+        appendMessage('system',
+          `Agent delegation active on ${CHAIN_NAMES[currentChainId] || 'chain ' + currentChainId}. Agent: ${setupData.agentAddress.slice(0,6)}…${setupData.agentAddress.slice(-4)}`
+        );
+
+        // Refresh status
+        refreshDelegationStatus();
+
+      } catch (err) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = `Error: ${err.message}`;
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Retry';
+      }
+    }
+
+    async function revokeDelegation() {
+      if (!connectedAddress) return;
+      const vault = vaultInput.value.trim();
+      if (!vault) return;
+
+      const chainName = CHAIN_NAMES[currentChainId] || 'chain ' + currentChainId;
+      if (!confirm(`Revoke agent delegation on ${chainName}?\nThis will remove the agent's authority to execute vault functions.`)) return;
+
+      try {
+        appendMessage('system', 'Revoking delegation…');
+
+        // Step 1: Call backend to get unsigned revokeAllDelegations() tx + clear KV
+        const res = await fetch('/api/delegation/revoke', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            operatorAddress: connectedAddress,
+            vaultAddress: vault,
+            chainId: currentChainId,
+            authSignature,
+            authTimestamp,
+          }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || 'Revoke failed');
+        }
+
+        const data = await res.json();
+
+        // Step 2: Send the on-chain revocation tx if provided
+        if (data.transaction) {
+          // Ensure correct chain
+          const targetChainHex = '0x' + currentChainId.toString(16);
+          const walletChainHex = await activeProvider.request({ method: 'eth_chainId' });
+          if (walletChainHex !== targetChainHex) {
+            appendMessage('system', `Switching to ${chainName}…`);
+            await activeProvider.request({
+              method: 'wallet_switchEthereumChain',
+              params: [{ chainId: targetChainHex }],
+            });
+            await new Promise(r => setTimeout(r, 500));
+          }
+
+          appendMessage('system', `Sending revocation tx on ${chainName}…`);
+          // Estimate gas dynamically — revocation clears dynamic arrays,
+          // gas usage depends on how many selectors are being revoked.
+          const revokeEstimate = await activeProvider.request({
+            method: 'eth_estimateGas',
+            params: [{
+              from: connectedAddress,
+              to: data.transaction.to,
+              data: data.transaction.data,
+              value: '0x0',
+            }],
+          });
+          const revokeGas = '0x' + Math.ceil(parseInt(revokeEstimate, 16) * 1.2).toString(16);
+          console.log('[Delegation] Revocation estimated gas:', parseInt(revokeEstimate, 16), '→ with buffer:', parseInt(revokeGas, 16));
+
+          const txHash = await activeProvider.request({
+            method: 'eth_sendTransaction',
+            params: [{
+              from: connectedAddress,
+              to: data.transaction.to,
+              data: data.transaction.data,
+              value: '0x0',
+              gas: revokeGas,
+            }],
+          });
+
+          // Wait for confirmation (up to 60s)
+          let confirmed = false;
+          for (let i = 0; i < 30; i++) {
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+              const receipt = await activeProvider.request({
+                method: 'eth_getTransactionReceipt',
+                params: [txHash],
+              });
+              if (receipt && receipt.status === '0x1') {
+                confirmed = true;
+                appendMessage('system', `Revocation confirmed on ${chainName}: ${txHash.slice(0,10)}…`);
+                break;
+              } else if (receipt && receipt.status === '0x0') {
+                throw new Error('Revocation transaction reverted');
+              }
+            } catch (e) {
+              if (e.message?.includes('reverted')) throw e;
+            }
+          }
+          if (!confirmed) {
+            appendMessage('system', `Revocation tx pending: ${txHash.slice(0,10)}… (check explorer)`);
+          }
+        }
+
+        appendMessage('system', data.message || 'Delegation revoked.');
+        refreshDelegationStatus();
+      } catch (err) {
+        if (err.code === 4001 || err.message?.includes('rejected')) {
+          appendMessage('system', 'Revocation cancelled by user. Backend delegation was cleared but on-chain delegation may still be active.');
+        } else {
+          appendMessage('system', `Revoke failed: ${err.message}`);
+        }
+      }
+    }
+
+    // Refresh delegation when vault changes
+    const origValidateVault = validateVault;
+    validateVault = async function() {
+      await origValidateVault();
+      refreshDelegationStatus();
+    };
+
+    // Auto-refresh delegation on load
+    (function initDelegation() {
+      setTimeout(() => refreshDelegationStatus(), 600);
+    })();
+
+    /* ================================================================
+       Pool Onboarding — show/hide based on vault input
+       ================================================================ */
+    function updateOnboardingVisibility() {
+      const onboarding = document.getElementById('pool-onboarding');
+      const vault = vaultInput.value.trim();
+      if (!vault || vault.length < 42) {
+        onboarding.style.display = '';
+      } else {
+        onboarding.style.display = 'none';
+      }
+    }
+
+    // Listen on vault input changes
+    vaultInput.addEventListener('input', updateOnboardingVisibility);
+    // Show onboarding on initial load if no vault set
+    updateOnboardingVisibility();
+
+    /* ================================================================
+       Deploy Pool Modal
+       ================================================================ */
+    function openDeployPoolModal() {
+      if (!connectedAddress) {
+        openWalletPicker();
+        return;
+      }
+      document.getElementById('deploy-pool-name').value = '';
+      document.getElementById('deploy-pool-symbol').value = '';
+      document.getElementById('deploy-pool-base-token').value = 'ETH';
+      document.getElementById('deploy-custom-token-field').style.display = 'none';
+      document.getElementById('deploy-pool-status').textContent = '';
+      document.getElementById('deploy-pool-modal').classList.add('visible');
+    }
+
+    // Toggle custom token field
+    document.getElementById('deploy-pool-base-token').addEventListener('change', (e) => {
+      document.getElementById('deploy-custom-token-field').style.display =
+        e.target.value === 'custom' ? '' : 'none';
+    });
+
+    // Well-known USDC addresses per chain
+    const USDC_ADDRESSES = {
+      1:     '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+      8453:  '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      42161: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+      10:    '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85',
+      137:   '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+      56:    '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',
+      130:   '0x078D888E40faAe0f32594342c85940AF3949E666',
+    };
+
+    /**
+     * Minimal ABI encoder for createPool(string, string, address).
+     * Returns the hex arguments (without selector prefix).
+     */
+    function encodeCreatePoolArgs(name, symbol, baseToken) {
+      // Pad to 32 bytes (64 hex chars)
+      function pad32(hex) { return hex.padStart(64, '0'); }
+      // Encode string: offset → length → utf8 bytes padded to 32
+      function encodeString(str) {
+        const bytes = new TextEncoder().encode(str);
+        const len = pad32(bytes.length.toString(16));
+        const hexBytes = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        const padded = hexBytes.padEnd(Math.ceil(hexBytes.length / 64) * 64, '0');
+        return len + padded;
+      }
+      // Head: 3 slots (offsets for name, symbol, then address)
+      // name offset = 0x60 (3 * 32 = 96), symbol offset = dynamic, baseToken = value
+      const nameEncoded = encodeString(name);
+      const symbolEncoded = encodeString(symbol);
+      // Offsets: name at 96 (0x60), symbol at 96 + nameEncoded/2 bytes
+      const nameOffset = 96; // 3 * 32
+      const symbolOffset = nameOffset + nameEncoded.length / 2;
+      const addrClean = baseToken.toLowerCase().replace('0x', '');
+      return (
+        pad32(nameOffset.toString(16)) +
+        pad32(symbolOffset.toString(16)) +
+        pad32(addrClean) +
+        nameEncoded +
+        symbolEncoded
+      );
+    }
+
+    async function deploySmartPool() {
+      const name = document.getElementById('deploy-pool-name').value.trim();
+      const symbol = document.getElementById('deploy-pool-symbol').value.trim().toUpperCase();
+      const baseTokenSelect = document.getElementById('deploy-pool-base-token').value;
+      const statusEl = document.getElementById('deploy-pool-status');
+
+      if (!name) { statusEl.textContent = 'Pool name is required.'; return; }
+      if (!symbol || symbol.length < 2) { statusEl.textContent = 'Valid symbol required (2-5 chars).'; return; }
+
+      let baseToken = '0x0000000000000000000000000000000000000000'; // ETH
+      if (baseTokenSelect === 'USDC') {
+        baseToken = USDC_ADDRESSES[currentChainId] || USDC_ADDRESSES[1];
+      } else if (baseTokenSelect === 'custom') {
+        baseToken = document.getElementById('deploy-custom-token').value.trim();
+        if (!baseToken || baseToken.length !== 42 || !baseToken.startsWith('0x')) {
+          statusEl.textContent = 'Enter a valid token address (0x…).'; return;
+        }
+      }
+
+      statusEl.textContent = 'Preparing deployment…';
+      statusEl.style.color = 'var(--text)';
+
+      try {
+        // Ensure correct chain
+        const walletChainHex = await activeProvider.request({ method: 'eth_chainId' });
+        const walletChain = parseInt(walletChainHex, 16);
+        if (walletChain !== currentChainId) {
+          statusEl.textContent = `Switching to ${CHAIN_NAMES[currentChainId] || 'chain ' + currentChainId}…`;
+          await activeProvider.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: '0x' + currentChainId.toString(16) }],
+          });
+        }
+
+        // Encode createPool(string, string, address) — selector 0x1d7d13cc
+        const factoryAddress = '0x8DE8895ddD702d9a216E640966A98e08c9228f24';
+
+        // Minimal ABI encoding for createPool(string name, string symbol, address baseToken)
+        const selector = '0x1d7d13cc';
+        const data = selector + encodeCreatePoolArgs(name, symbol, baseToken);
+
+        statusEl.textContent = 'Please confirm in your wallet…';
+        const txHash = await activeProvider.request({
+          method: 'eth_sendTransaction',
+          params: [{
+            from: connectedAddress,
+            to: factoryAddress,
+            data: data,
+            value: '0x0',
+          }],
+        });
+
+        statusEl.style.color = 'var(--success)';
+        statusEl.textContent = `Transaction sent: ${txHash.slice(0, 10)}… Waiting for confirmation…`;
+
+        // Poll for receipt
+        let confirmed = false;
+        for (let i = 0; i < 60; i++) {
+          await new Promise(r => setTimeout(r, 3000));
+          try {
+            const receipt = await activeProvider.request({
+              method: 'eth_getTransactionReceipt',
+              params: [txHash],
+            });
+            if (receipt && receipt.status === '0x1') {
+              confirmed = true;
+              // Try to extract new pool address from logs
+              // The factory emits PoolCreated(address indexed pool, ...) or the return value
+              // Look for the new pool address in the logs (first topic of PoolCreated event)
+              let newPoolAddress = null;
+              if (receipt.logs && receipt.logs.length > 0) {
+                // PoolCreated event or similar — look for address in first topic or data
+                for (const log of receipt.logs) {
+                  // Pool created events typically have the address as topic[1]
+                  if (log.topics && log.topics.length >= 2) {
+                    const addr = '0x' + log.topics[1].slice(26);
+                    if (addr.length === 42 && addr !== '0x0000000000000000000000000000000000000000') {
+                      newPoolAddress = addr;
+                      break;
+                    }
+                  }
+                }
+              }
+
+              if (newPoolAddress) {
+                vaultInput.value = newPoolAddress;
+                updateOnboardingVisibility();
+                statusEl.innerHTML = `✅ Pool deployed at <strong>${newPoolAddress.slice(0,6)}…${newPoolAddress.slice(-4)}</strong>. Address auto-filled!`;
+                validateVault();
+                appendMessage('system', `🏊 New pool "${name}" (${symbol}) deployed at ${newPoolAddress}`);
+              } else {
+                statusEl.innerHTML = `✅ Pool deployed! Check the <a href="${getExplorerUrl(currentChainId, txHash)}" target="_blank">transaction</a> for the new address and paste it above.`;
+                appendMessage('system', `🏊 Pool "${name}" (${symbol}) deployed. Tx: ${txHash.slice(0,10)}…`);
+              }
+              break;
+            } else if (receipt && receipt.status === '0x0') {
+              throw new Error('Deployment transaction reverted');
+            }
+          } catch (e) {
+            if (e.message?.includes('reverted')) throw e;
+          }
+        }
+        if (!confirmed) {
+          statusEl.textContent = `Transaction pending: ${txHash.slice(0,10)}… (check explorer)`;
+        }
+
+      } catch (err) {
+        if (err.code === 4001 || err.message?.includes('rejected')) {
+          statusEl.textContent = 'Deployment cancelled.';
+          statusEl.style.color = 'var(--muted)';
+        } else {
+          statusEl.textContent = `Error: ${err.message}`;
+          statusEl.style.color = 'var(--error)';
+        }
+      }
+    }
+
+    function getExplorerUrl(chainId, txHash) {
+      const explorers = {
+        1: 'https://etherscan.io/tx/',
+        8453: 'https://basescan.org/tx/',
+        42161: 'https://arbiscan.io/tx/',
+        10: 'https://optimistic.etherscan.io/tx/',
+        137: 'https://polygonscan.com/tx/',
+        56: 'https://bscscan.com/tx/',
+        130: 'https://uniscan.xyz/tx/',
+        11155111: 'https://sepolia.etherscan.io/tx/',
+      };
+      return (explorers[chainId] || 'https://etherscan.io/tx/') + txHash;
+    }
 
   </script>
 </body>

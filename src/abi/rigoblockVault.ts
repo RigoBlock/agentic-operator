@@ -87,11 +87,116 @@ export const RIGOBLOCK_VAULT_ABI = [
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
   },
+
+  // ── NAV view (ENavView extension) ──
+
+  // getNavDataView() → (uint256 totalValue, uint256 unitaryValue, uint256 timestamp)
+  {
+    name: "getNavDataView",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      {
+        name: "navData",
+        type: "tuple",
+        components: [
+          { name: "totalValue", type: "uint256" },
+          { name: "unitaryValue", type: "uint256" },
+          { name: "timestamp", type: "uint256" },
+        ],
+      },
+    ],
+  },
+
+  // ── Multicall (AMulticall adapter) ──
+
+  // multicall(bytes[] data) → bytes[]
+  {
+    name: "multicall",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "data", type: "bytes[]" }],
+    outputs: [{ name: "results", type: "bytes[]" }],
+  },
+] as const;
+
+/**
+ * Vault delegation ABI — updateDelegation(), revokeAllDelegations(),
+ * revokeAllDelegationsForSelector(), getDelegatedSelectors(), getDelegatedAddresses().
+ *
+ * New in v4.2.0: granular per-selector delegation where the operator batches
+ * grant/revoke of (selector, address) pairs via updateDelegation().
+ *
+ * Source: https://github.com/RigoBlock/v3-contracts/pull/870
+ */
+export const VAULT_DELEGATION_ABI = [
+  // ── Write methods (onlyOwner) ──
+
+  // updateDelegation(Delegation[] calldata delegations)
+  // Delegation = (address delegated, bytes4 selector, bool isDelegated)
+  {
+    name: "updateDelegation",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "delegations",
+        type: "tuple[]",
+        components: [
+          { name: "delegated", type: "address" },
+          { name: "selector", type: "bytes4" },
+          { name: "isDelegated", type: "bool" },
+        ],
+      },
+    ],
+    outputs: [],
+  },
+
+  // revokeAllDelegations(address delegated)
+  // Atomically revokes every selector previously delegated to `delegated`.
+  {
+    name: "revokeAllDelegations",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "delegated", type: "address" }],
+    outputs: [],
+  },
+
+  // revokeAllDelegationsForSelector(bytes4 selector)
+  // Atomically revokes all addresses delegated for `selector`.
+  {
+    name: "revokeAllDelegationsForSelector",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "selector", type: "bytes4" }],
+    outputs: [],
+  },
+
+  // ── View methods ──
+
+  // getDelegatedSelectors(address delegated) → bytes4[]
+  {
+    name: "getDelegatedSelectors",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "delegated", type: "address" }],
+    outputs: [{ name: "selectors", type: "bytes4[]" }],
+  },
+
+  // getDelegatedAddresses(bytes4 selector) → address[]
+  {
+    name: "getDelegatedAddresses",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "selector", type: "bytes4" }],
+    outputs: [{ name: "addresses", type: "address[]" }],
+  },
 ] as const;
 
 /**
  * Function selectors the agent is allowed to call on the vault.
- * Used for EIP-7702 session key scoping.
+ * Used for vault-based delegation scoping.
  */
 export const ALLOWED_VAULT_SELECTORS = {
   // execute(bytes,bytes[],uint256)
@@ -100,6 +205,9 @@ export const ALLOWED_VAULT_SELECTORS = {
   execute: "0x24856bc3" as `0x${string}`,
   // modifyLiquidities(bytes,uint256)
   modifyLiquidities: "0xee3e8b0e" as `0x${string}`,
+  // ── 0x Aggregator (IA0x / AllowanceHolder) ──
+  // execute(address,address,uint256,address,bytes) — AllowanceHolder entry point
+  zeroXExecute: "0x2213bc0b" as `0x${string}`,
   // ── GMX v2 Adapter (IAGmxV2) ──
   cancelOrder: "0x7489ec23" as `0x${string}`,
   claimCollateral: "0xe9249b57" as `0x${string}`,
