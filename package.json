@@ -1,6 +1,6 @@
 {
   "name": "agentic-operator",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Agentic trading operator for Rigoblock vaults — Cloudflare Worker + EIP-7702 delegation",
   "private": true,
   "type": "module",
@@ -16,12 +16,10 @@
     "@account-kit/infra": "^4.84.1",
     "@account-kit/wallet-client": "^4.84.1",
     "@metamask/smart-accounts-kit": "^0.4.0-beta.1",
-    "@x402/core": "^2.6.0",
-    "@x402/evm": "^2.6.0",
-    "@x402/hono": "^2.6.0",
     "hono": "^4.6.0",
     "openai": "^4.70.0",
-    "viem": "^2.21.0"
+    "viem": "^2.21.0",
+    "x402-hono": "^1.1.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241106.0",

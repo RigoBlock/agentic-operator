@@ -23,6 +23,7 @@ import { telegram } from "./routes/telegram.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
+import { createX402Middleware } from "./middleware/x402.js";
 import type { Address } from "viem";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -35,6 +36,10 @@ app.use("*", async (c, next) => {
   if (c.env.KV) initTokenResolver(c.env.KV);
   await next();
 });
+
+// x402 payment gate — charges external agents for /api/chat and /api/quote.
+// Own-user requests (browser UI, Telegram webhook) are exempt.
+app.use("*", createX402Middleware());
 
 // ── API Routes ────────────────────────────────────────────────────────
 app.route("/api/chat", chat);
@@ -90,8 +95,23 @@ app.get("/api/chains", (c) => {
 app.get("/api/health", (c) =>
   c.json({
     status: "ok",
-    version: "0.3.2",
-    features: ["manual-execution", "vault-delegation", "tx-simulation", "tx-monitoring"],
+    version: "0.4.0",
+    features: [
+      "manual-execution",
+      "vault-delegation",
+      "tx-simulation",
+      "tx-monitoring",
+      "x402-payments",
+    ],
+    x402: {
+      network: "base",
+      payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
+      facilitator: "https://x402.org/facilitator",
+      paidRoutes: {
+        "POST /api/chat": "$0.01",
+        "GET /api/quote": "$0.002",
+      },
+    },
   }),
 );
 

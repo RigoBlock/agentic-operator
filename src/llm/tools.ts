@@ -503,6 +503,156 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+
+  // ── Cross-chain (AIntents + Across Protocol) ────────────────────────
+
+  {
+    type: "function" as const,
+    function: {
+      name: "crosschain_transfer",
+      description:
+        "Bridge tokens from the vault on one chain to the same vault on a destination chain. " +
+        "Uses the Across Protocol via the AIntents adapter. The vault must hold the token being bridged. " +
+        "Supported tokens: USDC, USDT, WETH, WBTC (not all tokens on all chains). " +
+        "Supported chains: Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Unichain. " +
+        "The transfer burns virtual supply on the source chain and mints via donate on the destination. " +
+        "Requires the depositV3 selector to be delegated (same as other vault operations). " +
+        "IMPORTANT: sourceChain defaults to the current chain if not specified, but ALWAYS include it " +
+        "when the user mentions a source (e.g., 'bridge USDC from Base to Arbitrum').",
+      parameters: {
+        type: "object",
+        properties: {
+          sourceChain: {
+            type: "string",
+            description: "Source chain name or ID (e.g., 'Base', 'Arbitrum'). Defaults to current chain if omitted.",
+          },
+          destinationChain: {
+            type: "string",
+            description: "Destination chain name or ID (e.g., 'Arbitrum', 'Base', '42161').",
+          },
+          token: {
+            type: "string",
+            description: "Token to bridge — symbol (USDC, USDT, WETH, WBTC).",
+          },
+          amount: {
+            type: "string",
+            description: "Amount to bridge (human-readable, e.g., '1000' USDC or '0.5' WETH).",
+          },
+        },
+        required: ["destinationChain", "token", "amount"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "crosschain_sync",
+      description:
+        "Synchronise NAV data from one chain to a destination chain. " +
+        "Uses a small token amount to carry the sync message via Across Protocol. " +
+        "This validates NAV impact tolerance without moving significant tokens. " +
+        "Token and amount are AUTO-CALCULATED if not provided — the agent picks the cheapest " +
+        "bridgeable token with sufficient balance and uses the minimum amount to cover fees. " +
+        "Useful when the vault has positions on multiple chains and needs NAV consistency.",
+      parameters: {
+        type: "object",
+        properties: {
+          sourceChain: {
+            type: "string",
+            description: "Source chain name or ID. Defaults to current chain if omitted.",
+          },
+          destinationChain: {
+            type: "string",
+            description: "Destination chain name or ID (e.g., 'Arbitrum', 'Base').",
+          },
+          token: {
+            type: "string",
+            description: "Token to use for the sync message (USDC, USDT, WETH, WBTC). Auto-selected if omitted.",
+          },
+          amount: {
+            type: "string",
+            description: "Amount to carry the sync. Auto-calculated if omitted (minimum to cover fees).",
+          },
+          navToleranceBps: {
+            type: "number",
+            description: "NAV tolerance in basis points (default: 100 = 1%). Higher values allow more NAV divergence.",
+          },
+        },
+        required: ["destinationChain"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "get_crosschain_quote",
+      description:
+        "Get a cross-chain bridge fee quote without executing. Shows the estimated output, fee percentage, " +
+        "and estimated fill time. Use when the user asks 'how much to bridge?' or 'what's the bridge fee?'.",
+      parameters: {
+        type: "object",
+        properties: {
+          sourceChain: {
+            type: "string",
+            description: "Source chain name or ID. Defaults to current chain.",
+          },
+          destinationChain: {
+            type: "string",
+            description: "Destination chain name or ID.",
+          },
+          token: {
+            type: "string",
+            description: "Token to bridge (USDC, USDT, WETH, WBTC).",
+          },
+          amount: {
+            type: "string",
+            description: "Amount to bridge (human-readable).",
+          },
+        },
+        required: ["destinationChain", "token", "amount"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "get_aggregated_nav",
+      description:
+        "Read the vault's NAV data and bridgeable token balances across ALL supported chains. " +
+        "Returns per-chain NAV (unitary value, total value, base token), token balances, " +
+        "delegation status, and aggregate totals. " +
+        "Also checks which chains have agent delegation set up and which are missing. " +
+        "Use this to give the operator a full cross-chain portfolio overview, " +
+        "or before recommending rebalancing operations.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "get_rebalance_plan",
+      description:
+        "Analyse the vault's cross-chain positions and recommend the minimum set of bridge " +
+        "operations needed to consolidate tokens to a target chain. " +
+        "Reads NAV + balances on all chains, then computes one bridge per (source, token type). " +
+        "Includes fee estimates for each operation and flags chains missing agent delegation. " +
+        "If targetChain is omitted, auto-selects the chain with the most value.",
+      parameters: {
+        type: "object",
+        properties: {
+          targetChain: {
+            type: "string",
+            description: "Chain to consolidate everything to (e.g., 'Arbitrum', 'Base'). Auto-selected if omitted.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
 ];
 
 /**
@@ -634,4 +784,31 @@ POOL FUNDING (MINT):
 - For ERC-20 base tokens (e.g., USDC), an approve transaction is required first.
 - For native ETH base tokens, the mint is sent with msg.value (no approval needed).
 - After funding, the user's wallet receives pool tokens proportional to the deposit.
-- Suggest funding after a new pool is deployed (the pool needs initial capital).`;
+- Suggest funding after a new pool is deployed (the pool needs initial capital).
+
+CROSS-CHAIN (AINTENTS + ACROSS PROTOCOL):
+- Use crosschain_transfer to bridge tokens between chains via the AIntents adapter and Across Protocol.
+- Use crosschain_sync to synchronise NAV across chains (sends a small amount with a sync message).
+  Token and amount are auto-calculated if omitted — just specify destinationChain.
+- Use get_crosschain_quote to show bridge fees without executing.
+- Use get_aggregated_nav to see the vault's NAV and token balances on ALL chains at once.
+  This also shows which chains have delegation set up and which are missing.
+- Use get_rebalance_plan to compute the optimal set of bridge operations to consolidate tokens to one chain.
+  If targetChain is omitted, auto-selects the chain with the most value.
+  Present the plan to the operator and ask which operations to execute.
+- Keywords: bridge, cross-chain, transfer to [chain], move to [chain], sync NAV, synchronise,
+  rebalance, consolidate, aggregate NAV, portfolio overview, multichain.
+- Bridgeable tokens: USDC, USDT, WETH, WBTC (not all tokens available on all chains).
+- Supported chains: Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Unichain.
+- The vault must hold the bridged token on the source chain. Balance is checked automatically.
+- Typical bridge fees: 0.01%-0.5% depending on route and amount. Max 2%.
+- Fill time: usually 2s-10min depending on the route.
+- The sourceChain and destinationChain parameters accept names ("Arbitrum", "Base") or chain IDs ("42161", "8453").
+  ALWAYS include sourceChain when the user mentions a specific source (e.g. "bridge from Polygon").
+- Requires depositV3 selector delegated for delegated execution mode.
+- REBALANCING WORKFLOW: when a user says "rebalance" or "consolidate",
+  1. Call get_aggregated_nav to see current positions.
+  2. Call get_rebalance_plan (with user's preferred target chain if stated).
+  3. Show the recommended operations (source → target, token, amount, fee) and ask which to execute.
+  4. For each confirmed operation, call crosschain_transfer with the sourceChain, token, and amount.
+  5. If the plan shows missing delegation on any source chain, inform the operator and ask them to set up delegation first.`;

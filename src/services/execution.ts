@@ -272,6 +272,9 @@ export async function executeViaDelegation(
   // 6b. NAV Guard — prevent trades that crash the pool's unit price
   // Runs BEFORE execution (both sponsored & direct paths).
   // Simulates a multicall([swap, getNavDataView]) to measure post-swap NAV impact.
+  // IMPORTANT: This guard is selector-agnostic — it runs on ANY function call
+  // the agent sends to the vault (swaps, GMX, depositV3, future methods).
+  // No per-method extension is needed when new vault adapters are added.
   try {
     const navResult = await checkNavImpact(
       tx.to as Address,
