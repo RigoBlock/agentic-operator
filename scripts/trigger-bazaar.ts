@@ -73,8 +73,12 @@ async function main() {
   console.log(`← ${paidRes.status} ${paidRes.statusText}`);
   console.log("Response:", await paidRes.text());
 
-  // 7. Check settlement
-  const settle = paidRes.headers.get("X-PAYMENT-RESPONSE");
+  // 7. Check settlement (SDK uses "PAYMENT-RESPONSE" header, not "X-PAYMENT-RESPONSE")
+  const settle = paidRes.headers.get("PAYMENT-RESPONSE") || paidRes.headers.get("X-PAYMENT-RESPONSE");
+  console.log("\nResponse headers:");
+  paidRes.headers.forEach((v, k) => {
+    if (k.toLowerCase().includes("payment")) console.log(`  ${k}: ${v}`);
+  });
   if (settle) {
     console.log("\n✅ Payment settled! X-PAYMENT-RESPONSE:", settle);
     console.log("\nThe facilitator has now cataloged this endpoint in the x402 Bazaar.");

@@ -31,7 +31,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { declareDiscoveryExtension, bazaarResourceServerExtension } from "@x402/extensions";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler } from "hono";
-import type { Env } from "../types.js";
+import type { Env, AppVariables } from "../types.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
 
@@ -203,7 +203,7 @@ function honoAdapter(c: { req: { header(name: string): string | undefined; metho
  *    - "payment-verified"     → next(), then settle
  *    - "payment-error"        → return 402 with payment instructions
  */
-export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env }> {
+export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
   return async (c, next) => {
     const server = await getHttpServer(c.env);
 
@@ -233,11 +233,20 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env }> {
       return c.json(body as Record<string, unknown>, status as 402);
     }
 
-    // payment-verified → run the route handler, then settle
+    // payment-verified → flag context so routes skip their own auth, then run handler
     const { paymentPayload, paymentRequirements, declaredExtensions } = result;
+    c.set("x402Paid", true);
     await next();
 
-    // Settle the payment after the response is produced
+    // Only settle if the route handler succeeded (2xx).
+    // Don't charge agents for our errors (5xx) or their malformed requests (4xx).
+    const responseStatus = c.res.status;
+    if (responseStatus >= 400) {
+      console.warn(`[x402] Skipping settlement — route returned ${responseStatus}`);
+      return;
+    }
+
+    // Settle the payment after a successful response
     const settleResult = await server.processSettlement(
       paymentPayload,
       paymentRequirements,
@@ -249,13 +258,17 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env }> {
       for (const [k, v] of Object.entries(settleResult.headers)) {
         c.header(k, v);
       }
+      console.log(`[x402] Settlement succeeded, headers:`, Object.keys(settleResult.headers));
     } else {
-      // Settlement failed — return 402 with failure info
-      const { status, headers, body } = settleResult.response;
-      for (const [k, v] of Object.entries(headers)) {
-        c.header(k, v);
+      // Settlement failed — log but still return the successful response.
+      // The agent got the data; settlement failure is between us and the facilitator.
+      console.error(`[x402] Settlement failed:`, (settleResult as any).errorReason ?? "unknown");
+      // Still set whatever headers came back (may include error info)
+      if ((settleResult as any).headers) {
+        for (const [k, v] of Object.entries((settleResult as any).headers)) {
+          c.header(k, v as string);
+        }
       }
-      return c.json(body as Record<string, unknown>, status as 402);
     }
   };
 }

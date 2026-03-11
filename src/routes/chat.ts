@@ -12,7 +12,7 @@
  */
 
 import { Hono } from "hono";
-import type { Env, ChatRequest, ChatResponse, RequestContext, ExecutionMode } from "../types.js";
+import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode } from "../types.js";
 import { processChat } from "../llm/client.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { sanitizeError } from "../config.js";
@@ -20,7 +20,7 @@ import { executeViaDelegation, ExecutionError } from "../services/execution.js";
 import { isDelegationActive } from "../services/delegation.js";
 import type { Address } from "viem";
 
-const chat = new Hono<{ Bindings: Env }>();
+const chat = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 chat.post("/", async (c) => {
   try {
@@ -36,27 +36,49 @@ chat.post("/", async (c) => {
       return c.json({ error: "chainId is required" }, 400);
     }
 
-    // ── Auth gate: verify the caller is the vault owner ──
-    await verifyOperatorAuth({
-      operatorAddress: body.operatorAddress || "",
-      vaultAddress: body.vaultAddress,
-      authSignature: body.authSignature || "",
-      authTimestamp: body.authTimestamp || 0,
-      preferredChainId: body.chainId,
-      alchemyKey: c.env.ALCHEMY_API_KEY,
-    });
+    // ── Auth gate ──
+    // x402 payment = API access fee. Operator auth = vault authorization.
+    // These are independent. An x402 request CAN also include operator auth.
+    //   - x402 paid + no auth → manual mode only (unsigned tx data)
+    //   - x402 paid + auth    → manual or delegated (full access)
+    //   - browser (exempt) + auth → manual or delegated (full access)
+    // Delegated execution ALWAYS requires proven vault ownership.
+    const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
+    let operatorVerified = false;
+
+    if (hasAuthCredentials) {
+      // Auth credentials provided — verify regardless of x402 status
+      await verifyOperatorAuth({
+        operatorAddress: body.operatorAddress || "",
+        vaultAddress: body.vaultAddress,
+        authSignature: body.authSignature || "",
+        authTimestamp: body.authTimestamp || 0,
+        preferredChainId: body.chainId,
+        alchemyKey: c.env.ALCHEMY_API_KEY,
+      });
+      operatorVerified = true;
+    } else if (!c.get("x402Paid")) {
+      // No auth + no x402 payment → reject
+      throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
+    }
+    // else: x402 paid + no auth → allowed in manual mode only (below)
 
     // ── Resolve execution mode ──
+    // Delegated execution REQUIRES proven vault ownership. No exceptions.
     const requestedMode: ExecutionMode = body.executionMode || "manual";
     let executionMode: ExecutionMode = "manual";
     if (requestedMode === "delegated") {
-      // Verify delegation is actually active on this chain
-      const active = await isDelegationActive(c.env.KV, body.vaultAddress, body.chainId);
-      if (active) {
-        executionMode = "delegated";
+      if (!operatorVerified) {
+        // No auth = no delegation. This is a hard security boundary.
+        console.warn(`[chat] Delegated mode requested without operator auth — forced to manual`);
       } else {
-        console.warn(`[chat] Delegated mode requested but not active on chain ${body.chainId} for vault ${body.vaultAddress}`);
-        // Fall back to manual — don't error, just degrade gracefully
+        // Operator verified — check if delegation is actually active on-chain
+        const active = await isDelegationActive(c.env.KV, body.vaultAddress, body.chainId);
+        if (active) {
+          executionMode = "delegated";
+        } else {
+          console.warn(`[chat] Delegated mode requested but not active on chain ${body.chainId} for vault ${body.vaultAddress}`);
+        }
       }
     }
 

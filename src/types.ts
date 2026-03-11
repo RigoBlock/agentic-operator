@@ -10,6 +10,12 @@ import type { Address, Hex } from "viem";
  */
 export type ExecutionMode = "manual" | "delegated";
 
+// ── Hono context variables (set by middleware, read by routes) ─────────
+export type AppVariables = {
+  /** Set to true by x402 middleware when payment is verified */
+  x402Paid: boolean;
+};
+
 // ── Environment bindings ──────────────────────────────────────────────
 export interface Env {
   // KV namespace (stores per-user vault lists, delegation config, agent wallets)

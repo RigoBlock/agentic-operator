@@ -61,6 +61,25 @@ export function getChain(chainId: number): Chain {
   return chain;
 }
 
+/** Resolve a chain name, shortName, or numeric ID string to a chain ID number.
+ *  Accepts: "base", "Base", "8453", "arbitrum", "42161", etc. */
+export function resolveChainId(chainArg: string): number {
+  const num = Number(chainArg);
+  if (!Number.isNaN(num) && chainMap[num]) return num;
+  const allChains = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS];
+  const match = allChains.find(
+    (c) =>
+      c.name.toLowerCase() === chainArg.toLowerCase() ||
+      c.shortName.toLowerCase() === chainArg.toLowerCase(),
+  );
+  if (!match) {
+    throw new Error(
+      `Unknown chain: ${chainArg}. Supported: ${allChains.map((c) => `${c.shortName} (${c.id})`).join(", ")}`,
+    );
+  }
+  return match.id;
+}
+
 /**
  * Alchemy network slugs for each chain.
  * Chains not listed here use their default public RPC.
