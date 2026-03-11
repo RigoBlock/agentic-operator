@@ -100,15 +100,20 @@ const PROTECTED_ROUTES: RoutesConfig = {
     mimeType: "application/json",
     extensions: declareDiscoveryExtension({
       input: {
-        token: "Token symbol (ETH, USDC, WBTC, …) or contract address",
-        chain: "Chain name or ID (e.g. 'arbitrum' or '42161')",
+        sell: "Token to sell (ETH, USDC, WBTC, … or contract address)",
+        buy: "Token to buy (ETH, USDC, WBTC, … or contract address)",
+        amount: "Amount to sell (human-readable, e.g. '1' for 1 ETH)",
+        chain: "Chain name or ID (e.g. 'base', '8453', 'arbitrum', '42161')",
       },
       output: {
         example: {
-          token: "ETH",
-          priceUsd: "3456.78",
+          sell: "ETH",
+          buy: "USDC",
+          amountIn: "1.0",
+          amountOut: "3456.78",
+          priceImpact: "0.03%",
           source: "uniswap",
-          chainId: 42161,
+          chainId: 8453,
         },
       },
     }),

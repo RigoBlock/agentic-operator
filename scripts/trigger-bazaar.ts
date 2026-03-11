@@ -19,7 +19,7 @@ import { publicActions } from "viem";
 import { x402Client, x402HTTPClient } from "@x402/core/client";
 import { ExactEvmScheme, toClientEvmSigner } from "@x402/evm";
 
-const API_URL = "https://trader.rigoblock.com/api/quote?token=ETH&chain=arbitrum";
+const API_URL = "https://trader.rigoblock.com/api/quote?sell=ETH&buy=USDC&amount=1&chain=base";
 
 async function main() {
   const pk = process.env.TEST_PRIVATE_KEY;
