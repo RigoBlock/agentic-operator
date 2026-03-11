@@ -128,6 +128,12 @@ async function main() {
   console.log("\n" + "=".repeat(60));
   console.log("Done. Check Bazaar listings:");
   console.log("https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources");
+
+  // Force exit — viem keeps HTTP handles alive, preventing clean shutdown
+  process.exit(0);
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
