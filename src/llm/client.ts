@@ -52,6 +52,8 @@ import {
   chainName as crosschainChainName,
 } from "../services/crosschain.js";
 import { CROSSCHAIN_TOKENS, getSupportedDestinations, findBridgeableToken } from "../services/crosschainConfig.js";
+import { addStrategy, removeStrategy, removeAllStrategies, getStrategies, MIN_INTERVAL_MINUTES, MAX_STRATEGIES_PER_VAULT } from "../services/strategy.js";
+import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 
 /**
  * Process a chat request: send to LLM, handle tool calls, return response.
@@ -1654,7 +1656,8 @@ async function executeToolCall(
       const opLines = plan.operations.map((op, i) => {
         const fee = op.estimatedFeePct || "N/A";
         const time = op.estimatedTime || "N/A";
-        return `  ${i + 1}. ${op.srcChainName} → ${plan.targetChainName}: ${op.amount} ${op.tokenType} (fee: ${fee}, ~${time})`;
+        const cappedNote = op.capped ? " ⚠️ capped to stay within 10% NAV guard" : "";
+        return `  ${i + 1}. ${op.srcChainName} → ${plan.targetChainName}: ${op.amount} ${op.tokenType} (fee: ${fee}, ~${time})${cappedNote}`;
       });
 
       // Check for missing delegation on source chains
@@ -1687,6 +1690,118 @@ async function executeToolCall(
           "Show aggregated NAV",
           "Skip rebalancing",
         ],
+      };
+    }
+
+    // ── Automated strategies ──────────────────────────────────────────
+
+    case "create_strategy": {
+      const instruction = args.instruction as string;
+      const intervalMinutes = Math.max(
+        MIN_INTERVAL_MINUTES,
+        Math.round(Number(args.intervalMinutes) || 480),
+      );
+
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected — cannot create strategy.");
+      }
+
+      // Check Telegram pairing
+      const tgUserId = await getTelegramUserIdByAddress(
+        env.KV,
+        ctx.operatorAddress,
+      );
+      if (!tgUserId) {
+        return {
+          message:
+            "⚠️ Telegram not paired. Strategies send notifications via Telegram.\n\n" +
+            "Please pair your Telegram first using the 'Pair Telegram' button, then try again.",
+          suggestions: ["Pair Telegram"],
+        };
+      }
+
+      const strategy = await addStrategy(env.KV, {
+        instruction,
+        intervalMinutes,
+        vaultAddress: ctx.vaultAddress,
+        chainId: ctx.chainId,
+        operatorAddress: ctx.operatorAddress,
+      });
+
+      const intervalStr = intervalMinutes >= 60
+        ? `${(intervalMinutes / 60).toFixed(intervalMinutes % 60 ? 1 : 0)} hour${intervalMinutes >= 120 ? "s" : ""}`
+        : `${intervalMinutes} minutes`;
+
+      return {
+        message:
+          `✅ Strategy #${strategy.id} created!\n\n` +
+          `• Instruction: "${instruction}"\n` +
+          `• Check interval: every ${intervalStr}\n` +
+          `• Notifications: via Telegram\n\n` +
+          `I'll evaluate this instruction periodically and notify you with recommendations. ` +
+          `You'll need to confirm via Telegram before any execution.`,
+        suggestions: ["List strategies", "Create another strategy", "Remove strategy"],
+      };
+    }
+
+    case "remove_strategy": {
+      const id = Number(args.id);
+
+      if (id === 0) {
+        const count = await removeAllStrategies(env.KV, ctx.vaultAddress);
+        return {
+          message: count > 0
+            ? `✅ Removed all ${count} strategies for this vault.`
+            : "No strategies found for this vault.",
+          suggestions: ["Create a strategy"],
+        };
+      }
+
+      const removed = await removeStrategy(env.KV, ctx.vaultAddress, id);
+      return {
+        message: removed
+          ? `✅ Strategy #${id} removed.`
+          : `Strategy #${id} not found. Use "list strategies" to see active ones.`,
+        suggestions: ["List strategies", "Create a strategy"],
+      };
+    }
+
+    case "list_strategies": {
+      const strategies = await getStrategies(env.KV, ctx.vaultAddress);
+
+      if (strategies.length === 0) {
+        return {
+          message: "No automated strategies configured for this vault.",
+          suggestions: ["Create a strategy"],
+        };
+      }
+
+      const lines = strategies.map((s) => {
+        const status = s.active ? "✅ Active" : "⏸️ Paused";
+        const intervalStr = s.intervalMinutes >= 60
+          ? `${(s.intervalMinutes / 60).toFixed(s.intervalMinutes % 60 ? 1 : 0)}h`
+          : `${s.intervalMinutes}m`;
+        const lastRun = s.lastRun
+          ? new Date(s.lastRun).toISOString().slice(0, 16).replace("T", " ")
+          : "never";
+        const errors = s.consecutiveFailures > 0
+          ? ` | ⚠️ ${s.consecutiveFailures} failure${s.consecutiveFailures > 1 ? "s" : ""}`
+          : "";
+        return (
+          `  **#${s.id}** [${status}] every ${intervalStr}\n` +
+          `    "${s.instruction}"\n` +
+          `    Last run: ${lastRun}${errors}`
+        );
+      });
+
+      return {
+        message:
+          `📋 **Strategies for this vault** (${strategies.length}/${MAX_STRATEGIES_PER_VAULT}):\n\n` +
+          lines.join("\n\n"),
+        suggestions: [
+          "Create a strategy",
+          strategies.length > 0 ? `Remove strategy ${strategies[0].id}` : "",
+        ].filter(Boolean),
       };
     }
 

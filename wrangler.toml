@@ -25,3 +25,11 @@ id = "2c0f24cd5916471ab4e2cd8d3fd1b1b7"
 # AGENT_WALLET_SECRET   — Encryption key for agent wallet private keys (32+ char random string)
 # ALCHEMY_GAS_POLICY_ID — (Optional) Alchemy Gas Manager policy ID for sponsored agent gas
 # TELEGRAM_BOT_TOKEN    — (Optional) Telegram Bot API token from @BotFather
+# CDP_API_KEY_ID        — Coinbase Developer Platform API key ID (for x402 facilitator auth)
+# CDP_API_KEY_SECRET    — Coinbase Developer Platform API key secret (for x402 facilitator auth)
+
+# ── Cron Triggers ──────────────────────────────────────────────────────
+# Strategy engine: runs every 5 minutes, checks which strategies are due
+# based on each strategy's configured interval (min 5 min, default 480 min).
+[triggers]
+crons = ["*/5 * * * *"]

@@ -24,6 +24,8 @@ import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
 import { createX402Middleware } from "./middleware/x402.js";
+import { runDueStrategies } from "./services/strategy.js";
+import { processChat } from "./llm/client.js";
 import type { Address } from "viem";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -95,18 +97,19 @@ app.get("/api/chains", (c) => {
 app.get("/api/health", (c) =>
   c.json({
     status: "ok",
-    version: "0.4.0",
+    version: "0.7.0",
     features: [
       "manual-execution",
       "vault-delegation",
       "tx-simulation",
       "tx-monitoring",
       "x402-payments",
+      "automated-strategies",
     ],
     x402: {
-      network: "base",
+      network: "eip155:8453",
       payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
-      facilitator: "https://x402.org/facilitator",
+      facilitator: "https://api.cdp.coinbase.com/platform/v2/x402",
       paidRoutes: {
         "POST /api/chat": "$0.01",
         "GET /api/quote": "$0.002",
@@ -115,4 +118,13 @@ app.get("/api/health", (c) =>
   }),
 );
 
-export default app;
+export default {
+  fetch: app.fetch,
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ) {
+    ctx.waitUntil(runDueStrategies(env, processChat));
+  },
+};

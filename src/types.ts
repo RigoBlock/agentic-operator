@@ -26,6 +26,8 @@ export interface Env {
   AGENT_WALLET_SECRET: string; // Encryption key for agent wallet private keys
   ALCHEMY_GAS_POLICY_ID?: string; // Alchemy Gas Manager policy ID (optional, enables sponsored gas)
   TELEGRAM_BOT_TOKEN?: string; // Telegram Bot API token (optional, enables Telegram control)
+  CDP_API_KEY_ID: string;      // Coinbase Developer Platform API key ID (x402 facilitator auth)
+  CDP_API_KEY_SECRET: string;  // Coinbase Developer Platform API key secret (x402 facilitator auth)
 }
 
 // ── Telegram types ────────────────────────────────────────────────────

@@ -161,6 +161,9 @@ export interface AggregatedNav {
 }
 
 /** A single bridge operation recommended by the rebalancer */
+/** Maximum NAV impact per bridge operation (matches NAV guard) */
+const MAX_BRIDGE_NAV_IMPACT_PCT = 9n; // stay under the 10% guard
+
 export interface BridgeRecommendation {
   srcChainId: number;
   srcChainName: string;
@@ -173,6 +176,10 @@ export interface BridgeRecommendation {
   /** Estimated fee */
   estimatedFeePct?: string;
   estimatedTime?: string;
+  /** Estimated NAV impact on source chain (%) */
+  navImpactPct?: string;
+  /** true if the amount was capped to stay within the NAV guard limit */
+  capped?: boolean;
 }
 
 /** Rebalancing plan */
@@ -427,10 +434,39 @@ export async function buildRebalancePlan(params: {
     if (snap.chainId === targetChainId) continue;
     if (snap.error) continue;
 
+    // Estimate total bridgeable value on this chain (in base-token-equivalent units)
+    // For a rough impact %, we sum all bridgeable token values normalised to 18 decimals
+    const totalChainValue = snap.totalValue; // already in base token units (18 dec)
+
     for (const bal of snap.tokenBalances) {
       // Only bridge if the target chain supports this token type
       if (!targetTypes.has(bal.token.type)) continue;
       if (bal.balance === 0n) continue;
+
+      // Estimate this token's share of the chain's NAV.
+      // Normalise token balance to 18 decimals for comparison with totalValue.
+      const normalised = bal.balance * (10n ** (18n - BigInt(bal.token.decimals)));
+      let bridgeAmount = bal.balance;
+      let bridgeFormatted = bal.balanceFormatted;
+      let capped = false;
+      let impactPct = "N/A";
+
+      if (totalChainValue > 0n) {
+        const pct = (normalised * 100n) / totalChainValue;
+        impactPct = `${pct.toString()}%`;
+
+        // If bridging the full amount would exceed NAV guard, cap at safe amount
+        if (pct > MAX_BRIDGE_NAV_IMPACT_PCT) {
+          const safeNormalised = (totalChainValue * MAX_BRIDGE_NAV_IMPACT_PCT) / 100n;
+          bridgeAmount = safeNormalised / (10n ** (18n - BigInt(bal.token.decimals)));
+          const divisor = 10n ** BigInt(bal.token.decimals);
+          const whole = bridgeAmount / divisor;
+          const frac = (bridgeAmount % divisor).toString().padStart(bal.token.decimals, "0").slice(0, 6);
+          bridgeFormatted = `${whole}.${frac}`;
+          capped = true;
+          impactPct = `~${MAX_BRIDGE_NAV_IMPACT_PCT}% (capped from ${pct}%)`;
+        }
+      }
 
       operations.push({
         srcChainId: snap.chainId,
@@ -438,8 +474,10 @@ export async function buildRebalancePlan(params: {
         dstChainId: targetChainId,
         dstChainName: targetName,
         tokenType: bal.token.type,
-        amount: bal.balanceFormatted,
-        amountRaw: bal.balance,
+        amount: bridgeFormatted,
+        amountRaw: bridgeAmount,
+        navImpactPct: impactPct,
+        capped,
       });
     }
   }
