@@ -1,18 +1,18 @@
 /**
  * Quote route — direct Uniswap Trading API quote, no LLM required.
  *
- * GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=8453
+ * GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base
  * GET /api/quote?sell=USDC&buy=ETH&amount=100&chain=1
  */
 
 import { Hono } from "hono";
-import type { Env } from "../types.js";
+import type { Env, AppVariables } from "../types.js";
 import { getUniswapQuote, formatUniswapQuoteForDisplay, calculateVaultGasLimit } from "../services/uniswapTrading.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
-import { sanitizeError } from "../config.js";
+import { sanitizeError, resolveChainId } from "../config.js";
 import type { SwapIntent } from "../types.js";
 
-export const quote = new Hono<{ Bindings: Env }>();
+export const quote = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 quote.get("/", async (c) => {
   const sell = c.req.query("sell")?.toUpperCase();
@@ -35,24 +35,31 @@ quote.get("/", async (c) => {
     );
   }
 
-  // Auth gate
-  try {
-    await verifyOperatorAuth({
-      operatorAddress: operator,
-      vaultAddress: vault,
-      authSignature: sig,
-      authTimestamp: Number(ts),
-      preferredChainId: Number(chain),
-      alchemyKey: c.env.ALCHEMY_API_KEY,
-    });
-  } catch (err) {
-    if (err instanceof AuthError) {
-      return c.json({ error: err.message }, err.status as 401 | 403);
+  // Auth gate — skip when request was paid via x402 (agent access)
+  if (!c.get("x402Paid")) {
+    try {
+      await verifyOperatorAuth({
+        operatorAddress: operator,
+        vaultAddress: vault,
+        authSignature: sig,
+        authTimestamp: Number(ts),
+        preferredChainId: Number(chain),
+        alchemyKey: c.env.ALCHEMY_API_KEY,
+      });
+    } catch (err) {
+      if (err instanceof AuthError) {
+        return c.json({ error: err.message }, err.status as 401 | 403);
+      }
+      return c.json({ error: "Auth failed" }, 401);
     }
-    return c.json({ error: "Auth failed" }, 401);
   }
 
-  const chainId = Number(chain);
+  let chainId: number;
+  try {
+    chainId = resolveChainId(chain);
+  } catch {
+    return c.json({ error: `Unknown chain: ${chain}`, supported: "ethereum, base, arbitrum, optimism, polygon, bsc, unichain (or numeric ID)" }, 400);
+  }
   const intent: SwapIntent = {
     tokenIn: sell,
     tokenOut: buy,

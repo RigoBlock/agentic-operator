@@ -653,6 +653,70 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "create_strategy",
+      description:
+        "Create an automated strategy for this vault. The strategy runs on a timer (cron) and sends " +
+        "recommendations via Telegram — the operator must confirm before execution. " +
+        "Supports any instruction the LLM can evaluate: rebalancing, DCA purchases, limit orders, etc. " +
+        "Up to 3 strategies per vault. Requires Telegram to be paired.",
+      parameters: {
+        type: "object",
+        properties: {
+          instruction: {
+            type: "string",
+            description:
+              "Natural language instruction for the strategy, e.g. " +
+              "'Rebalance all tokens to Base, keeping NAV impact below 10%', " +
+              "'Buy 100 GRG with ETH if GRG/ETH price is below 0.001', " +
+              "'Check if any chain has more than 50% of total NAV and suggest rebalancing'",
+          },
+          intervalMinutes: {
+            type: "number",
+            description:
+              "How often to check, in minutes. Minimum 5. Examples: 5 (every 5 min), " +
+              "60 (hourly), 480 (every 8 hours), 1440 (daily). Default: 480.",
+          },
+        },
+        required: ["instruction"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "remove_strategy",
+      description:
+        "Remove an automated strategy by ID. Use list_strategies to see IDs. " +
+        "Pass id=0 to remove ALL strategies for this vault.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "number",
+            description: "Strategy ID to remove (from list_strategies), or 0 to remove all.",
+          },
+        },
+        required: ["id"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_strategies",
+      description:
+        "List all automated strategies for the current vault, showing their ID, instruction, " +
+        "interval, status (active/paused), last run time, and error count.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
 ];
 
 /**
@@ -811,4 +875,14 @@ CROSS-CHAIN (AINTENTS + ACROSS PROTOCOL):
   2. Call get_rebalance_plan (with user's preferred target chain if stated).
   3. Show the recommended operations (source → target, token, amount, fee) and ask which to execute.
   4. For each confirmed operation, call crosschain_transfer with the sourceChain, token, and amount.
-  5. If the plan shows missing delegation on any source chain, inform the operator and ask them to set up delegation first.`;
+  5. If the plan shows missing delegation on any source chain, inform the operator and ask them to set up delegation first.
+
+AUTO-REBALANCE STRATEGY:
+- Use create_strategy to set up any automated check: rebalancing, DCA, limit buys, etc.
+- Use remove_strategy to delete a strategy by ID (or 0 for all). Use list_strategies to show them.
+- Each strategy is a natural language instruction evaluated by the LLM on a cron timer.
+- The cron sends recommendations via Telegram — the operator confirms before execution.
+- Up to 3 strategies per vault. Minimum interval: 5 minutes. Default: 8 hours (480 min).
+- Strategies auto-pause after 3 consecutive failures and notify the operator.
+- Requires Telegram pairing. If not paired, tell the user to pair first.
+- Keywords: automate, auto-rebalance, DCA, recurring, schedule, timer, every X hours.`;

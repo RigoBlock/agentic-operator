@@ -1,32 +1,45 @@
 /**
- * x402 Payment Middleware
+ * x402 v2 Payment Middleware
  *
- * Gates premium API endpoints behind x402 micropayments (USDC on Base).
- * Own-user requests (browser UI, Telegram) are exempt via origin / Sec-Fetch checks.
- * External AI agents pay per call using the x402 protocol.
+ * Gates premium API endpoints behind x402 micropayments (USDC on Base mainnet).
+ * Own-user requests (browser UI, Telegram) are exempt via the onProtectedRequest hook.
+ * External AI agents pay per call using the x402 v2 protocol.
  *
  * Pricing:
  *   POST /api/chat  → $0.01  (LLM-powered trading chat)
  *   GET  /api/quote → $0.002 (DEX price quote)
  *
- * Uses the `x402-hono` v1 middleware (same as Cloudflare's x402-proxy template)
- * with `"base"` mainnet and the default CDP facilitator.
+ * Uses @x402/core v2 SDK with ExactEvmScheme (server-side) and the CDP
+ * facilitator at api.cdp.coinbase.com for Base mainnet support.
+ * Bazaar discovery metadata is declared via @x402/extensions declareDiscoveryExtension.
  *
- * @see https://developers.cloudflare.com/agents/x402/charge-for-http-content/
- * @see https://x402.org
+ * @see https://docs.cdp.coinbase.com/x402/quickstart-for-sellers
  */
 
-import { paymentMiddleware } from "x402-hono";
+import {
+  x402ResourceServer,
+  x402HTTPResourceServer,
+  HTTPFacilitatorClient,
+} from "@x402/core/server";
+import type {
+  HTTPAdapter,
+  HTTPRequestContext,
+  HTTPProcessResult,
+  RoutesConfig,
+} from "@x402/core/server";
+import { ExactEvmScheme } from "@x402/evm/exact/server";
+import { declareDiscoveryExtension, bazaarResourceServerExtension } from "@x402/extensions";
+import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler } from "hono";
-import type { Env } from "../types.js";
+import type { Env, AppVariables } from "../types.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
 
-/** Wallet receiving x402 payments (USDC on Base) */
-const PAY_TO = "0xA0F9C380ad1E1be09046319fd907335B2B452B37" as `0x${string}`;
+/** Wallet receiving x402 payments (USDC on Base mainnet) */
+const PAY_TO = "0xA0F9C380ad1E1be09046319fd907335B2B452B37";
 
-/** Base mainnet. Use "base-sepolia" for testnet. */
-const NETWORK = "base" as const;
+/** Base mainnet (CAIP-2) */
+const NETWORK = "eip155:8453";
 
 // ── Exempt origins (our own frontends) ────────────────────────────────
 
@@ -37,103 +50,225 @@ const EXEMPT_ORIGINS = new Set([
   "http://localhost:5173",  // vite dev
 ]);
 
-// ── Protected route config ────────────────────────────────────────────
+// ── Protected route config (v2 format) ────────────────────────────────
 
-/** Routes that require x402 payment from external agents */
-const PROTECTED_ROUTES: Record<string, { price: string; network: string; config: { description: string } }> = {
+const PROTECTED_ROUTES: RoutesConfig = {
   "POST /api/chat": {
-    price: "$0.01",
-    network: NETWORK,
-    config: { description: "AI-powered trading chat for Rigoblock vaults" },
+    accepts: [{
+      scheme: "exact",
+      payTo: PAY_TO,
+      price: "$0.01",
+      network: NETWORK,
+    }],
+    description:
+      "AI-powered trading assistant for Rigoblock vaults. Supports swaps (Uniswap, 0x), " +
+      "perpetual positions (GMX), cross-chain bridging (Across), pool deployment, and " +
+      "delegated execution via EIP-7702.",
+    mimeType: "application/json",
+    extensions: declareDiscoveryExtension({
+      bodyType: "json",
+      input: {
+        messages: "Array of {role, content} chat messages",
+        vaultAddress: "Rigoblock vault contract address (0x…)",
+        chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
+        operatorAddress: "Operator wallet address (optional)",
+        executionMode: "manual | delegated (optional, default: manual)",
+      },
+      output: {
+        example: {
+          reply: "I'll swap 1 ETH → USDC on Arbitrum via 0x…",
+          suggestions: ["Check balance", "Swap ETH to USDC"],
+          transaction: {
+            to: "0xVaultAddress",
+            data: "0xcalldata…",
+            value: "0x0",
+            chainId: 42161,
+            description: "Swap 1 ETH → 3,456.78 USDC via 0x",
+          },
+        },
+      },
+    }),
   },
   "GET /api/quote": {
-    price: "$0.002",
-    network: NETWORK,
-    config: { description: "DEX price quotes via Uniswap / 0x aggregator" },
+    accepts: [{
+      scheme: "exact",
+      payTo: PAY_TO,
+      price: "$0.002",
+      network: NETWORK,
+    }],
+    description: "DEX price quotes from Uniswap and 0x aggregator across all supported chains.",
+    mimeType: "application/json",
+    extensions: declareDiscoveryExtension({
+      input: {
+        sell: "Token to sell (ETH, USDC, WBTC, … or contract address)",
+        buy: "Token to buy (ETH, USDC, WBTC, … or contract address)",
+        amount: "Amount to sell (human-readable, e.g. '1' for 1 ETH)",
+        chain: "Chain name or ID (e.g. 'base', '8453', 'arbitrum', '42161')",
+      },
+      output: {
+        example: {
+          sell: "ETH",
+          buy: "USDC",
+          amountIn: "1.0",
+          amountOut: "3456.78",
+          priceImpact: "0.03%",
+          source: "uniswap",
+          chainId: 8453,
+        },
+      },
+    }),
   },
 };
 
-// Pre-compile route patterns for efficient matching
-const compiledRoutes = Object.entries(PROTECTED_ROUTES).map(([key, cfg]) => {
-  const spaceIdx = key.indexOf(" ");
-  const verb = key.slice(0, spaceIdx).toUpperCase();
-  const pathPattern = key.slice(spaceIdx + 1);
-  // Convert "/api/chat" → exact, "/api/quote/*" → prefix
-  const regex = pathPattern.endsWith("/*")
-    ? new RegExp(`^${pathPattern.slice(0, -2)}(/|$)`)
-    : new RegExp(`^${pathPattern}$`);
-  return { verb, regex, cfg };
-});
+// ── Build x402 v2 server (lazy-initialized) ───────────────────────────
+
+let httpServer: x402HTTPResourceServer | null = null;
+let initPromise: Promise<void> | null = null;
+
+function buildHttpServer(env: Env): x402HTTPResourceServer {
+  // Use CDP facilitator with auth for mainnet support
+  const facilitatorConfig = createFacilitatorConfig(
+    env.CDP_API_KEY_ID,
+    env.CDP_API_KEY_SECRET,
+  );
+  const facilitator = new HTTPFacilitatorClient(facilitatorConfig);
+  const resourceServer = new x402ResourceServer([facilitator])
+    .register(NETWORK, new ExactEvmScheme())
+    .registerExtension(bazaarResourceServerExtension);
+
+  const server = new x402HTTPResourceServer(resourceServer, PROTECTED_ROUTES);
+
+  // Exempt own-frontend requests from payment
+  server.onProtectedRequest(async (ctx) => {
+    const adapter = ctx.adapter;
+    const secFetchSite = adapter.getHeader("sec-fetch-site");
+    if (secFetchSite === "same-origin") {
+      return { grantAccess: true };
+    }
+
+    const origin = adapter.getHeader("origin");
+    if (origin && EXEMPT_ORIGINS.has(origin)) {
+      return { grantAccess: true };
+    }
+
+    const referer = adapter.getHeader("referer");
+    if (referer) {
+      for (const o of EXEMPT_ORIGINS) {
+        if (referer.startsWith(o)) {
+          return { grantAccess: true };
+        }
+      }
+    }
+    // Continue to payment flow
+  });
+
+  return server;
+}
+
+async function getHttpServer(env: Env): Promise<x402HTTPResourceServer> {
+  if (!httpServer) {
+    httpServer = buildHttpServer(env);
+    initPromise = httpServer.initialize();
+  }
+  await initPromise;
+  return httpServer;
+}
+
+// ── Hono HTTPAdapter ──────────────────────────────────────────────────
+
+function honoAdapter(c: { req: { header(name: string): string | undefined; method: string; url: string } }): HTTPAdapter {
+  const url = new URL(c.req.url);
+  return {
+    getHeader: (name: string) => c.req.header(name),
+    getMethod: () => c.req.method,
+    getPath: () => url.pathname,
+    getUrl: () => c.req.url,
+    getAcceptHeader: () => c.req.header("accept") ?? "",
+    getUserAgent: () => c.req.header("user-agent") ?? "",
+    getQueryParams: () => Object.fromEntries(url.searchParams.entries()),
+    getQueryParam: (name: string) => url.searchParams.get(name) ?? undefined,
+  };
+}
 
 // ── Middleware factory ─────────────────────────────────────────────────
 
 /**
- * Creates the x402 payment middleware for Hono.
+ * Creates the x402 v2 payment middleware for Hono.
  *
- * Flow for each request:
- * 1. Check exempt origins (browser UI, Telegram) → skip payment
- * 2. Match against protected routes → if no match, skip payment
- * 3. Apply x402 `paymentMiddleware` from `x402-hono` → returns 402 with
- *    payment instructions. Client pays USDC on Base, retries with
- *    X-PAYMENT header → access granted.
- *
- * Uses the default CDP facilitator (no custom facilitator URL needed).
+ * Flow:
+ * 1. Lazy-init the x402HTTPResourceServer (fetches facilitator support once)
+ * 2. Build HTTPRequestContext from Hono context
+ * 3. processHTTPRequest → returns one of:
+ *    - "no-payment-required"  → next()
+ *    - "payment-verified"     → next(), then settle
+ *    - "payment-error"        → return 402 with payment instructions
  */
-export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env }> {
+export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
   return async (c, next) => {
-    // ── 1. Exempt our own frontend users ───────────────────────────
+    const server = await getHttpServer(c.env);
 
-    // Sec-Fetch-Site is set by the browser and cannot be spoofed via JS.
-    const secFetchSite = c.req.header("sec-fetch-site");
-    if (secFetchSite === "same-origin") {
+    const adapter = honoAdapter(c);
+    const context: HTTPRequestContext = {
+      adapter,
+      path: adapter.getPath(),
+      method: adapter.getMethod(),
+      paymentHeader: adapter.getHeader("x-payment"),
+    };
+
+    const result: HTTPProcessResult = await server.processHTTPRequest(context);
+
+    if (result.type === "no-payment-required") {
       return next();
     }
 
-    // Fallback: check Origin / Referer for known frontends
-    const origin = c.req.header("origin");
-    if (origin && EXEMPT_ORIGINS.has(origin)) {
-      return next();
+    if (result.type === "payment-error") {
+      const { status, headers, body, isHtml } = result.response;
+      for (const [k, v] of Object.entries(headers)) {
+        c.header(k, v);
+      }
+      if (isHtml) {
+        c.header("content-type", "text/html");
+        return c.html(body as string, status as 402);
+      }
+      return c.json(body as Record<string, unknown>, status as 402);
     }
 
-    const referer = c.req.header("referer");
-    if (referer) {
-      for (const o of EXEMPT_ORIGINS) {
-        if (referer.startsWith(o)) {
-          return next();
+    // payment-verified → flag context so routes skip their own auth, then run handler
+    const { paymentPayload, paymentRequirements, declaredExtensions } = result;
+    c.set("x402Paid", true);
+    await next();
+
+    // Only settle if the route handler succeeded (2xx).
+    // Don't charge agents for our errors (5xx) or their malformed requests (4xx).
+    const responseStatus = c.res.status;
+    if (responseStatus >= 400) {
+      console.warn(`[x402] Skipping settlement — route returned ${responseStatus}`);
+      return;
+    }
+
+    // Settle the payment after a successful response
+    const settleResult = await server.processSettlement(
+      paymentPayload,
+      paymentRequirements,
+      declaredExtensions,
+      { request: context },
+    );
+
+    if (settleResult.success) {
+      for (const [k, v] of Object.entries(settleResult.headers)) {
+        c.header(k, v);
+      }
+      console.log(`[x402] Settlement succeeded, headers:`, Object.keys(settleResult.headers));
+    } else {
+      // Settlement failed — log but still return the successful response.
+      // The agent got the data; settlement failure is between us and the facilitator.
+      console.error(`[x402] Settlement failed:`, (settleResult as any).errorReason ?? "unknown");
+      // Still set whatever headers came back (may include error info)
+      if ((settleResult as any).headers) {
+        for (const [k, v] of Object.entries((settleResult as any).headers)) {
+          c.header(k, v as string);
         }
       }
     }
-
-    // ── 2. Check if this route is protected ────────────────────────
-
-    const method = c.req.method.toUpperCase();
-    const path = new URL(c.req.url).pathname;
-    const matched = compiledRoutes.find(
-      (r) => r.verb === method && r.regex.test(path),
-    );
-
-    if (!matched) {
-      // Not a protected route — proceed without payment
-      return next();
-    }
-
-    // ── 3. Apply x402 payment middleware ───────────────────────────
-
-    // Build route config keyed by the matched path (x402-hono matches on path)
-    const routeKey = path;
-    const paymentMw = paymentMiddleware(
-      PAY_TO,
-      {
-        [routeKey]: {
-          price: matched.cfg.price,
-          network: NETWORK,
-          config: { description: matched.cfg.config.description },
-        },
-      },
-      // undefined = use default CDP facilitator (supports Base mainnet)
-    );
-
-    // paymentMiddleware returns (c, next) => Promise<void | Response>
-    return paymentMw(c, next);
   };
 }

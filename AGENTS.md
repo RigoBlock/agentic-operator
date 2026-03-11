@@ -1,0 +1,355 @@
+# AGENTS.md — External Agent Integration Guide
+
+> How external AI agents interact with the Rigoblock Agentic Operator via x402.
+> This document covers the security model, access tiers, and what agents can
+> and cannot do.
+
+---
+
+## Overview
+
+The Rigoblock Agentic Operator exposes two x402-gated endpoints:
+
+| Endpoint | Method | Price | What it returns |
+|----------|--------|-------|-----------------|
+| `/api/quote` | GET | $0.002 USDC | DEX price quote (no vault context needed) |
+| `/api/chat` | POST | $0.01 USDC | AI-powered DeFi response (swap calldata, positions, analysis) |
+
+Payments are in USDC on **Base mainnet** (`eip155:8453`) via the
+[x402 protocol](https://x402.org). The CDP facilitator at
+`api.cdp.coinbase.com` handles verification and settlement.
+
+---
+
+## Access Tiers
+
+### Tier 1: Anonymous (x402 payment only)
+
+**What:** Agent pays x402 fee. No operator credentials.
+**Gets:** Unsigned transaction data, price quotes, DeFi analysis.
+**Cannot:** Execute transactions on any vault.
+
+```
+GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base
+X-PAYMENT: <x402-payment-header>
+
+→ 200: { sell: "1 ETH", buy: "2079.54 USDC", price: "1 ETH = 2079.54 USDC", ... }
+```
+
+```
+POST /api/chat
+X-PAYMENT: <x402-payment-header>
+Content-Type: application/json
+
+{
+  "messages": [{"role": "user", "content": "swap 1 ETH for USDC on Base"}],
+  "vaultAddress": "0xYourVault",
+  "chainId": 8453
+}
+
+→ 200: {
+    "reply": "I'll prepare a swap of 1 ETH → USDC on Base via Uniswap...",
+    "transaction": {
+      "to": "0xYourVault",
+      "data": "0x...",           ← unsigned calldata
+      "value": "0x0",
+      "chainId": 8453,
+      "description": "Swap 1 ETH → 2,079.54 USDC via Uniswap"
+    }
+  }
+```
+
+The agent receives unsigned calldata. To execute it, the agent (or its operator)
+must sign and broadcast the transaction themselves. The calling agent's wallet is
+**never** used to operate the vault — the vault contract requires the transaction
+to come from its owner.
+
+**Use cases:**
+- Price discovery across 7 chains
+- Natural language → structured DeFi calldata
+- Portfolio analysis and position queries (read-only)
+- Strategy recommendations (analysis only)
+
+### Tier 2: Authenticated (x402 payment + operator signature)
+
+**What:** Agent pays x402 fee AND provides operator auth credentials.
+**Gets:** Everything in Tier 1, plus delegated (auto-execute) mode.
+**Can:** Trigger our agent wallet to execute trades on the authenticated vault.
+
+```
+POST /api/chat
+X-PAYMENT: <x402-payment-header>
+Content-Type: application/json
+
+{
+  "messages": [{"role": "user", "content": "swap 1 ETH for USDC on Base"}],
+  "vaultAddress": "0xYourVault",
+  "chainId": 8453,
+  "operatorAddress": "0xOperatorWallet",
+  "authSignature": "0x...",
+  "authTimestamp": 1741700000000,
+  "executionMode": "delegated",
+  "confirmExecution": true
+}
+
+→ 200: {
+    "reply": "Executed: swapped 1 ETH → 2,079.54 USDC",
+    "executionResult": {
+      "txHash": "0x...",
+      "confirmed": true,
+      "explorerUrl": "https://basescan.org/tx/0x..."
+    }
+  }
+```
+
+**Requirements for Tier 2:**
+1. The `operatorAddress` must be the vault owner on at least one supported chain
+2. The `authSignature` must be a valid EIP-191 signature of the auth message,
+   signed by `operatorAddress`
+3. The vault must have active delegation to our agent wallet on the target chain
+4. The agent wallet must be authorized for the required function selector
+
+**Auth message format:**
+```
+Welcome to Rigoblock Operator
+
+Sign this message to verify your wallet and access your smart pool assistant.
+```
+
+The signature is valid for 24 hours from `authTimestamp`.
+
+---
+
+## Security Model
+
+### What the x402 payment wallet CAN do:
+- Pay for API access ($0.002–$0.01 per call)
+- Receive unsigned transaction data
+- Query prices, positions, and vault info
+- Get natural language DeFi analysis
+
+### What the x402 payment wallet CANNOT do:
+- Execute transactions on any vault
+- Trigger delegated execution (even if the vault has delegation active)
+- Access operator-only endpoints without a valid operator signature
+- Bypass the NAV guard or any on-chain safety check
+
+### What the operator signature unlocks:
+- Delegated execution mode (our agent wallet executes on the vault)
+- Access to vault-specific operations that modify state
+- The operator signature proves: "I own this vault and authorize this action"
+
+### Why these are separate:
+The x402 payer and the operator are typically different wallets:
+- **x402 payer:** The agent's operational wallet (holds USDC on Base for API fees)
+- **Operator:** The vault owner's wallet (controls on-chain vault permissions)
+
+An agent builder might have one x402 payment wallet but interact with multiple
+vaults owned by different operators. The operator must independently authorize
+the agent by providing a signed auth credential.
+
+---
+
+## Safety Guarantees
+
+Every transaction that our agent wallet executes passes through these checks
+**before broadcast:**
+
+### 1. Operator Authentication
+The caller must provide a valid signature proving they own the target vault.
+No signature, no execution. This prevents any agent from operating vaults
+they don't control.
+
+### 2. Delegation Verification
+The vault must have active on-chain delegation to our specific agent wallet
+for the required function selector. The vault owner controls which functions
+are delegated and can revoke at any time.
+
+### 3. Seven-Point Execution Validation
+1. Delegation config exists and is enabled in our KV store
+2. Transaction target is the vault address (prevents cross-contract attacks)
+3. Function selector is in the allowed set (whitelist, not blacklist)
+4. Agent wallet identity matches stored config
+5. Transaction simulation passes via `eth_call` (catches reverts pre-broadcast)
+6. Agent wallet has sufficient balance for gas
+7. Gas fees within hard caps per chain
+
+### 4. NAV Guard (10% Maximum Loss)
+Before every transaction broadcast, the system simulates the trade's impact
+on the vault's Net Asset Value per unit:
+
+- Atomically simulates: `multicall([swap, getNavDataView])`
+- Compares post-swap NAV against the **higher of:** pre-swap NAV or 24-hour baseline
+- If NAV drops > 10% → **transaction BLOCKED**, reason returned to caller
+- This check runs outside the agent's control surface — it cannot be disabled,
+  bypassed, or circumvented by any API caller
+
+### 5. Slippage Protection
+Default slippage tolerance: 1% (100 basis points). Combined with the NAV guard,
+this provides two layers of price protection.
+
+---
+
+## What Agents CANNOT Do (Even with Full Authentication)
+
+Even a fully authenticated agent with delegation access CANNOT:
+
+| Action | Why not |
+|--------|---------|
+| Drain vault assets to external address | `withdraw` and `transferOwnership` selectors are never delegated |
+| Execute trades that lose > 10% NAV | NAV guard blocks pre-broadcast |
+| Bypass slippage protection | Slippage is enforced in swap calldata building |
+| Call arbitrary contract functions | Selector whitelist — only approved vault functions |
+| Send transactions to non-vault contracts | Target address must equal vault address |
+| Spend more gas than the per-chain cap | Gas caps are hard-coded, not configurable |
+| Modify delegation settings | Only vault owner can call `updateDelegation` from their wallet |
+
+---
+
+## Settlement Policy
+
+x402 settlement (USDC transfer) only occurs when the API returns a **2xx response:**
+
+| Response | Settlement | Reason |
+|----------|-----------|--------|
+| 200 OK | Settled | Agent received value — charge applies |
+| 400 Bad Request | NOT settled | Malformed request — agent not charged |
+| 401 Unauthorized | NOT settled | Auth failure — agent not charged |
+| 500 Server Error | NOT settled | Our fault — agent not charged |
+
+If settlement fails or is skipped, the CDP facilitator releases the held funds
+back to the paying wallet after `maxTimeoutSeconds` (300s).
+
+The `PAYMENT-RESPONSE` header on the response contains the settlement receipt
+(base64-encoded JSON) when settlement succeeds.
+
+---
+
+## The `/api/quote` Endpoint
+
+Stateless price quotes. No vault context needed. No operator auth.
+
+```
+GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base
+```
+
+**Query parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `sell` | Yes | Token to sell (symbol or contract address) |
+| `buy` | Yes | Token to buy (symbol or contract address) |
+| `amount` | Yes | Amount to sell (human-readable, e.g. "1" for 1 ETH) |
+| `chain` | No (default: 8453) | Chain name or ID: `base`, `arbitrum`, `8453`, `42161`, etc. |
+
+**Response:**
+```json
+{
+  "sell": "1 ETH",
+  "buy": "2079.548076 USDC",
+  "price": "1 ETH = 2079.5481 USDC",
+  "routing": "CLASSIC",
+  "gasFeeUSD": "0.002423",
+  "gasLimit": "394000",
+  "chainId": 8453
+}
+```
+
+---
+
+## x402 Client Setup (TypeScript)
+
+```typescript
+import { createWalletClient, http } from "viem";
+import { base } from "viem/chains";
+import { privateKeyToAccount } from "viem/accounts";
+import { publicActions } from "viem";
+import { x402Client, x402HTTPClient } from "@x402/core/client";
+import { ExactEvmScheme, toClientEvmSigner } from "@x402/evm";
+
+// 1. Create a signer with USDC on Base (for x402 payments)
+const account = privateKeyToAccount(PRIVATE_KEY);
+const walletClient = createWalletClient({
+  account,
+  chain: base,
+  transport: http(),
+}).extend(publicActions);
+
+// IMPORTANT: pass account as first arg (has .address), walletClient as second
+const signer = toClientEvmSigner(account, walletClient);
+
+// 2. Register the EVM exact scheme for Base mainnet
+const client = new x402Client();
+client.register("eip155:8453", new ExactEvmScheme(signer));
+const httpClient = new x402HTTPClient(client);
+
+// 3. Make a paid request
+const res = await fetch("https://trader.rigoblock.com/api/quote?sell=ETH&buy=USDC&amount=1&chain=base");
+
+if (res.status === 402) {
+  const body = await res.json();
+  const paymentRequired = httpClient.getPaymentRequiredResponse(
+    (name) => res.headers.get(name),
+    body,
+  );
+  const paymentPayload = await httpClient.createPaymentPayload(paymentRequired);
+  const headers = httpClient.encodePaymentSignatureHeader(paymentPayload);
+
+  const paidRes = await fetch(
+    "https://trader.rigoblock.com/api/quote?sell=ETH&buy=USDC&amount=1&chain=base",
+    { headers },
+  );
+  console.log(await paidRes.json());
+}
+```
+
+---
+
+## Supported Chains
+
+| Chain | ID | Name | Short |
+|-------|----|------|-------|
+| Ethereum | 1 | Ethereum | `ethereum` |
+| Base | 8453 | Base | `base` |
+| Arbitrum | 42161 | Arbitrum | `arbitrum` |
+| Optimism | 10 | Optimism | `optimism` |
+| Polygon | 137 | Polygon | `polygon` |
+| BNB Chain | 56 | BNB Chain | `bsc` |
+| Unichain | 130 | Unichain | `unichain` |
+
+---
+
+## Bazaar Discovery
+
+This service is registered in the [x402 Bazaar](https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources),
+Coinbase's discovery API for x402-enabled services. AI agents using the Bazaar
+can discover and call our endpoints automatically.
+
+---
+
+## FAQ
+
+**Q: Does the x402 paying wallet need to be the vault operator?**
+No. The x402 payer and the vault operator are independent. The x402 payer pays
+for API access. The operator proves vault ownership via signature. They can be
+different wallets.
+
+**Q: Can an agent execute trades without the operator's private key?**
+No. Delegated execution requires a valid operator signature. Without it, the
+agent only gets unsigned transaction data (manual mode).
+
+**Q: What happens if an agent provides a wrong vault address?**
+In manual mode: they get calldata they can't execute (they don't own the vault).
+In authenticated mode: `verifyOperatorAuth` checks on-chain that the signer owns
+the vault — if they don't, the request is rejected with 403.
+
+**Q: Can an agent drain a vault through repeated small trades?**
+The NAV guard checks against a 24-hour baseline. Each trade is checked
+independently against the higher of the pre-swap NAV or the 24h baseline.
+A series of 1% losses would be individually allowed but would shift the
+baseline down over 24 hours. The 10% per-trade limit is the hard cap.
+
+**Q: What if the agent wallet private key is compromised?**
+The vault owner can revoke delegation at any time via `revokeAllDelegations()`.
+The agent wallet can only call whitelisted selectors on the vault — cannot
+withdraw funds or transfer ownership.
