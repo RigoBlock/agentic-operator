@@ -17,17 +17,18 @@
  */
 
 import { Hono, type Context } from "hono";
-import type { Env, ChatMessage, RequestContext, ChatResponse, TelegramConversation } from "../types.js";
+import type { Env, ChatMessage, RequestContext, ChatResponse, TelegramConversation, UnsignedTransaction } from "../types.js";
 import type { Address } from "viem";
 import { processChat } from "../llm/client.js";
-import { isDelegationActive } from "../services/delegation.js";
-import { executeViaDelegation, ExecutionError } from "../services/execution.js";
+import { isDelegationActive, isDelegationActiveAnyChain } from "../services/delegation.js";
+import { executeTxList, type TxExecOutcome } from "../services/execution.js";
 import { initTokenResolver } from "../services/tokenResolver.js";
 import {
   sendMessage,
   editMessageText,
   answerCallbackQuery,
   sendChatAction,
+  deleteMessage,
   setWebhook,
   formatForTelegram,
   escapeHtml,
@@ -47,7 +48,7 @@ import {
 } from "../services/telegramPairing.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { getVaultInfo } from "../services/vault.js";
-import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "../config.js";
+import { SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
 import type { TelegramVaultLink } from "../types.js";
 
 const telegram = new Hono<{ Bindings: Env }>();
@@ -135,14 +136,24 @@ telegram.post("/pair", async (c) => {
       return c.json({ error: err.message }, err.status as 401 | 403);
     }
     const msg = err instanceof Error ? err.message : "Internal error";
-    return c.json({ error: msg }, 500);
+    return c.json({ error: sanitizeError(msg) }, 500);
   }
 });
 
 // ── Setup: register webhook URL with Telegram ─────────────────────────
 // Exposed as both GET and POST to avoid Cloudflare WAF blocking bare POSTs.
+// Protected: requires AGENT_WALLET_SECRET as query param or X-Admin-Secret header.
+
+function verifyAdminSecret(c: Context<{ Bindings: Env }>): boolean {
+  const secret = c.env.AGENT_WALLET_SECRET;
+  if (!secret) return false;
+  const provided = c.req.query("secret") || c.req.header("x-admin-secret") || "";
+  return provided === secret;
+}
 
 const setupHandler = async (c: Context<{ Bindings: Env }>) => {
+  if (!verifyAdminSecret(c)) return c.json({ error: "Unauthorized" }, 401);
+
   const token = c.env.TELEGRAM_BOT_TOKEN;
   if (!token) return c.json({ error: "TELEGRAM_BOT_TOKEN not set" }, 400);
 
@@ -169,8 +180,11 @@ telegram.post("/setup", setupHandler);
 telegram.get("/setup", setupHandler);
 
 // ── Diagnostic: check webhook status from Telegram's side ─────────────
+// Protected: requires AGENT_WALLET_SECRET.
 
 telegram.get("/debug", async (c) => {
+  if (!verifyAdminSecret(c)) return c.json({ error: "Unauthorized" }, 401);
+
   const token = c.env.TELEGRAM_BOT_TOKEN;
   if (!token) return c.json({ error: "TELEGRAM_BOT_TOKEN not set" }, 400);
 
@@ -388,8 +402,9 @@ async function handleMessage(
     return;
   }
 
-  // Show "typing…"
+  // Show "typing…" and keep it alive while processing
   await sendChatAction(token, chatId);
+  const typingInterval = setInterval(() => sendChatAction(token, chatId).catch(() => {}), 4000);
 
   // Load or create conversation
   let conv = await getConversation(env.KV, userId);
@@ -405,9 +420,11 @@ async function handleMessage(
   // Append user message
   conv.messages.push({ role: "user", content: text });
 
-  // Check if delegation is active (determines execution mode)
-  const delegationActive = await isDelegationActive(env.KV, vault.address, vault.chainId);
-  const executionMode = delegationActive ? "delegated" : "manual";
+  // Check if delegation is active on current chain OR any chain
+  // This allows multi-chain swaps where target chains have delegation
+  const delegationOnCurrentChain = await isDelegationActive(env.KV, vault.address, vault.chainId);
+  const delegationOnAnyChain = delegationOnCurrentChain || await isDelegationActiveAnyChain(env.KV, vault.address);
+  const executionMode = delegationOnAnyChain ? "delegated" : "manual";
 
   const ctx: RequestContext = {
     vaultAddress: vault.address,
@@ -420,13 +437,48 @@ async function handleMessage(
     // Initialize token resolver
     if (env.KV) initTokenResolver(env.KV);
 
-    const response: ChatResponse = await processChat(env, conv.messages as ChatMessage[], ctx);
+    // Track progress message for intermediate tool results
+    let progressMsgId: number | undefined;
+    const progressLines: string[] = [];
+
+    const response: ChatResponse = await processChat(
+      env,
+      conv.messages as ChatMessage[],
+      ctx,
+      async (toolName, result, isError) => {
+        // Show intermediate tool results as a live-updating message
+        const prefix = isError ? "⚠️ " : "✅ ";
+        // Show a short summary — first line of the result, max 200 chars
+        const firstLine = result.split("\n")[0].slice(0, 200);
+        progressLines.push(`${prefix}${escapeHtml(firstLine)}`);
+        const text = progressLines.join("\n");
+        if (!progressMsgId) {
+          const sent = await sendMessage(token, chatId, text).catch(() => null);
+          if (sent?.message_id) progressMsgId = sent.message_id;
+        } else {
+          await editMessageText(token, chatId, progressMsgId, text).catch(() => {});
+        }
+      },
+    );
+    clearInterval(typingInterval);
+
+    // Delete progress message — final reply will contain full details
+    if (progressMsgId) {
+      await deleteMessage(token, chatId, progressMsgId).catch(() => {});
+    }
 
     // Track chain switches in conversation state
     if (response.chainSwitch) {
       conv.chainId = response.chainSwitch;
       vault.chainId = response.chainSwitch;
     }
+
+    // Collect all transactions (multi-tx or single)
+    const txList = response.transactions && response.transactions.length > 0
+      ? response.transactions
+      : response.transaction
+        ? [response.transaction]
+        : [];
 
     // Build the Telegram reply
     let replyParts: string[] = [];
@@ -448,37 +500,46 @@ async function handleMessage(
       replyParts.push(formatForTelegram(response.reply));
     }
 
-    // If there's a transaction and we're in delegated mode → show Execute/Cancel buttons
-    if (response.transaction && executionMode === "delegated") {
-      // Store the pending tx in KV for callback handling
+    // Handle transactions
+    if (txList.length > 0 && executionMode === "delegated") {
+      // Store all pending transactions in KV for callback handler
       const txKey = `tg-pending-tx:${userId}`;
-      await env.KV.put(txKey, JSON.stringify(response.transaction), {
+      await env.KV.put(txKey, JSON.stringify(txList), {
         expirationTtl: 300, // 5 min expiry
       });
 
-      const meta = response.transaction.swapMeta;
-      const label = meta
-        ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
-        : response.transaction.description || "Execute transaction";
+      // Build trade summary for all transactions
+      const tradeLabels: string[] = [];
+      for (const tx of txList) {
+        const meta = tx.swapMeta;
+        const label = meta
+          ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
+          : tx.description || "Transaction";
+        const chainName = SUPPORTED_CHAINS.find(ch => ch.id === tx.chainId)?.name
+          || TESTNET_CHAINS.find(ch => ch.id === tx.chainId)?.name
+          || String(tx.chainId);
+        tradeLabels.push(`• ${escapeHtml(label)} (${chainName})`);
+      }
+
+      const tradeCount = txList.length > 1 ? `${txList.length} trades` : "Trade";
+      replyParts.push(`\n🔔 <b>${tradeCount} ready:</b>\n${tradeLabels.join("\n")}`);
 
       const keyboard: TgInlineKeyboardMarkup = {
         inline_keyboard: [
           [
-            { text: "✅ Execute", callback_data: `exec:${userId}` },
+            { text: `✅ Execute${txList.length > 1 ? " All" : ""}`, callback_data: `exec:${userId}` },
             { text: "❌ Cancel", callback_data: `cancel:${userId}` },
           ],
         ],
       };
 
-      replyParts.push(`\n🔔 <b>Trade ready:</b> ${escapeHtml(label)}`);
       const fullReply = replyParts.join("\n\n") || "Ready.";
-
-      // Truncate if too long for Telegram (4096 char limit)
       const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
       await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
-    } else if (response.transaction && executionMode === "manual") {
+    } else if (txList.length > 0 && executionMode === "manual") {
       // Manual mode — can't sign from Telegram
-      replyParts.push("\n⚠️ This trade requires wallet signing. Please complete it in the web app, or set up delegation to execute from Telegram.");
+      const tradeCount = txList.length > 1 ? `These ${txList.length} trades require` : "This trade requires";
+      replyParts.push(`\n⚠️ ${tradeCount} wallet signing. Please complete in the web app, or set up delegation to execute from Telegram.`);
       const fullReply = replyParts.join("\n\n") || "Ready.";
       const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
       await sendMessage(token, chatId, truncated);
@@ -509,9 +570,11 @@ async function handleMessage(
     await saveConversation(env.KV, userId, conv);
 
   } catch (err) {
+    clearInterval(typingInterval);
     console.error("[telegram] processChat error:", err);
-    const errMsg = err instanceof Error ? err.message : "Unknown error";
-    await sendMessage(token, chatId, `⚠️ Error: ${escapeHtml(errMsg.slice(0, 200))}`);
+    const rawMsg = err instanceof Error ? err.message : "Unknown error";
+    const safeMsg = sanitizeError(rawMsg);
+    await sendMessage(token, chatId, `⚠️ Error: ${escapeHtml(safeMsg.slice(0, 200))}`);
   }
 }
 
@@ -557,71 +620,51 @@ async function handleCallbackQuery(
       return;
     }
 
-    const tx = JSON.parse(raw) as {
-      to: string;
-      data: string;
-      value: string;
-      chainId: number;
-      gas: string;
-      description: string;
-      swapMeta?: { sellAmount: string; sellToken: string; buyAmount: string; buyToken: string; price: string; dex: string };
-    };
+    // Parse stored transactions — supports both single tx (legacy) and array
+    const parsed = JSON.parse(raw);
+    const txList: UnsignedTransaction[] = (Array.isArray(parsed) ? parsed : [parsed]).map(
+      (t: Record<string, unknown>) => ({
+        to: t.to as Address,
+        data: t.data as `0x${string}`,
+        value: (t.value as string) || "0x0",
+        chainId: t.chainId as number,
+        gas: (t.gas as string) || "0x0",
+        description: (t.description as string) || "",
+        swapMeta: t.swapMeta as UnsignedTransaction["swapMeta"],
+      }),
+    );
 
-    // Delete pending tx
+    // Delete pending txs
     await env.KV.delete(txKey);
 
     // Update message to show "executing…"
-    await editMessageText(token, chatId, messageId, "⏳ Executing trade…");
+    const progressLabel = txList.length > 1 ? `Executing ${txList.length} trades…` : "Executing trade…";
+    await editMessageText(token, chatId, messageId, `⏳ ${progressLabel}`);
 
-    try {
-      const result = await executeViaDelegation(
-        env,
-        {
-          to: tx.to as Address,
-          data: tx.data as `0x${string}`,
-          value: tx.value,
-          chainId: tx.chainId,
-          gas: tx.gas,
-          description: tx.description,
-        },
-        tx.to, // vault address
-      );
+    // The vault address is always tx.to (validated by executeViaDelegation)
+    const vaultAddress = txList[0].to;
 
-      if (result.confirmed) {
-        const meta = tx.swapMeta;
-        const gasInfo = result.gasCostEth ? ` (gas: ${result.gasCostEth} ETH)` : "";
-        const tradeLabel = meta
-          ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
-          : tx.description;
-        const explorerLink = result.explorerUrl
-          ? `<a href="${result.explorerUrl}">View on explorer</a>`
-          : `Tx: <code>${result.txHash.slice(0, 14)}…</code>`;
-
+    const outcomes = await executeTxList(env, txList, vaultAddress, async (idx, total, soFar) => {
+      if (total > 1) {
+        const done = soFar.length > 0 ? "\n\n" + formatTelegramOutcomes(soFar) : "";
         await editMessageText(
           token, chatId, messageId,
-          `✅ <b>Trade confirmed</b> (block ${result.blockNumber || "?"})${gasInfo}\n${escapeHtml(tradeLabel)}\n${explorerLink}`,
-        );
-      } else if (result.reverted) {
-        const explorerLink = result.explorerUrl
-          ? `<a href="${result.explorerUrl}">View failed tx</a>`
-          : "";
-        await editMessageText(
-          token, chatId, messageId,
-          `❌ <b>Transaction reverted</b>\n${escapeHtml(tx.description)}\n${explorerLink}\n\nTry again with a fresh quote.`,
-        );
-      } else {
-        await editMessageText(
-          token, chatId, messageId,
-          `⏳ Transaction submitted: <code>${result.txHash.slice(0, 14)}…</code>\nWaiting for confirmation…`,
-        );
+          `⏳ Executing trade ${idx + 1} of ${total}…${done}`,
+        ).catch(() => {});
       }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : "Execution failed";
-      await editMessageText(
-        token, chatId, messageId,
-        `⚠️ Execution error: ${escapeHtml(errMsg.slice(0, 200))}`,
-      );
-    }
+    });
+
+    // We need outcomes to be available inside the callback, so collect them first
+    const resultLines = formatTelegramOutcomes(outcomes);
+    const allSuccess = outcomes.every(o => o.result?.confirmed && !o.result?.reverted);
+
+    // Final summary
+    const header = allSuccess
+      ? (txList.length > 1 ? `✅ <b>All ${txList.length} trades confirmed</b>` : "✅ <b>Trade confirmed</b>")
+      : "⚠️ <b>Some trades failed</b>";
+    const finalMsg = `${header}\n\n${resultLines}`;
+    const truncated = finalMsg.length > 4000 ? finalMsg.slice(0, 3990) + "…" : finalMsg;
+    await editMessageText(token, chatId, messageId, truncated);
 
     return;
   }
@@ -636,6 +679,31 @@ async function handleCallbackQuery(
   }
 
   await answerCallbackQuery(token, query.id);
+}
+
+/** Format TxExecOutcome[] as Telegram HTML lines */
+function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
+  const lines: string[] = [];
+  for (const { tx, result, error } of outcomes) {
+    const meta = tx.swapMeta;
+    const desc = meta
+      ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
+      : tx.description || "Transaction";
+
+    if (result?.confirmed) {
+      const gasInfo = result.gasCostEth ? ` (gas: ${result.gasCostEth} ETH)` : "";
+      const link = result.explorerUrl ? `<a href="${result.explorerUrl}">↗</a>` : "";
+      lines.push(`✅ ${escapeHtml(desc)}${gasInfo} ${link}`);
+    } else if (result?.reverted) {
+      const link = result.explorerUrl ? `<a href="${result.explorerUrl}">↗</a>` : "";
+      lines.push(`❌ ${escapeHtml(desc)} — reverted ${link}`);
+    } else if (result) {
+      lines.push(`⏳ ${escapeHtml(desc)} — submitted: <code>${result.txHash.slice(0, 14)}…</code>`);
+    } else if (error) {
+      lines.push(`⚠️ ${escapeHtml(desc)} — ${escapeHtml(error.slice(0, 150))}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 // ── Help message ──────────────────────────────────────────────────────

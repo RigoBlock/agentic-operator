@@ -140,6 +140,18 @@ export async function sendChatAction(
   });
 }
 
+/** Delete a message by ID. */
+export async function deleteMessage(
+  token: string,
+  chatId: number,
+  messageId: number,
+): Promise<void> {
+  await callTg(token, "deleteMessage", {
+    chat_id: chatId,
+    message_id: messageId,
+  });
+}
+
 /** Set the webhook URL for the bot. Called once during setup. */
 export async function setWebhook(
   token: string,

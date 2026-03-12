@@ -344,15 +344,14 @@ delegation.post("/execute", async (c) => {
     }
     if (err instanceof ExecutionError) {
       console.error(`[delegation/execute] ExecutionError: code=${err.code} msg=${err.message}`);
-      return c.json({ error: err.message, code: err.code }, 400);
+      return c.json({ error: sanitizeError(err.message), code: err.code }, 400);
     }
     // Log the FULL error for debugging — the sanitized version hides crucial details
     const errMsg = err instanceof Error ? err.message : String(err);
     const errStack = err instanceof Error ? err.stack : undefined;
     console.error(`[delegation/execute] UNHANDLED ERROR: ${errMsg}`);
     if (errStack) console.error(`[delegation/execute] Stack: ${errStack}`);
-    // Return the real error message (not sanitized) for debugging
-    return c.json({ error: errMsg }, 500);
+    return c.json({ error: sanitizeError(errMsg) }, 500);
   }
 });
 

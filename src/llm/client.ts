@@ -64,9 +64,11 @@ export async function processChat(
   env: Env,
   messages: ChatMessage[],
   ctx: RequestContext,
+  onToolResult?: (toolName: string, result: string, isError: boolean) => Promise<void>,
 ): Promise<ChatResponse> {
   const openai = new OpenAI({
     apiKey: env.OPENAI_API_KEY,
+    timeout: 25_000, // 25s — stay well within Cloudflare's 30s subrequest limit
   });
 
   // Build system prompt with vault context
@@ -163,7 +165,7 @@ ${executionModeNote}`;
   if (!choice) throw new Error("No response from LLM");
 
   const toolCallResults: ToolCallResult[] = [];
-  let pendingTransaction: UnsignedTransaction | undefined;
+  const pendingTransactions: UnsignedTransaction[] = [];
   let pendingChainSwitch: number | undefined;
   let detectedDex: string | undefined;
   let pendingSuggestions: string[] | undefined;
@@ -195,7 +197,7 @@ ${executionModeNote}`;
         result = toolResult.message;
         console.log(`[LLM] Tool ${name} succeeded, result length: ${result.length}`);
         if (toolResult.transaction) {
-          pendingTransaction = toolResult.transaction;
+          pendingTransactions.push(toolResult.transaction);
         }
         if (toolResult.chainSwitch) {
           pendingChainSwitch = toolResult.chainSwitch;
@@ -226,6 +228,9 @@ ${executionModeNote}`;
         error: isError,
       });
 
+      // Notify caller of intermediate results (e.g. Telegram sends progress message)
+      if (onToolResult) await onToolResult(name, result, isError).catch(() => {});
+
       toolMessages.push({
         role: "tool",
         tool_call_id: toolCall.id,
@@ -233,16 +238,21 @@ ${executionModeNote}`;
       });
     }
 
-    // If we already have a transaction, skip the follow-up LLM call entirely.
-    // The tool result message already contains all the details the user needs.
-    // This saves ~1-2 seconds of latency.
-    // reply is empty to avoid duplicating the tool result in the chat.
-    if (pendingTransaction) {
-      console.log("[processChat] Skipping follow-up LLM call — transaction ready");
+    // If we already have transaction(s), skip the follow-up LLM call entirely.
+    // The tool result messages already contain all the details the user needs.
+    // This saves ~1-2 seconds of latency and avoids Cloudflare timeout for multi-swap.
+    if (pendingTransactions.length > 0) {
+      console.log(`[processChat] Skipping follow-up LLM call — ${pendingTransactions.length} transaction(s) ready`);
+      // Surface errors from failed tool calls so the user sees them prominently
+      const failedCalls = toolCallResults.filter(tc => tc.error);
+      const errorReply = failedCalls.length > 0
+        ? failedCalls.map(e => `⚠️ ${e.result}`).join('\n')
+        : "";
       return {
-        reply: "",
+        reply: errorReply,
         toolCalls: toolCallResults,
-        transaction: pendingTransaction,
+        transaction: pendingTransactions[pendingTransactions.length - 1],
+        transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
         chainSwitch: pendingChainSwitch,
         dexProvider: detectedDex,
         suggestions: pendingSuggestions,
@@ -301,7 +311,7 @@ ${executionModeNote}`;
         try {
           const toolResult = await executeToolCall(env, ctx, name, args);
           result = toolResult.message;
-          if (toolResult.transaction) pendingTransaction = toolResult.transaction;
+          if (toolResult.transaction) pendingTransactions.push(toolResult.transaction);
           if (toolResult.chainSwitch) {
             pendingChainSwitch = toolResult.chainSwitch;
             ctx.chainId = toolResult.chainSwitch;
@@ -320,16 +330,18 @@ ${executionModeNote}`;
           isError = true;
         }
         toolCallResults.push({ name, arguments: args, result, error: isError });
+        if (onToolResult) await onToolResult(name, result, isError).catch(() => {});
         chainMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
       }
 
-      // Skip third LLM call if transaction is ready (same optimization as above)
-      if (pendingTransaction) {
-        console.log("[processChat] Skipping chain follow-up LLM call — transaction ready");
+      // Skip third LLM call if transaction is ready
+      if (pendingTransactions.length > 0) {
+        console.log(`[processChat] Skipping chain follow-up LLM call — ${pendingTransactions.length} transaction(s) ready`);
         return {
           reply: "",
           toolCalls: toolCallResults,
-          transaction: pendingTransaction,
+          transaction: pendingTransactions[pendingTransactions.length - 1],
+          transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
           chainSwitch: pendingChainSwitch,
           dexProvider: detectedDex,
         };
@@ -344,7 +356,8 @@ ${executionModeNote}`;
       return {
         reply: chainFollowUp.choices[0]?.message?.content || "Done.",
         toolCalls: toolCallResults,
-        transaction: pendingTransaction,
+        transaction: pendingTransactions[pendingTransactions.length - 1],
+        transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
         chainSwitch: pendingChainSwitch,
         dexProvider: detectedDex,
       };
@@ -353,7 +366,8 @@ ${executionModeNote}`;
     return {
       reply: followUpChoice?.message?.content || "Done.",
       toolCalls: toolCallResults,
-      transaction: pendingTransaction,
+      transaction: pendingTransactions[pendingTransactions.length - 1],
+      transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
       chainSwitch: pendingChainSwitch,
       dexProvider: detectedDex,
     };
@@ -1813,18 +1827,56 @@ async function executeToolCall(
 /** Resolve a chain name/shortName/ID to a supported chain entry. Throws if not found. */
 function resolveChainArg(chainArg: string): { id: number; name: string; shortName: string } {
   const allChains = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS];
-  const match = allChains.find(
+  const arg = chainArg.toLowerCase().trim();
+
+  // Exact match first
+  const exact = allChains.find(
     (c) =>
-      c.name.toLowerCase() === chainArg.toLowerCase() ||
-      c.shortName.toLowerCase() === chainArg.toLowerCase() ||
-      c.id.toString() === chainArg,
+      c.name.toLowerCase() === arg ||
+      c.shortName.toLowerCase() === arg ||
+      c.id.toString() === arg,
   );
-  if (!match) {
-    throw new Error(
-      `Unknown chain: ${chainArg}. Supported: ${allChains.map((c) => c.name).join(", ")}`,
-    );
+  if (exact) return exact;
+
+  // Fuzzy match — tolerate typos (Levenshtein distance ≤ 2)
+  let bestMatch: typeof allChains[0] | undefined;
+  let bestDist = 3; // threshold: accept distance 0-2
+  for (const c of allChains) {
+    for (const candidate of [c.name.toLowerCase(), c.shortName.toLowerCase()]) {
+      const d = levenshtein(arg, candidate);
+      if (d < bestDist) {
+        bestDist = d;
+        bestMatch = c;
+      }
+    }
   }
-  return match;
+  if (bestMatch) {
+    console.log(`[resolveChainArg] Fuzzy matched "${chainArg}" → ${bestMatch.name} (distance ${bestDist})`);
+    return bestMatch;
+  }
+
+  throw new Error(
+    `Unknown chain: ${chainArg}. Supported: ${allChains.map((c) => c.name).join(", ")}`,
+  );
+}
+
+/** Simple Levenshtein distance for short strings (chain names). */
+function levenshtein(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  let curr = new Array(n + 1);
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      curr[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1]
+        : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
 }
 
 /** Get a human-readable chain name from ID. */
@@ -1849,8 +1901,27 @@ function formatRawAmount(amount: string, decimals: number): string {
 // This function parses the user's raw message and corrects the args.
 
 /**
+ * Detect if the user message requests multiple swaps (e.g., "buy 300 GRG on
+ * ethereum, buy 100 GRG on arbitrum"). In this case the sanitizer must NOT
+ * override amounts because it would apply the first match to every tool call.
+ */
+function isMultiSwapMessage(msg: string): boolean {
+  return countExpectedSwaps(msg) > 1;
+}
+
+/** Count how many distinct swap/buy/sell instructions are in the message. */
+function countExpectedSwaps(msg: string): number {
+  const swapKeywords = msg.match(/\b(?:buy|sell|swap)\s+[\d.,]+\s+[a-z0-9]+/gi);
+  return swapKeywords?.length ?? 0;
+}
+
+/**
  * Sanitize and correct LLM-generated swap tool arguments.
  * Extracts intent directly from the user's message and overrides bad args.
+ *
+ * For multi-swap messages (multiple buy/sell/swap instructions), the amount
+ * and token corrections are SKIPPED — the LLM gets per-call amounts right,
+ * and applying the first regex match to every call duplicates amounts.
  */
 function sanitizeSwapArgs(
   args: Record<string, unknown>,
@@ -1858,6 +1929,7 @@ function sanitizeSwapArgs(
 ): Record<string, unknown> {
   const msg = userMessage.toLowerCase().trim();
   const corrected = { ...args };
+  const multiSwap = isMultiSwapMessage(msg);
 
   // ── 1. Force default DEX to 0x if LLM didn't set it or set it wrong ──
   if (!corrected.dex) {
@@ -1865,74 +1937,83 @@ function sanitizeSwapArgs(
   }
 
   // ── 2. Extract amount and direction from user message ──
-  // Pattern: "buy <amount> <token>" → amountOut
-  // Pattern: "sell/swap <amount> <token>" → amountIn
-  // Pattern: "buy <token> with <amount> <token>" → amountIn (less common)
+  // SKIP for multi-swap messages — the regex only matches the first occurrence
+  // and would incorrectly force that amount onto every tool call.
+  if (!multiSwap) {
+    // Pattern: "buy <amount> <token>" → amountOut
+    // Pattern: "sell/swap <amount> <token>" → amountIn
+    // Pattern: "buy <token> with <amount> <token>" → amountIn (less common)
 
-  // "buy 400 GRG" / "buy 400 GRG with ETH" / "buy 400 GRG on ethereum"
-  const buyMatch = msg.match(/\bbuy\s+([\d.,]+)\s+([a-z0-9]+)/i);
-  if (buyMatch) {
-    const amount = buyMatch[1].replace(/,/g, "");
-    const token = buyMatch[2].toUpperCase();
+    // "buy 400 GRG" / "buy 400 GRG with ETH" / "buy 400 GRG on ethereum"
+    const buyMatch = msg.match(/\bbuy\s+([\d.,]+)\s+([a-z0-9]+)/i);
+    if (buyMatch) {
+      const amount = buyMatch[1].replace(/,/g, "");
+      const token = buyMatch[2].toUpperCase();
 
-    // The LLM MUST set amountOut for "buy" — correct if wrong
-    const currentAmountOut = corrected.amountOut as string | undefined;
-    const currentAmountIn = corrected.amountIn as string | undefined;
+      // The LLM MUST set amountOut for "buy" — correct if wrong
+      const currentAmountOut = corrected.amountOut as string | undefined;
 
-    if (!currentAmountOut || Math.abs(parseFloat(currentAmountOut) - parseFloat(amount)) > parseFloat(amount) * 0.01) {
-      console.log(`[sanitize] Correcting buy amount: amountOut=${currentAmountOut} → ${amount} (user said "buy ${amount} ${token}")`);
-      corrected.amountOut = amount;
-      delete corrected.amountIn; // buy = amountOut, never amountIn
-    }
+      if (!currentAmountOut || Math.abs(parseFloat(currentAmountOut) - parseFloat(amount)) > parseFloat(amount) * 0.01) {
+        console.log(`[sanitize] Correcting buy amount: amountOut=${currentAmountOut} → ${amount} (user said "buy ${amount} ${token}")`);
+        corrected.amountOut = amount;
+        delete corrected.amountIn; // buy = amountOut, never amountIn
+      }
 
-    // Ensure tokenOut matches the token next to the number
-    if (corrected.tokenOut && (corrected.tokenOut as string).toUpperCase() !== token) {
-      console.log(`[sanitize] Correcting tokenOut: ${corrected.tokenOut} → ${token}`);
-      // Swap tokenIn/tokenOut if they're reversed
-      if ((corrected.tokenIn as string)?.toUpperCase() === token) {
-        const tmp = corrected.tokenIn;
-        corrected.tokenIn = corrected.tokenOut;
-        corrected.tokenOut = tmp;
-      } else {
-        corrected.tokenOut = token;
+      // Ensure tokenOut matches the token next to the number
+      if (corrected.tokenOut && (corrected.tokenOut as string).toUpperCase() !== token) {
+        console.log(`[sanitize] Correcting tokenOut: ${corrected.tokenOut} → ${token}`);
+        // Swap tokenIn/tokenOut if they're reversed
+        if ((corrected.tokenIn as string)?.toUpperCase() === token) {
+          const tmp = corrected.tokenIn;
+          corrected.tokenIn = corrected.tokenOut;
+          corrected.tokenOut = tmp;
+        } else {
+          corrected.tokenOut = token;
+        }
       }
     }
+
+    // "sell 0.5 ETH for USDC" / "swap 50 USDC to DAI"
+    const sellMatch = msg.match(/\b(?:sell|swap)\s+([\d.,]+)\s+([a-z0-9]+)/i);
+    if (sellMatch && !buyMatch) {
+      const amount = sellMatch[1].replace(/,/g, "");
+      const token = sellMatch[2].toUpperCase();
+
+      const currentAmountIn = corrected.amountIn as string | undefined;
+      if (!currentAmountIn || Math.abs(parseFloat(currentAmountIn) - parseFloat(amount)) > parseFloat(amount) * 0.01) {
+        console.log(`[sanitize] Correcting sell amount: amountIn=${currentAmountIn} → ${amount}`);
+        corrected.amountIn = amount;
+        delete corrected.amountOut;
+      }
+
+      if (corrected.tokenIn && (corrected.tokenIn as string).toUpperCase() !== token) {
+        console.log(`[sanitize] Correcting tokenIn: ${corrected.tokenIn} → ${token}`);
+        if ((corrected.tokenOut as string)?.toUpperCase() === token) {
+          const tmp = corrected.tokenOut;
+          corrected.tokenOut = corrected.tokenIn;
+          corrected.tokenIn = tmp;
+        } else {
+          corrected.tokenIn = token;
+        }
+      }
+    }
+  } else {
+    console.log(`[sanitize] Multi-swap detected — skipping amount/token correction, trusting LLM per-call args`);
   }
 
-  // "sell 0.5 ETH for USDC" / "swap 50 USDC to DAI"
-  const sellMatch = msg.match(/\b(?:sell|swap)\s+([\d.,]+)\s+([a-z0-9]+)/i);
-  if (sellMatch && !buyMatch) {
-    const amount = sellMatch[1].replace(/,/g, "");
-    const token = sellMatch[2].toUpperCase();
-
-    const currentAmountIn = corrected.amountIn as string | undefined;
-    if (!currentAmountIn || Math.abs(parseFloat(currentAmountIn) - parseFloat(amount)) > parseFloat(amount) * 0.01) {
-      console.log(`[sanitize] Correcting sell amount: amountIn=${currentAmountIn} → ${amount}`);
-      corrected.amountIn = amount;
-      delete corrected.amountOut;
-    }
-
-    if (corrected.tokenIn && (corrected.tokenIn as string).toUpperCase() !== token) {
-      console.log(`[sanitize] Correcting tokenIn: ${corrected.tokenIn} → ${token}`);
-      if ((corrected.tokenOut as string)?.toUpperCase() === token) {
-        const tmp = corrected.tokenOut;
-        corrected.tokenOut = corrected.tokenIn;
-        corrected.tokenIn = tmp;
-      } else {
-        corrected.tokenIn = token;
+  // ── 3. Extract chain from user message (only for single-swap) ──
+  // For multi-swap, the LLM sets the chain per tool call; overriding here
+  // would apply the first chain match to all calls.
+  if (!multiSwap) {
+    const chainNames = ["ethereum", "base", "arbitrum", "optimism", "polygon", "bnb chain", "unichain", "sepolia"];
+    for (const cn of chainNames) {
+      if (msg.includes(`on ${cn}`) || msg.includes(`to ${cn}`)) {
+        if (!corrected.chain) {
+          console.log(`[sanitize] Adding chain=${cn} from user message`);
+          corrected.chain = cn;
+        }
+        break;
       }
-    }
-  }
-
-  // ── 3. Extract chain from user message ──
-  const chainNames = ["ethereum", "base", "arbitrum", "optimism", "polygon", "bnb chain", "unichain", "sepolia"];
-  for (const cn of chainNames) {
-    if (msg.includes(`on ${cn}`) || msg.includes(`to ${cn}`)) {
-      if (!corrected.chain) {
-        console.log(`[sanitize] Adding chain=${cn} from user message`);
-        corrected.chain = cn;
-      }
-      break;
     }
   }
 

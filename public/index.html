@@ -128,7 +128,8 @@
       border-radius: 6px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--success);
     }
     .msg .error-result { background: rgba(248,81,73,0.1); border-color: rgba(248,81,73,0.3); color: var(--error); }
-    .typing::after { content: '▋'; animation: blink 1s step-end infinite; }
+    .typing .msg-content { color: var(--muted); font-style: italic; }
+    .typing .msg-content::after { content: ' ▋'; animation: blink 1s step-end infinite; }
     @keyframes blink { 50% { opacity: 0; } }
 
     /* ── Rich message content (tables, links) ───────────── */
@@ -441,6 +442,22 @@
     .delegated-confirm .exec-status {
       font-size: 11px; margin-top: 6px; white-space: normal;
       word-break: break-word; overflow-wrap: anywhere;
+    }
+    .delegated-confirm .multi-tx-header {
+      font-size: 11px; color: var(--muted); margin-bottom: 6px; font-weight: 600;
+    }
+    .multi-trade-row {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      font-size: 13px; font-weight: 600; padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .multi-trade-row:last-of-type { border-bottom: none; margin-bottom: 8px; }
+    .multi-trade-row .trade-chain {
+      font-size: 10px; color: var(--accent); background: rgba(31,111,235,0.12);
+      padding: 1px 6px; border-radius: 4px; font-weight: 500;
+    }
+    .multi-trade-row .multi-tx-status {
+      margin-left: auto; font-size: 12px;
     }
 
     /* ── Pool onboarding ─────────────────────────────── */
@@ -1113,13 +1130,32 @@
       appendMessage('user', text);
       conversationHistory.push({ role: 'user', content: text });
 
-      const typingEl = appendMessage('assistant', '');
-      typingEl.classList.add('typing');
+      const typingEl = document.createElement('div');
+      typingEl.className = 'msg assistant typing';
+      const typingContent = document.createElement('div');
+      typingContent.className = 'msg-content';
+      typingContent.textContent = 'Thinking…';
+      typingEl.appendChild(typingContent);
+      chatEl.appendChild(typingEl);
+      chatEl.scrollTop = chatEl.scrollHeight;
+
+      // Progressive status updates so the user knows the agent is working
+      const statusTimers = [];
+      const updateTypingStatus = (msg) => { typingContent.textContent = msg; };
+      statusTimers.push(setTimeout(() => updateTypingStatus('Working on it…'), 5000));
+      statusTimers.push(setTimeout(() => updateTypingStatus('Still processing — multi-chain swaps take a moment…'), 15000));
+      statusTimers.push(setTimeout(() => updateTypingStatus('Taking longer than expected…'), 30000));
+      const clearStatusTimers = () => statusTimers.forEach(t => clearTimeout(t));
+
+      // 50-second timeout to prevent infinite hangs
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 50000);
 
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             messages: conversationHistory,
             vaultAddress: vault,
@@ -1145,6 +1181,7 @@
               const retryRes = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                signal: controller.signal,
                 body: JSON.stringify({
                   messages: conversationHistory,
                   vaultAddress: vault,
@@ -1171,8 +1208,13 @@
         handleChatResponse(data);
       } catch (err) {
         typingEl.remove();
-        appendMessage('system', `Error: ${err.message}`);
+        const msg = err.name === 'AbortError'
+          ? 'Request timed out after 50 seconds. The agent may be overloaded — please try again.'
+          : `Error: ${err.message}`;
+        appendMessage('system', msg);
       } finally {
+        clearTimeout(timeoutId);
+        clearStatusTimers();
         sendBtn.disabled = false;
         inputEl.focus();
       }
@@ -1242,7 +1284,22 @@
         dexEl.classList.remove('hidden');
       }
 
-      if (data.transaction) {
+      // Handle multiple transactions (multi-chain swaps)
+      const txList = data.transactions && data.transactions.length > 0
+        ? data.transactions
+        : data.transaction ? [data.transaction] : [];
+
+      if (txList.length > 1 && executionMode === 'delegated') {
+        // Multi-transaction delegated mode: show combined card
+        console.log('[tx-modal] Showing multi-tx delegated confirmation:', txList.length, 'transactions');
+        showMultiDelegatedConfirmation(txList);
+      } else if (txList.length > 1 && executionMode !== 'delegated') {
+        // Multi-transaction manual mode: show each as individual in-chat card
+        console.log('[tx-modal] Showing multi-tx manual cards:', txList.length, 'transactions');
+        for (const tx of txList) {
+          showManualTxCard(tx);
+        }
+      } else if (data.transaction) {
         console.log('[tx-modal] Showing transaction modal:', data.transaction);
         if (executionMode === 'delegated') {
           // In delegated mode: show in-chat confirmation instead of wallet modal
@@ -1254,6 +1311,11 @@
         // Agent already executed the transaction (delegated auto-execute fallback)
         const r = data.executionResult;
         showTxReceiptCard(r, data.transaction?.swapMeta);
+      } else if (data.executionResults && data.executionResults.length > 0) {
+        // Agent already executed multiple transactions
+        for (const r of data.executionResults) {
+          showTxReceiptCard(r);
+        }
       } else {
         console.log('[tx-modal] No transaction in response:', Object.keys(data));
       }
@@ -1409,6 +1471,115 @@
       }, 5000);
     }
 
+    /** Show an in-chat card for a manual-mode transaction (user signs with wallet) */
+    function showManualTxCard(tx) {
+      if (!tx || !tx.to || !tx.data) return;
+      const meta = tx.swapMeta;
+      const chain = CHAIN_NAMES[tx.chainId] || tx.chainId;
+
+      let tradeHtml;
+      if (meta) {
+        tradeHtml = `
+          <div class="trade-pair">
+            <span class="trade-amount sell">${escapeHtml(meta.sellAmount)} ${escapeHtml(meta.sellToken)}</span>
+            <span class="trade-arrow">→</span>
+            <span class="trade-amount buy">~${escapeHtml(meta.buyAmount)} ${escapeHtml(meta.buyToken)}</span>
+          </div>
+          <div class="trade-meta">${meta.price ? escapeHtml(meta.price) + ' · ' : ''}${escapeHtml(chain)}</div>
+        `;
+      } else {
+        tradeHtml = `<div class="trade-meta">${escapeHtml(tx.description || 'Execute transaction')} · ${escapeHtml(chain)}</div>`;
+      }
+
+      const div = document.createElement('div');
+      div.className = 'msg assistant compact';
+      div.innerHTML = `
+        <div class="delegated-confirm">
+          ${tradeHtml}
+          <div class="confirm-actions">
+            <button class="btn-agent-exec approve" onclick="signManualTxCard(this)">Sign with Wallet</button>
+            <button class="btn-agent-exec reject" onclick="this.closest('.msg').remove()">Dismiss</button>
+          </div>
+          <div class="exec-status"></div>
+        </div>
+      `;
+      div._pendingTx = tx;
+      chatEl.appendChild(div);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    /** Handle signing a manual tx card — opens wallet for the specific tx */
+    async function signManualTxCard(btn) {
+      const msgEl = btn.closest('.msg');
+      const tx = msgEl._pendingTx;
+      if (!tx || !activeProvider) return;
+
+      const container = btn.closest('.delegated-confirm');
+      const statusEl = container.querySelector('.exec-status');
+      const buttons = container.querySelectorAll('.btn-agent-exec');
+      buttons.forEach(b => b.disabled = true);
+      btn.textContent = 'Signing…';
+
+      try {
+        const currentChainHex = await activeProvider.request({ method: 'eth_chainId' });
+        const targetChainHex = '0x' + tx.chainId.toString(16);
+        if (currentChainHex !== targetChainHex) {
+          statusEl.textContent = 'Switching chain…';
+          await activeProvider.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: targetChainHex }],
+          });
+        }
+
+        statusEl.textContent = 'Confirm in your wallet…';
+        const txHash = await activeProvider.request({
+          method: 'eth_sendTransaction',
+          params: [{
+            from: connectedAddress,
+            to: tx.to,
+            data: tx.data,
+            gas: tx.gas,
+          }],
+        });
+
+        buttons.forEach(b => b.style.display = 'none');
+        statusEl.style.color = 'var(--accent)';
+        statusEl.innerHTML = `<span style="display:inline-flex;align-items:center;gap:6px;"><span class="spinner"></span> Pending… ${txHash.slice(0, 10)}…${txHash.slice(-6)}</span>`;
+        pollManualTxReceipt(txHash, tx, statusEl);
+      } catch (err) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = `Error: ${err.message || 'User rejected'}`;
+        buttons.forEach(b => b.disabled = false);
+        btn.textContent = 'Sign with Wallet';
+      }
+    }
+
+    /** Poll receipt for a manual tx card */
+    async function pollManualTxReceipt(txHash, tx, statusEl) {
+      const meta = tx.swapMeta;
+      for (let i = 0; i < 60; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const receipt = await activeProvider.request({
+            method: 'eth_getTransactionReceipt',
+            params: [txHash],
+          });
+          if (receipt) {
+            const success = receipt.status === '0x1';
+            statusEl.style.color = success ? 'var(--success)' : 'var(--error)';
+            if (success && meta) {
+              statusEl.textContent = `✓ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}`;
+            } else {
+              statusEl.textContent = success ? '✓ Transaction confirmed' : '✗ Transaction reverted';
+            }
+            return;
+          }
+        } catch (e) { /* retry */ }
+      }
+      statusEl.style.color = 'var(--warn)';
+      statusEl.textContent = 'Tx still pending. Check explorer.';
+    }
+
     /* ================================================================
        Delegated Execution Confirmation (in-chat)
        ================================================================ */
@@ -1528,6 +1699,132 @@
       const container = btn.closest('.delegated-confirm');
       container.innerHTML = '<div style="color:var(--muted);font-size:12px;">Execution cancelled.</div>';
       appendMessage('system', 'Delegated execution cancelled by operator.');
+    }
+
+    /* ================================================================
+       Multi-Transaction Delegated Confirmation
+       ================================================================ */
+
+    /** Show a combined card for multiple transactions in delegated mode */
+    function showMultiDelegatedConfirmation(txList) {
+      let tradesHtml = '';
+      for (let i = 0; i < txList.length; i++) {
+        const tx = txList[i];
+        const meta = tx.swapMeta;
+        const chain = CHAIN_NAMES[tx.chainId] || tx.chainId;
+        if (meta) {
+          tradesHtml += `
+            <div class="multi-trade-row" data-tx-idx="${i}">
+              <span class="trade-amount sell">${escapeHtml(meta.sellAmount)} ${escapeHtml(meta.sellToken)}</span>
+              <span class="trade-arrow">→</span>
+              <span class="trade-amount buy">~${escapeHtml(meta.buyAmount)} ${escapeHtml(meta.buyToken)}</span>
+              <span class="trade-chain">${escapeHtml(chain)}</span>
+              <span class="multi-tx-status"></span>
+            </div>`;
+        } else {
+          tradesHtml += `
+            <div class="multi-trade-row" data-tx-idx="${i}">
+              <span class="trade-meta">${escapeHtml(tx.description || 'Transaction ' + (i + 1))} · ${escapeHtml(chain)}</span>
+              <span class="multi-tx-status"></span>
+            </div>`;
+        }
+      }
+
+      const div = document.createElement('div');
+      div.className = 'msg assistant compact';
+      div.innerHTML = `
+        <div class="delegated-confirm multi-tx">
+          <div class="multi-tx-header">${txList.length} transactions to execute</div>
+          ${tradesHtml}
+          <div class="confirm-actions">
+            <button class="btn-agent-exec approve" onclick="confirmMultiDelegatedExecution(this)">Execute All</button>
+            <button class="btn-agent-exec reject" onclick="rejectDelegatedExecution(this)">Cancel</button>
+          </div>
+          <div class="exec-status"></div>
+        </div>
+      `;
+
+      div._pendingTxList = txList;
+      chatEl.appendChild(div);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    /** Execute multiple transactions sequentially */
+    async function confirmMultiDelegatedExecution(btn) {
+      const container = btn.closest('.delegated-confirm');
+      const msgEl = btn.closest('.msg');
+      const txList = msgEl._pendingTxList;
+      if (!txList || txList.length === 0) return;
+
+      const statusEl = container.querySelector('.exec-status');
+      const buttons = container.querySelectorAll('.btn-agent-exec');
+      buttons.forEach(b => b.disabled = true);
+      btn.textContent = 'Executing…';
+
+      const vault = vaultInput.value.trim();
+      let allSuccess = true;
+
+      for (let i = 0; i < txList.length; i++) {
+        const tx = txList[i];
+        const rowStatusEl = container.querySelector(`.multi-trade-row[data-tx-idx="${i}"] .multi-tx-status`);
+        if (rowStatusEl) {
+          rowStatusEl.innerHTML = '<span class="spinner" style="width:12px;height:12px;"></span>';
+        }
+        statusEl.style.color = 'var(--accent)';
+        statusEl.textContent = `Executing ${i + 1} of ${txList.length}…`;
+
+        try {
+          const res = await fetch('/api/delegation/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              operatorAddress: connectedAddress,
+              vaultAddress: vault,
+              chainId: tx.chainId || currentChainId,
+              authSignature,
+              authTimestamp,
+              transaction: {
+                to: tx.to,
+                data: tx.data,
+                value: tx.value,
+                chainId: tx.chainId,
+                gas: tx.gas,
+                description: tx.description,
+              },
+            }),
+          });
+
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${res.status}`);
+          }
+
+          const data = await res.json();
+
+          if (data.executionResult) {
+            const r = data.executionResult;
+            if (rowStatusEl) {
+              rowStatusEl.textContent = r.confirmed ? '✅' : r.reverted ? '❌' : '⏳';
+            }
+            showTxReceiptCard(r, tx.swapMeta);
+            if (!r.confirmed || r.reverted) allSuccess = false;
+          } else {
+            throw new Error('No execution result');
+          }
+        } catch (err) {
+          if (rowStatusEl) rowStatusEl.textContent = '❌';
+          appendMessage('system', `Transaction ${i + 1} failed: ${err.message}`);
+          allSuccess = false;
+        }
+      }
+
+      buttons.forEach(b => b.style.display = 'none');
+      statusEl.style.color = allSuccess ? 'var(--success)' : 'var(--error)';
+      statusEl.textContent = allSuccess
+        ? `All ${txList.length} transactions executed successfully`
+        : 'Some transactions failed — see details above';
+
+      fetchAgentBalance(vault);
     }
 
     /* ================================================================
@@ -1872,9 +2169,12 @@
     let executionMode = 'manual'; // 'manual' | 'delegated'
     let delegationState = null;   // cached delegation status from backend
 
-    /** Auto-detect execution mode from delegation state */
+    /** Auto-detect execution mode from delegation state.
+     *  Allows delegated mode if delegation is active on ANY chain,
+     *  not just the current one — enables multi-chain delegated swaps. */
     function syncExecutionMode() {
-      if (delegationState && delegationState.enabled && delegationState.isActiveOnChain) {
+      if (delegationState && delegationState.enabled &&
+          (delegationState.isActiveOnChain || (delegationState.activeChains && delegationState.activeChains.length > 0))) {
         executionMode = 'delegated';
       } else {
         executionMode = 'manual';

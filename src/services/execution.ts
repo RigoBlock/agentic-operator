@@ -32,7 +32,7 @@ import {
 } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
 import type { Env, UnsignedTransaction, ExecutionResult } from "../types.js";
-import { getChain, getRpcUrl } from "../config.js";
+import { getChain, getRpcUrl, sanitizeError } from "../config.js";
 import { loadAgentWalletAccount } from "./agentWallet.js";
 import { getDelegationConfig, getChainDelegation } from "./delegation.js";
 import {
@@ -40,6 +40,60 @@ import {
   type WalletCall,
 } from "./bundler.js";
 import { checkNavImpact } from "./navGuard.js";
+
+/**
+ * Map chain ID to the native gas token symbol for user-facing messages.
+ */
+const NATIVE_TOKEN: Record<number, string> = {
+  1: "ETH", 10: "ETH", 130: "ETH", 8453: "ETH", 42161: "ETH",
+  56: "BNB", 137: "POL",
+  11155111: "ETH", 84532: "ETH",
+};
+
+/**
+ * Parse Alchemy bundler/paymaster errors to detect rate-limit or spending-cap issues.
+ * Returns a user-friendly message if the error matches, otherwise null.
+ */
+function parseSponsoredError(raw: string, chainId: number, agentAddress: string): string | null {
+  const lower = raw.toLowerCase();
+  const token = NATIVE_TOKEN[chainId] || "ETH";
+
+  // Per-user transaction count limit
+  if (lower.includes("max number of user ops") || lower.includes("policy limit") ||
+      lower.includes("exceeded the maximum") || lower.includes("rate limit") ||
+      lower.includes("spending limit") || lower.includes("quota")) {
+    return (
+      `Gas sponsorship limit reached for this wallet. ` +
+      `The agent wallet has exhausted its sponsored transaction allowance. ` +
+      `To continue trading, send a small amount of ${token} to the agent wallet ` +
+      `(${agentAddress}) on chain ${chainId} to cover gas fees, ` +
+      `or wait for the sponsorship limit to reset.`
+    );
+  }
+
+  // Policy expired / disabled
+  if (lower.includes("policy not found") || lower.includes("policy is disabled") ||
+      lower.includes("policy has expired") || lower.includes("invalid policy")) {
+    return (
+      `Gas sponsorship policy is no longer active. ` +
+      `Send a small amount of ${token} to the agent wallet ` +
+      `(${agentAddress}) on chain ${chainId} to cover gas fees directly.`
+    );
+  }
+
+  // Global spending cap
+  if (lower.includes("max spend") || lower.includes("global limit") ||
+      lower.includes("budget exceeded") || lower.includes("insufficient funds") ||
+      lower.includes("paymaster deposit too low")) {
+    return (
+      `Gas sponsorship budget has been exhausted. ` +
+      `To continue, send a small amount of ${token} to the agent wallet ` +
+      `(${agentAddress}) on chain ${chainId} to pay gas fees directly.`
+    );
+  }
+
+  return null;
+}
 
 const ALCHEMY_ORIGIN = "https://trader.rigoblock.com";
 
@@ -323,14 +377,53 @@ export async function executeViaDelegation(
     // The paymaster sponsors gas, so the agent wallet doesn't need ETH.
     // The agent EOA must have EIP-7702 authorization (auto-set on first use).
     console.log(`[executeViaDelegation] Calling sponsoredAgentTransaction...`);
-    result = await sponsoredAgentTransaction(
-      agentAccount,
-      tx,
-      tx.chainId,
-      env.ALCHEMY_API_KEY,
-      env.ALCHEMY_GAS_POLICY_ID!,
-      env.KV,
-    );
+    try {
+      result = await sponsoredAgentTransaction(
+        agentAccount,
+        tx,
+        tx.chainId,
+        env.ALCHEMY_API_KEY,
+        env.ALCHEMY_GAS_POLICY_ID!,
+        env.KV,
+      );
+    } catch (sponsoredErr) {
+      // If simulation failed, the transaction itself is bad — don't retry via direct
+      if (sponsoredErr instanceof ExecutionError &&
+          (sponsoredErr.code === "SIMULATION_FAILED" || sponsoredErr.code === "RPC_UNAVAILABLE")) {
+        throw sponsoredErr;
+      }
+      // For bundler/paymaster errors (e.g. policy expired, chain not covered),
+      // fall back to direct broadcast so the agent wallet pays gas instead.
+      const sponsoredMsg = sponsoredErr instanceof Error ? sponsoredErr.message : String(sponsoredErr);
+      console.warn(
+        `[executeViaDelegation] Sponsored execution failed, falling back to direct broadcast. ` +
+        `Error: ${sponsoredMsg}`,
+      );
+      try {
+        result = await broadcastAgentTransaction(
+          agentAccount,
+          tx,
+          tx.chainId,
+          env.ALCHEMY_API_KEY,
+        );
+      } catch (directErr) {
+        // If direct broadcast also fails due to no balance, the real problem is the
+        // sponsored path. Surface a user-friendly message about what went wrong.
+        if (directErr instanceof ExecutionError && directErr.code === "INSUFFICIENT_BALANCE") {
+          const friendly = parseSponsoredError(sponsoredMsg, tx.chainId, agentAccount.address);
+          const sanitizedMsg = sanitizeError(sponsoredMsg);
+          throw new ExecutionError(
+            friendly ||
+            `Gas-sponsored execution failed: ${sanitizedMsg}. ` +
+            `Direct broadcast also failed (agent wallet has no balance on chain ${tx.chainId}). ` +
+            `Send ${NATIVE_TOKEN[tx.chainId] || "ETH"} to ${agentAccount.address} to cover gas, ` +
+            `or wait for the sponsorship limit to reset.`,
+            "SPONSORED_FAILED",
+          );
+        }
+        throw directErr;
+      }
+    }
   } else {
     // ── Direct broadcast: agent wallet pays gas ──
     result = await broadcastAgentTransaction(
@@ -394,7 +487,7 @@ async function broadcastAgentTransaction(
     throw new ExecutionError(
       `Transaction simulation failed — the transaction would revert on-chain. ` +
       `This could mean the agent is not delegated on the vault, or the trade parameters are invalid. ` +
-      `Details: ${msg}`,
+      `Details: ${sanitizeError(msg)}`,
       "SIMULATION_FAILED",
     );
   }
@@ -441,11 +534,13 @@ async function broadcastAgentTransaction(
   if (balance < estimatedCost) {
     const needed = Number(estimatedCost) / 1e18;
     const have = Number(balance) / 1e18;
+    // Use enough decimal places to show non-zero L2 gas costs (~0.0000003 ETH)
+    const fmt = (n: number) => n < 0.000001 ? n.toExponential(2) : n.toFixed(8);
     throw new ExecutionError(
       `Agent balance too low for this transaction. ` +
-      `Have: ${have.toFixed(6)} ETH, need: ~${needed.toFixed(6)} ETH ` +
+      `Have: ${fmt(have)} ETH, need: ~${fmt(needed)} ETH ` +
       `(gas: ${gasLimit} × ${formatGwei(fees.maxFeePerGas)} gwei). ` +
-      `Send ${(needed - have).toFixed(6)} ETH to ${agentAccount.address}`,
+      `Send ${fmt(needed - have)} ETH to ${agentAccount.address}`,
       "INSUFFICIENT_BALANCE",
     );
   }
@@ -622,7 +717,7 @@ async function sponsoredAgentTransaction(
     const msg = simError instanceof Error ? simError.message : String(simError);
     console.error(`[Sponsored] Simulation FAILED on chain ${chainId}:`, msg);
     throw new ExecutionError(
-      `Transaction simulation failed — would revert on-chain. Details: ${msg}`,
+      `Transaction simulation failed — would revert on-chain. Details: ${sanitizeError(msg)}`,
       "SIMULATION_FAILED",
     );
   }
@@ -852,4 +947,69 @@ export class ExecutionError extends Error {
     this.name = "ExecutionError";
     this.code = code;
   }
+}
+
+// ── Shared multi-tx execution helper ──────────────────────────────────
+
+/** Result of executing a single transaction in a batch */
+export interface TxExecOutcome {
+  tx: UnsignedTransaction;
+  result?: ExecutionResult;
+  error?: string;
+}
+
+/**
+ * Execute a list of unsigned transactions via delegation, collecting
+ * per-tx results. Used by both the web chat and Telegram handlers.
+ *
+ * @param onProgress - Optional callback invoked before each tx starts,
+ *   with the index, total count, and outcomes so far.
+ */
+export async function executeTxList(
+  env: Env,
+  txList: UnsignedTransaction[],
+  vaultAddress: string,
+  onProgress?: (index: number, total: number, outcomesSoFar: TxExecOutcome[]) => Promise<void>,
+): Promise<TxExecOutcome[]> {
+  const outcomes: TxExecOutcome[] = [];
+  for (let i = 0; i < txList.length; i++) {
+    const tx = txList[i];
+    if (onProgress) await onProgress(i, txList.length, outcomes);
+    try {
+      const result = await executeViaDelegation(env, tx, vaultAddress);
+      outcomes.push({ tx, result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      outcomes.push({ tx, error: sanitizeError(msg) });
+    }
+  }
+  return outcomes;
+}
+
+/**
+ * Format executeTxList outcomes into a markdown summary string
+ * suitable for returning in ChatResponse.reply.
+ */
+export function formatOutcomesMarkdown(outcomes: TxExecOutcome[]): string {
+  const parts: string[] = [];
+  for (const { tx, result, error } of outcomes) {
+    const desc = tx.description || "Transaction";
+    if (result?.confirmed) {
+      const gasInfo = result.gasCostEth ? ` Gas: ${result.gasCostEth} ETH.` : "";
+      const link = result.explorerUrl || result.txHash;
+      parts.push(`✅ ${desc} confirmed in block ${result.blockNumber || "?"}.${gasInfo} [View](${link})`);
+    } else if (result?.reverted) {
+      const gasWasted = result.gasCostEth ? ` (gas spent: ${result.gasCostEth} ETH)` : "";
+      const link = result.explorerUrl || result.txHash;
+      parts.push(`⚠️ ${desc} reverted on-chain${gasWasted}. [View failed tx](${link})`);
+    } else if (result) {
+      parts.push(`⏳ Transaction submitted: ${result.txHash}. Waiting for confirmation…`);
+    } else if (error) {
+      parts.push(`❌ ${desc} failed: ${error}`);
+    }
+  }
+  if (outcomes.some(o => o.result?.reverted)) {
+    parts.push("Would you like to retry the failed transaction(s) with fresh parameters?");
+  }
+  return parts.join("\n\n");
 }

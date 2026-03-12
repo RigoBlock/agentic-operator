@@ -137,8 +137,10 @@ export interface UnsignedTransaction {
 export interface ChatResponse {
   reply: string;
   toolCalls?: ToolCallResult[];
-  /** If the agent built a transaction, the frontend should prompt signing */
+  /** If the agent built a single transaction, the frontend should prompt signing */
   transaction?: UnsignedTransaction;
+  /** If the agent built multiple transactions (multi-chain swap), all are included */
+  transactions?: UnsignedTransaction[];
   /** If the agent switched chains, the frontend should update the selector */
   chainSwitch?: number;
   /** The DEX / API provider used in this response (e.g. "0x", "Uniswap") */
@@ -147,6 +149,8 @@ export interface ChatResponse {
   suggestions?: string[];
   /** In delegated mode: transaction was executed by agent wallet */
   executionResult?: ExecutionResult;
+  /** In delegated mode with multiple txs: results for each */
+  executionResults?: ExecutionResult[];
 }
 
 // ── Agent Wallet ──────────────────────────────────────────────────────

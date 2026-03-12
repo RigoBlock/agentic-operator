@@ -349,6 +349,19 @@ export async function isDelegationActive(
 }
 
 /**
+ * Check if delegation is active on ANY chain for a vault.
+ * Used when the caller's current chain may differ from target chains.
+ */
+export async function isDelegationActiveAnyChain(
+  kv: KVNamespace,
+  vaultAddress: string,
+): Promise<boolean> {
+  const config = await getDelegationConfig(kv, vaultAddress);
+  if (!config || !config.enabled) return false;
+  return Object.keys(config.chains || {}).length > 0;
+}
+
+/**
  * Get the chain-specific delegation config.
  */
 export async function getChainDelegation(
