@@ -1659,15 +1659,28 @@
 
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
+          // If delegation not active on this chain, fall back to manual wallet signing
+          if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.fallbackToManual) {
+            container.innerHTML = '';
+            const manualMsg = document.createElement('div');
+            manualMsg.style.cssText = 'color:var(--warning,orange);font-size:12px;margin-bottom:8px;';
+            manualMsg.textContent = 'Delegation not active on this chain — sign from your wallet instead:';
+            container.appendChild(manualMsg);
+            // Re-render as manual tx card inline
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'confirm-actions';
+            actionsDiv.innerHTML = `
+              <button class="btn-agent-exec approve" onclick="signManualTxCard(this)">Sign with Wallet</button>
+              <button class="btn-agent-exec reject" onclick="this.closest('.msg').remove()">Dismiss</button>
+            `;
+            container.appendChild(actionsDiv);
+            const newStatusEl = document.createElement('div');
+            newStatusEl.className = 'exec-status';
+            container.appendChild(newStatusEl);
+            return;
+          }
           throw new Error(err.error || `HTTP ${res.status}`);
         }
-
-        const data = await res.json();
-
-        if (data.executionResult) {
-          const r = data.executionResult;
-          statusEl.style.color = r.confirmed ? 'var(--success)' : (r.reverted ? 'var(--error)' : 'var(--accent)');
-          statusEl.textContent = r.confirmed
             ? `✅ Confirmed in block ${r.blockNumber || '?'}`
             : r.reverted
               ? '❌ Reverted on-chain'
@@ -1796,6 +1809,20 @@
 
           if (!res.ok) {
             const err = await res.json().catch(() => ({}));
+            // If delegation not active on this chain, show manual sign for remaining txs
+            if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.fallbackToManual) {
+              if (rowStatusEl) rowStatusEl.textContent = '⚠️';
+              // Show manual tx card for this tx and any remaining ones
+              appendMessage('system', `Delegation not active on chain ${tx.chainId} — sign remaining transactions from your wallet:`);
+              for (let j = i; j < txList.length; j++) {
+                showManualTxCard(txList[j]);
+              }
+              buttons.forEach(b => b.style.display = 'none');
+              statusEl.style.color = 'var(--warning, orange)';
+              statusEl.textContent = `${i} of ${txList.length} executed via agent — remaining require wallet signing`;
+              fetchAgentBalance(vault);
+              return;
+            }
             throw new Error(err.error || `HTTP ${res.status}`);
           }
 

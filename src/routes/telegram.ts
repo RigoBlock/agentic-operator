@@ -20,7 +20,7 @@ import { Hono, type Context } from "hono";
 import type { Env, ChatMessage, RequestContext, ChatResponse, TelegramConversation, UnsignedTransaction } from "../types.js";
 import type { Address } from "viem";
 import { processChat } from "../llm/client.js";
-import { isDelegationActive, isDelegationActiveAnyChain } from "../services/delegation.js";
+import { isDelegationActive, isDelegationActiveAnyChain, getDelegationConfig, getActiveChains } from "../services/delegation.js";
 import { executeTxList, type TxExecOutcome } from "../services/execution.js";
 import { initTokenResolver } from "../services/tokenResolver.js";
 import {
@@ -502,40 +502,80 @@ async function handleMessage(
 
     // Handle transactions
     if (txList.length > 0 && executionMode === "delegated") {
-      // Store all pending transactions in KV for callback handler
-      const txKey = `tg-pending-tx:${userId}`;
-      await env.KV.put(txKey, JSON.stringify(txList), {
-        expirationTtl: 300, // 5 min expiry
-      });
+      // Pre-check per-chain delegation for each transaction
+      const delegConfig = await getDelegationConfig(env.KV, vault.address);
+      const activeDelegChains = delegConfig ? getActiveChains(delegConfig) : [];
+      const executableTxs: UnsignedTransaction[] = [];
+      const blockedTxs: { tx: UnsignedTransaction; chainName: string }[] = [];
 
-      // Build trade summary for all transactions
-      const tradeLabels: string[] = [];
       for (const tx of txList) {
-        const meta = tx.swapMeta;
-        const label = meta
-          ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
-          : tx.description || "Transaction";
         const chainName = SUPPORTED_CHAINS.find(ch => ch.id === tx.chainId)?.name
           || TESTNET_CHAINS.find(ch => ch.id === tx.chainId)?.name
           || String(tx.chainId);
-        tradeLabels.push(`• ${escapeHtml(label)} (${chainName})`);
+        if (activeDelegChains.includes(tx.chainId)) {
+          executableTxs.push(tx);
+        } else {
+          blockedTxs.push({ tx, chainName });
+        }
       }
 
-      const tradeCount = txList.length > 1 ? `${txList.length} trades` : "Trade";
-      replyParts.push(`\n🔔 <b>${tradeCount} ready:</b>\n${tradeLabels.join("\n")}`);
+      // Warn about chains without delegation
+      if (blockedTxs.length > 0) {
+        const blockedLabels = blockedTxs.map(({ tx, chainName }) => {
+          const meta = tx.swapMeta;
+          const label = meta
+            ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
+            : tx.description || "Transaction";
+          return `• ${escapeHtml(label)} — <b>${chainName}</b>`;
+        });
+        replyParts.push(
+          `⚠️ <b>Delegation not active on ${blockedTxs.length === 1 ? "this chain" : "these chains"}:</b>\n` +
+          blockedLabels.join("\n") +
+          `\n\nSet up delegation at <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to execute from Telegram.`,
+        );
+      }
 
-      const keyboard: TgInlineKeyboardMarkup = {
-        inline_keyboard: [
-          [
-            { text: `✅ Execute${txList.length > 1 ? " All" : ""}`, callback_data: `exec:${userId}` },
-            { text: "❌ Cancel", callback_data: `cancel:${userId}` },
+      if (executableTxs.length > 0) {
+        // Store only executable transactions
+        const txKey = `tg-pending-tx:${userId}`;
+        await env.KV.put(txKey, JSON.stringify(executableTxs), {
+          expirationTtl: 300, // 5 min expiry
+        });
+
+        // Build trade summary for executable transactions
+        const tradeLabels: string[] = [];
+        for (const tx of executableTxs) {
+          const meta = tx.swapMeta;
+          const label = meta
+            ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
+            : tx.description || "Transaction";
+          const chainName = SUPPORTED_CHAINS.find(ch => ch.id === tx.chainId)?.name
+            || TESTNET_CHAINS.find(ch => ch.id === tx.chainId)?.name
+            || String(tx.chainId);
+          tradeLabels.push(`• ${escapeHtml(label)} (${chainName})`);
+        }
+
+        const tradeCount = executableTxs.length > 1 ? `${executableTxs.length} trades` : "Trade";
+        replyParts.push(`\n🔔 <b>${tradeCount} ready:</b>\n${tradeLabels.join("\n")}`);
+
+        const keyboard: TgInlineKeyboardMarkup = {
+          inline_keyboard: [
+            [
+              { text: `✅ Execute${executableTxs.length > 1 ? " All" : ""}`, callback_data: `exec:${userId}` },
+              { text: "❌ Cancel", callback_data: `cancel:${userId}` },
+            ],
           ],
-        ],
-      };
+        };
 
-      const fullReply = replyParts.join("\n\n") || "Ready.";
-      const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
-      await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
+        const fullReply = replyParts.join("\n\n") || "Ready.";
+        const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
+        await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
+      } else {
+        // All transactions blocked — no Execute button
+        const fullReply = replyParts.join("\n\n") || "No executable trades.";
+        const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
+        await sendMessage(token, chatId, truncated);
+      }
     } else if (txList.length > 0 && executionMode === "manual") {
       // Manual mode — can't sign from Telegram
       const tradeCount = txList.length > 1 ? `These ${txList.length} trades require` : "This trade requires";
@@ -700,7 +740,15 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
     } else if (result) {
       lines.push(`⏳ ${escapeHtml(desc)} — submitted: <code>${result.txHash.slice(0, 14)}…</code>`);
     } else if (error) {
-      lines.push(`⚠️ ${escapeHtml(desc)} — ${escapeHtml(error.slice(0, 150))}`);
+      // Provide actionable guidance for delegation errors
+      if (error.includes("Delegation not active on chain")) {
+        const chainName = SUPPORTED_CHAINS.find(ch => error.includes(String(ch.id)))?.name
+          || TESTNET_CHAINS.find(ch => error.includes(String(ch.id)))?.name
+          || "this chain";
+        lines.push(`⚠️ ${escapeHtml(desc)} — delegation not set up on ${chainName}. Visit <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to activate.`);
+      } else {
+        lines.push(`⚠️ ${escapeHtml(desc)} — ${escapeHtml(error.slice(0, 150))}`);
+      }
     }
   }
   return lines.join("\n");

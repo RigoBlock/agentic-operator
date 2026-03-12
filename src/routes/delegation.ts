@@ -322,7 +322,13 @@ delegation.post("/execute", async (c) => {
     // Verify delegation is active on this chain
     const active = await isDelegationActive(c.env.KV, body.vaultAddress, body.chainId);
     if (!active) {
-      return c.json({ error: `Delegation not active on chain ${body.chainId}` }, 400);
+      // Return fallback signal so the frontend can switch to manual wallet signing
+      return c.json({
+        error: `Delegation not active on chain ${body.chainId}. You can sign this transaction directly from your wallet.`,
+        code: "DELEGATION_NOT_ON_CHAIN",
+        fallbackToManual: true,
+        transaction: body.transaction,
+      }, 400);
     }
 
     const tx: UnsignedTransaction = {

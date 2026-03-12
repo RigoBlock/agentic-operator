@@ -42,8 +42,46 @@ import {
 import { checkNavImpact } from "./navGuard.js";
 
 /**
- * Map chain ID to the native gas token symbol for user-facing messages.
+ * Parse simulation revert messages to detect common ERC20/DEX token balance issues.
+ * Returns a user-friendly message if detected, otherwise null.
  */
+function parseSimulationRevert(raw: string): string | null {
+  const lower = raw.toLowerCase();
+
+  // Common ERC20 / Uniswap / 0x revert patterns indicating insufficient token balance
+  if (
+    lower.includes("stf") ||                             // Uniswap SafeTransferFrom
+    lower.includes("transfer amount exceeds balance") ||
+    lower.includes("transfer_from_failed") ||
+    lower.includes("insufficient balance") ||
+    lower.includes("erc20: transfer amount exceeds") ||
+    lower.includes("safetransferfrom") ||
+    lower.includes("subtraction overflow") ||             // balance underflow
+    lower.includes("ds-math-sub-underflow") ||            // MakerDAO-style SafeMath
+    lower.includes("not enough balance") ||
+    lower.includes("exceeds allowance") ||                // approval-related
+    lower.includes("v3_invalid_swap") ||                  // Uniswap V3 revert
+    lower.includes("too little received")
+  ) {
+    return (
+      "The vault does not hold enough of the sell token for this swap. " +
+      "Check the vault's token balances and try a smaller amount."
+    );
+  }
+
+  // Expired deadline
+  if (lower.includes("transaction too old") || lower.includes("deadline")) {
+    return "The swap quote has expired. Please request a fresh quote.";
+  }
+
+  // Slippage
+  if (lower.includes("too much requested") || lower.includes("slippage") || lower.includes("minimum amount")) {
+    return "The swap would result in too much slippage. Try again with a fresh quote or smaller amount.";
+  }
+
+  return null;
+}
+
 const NATIVE_TOKEN: Record<number, string> = {
   1: "ETH", 10: "ETH", 130: "ETH", 8453: "ETH", 42161: "ETH",
   56: "BNB", 137: "POL",
@@ -484,7 +522,9 @@ async function broadcastAgentTransaction(
   } catch (simError) {
     const msg = simError instanceof Error ? simError.message : String(simError);
     console.error(`[Execution] Simulation FAILED for ${tx.to} on chain ${chainId}:`, msg);
+    const friendly = parseSimulationRevert(msg);
     throw new ExecutionError(
+      friendly ||
       `Transaction simulation failed — the transaction would revert on-chain. ` +
       `This could mean the agent is not delegated on the vault, or the trade parameters are invalid. ` +
       `Details: ${sanitizeError(msg)}`,
@@ -716,7 +756,9 @@ async function sponsoredAgentTransaction(
   } catch (simError) {
     const msg = simError instanceof Error ? simError.message : String(simError);
     console.error(`[Sponsored] Simulation FAILED on chain ${chainId}:`, msg);
+    const friendly = parseSimulationRevert(msg);
     throw new ExecutionError(
+      friendly ||
       `Transaction simulation failed — would revert on-chain. Details: ${sanitizeError(msg)}`,
       "SIMULATION_FAILED",
     );
