@@ -927,6 +927,7 @@
         }
 
         saveVault(addr, foundChainId, name);
+        refreshDelegationStatus();
       } catch {
         status.className = 'vault-info-badge error';
         status.textContent = 'not a vault on any chain';
@@ -1681,6 +1682,11 @@
           }
           throw new Error(err.error || `HTTP ${res.status}`);
         }
+
+        const data = await res.json();
+        if (data.executionResult) {
+          const r = data.executionResult;
+          statusEl.textContent = r.confirmed
             ? `✅ Confirmed in block ${r.blockNumber || '?'}`
             : r.reverted
               ? '❌ Reverted on-chain'
@@ -2225,8 +2231,11 @@
         updateDelegationUI(delegationState);
         syncExecutionMode();
 
-        // Also fetch balance if delegation is active
-        if (delegationState.enabled && delegationState.agentAddress) {
+        // Also fetch balance if delegation is active on current chain
+        const isActive = delegationState.isActiveOnChain != null
+          ? delegationState.isActiveOnChain
+          : (delegationState.isActiveInKV || false);
+        if (delegationState.enabled && delegationState.agentAddress && isActive) {
           fetchAgentBalance(vault);
         }
       } catch {

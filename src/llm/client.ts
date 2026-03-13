@@ -212,7 +212,7 @@ ${executionModeNote}`;
           const dexArg = (args.dex as string).toLowerCase();
           detectedDex = (dexArg === "uniswap") ? "Uniswap" : "0x";
         } else if ((name === "get_swap_quote" || name === "build_vault_swap") && !args.dex) {
-          detectedDex = "0x"; // default
+          detectedDex = "Uniswap"; // default
         } else if (name.startsWith("gmx_")) {
           detectedDex = "GMX";
         }
@@ -321,7 +321,7 @@ ${executionModeNote}`;
             const dexArg = (args.dex as string).toLowerCase();
             detectedDex = (dexArg === "uniswap") ? "Uniswap" : "0x";
           } else if ((name === "get_swap_quote" || name === "build_vault_swap") && !args.dex) {
-            detectedDex = "0x";
+            detectedDex = "Uniswap";
           } else if (name.startsWith("gmx_")) {
             detectedDex = "GMX";
           }
@@ -1931,9 +1931,13 @@ function sanitizeSwapArgs(
   const corrected = { ...args };
   const multiSwap = isMultiSwapMessage(msg);
 
-  // ── 1. Force default DEX to 0x if LLM didn't set it or set it wrong ──
+  // ── 1. Default DEX to Uniswap (reliable vault adapter) ──
+  // 0x AllowanceHolder flow requires an on-chain A0xRouter adapter that is
+  // not yet deployed on most vaults. Uniswap routes through the proven
+  // AUniswapRouter adapter and has longer deadlines (30 min vs ~2 min for 0x),
+  // which is critical for Telegram where users press Execute after a delay.
   if (!corrected.dex) {
-    corrected.dex = "0x";
+    corrected.dex = "uniswap";
   }
 
   // ── 2. Extract amount and direction from user message ──

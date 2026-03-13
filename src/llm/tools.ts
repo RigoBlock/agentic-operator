@@ -38,7 +38,7 @@ export const TOOL_DEFINITIONS = [
           dex: {
             type: "string",
             description:
-              "DEX to use: '0x' or 'uniswap'. Default is '0x' (aggregator, best prices). " +
+              "DEX to use: 'uniswap' (default, reliable) or '0x' (aggregator). " +
               "If the user previously used a specific DEX in this conversation, keep using it. " +
               "When user says 'uniswap' → set dex='uniswap'. When user says '0x'/'zero x'/'zerox'/'aggregator' → set dex='0x'.",
           },
@@ -84,7 +84,7 @@ export const TOOL_DEFINITIONS = [
           dex: {
             type: "string",
             description:
-              "DEX to use: '0x' or 'uniswap'. Default is '0x' (aggregator, best prices). " +
+              "DEX to use: 'uniswap' (default, reliable) or '0x' (aggregator). " +
               "If the user previously used a specific DEX in this conversation, keep using it. " +
               "When user says 'uniswap' → set dex='uniswap'. When user says '0x'/'zero x'/'zerox'/'aggregator' → set dex='0x'.",
           },
@@ -737,8 +737,8 @@ If in doubt between perp and swap, treat "long/short" as a GMX perpetual.
 Pair suffixes like USD, USDC, USDT after a token symbol (e.g. ETHUSD, UNIUSDC, BTCUSD) indicate a GMX perpetual market, not a swap pair.
 
 SUPPORTED DEXs (SWAPS):
-- Uniswap: Routes through Universal Router. Supports exact-input AND exact-output.
-- 0x: Routes through AllowanceHolder contract. 150+ liquidity sources. Supports both amountIn and amountOut.
+- Uniswap (default): Routes through Universal Router via vault's AUniswapRouter adapter. Supports exact-input AND exact-output.
+- 0x: Routes through AllowanceHolder contract. 150+ liquidity sources. Requires vault's A0xRouter adapter (not yet deployed on most vaults).
 
 SUPPORTED PERPS (PERPETUAL FUTURES):
 - GMX v2: Leveraged perpetual positions on Arbitrum only. Markets include ETH, BTC, ARB, SOL, LINK, UNI, and more.
@@ -746,10 +746,10 @@ SUPPORTED PERPS (PERPETUAL FUTURES):
   No multicall needed — each tool call produces one transaction.
 
 DEX PREFERENCE:
+- Default is Uniswap (reliable vault adapter, longer quote deadlines).
 - If the user explicitly says "uniswap", set dex="uniswap".
 - If the user explicitly says "0x"/"zero x"/"zerox"/"aggregator", set dex="0x".
 - If the user previously used a specific DEX in this conversation, keep using it.
-- If no preference, default to 0x (aggregator with 150+ sources and best prices).
 - Always honor explicit DEX requests.
 
 CHAIN HANDLING:

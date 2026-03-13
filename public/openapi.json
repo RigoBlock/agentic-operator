@@ -1,0 +1,443 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RigoBlock Agent Trader API",
+    "description": "AI-powered DeFi trading API for autonomous agents. All endpoints are protected by the x402 payment protocol \u2014 no API key required. Agents pay per request in USDC on Base (chain ID 8453) via the Coinbase Developer Platform facilitator.\n\n## x402 Payment Flow\n1. Agent makes a request \u2192 server responds `402 Payment Required` with a payment payload\n2. Agent pays in USDC on Base via `api.cdp.coinbase.com`\n3. Agent retries with the `X-Payment` header \u2192 receives structured data\n\n**Facilitator:** `api.cdp.coinbase.com`  \n**Payment token:** USDC on Base (chain ID 8453)  \n**Integration guide:** https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md",
+    "version": "1.0.0",
+    "contact": {
+      "name": "RigoBlock",
+      "url": "https://rigoblock.com",
+      "email": "gab@rigoblock.com"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://trader.rigoblock.com",
+      "description": "Production"
+    }
+  ],
+  "paths": {
+    "/api/quote": {
+      "get": {
+        "operationId": "getDexQuote",
+        "summary": "Get DEX swap quote",
+        "description": "Returns the best swap quote routed automatically across Uniswap V2, V3, and V4. No vault or wallet context required \u2014 any agent can call this endpoint.\n\n**Price:** $0.002 USDC per request (paid via x402)",
+        "tags": [
+          "Quotes"
+        ],
+        "parameters": [
+          {
+            "name": "sell",
+            "in": "query",
+            "required": true,
+            "description": "Token to sell \u2014 ticker symbol (e.g. `ETH`) or ERC-20 contract address.",
+            "schema": {
+              "type": "string",
+              "example": "ETH"
+            }
+          },
+          {
+            "name": "buy",
+            "in": "query",
+            "required": true,
+            "description": "Token to buy \u2014 ticker symbol (e.g. `USDC`) or ERC-20 contract address.",
+            "schema": {
+              "type": "string",
+              "example": "USDC"
+            }
+          },
+          {
+            "name": "amount",
+            "in": "query",
+            "required": true,
+            "description": "Human-readable amount of the sell token (e.g. `1` for 1 ETH).",
+            "schema": {
+              "type": "string",
+              "example": "1"
+            }
+          },
+          {
+            "name": "chain",
+            "in": "query",
+            "required": false,
+            "description": "Target chain. Accepts chain name or chain ID.",
+            "schema": {
+              "type": "string",
+              "default": "base",
+              "enum": [
+                "base",
+                "arbitrum",
+                "ethereum",
+                "optimism",
+                "polygon",
+                "bsc",
+                "unichain"
+              ],
+              "example": "base"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful quote response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuoteResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Payment required (x402). Pay in USDC on Base and retry with `X-Payment` header.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/X402PaymentRequired"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request \u2014 missing or invalid parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "x402": []
+          }
+        ]
+      }
+    },
+    "/api/chat": {
+      "post": {
+        "operationId": "agentChat",
+        "summary": "AI-powered DeFi agent chat",
+        "description": "Natural language DeFi interface for autonomous agents. Send a message describing a trading intent and receive swap calldata, position summaries, or market analysis \u2014 ready for on-chain execution.\n\n**Price:** $0.01 USDC per request (paid via x402)",
+        "tags": [
+          "Agent"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              },
+              "example": {
+                "messages": [
+                  {
+                    "role": "user",
+                    "content": "Swap 0.1 ETH for USDC on Base"
+                  }
+                ],
+                "vaultAddress": "0xYourVaultAddress"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "AI response with DeFi action or analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Payment required (x402). Pay in USDC on Base and retry with `X-Payment` header.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/X402PaymentRequired"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "x402": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "x402": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Payment",
+        "description": "x402 payment header. Flow:\n1. Make the request without this header \u2192 receive `402 Payment Required`\n2. Submit USDC payment on Base (chain 8453) via `api.cdp.coinbase.com`\n3. Retry the request with this header set to the payment receipt\n\nSee https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md for full integration."
+      }
+    },
+    "schemas": {
+      "QuoteResponse": {
+        "type": "object",
+        "description": "Best swap quote across Uniswap V2/V3/V4",
+        "properties": {
+          "sellToken": {
+            "type": "string",
+            "description": "Address of the token being sold",
+            "example": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+          },
+          "buyToken": {
+            "type": "string",
+            "description": "Address of the token being bought",
+            "example": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+          },
+          "sellAmount": {
+            "type": "string",
+            "description": "Sell amount in token base units (wei)",
+            "example": "1000000000000000000"
+          },
+          "buyAmount": {
+            "type": "string",
+            "description": "Buy amount in token base units",
+            "example": "2485000000"
+          },
+          "price": {
+            "type": "string",
+            "description": "Exchange rate (buy per sell)",
+            "example": "2485.00"
+          },
+          "source": {
+            "type": "string",
+            "description": "DEX source routing the quote",
+            "example": "Uniswap_V3"
+          },
+          "chain": {
+            "type": "string",
+            "description": "Chain the quote is valid on",
+            "example": "base"
+          },
+          "calldata": {
+            "type": "string",
+            "description": "Encoded calldata for on-chain execution"
+          },
+          "to": {
+            "type": "string",
+            "description": "Contract address to send the swap transaction to"
+          },
+          "value": {
+            "type": "string",
+            "description": "ETH value to attach (for native token swaps)",
+            "example": "1000000000000000000"
+          },
+          "gasEstimate": {
+            "type": "string",
+            "description": "Estimated gas units for the transaction",
+            "example": "180000"
+          }
+        }
+      },
+      "ChatRequest": {
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "description": "Conversation history in OpenAI message format",
+            "items": {
+              "type": "object",
+              "required": [
+                "role",
+                "content"
+              ],
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "enum": [
+                    "user",
+                    "assistant",
+                    "system"
+                  ]
+                },
+                "content": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "vaultAddress": {
+            "type": "string",
+            "description": "RigoBlock vault (smart pool) address for vault-scoped operations",
+            "example": "0xYourVaultAddress"
+          },
+          "chain": {
+            "type": "string",
+            "description": "Target chain context",
+            "default": "base",
+            "enum": [
+              "base",
+              "arbitrum",
+              "ethereum",
+              "optimism",
+              "polygon",
+              "bsc",
+              "unichain"
+            ]
+          }
+        }
+      },
+      "ChatResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "AI-generated response text"
+          },
+          "action": {
+            "type": "object",
+            "description": "Executable on-chain action, if applicable",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "swap",
+                  "position",
+                  "analysis"
+                ],
+                "description": "Action type"
+              },
+              "to": {
+                "type": "string",
+                "description": "Contract address"
+              },
+              "calldata": {
+                "type": "string",
+                "description": "Encoded transaction calldata"
+              },
+              "value": {
+                "type": "string",
+                "description": "ETH value to attach"
+              },
+              "gasEstimate": {
+                "type": "string",
+                "description": "Estimated gas"
+              }
+            }
+          }
+        }
+      },
+      "X402PaymentRequired": {
+        "type": "object",
+        "description": "Standard x402 payment challenge",
+        "properties": {
+          "x402Version": {
+            "type": "integer",
+            "example": 1
+          },
+          "error": {
+            "type": "string",
+            "example": "X-PAYMENT-REQUIRED"
+          },
+          "accepts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "scheme": {
+                  "type": "string",
+                  "example": "exact"
+                },
+                "network": {
+                  "type": "string",
+                  "example": "base"
+                },
+                "maxAmountRequired": {
+                  "type": "string",
+                  "example": "2000"
+                },
+                "resource": {
+                  "type": "string",
+                  "example": "https://trader.rigoblock.com/api/quote"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "mimeType": {
+                  "type": "string",
+                  "example": "application/json"
+                },
+                "payTo": {
+                  "type": "string",
+                  "description": "USDC recipient address on Base"
+                },
+                "maxTimeoutSeconds": {
+                  "type": "integer",
+                  "example": 300
+                },
+                "asset": {
+                  "type": "string",
+                  "description": "USDC contract address on Base",
+                  "example": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                },
+                "extra": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "example": "USDC"
+                    },
+                    "version": {
+                      "type": "string",
+                      "example": "2"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Quotes",
+      "description": "DEX price quotes \u2014 no wallet or vault context required"
+    },
+    {
+      "name": "Agent",
+      "description": "AI-powered DeFi agent interface \u2014 natural language to calldata"
+    }
+  ]
+}

@@ -87,6 +87,7 @@ export function resolveChainId(chainArg: string): number {
 const ALCHEMY_NETWORK: Record<number, string> = {
   1: "eth-mainnet",
   10: "opt-mainnet",
+  130: "unichain-mainnet",
   137: "polygon-mainnet",
   8453: "base-mainnet",
   42161: "arb-mainnet",

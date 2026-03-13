@@ -426,8 +426,7 @@ export async function executeViaDelegation(
       );
     } catch (sponsoredErr) {
       // If simulation failed, the transaction itself is bad — don't retry via direct
-      if (sponsoredErr instanceof ExecutionError &&
-          (sponsoredErr.code === "SIMULATION_FAILED" || sponsoredErr.code === "RPC_UNAVAILABLE")) {
+      if (sponsoredErr instanceof ExecutionError && sponsoredErr.code === "SIMULATION_FAILED") {
         throw sponsoredErr;
       }
       // For bundler/paymaster errors (e.g. policy expired, chain not covered),
@@ -734,13 +733,12 @@ async function sponsoredAgentTransaction(
 ): Promise<ExecutionResult> {
   const chain = getChain(chainId);
   const rpcUrl = getRpcUrl(chainId, alchemyKey);
-  if (!rpcUrl) {
-    throw new ExecutionError(
-      `No Alchemy RPC available for chain ${chainId} — sponsored execution requires Alchemy`,
-      "RPC_UNAVAILABLE",
-    );
-  }
-  const transport = http(rpcUrl, { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } });
+  // Use Alchemy RPC if available, otherwise fall back to chain's default public RPC.
+  // The simulation only needs any working RPC — the actual sponsored execution
+  // uses the Alchemy SDK's own transport (which supports more chains).
+  const transport = rpcUrl
+    ? http(rpcUrl, { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } })
+    : http();
   const publicClient = createPublicClient({ chain, transport });
   const txValue = BigInt(tx.value);
 
