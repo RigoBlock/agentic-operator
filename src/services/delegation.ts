@@ -31,7 +31,7 @@
  */
 
 import type { Address, Hex } from "viem";
-import { encodeFunctionData, createPublicClient, http } from "viem";
+import { encodeFunctionData } from "viem";
 import type { DelegationConfig, ChainDelegation, Env } from "../types.js";
 import { ALLOWED_VAULT_SELECTORS, VAULT_DELEGATION_ABI } from "../abi/rigoblockVault.js";
 import {
@@ -39,9 +39,7 @@ import {
   createAgentWallet,
   markChainDelegated,
 } from "./agentWallet.js";
-import { getChain, getRpcUrl } from "../config.js";
-
-const ALCHEMY_ORIGIN = "https://trader.rigoblock.com";
+import { getClient } from "./vault.js";
 
 // ── KV key helpers ────────────────────────────────────────────────────
 
@@ -212,13 +210,7 @@ export async function checkDelegationOnChain(
   delegatedSelectors: Hex[];
   undelegatedSelectors: Hex[];
 }> {
-  const chain = getChain(chainId);
-  const rpcUrl = getRpcUrl(chainId, alchemyKey);
-  const transport = http(rpcUrl, rpcUrl?.includes("alchemy.com")
-    ? { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
-    : undefined,
-  );
-  const publicClient = createPublicClient({ chain, transport });
+  const publicClient = getClient(chainId, alchemyKey);
 
   try {
     // Single call: get all selectors delegated to the agent

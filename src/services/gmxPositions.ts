@@ -12,14 +12,10 @@
  */
 
 import {
-  createPublicClient,
-  http,
   formatUnits,
   type Address,
-  type PublicClient,
 } from "viem";
-import { arbitrum } from "viem/chains";
-import { getRpcUrl } from "../config.js";
+import { getClient } from "./vault.js";
 import {
   GMX_READER_ABI,
   GMX_CHAINLINK_PRICE_FEED_ABI,
@@ -74,24 +70,6 @@ export interface GmxPositionsSummary {
   formattedReport: string;
 }
 
-// ── Client ─────────────────────────────────────────────────────────────
-
-const ALCHEMY_ORIGIN = "https://trader.rigoblock.com";
-
-let arbClient: PublicClient | null = null;
-
-function getArbitrumClient(alchemyKey?: string): PublicClient {
-  if (arbClient) return arbClient;
-  const rpcUrl = getRpcUrl(42161, alchemyKey);
-  arbClient = createPublicClient({
-    chain: arbitrum,
-    transport: http(rpcUrl, rpcUrl?.includes("alchemy.com")
-      ? { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
-      : undefined,
-    ),
-  });
-  return arbClient;
-}
 
 // ── Order type labels ──────────────────────────────────────────────────
 
@@ -115,7 +93,7 @@ export async function getGmxPositions(
   vaultAddress: Address,
   alchemyKey?: string,
 ): Promise<GmxPosition[]> {
-  const client = getArbitrumClient(alchemyKey);
+  const client = getClient(42161, alchemyKey);
 
   // Fetch positions, markets, and tickers in parallel
   const [rawPositions, markets, tickers] = await Promise.all([
@@ -240,7 +218,7 @@ export async function getGmxPendingOrders(
   vaultAddress: Address,
   alchemyKey?: string,
 ): Promise<GmxPendingOrder[]> {
-  const client = getArbitrumClient(alchemyKey);
+  const client = getClient(42161, alchemyKey);
 
   const [rawOrders, markets, tickers] = await Promise.all([
     client.readContract({

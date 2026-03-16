@@ -28,7 +28,7 @@ import type { VaultInfo } from "../types.js";
  * Cloudflare Workers don't send Origin by default, so Alchemy rejects
  * requests as "Unspecified". Setting this header fixes domain validation.
  */
-const ALCHEMY_ORIGIN = "https://trader.rigoblock.com";
+export const ALCHEMY_ORIGIN = "https://trader.rigoblock.com";
 
 /** Cache clients per chainId+key to avoid recreating */
 const clientCache = new Map<string, PublicClient>();

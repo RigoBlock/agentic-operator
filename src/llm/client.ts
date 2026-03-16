@@ -12,9 +12,9 @@ import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, Unsign
 import { TOOL_DEFINITIONS, SYSTEM_PROMPT } from "./tools.js";
 import { getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay } from "../services/uniswapTrading.js";
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../services/zeroXTrading.js";
-import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint } from "../services/vault.js";
-import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, getChain, getRpcUrl, STAKING_PROXY } from "../config.js";
-import { decodeFunctionData, encodeFunctionData, parseUnits, formatUnits, createPublicClient, http, type Address, type Hex } from "viem";
+import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint, getClient } from "../services/vault.js";
+import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, STAKING_PROXY } from "../config.js";
+import { decodeFunctionData, encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../abi/poolFactory.js";
 import { ERC20_ABI } from "../abi/erc20.js";
@@ -443,10 +443,7 @@ async function estimateGas(
     return `0x${fallback.toString(16)}`;
   }
   try {
-    const chain = getChain(chainId);
-    const rpcUrl = getRpcUrl(chainId, alchemyKey);
-    const transport = rpcUrl ? http(rpcUrl) : http();
-    const client = createPublicClient({ chain, transport });
+    const client = getClient(chainId, alchemyKey);
     const txValue = BigInt(value);
     const estimated = await client.estimateGas({
       account: from,
@@ -1591,7 +1588,9 @@ async function executeToolCall(
         tokenSymbol,
         amount,
         useNativeEth: useNativeEth ?? false,
-        shouldUnwrapOnDestination: shouldUnwrapOnDestination ?? false,
+        // If vault wraps native ETH→WETH for bridging, unwrap on destination too.
+        // If user is sending actual WETH tokens, they want WETH on destination.
+        shouldUnwrapOnDestination: shouldUnwrapOnDestination ?? (useNativeEth ?? false),
         alchemyKey: env.ALCHEMY_API_KEY,
       });
 

@@ -19,7 +19,6 @@
  */
 
 import {
-  createPublicClient,
   createWalletClient,
   http,
   formatGwei,
@@ -28,7 +27,7 @@ import {
   type Address,
   type Hex,
   type TransactionReceipt,
-  type Chain,
+  type PublicClient,
 } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
 import type { Env, UnsignedTransaction, ExecutionResult } from "../types.js";
@@ -41,6 +40,7 @@ import {
   type WalletCall,
 } from "./bundler.js";
 import { checkNavImpact } from "./navGuard.js";
+import { getClient, ALCHEMY_ORIGIN } from "./vault.js";
 
 /**
  * Parse simulation revert messages to detect common ERC20/DEX token balance issues.
@@ -133,8 +133,6 @@ function parseSponsoredError(raw: string, chainId: number, agentAddress: string)
 
   return null;
 }
-
-const ALCHEMY_ORIGIN = "https://trader.rigoblock.com";
 
 // ── Gas Safety Configuration ──────────────────────────────────────────
 
@@ -231,7 +229,7 @@ interface FeeEstimate {
  * Estimate EIP-1559 gas fees with safety caps.
  */
 async function estimateFees(
-  publicClient: ReturnType<typeof createPublicClient>,
+  publicClient: PublicClient,
   chainId: number,
 ): Promise<FeeEstimate> {
   const caps = GAS_CAPS[chainId] || DEFAULT_GAS_CAP;
@@ -369,41 +367,33 @@ export async function executeViaDelegation(
   // 6b. NAV Guard — prevent trades that crash the pool's unit price
   // Runs BEFORE execution (both sponsored & direct paths).
   // Simulates a multicall([swap, getNavDataView]) to measure post-swap NAV impact.
-  // IMPORTANT: This guard is selector-agnostic — it runs on ANY function call
-  // the agent sends to the vault (swaps, GMX, depositV3, future methods).
-  // No per-method extension is needed when new vault adapters are added.
-  try {
-    const navResult = await checkNavImpact(
-      tx.to as Address,
-      tx.data as Hex,
-      BigInt(tx.value),
-      tx.chainId,
-      env.ALCHEMY_API_KEY,
-      agentAccount.address,
-      env.KV,
+  // FAIL-CLOSED: Any error (RPC, simulation, decode) blocks the transaction.
+  // We NEVER allow a trade when we can't verify it's safe.
+  // NAV guard is FAIL-CLOSED: any error here MUST block execution.
+  // If we can't verify the trade is safe, we refuse to broadcast it.
+  const navResult = await checkNavImpact(
+    tx.to as Address,
+    tx.data as Hex,
+    BigInt(tx.value),
+    tx.chainId,
+    env.ALCHEMY_API_KEY,
+    agentAccount.address,
+    env.KV,
+  );
+  if (!navResult.allowed) {
+    console.warn(
+      `[executeViaDelegation] NAV guard BLOCKED tx: ${navResult.reason}`,
     );
-    if (!navResult.allowed) {
-      console.warn(
-        `[executeViaDelegation] NAV guard BLOCKED tx: ${navResult.reason}`,
-      );
-      throw new ExecutionError(
-        navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
-        "NAV_GUARD_BLOCKED",
-      );
-    }
-    if (navResult.dropPct !== "0" && navResult.dropPct !== "0.00") {
-      console.log(
-        `[executeViaDelegation] NAV guard OK: drop=${navResult.dropPct}% ` +
-        `(pre=${navResult.preNavUnitaryValue} post=${navResult.postNavUnitaryValue})`,
-      );
-    }
-  } catch (err) {
-    // If it's our own NAV_GUARD_BLOCKED error, re-throw
-    if (err instanceof ExecutionError && err.code === "NAV_GUARD_BLOCKED") {
-      throw err;
-    }
-    // For any other error (RPC issues, etc.), log and continue — don't block execution
-    console.warn(`[executeViaDelegation] NAV guard error (non-blocking): ${err}`);
+    throw new ExecutionError(
+      navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
+      "NAV_GUARD_BLOCKED",
+    );
+  }
+  if (navResult.dropPct !== "0" && navResult.dropPct !== "0.00") {
+    console.log(
+      `[executeViaDelegation] NAV guard OK: drop=${navResult.dropPct}% ` +
+      `(pre=${navResult.preNavUnitaryValue} post=${navResult.postNavUnitaryValue})`,
+    );
   }
 
   // 7. Execute the transaction
@@ -504,12 +494,7 @@ async function broadcastAgentTransaction(
   const chain = getChain(chainId);
   const rpcUrl = getRpcUrl(chainId, alchemyKey);
 
-  const transport = http(rpcUrl, rpcUrl?.includes("alchemy.com")
-    ? { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
-    : undefined,
-  );
-
-  const publicClient = createPublicClient({ chain, transport });
+  const publicClient = getClient(chainId, alchemyKey);
   const txValue = BigInt(tx.value);
 
   // ── Step 1: Simulate the transaction ──
@@ -594,7 +579,10 @@ async function broadcastAgentTransaction(
   const walletClient = createWalletClient({
     account: agentAccount,
     chain,
-    transport,
+    transport: http(rpcUrl, rpcUrl?.includes("alchemy.com")
+      ? { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
+      : undefined,
+    ),
   });
 
   const nonce = await publicClient.getTransactionCount({ address: agentAccount.address });
@@ -737,15 +725,9 @@ async function sponsoredAgentTransaction(
   gasPolicyId: string,
   _kv: KVNamespace,
 ): Promise<ExecutionResult> {
-  const chain = getChain(chainId);
-  const rpcUrl = getRpcUrl(chainId, alchemyKey);
-  // Use Alchemy RPC if available, otherwise fall back to chain's default public RPC.
   // The simulation only needs any working RPC — the actual sponsored execution
   // uses the Alchemy SDK's own transport (which supports more chains).
-  const transport = rpcUrl
-    ? http(rpcUrl, { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } })
-    : http();
-  const publicClient = createPublicClient({ chain, transport });
+  const publicClient = getClient(chainId, alchemyKey);
   const txValue = BigInt(tx.value);
 
   // ── Step 1: Simulate the vault call ──
@@ -926,13 +908,7 @@ export async function checkAgentBalance(
     throw new ExecutionError("Agent wallet not found", "AGENT_WALLET_NOT_FOUND");
   }
 
-  const chain = getChain(chainId);
-  const rpcUrl = getRpcUrl(chainId, env.ALCHEMY_API_KEY);
-  const transport = http(rpcUrl, rpcUrl?.includes("alchemy.com")
-    ? { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
-    : undefined,
-  );
-  const client = createPublicClient({ chain, transport });
+  const client = getClient(chainId, env.ALCHEMY_API_KEY);
 
   const balance = await client.getBalance({ address: agentAccount.address });
   const minBal = MIN_BALANCE[chainId] ?? DEFAULT_MIN_BALANCE;
@@ -965,18 +941,13 @@ export async function checkPendingTxStatus(
   hash: string,
   chainId: number,
 ): Promise<ExecutionResult | null> {
-  const chain = getChain(chainId);
   const rpcUrl = getRpcUrl(chainId, env.ALCHEMY_API_KEY);
 
   if (!rpcUrl) {
     throw new ExecutionError("RPC URL not available for chain " + chainId, "RPC_UNAVAILABLE");
   }
 
-  const transport = http(rpcUrl, rpcUrl.includes("alchemy.com")
-    ? { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
-    : undefined,
-  );
-  const publicClient = createPublicClient({ chain, transport });
+  const publicClient = getClient(chainId, env.ALCHEMY_API_KEY);
 
   try {
     const receipt = await publicClient.getTransactionReceipt({ hash: hash as Hex });

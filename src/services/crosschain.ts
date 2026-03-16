@@ -26,8 +26,6 @@
  */
 
 import {
-  createPublicClient,
-  http,
   encodeFunctionData,
   encodeAbiParameters,
   parseAbiParameters,
@@ -35,11 +33,9 @@ import {
   parseUnits,
   type Address,
   type Hex,
-  type PublicClient,
 } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { ACROSS_SPOKE_POOL_ABI } from "../abi/aIntents.js";
-import { getChain, getRpcUrl } from "../config.js";
 import {
   OpType,
   ACROSS_SPOKE_POOL,
@@ -51,13 +47,11 @@ import {
   type BridgeableToken,
   type BridgeableTokenType,
 } from "./crosschainConfig.js";
-import { getVaultTokenBalance, getNavData, getPoolData } from "./vault.js";
+import { getVaultTokenBalance, getNavData, getPoolData, getClient } from "./vault.js";
 import { getDelegationConfig, getActiveChains } from "./delegation.js";
 import type { DelegationConfig } from "../types.js";
 
-// ── Constants ─────────────────────────────────────────────────────────
-
-const ALCHEMY_ORIGIN = "https://trader.rigoblock.com";
+// ── Constants
 
 /** Maximum bridge fee as bps (2% — hard-coded in AIntents.sol as MAX_BRIDGE_FEE_BPS) */
 const MAX_BRIDGE_FEE_BPS = 200;
@@ -192,30 +186,6 @@ export interface RebalancePlan {
   totalEstimatedFees: string;
   /** Summary message */
   summary: string;
-}
-
-// ── RPC client helper ─────────────────────────────────────────────────
-
-const clientCache = new Map<string, PublicClient>();
-
-function getClient(chainId: number, alchemyKey?: string): PublicClient {
-  const cacheKey = `crosschain:${chainId}:${alchemyKey ? "alchemy" : "public"}`;
-  const cached = clientCache.get(cacheKey);
-  if (cached) return cached;
-
-  const chain = getChain(chainId);
-  const rpcUrl = getRpcUrl(chainId, alchemyKey);
-  const client = createPublicClient({
-    chain,
-    transport: http(
-      rpcUrl,
-      rpcUrl?.includes("alchemy.com")
-        ? { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
-        : undefined,
-    ),
-  });
-  clientCache.set(cacheKey, client);
-  return client;
 }
 
 // ── Multi-chain NAV reader ────────────────────────────────────────────

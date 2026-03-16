@@ -44,13 +44,17 @@ enabling sandwich attacks that extract ~10% per day within NAV guard limits.
 ```
 RULE: The NAV guard (10% max drop check) runs BEFORE every transaction broadcast.
       It is outside the agent's control surface. Do NOT add code paths that skip it.
+      It is FAIL-CLOSED: if ANY step fails (RPC, simulation, decode), block the tx.
 ```
 
 - `checkNavGuard()` in `execution.ts` calls `simulateNavImpact()` from `navGuard.ts`
 - It simulates atomically via `multicall([swap, getNavDataView])` on the RPC
 - If NAV drops > 10% vs the higher of pre-swap or 24h baseline → BLOCK
-- If the simulation fails, the transaction still goes through normal `eth_call` simulation
+- If the pre-swap NAV read fails → BLOCK (not skip)
+- If the multicall simulation fails → BLOCK (not skip)
+- If ANY error occurs in the guard or its caller → BLOCK (no try/catch swallow)
 - **NEVER** add a flag, env var, or config to skip the NAV guard
+- **NEVER** add a catch block that allows execution to continue when the guard errors
 
 ### 3. Auth model — three independent layers
 

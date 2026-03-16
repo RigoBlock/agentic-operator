@@ -17,20 +17,23 @@
  * This guard runs BEFORE the transaction is broadcast (both sponsored
  * and direct paths), so it's entirely server-side and outside the agent's
  * control.
+ *
+ * ## FAIL-CLOSED POLICY
+ *
+ * If ANY step fails (RPC error, simulation revert, decode failure), the
+ * guard returns `allowed: false`. We NEVER allow a transaction to pass
+ * when we can't verify it's safe. A user who enables delegation expects
+ * NAV protection — silently skipping it is worse than blocking a trade.
  */
 
 import {
-  createPublicClient,
-  http,
   encodeFunctionData,
   decodeFunctionResult,
   type Address,
   type Hex,
 } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
-import { getChain, getRpcUrl } from "../config.js";
-
-const ALCHEMY_ORIGIN = "https://trader.rigoblock.com";
+import { getClient } from "./vault.js";
 
 /** Maximum allowed NAV drop per transaction (10%) */
 const MAX_NAV_DROP_PCT = 10n;
@@ -91,14 +94,7 @@ export async function checkNavImpact(
   callerAddress: Address,
   kv?: KVNamespace,
 ): Promise<NavGuardResult> {
-  const chain = getChain(chainId);
-  const rpcUrl = getRpcUrl(chainId, alchemyKey);
-
-  const transport = http(rpcUrl, rpcUrl?.includes("alchemy.com")
-    ? { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
-    : undefined,
-  );
-  const publicClient = createPublicClient({ chain, transport });
+  const publicClient = getClient(chainId, alchemyKey);
 
   // ── Step 1: Read current (pre-swap) NAV ──
   let preNav: NavData;
@@ -119,15 +115,16 @@ export async function checkNavImpact(
       `totalValue=${preNav.totalValue} chain=${chainId}`,
     );
   } catch (err) {
-    // If getNavDataView is not available on this vault, skip the check
+    // FAIL-CLOSED: If we can't read pre-swap NAV, we MUST block the transaction.
+    // Allowing it would bypass the NAV guard entirely — leaving the vault unprotected.
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[NavGuard] Could not read pre-swap NAV (skipping guard): ${msg}`);
+    console.error(`[NavGuard] ✗ BLOCKED: Could not read pre-swap NAV: ${msg}`);
     return {
-      allowed: true,
+      allowed: false,
       preNavUnitaryValue: "0",
       postNavUnitaryValue: "0",
       dropPct: "0",
-      reason: "NAV view not available on this vault — guard skipped",
+      reason: `NAV guard cannot verify trade safety — pre-swap NAV read failed: ${msg.slice(0, 120)}`,
     };
   }
 
@@ -200,15 +197,15 @@ export async function checkNavImpact(
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // If multicall fails (maybe vault doesn't support it), fall back to allowing
-    // The normal simulation in execution.ts will catch actual reverts
-    console.warn(`[NavGuard] Multicall simulation failed (skipping nav guard): ${msg}`);
+    // FAIL-CLOSED: If we can't simulate the trade's NAV impact, we MUST block it.
+    // Allowing it would mean the user thinks they're protected when they're not.
+    console.error(`[NavGuard] ✗ BLOCKED: Multicall simulation failed: ${msg}`);
     return {
-      allowed: true,
+      allowed: false,
       preNavUnitaryValue: preNav.unitaryValue.toString(),
       postNavUnitaryValue: "0",
       dropPct: "0",
-      reason: `Multicall simulation failed — guard skipped: ${msg.slice(0, 100)}`,
+      reason: `NAV guard cannot verify trade safety — simulation failed: ${msg.slice(0, 120)}`,
     };
   }
 
