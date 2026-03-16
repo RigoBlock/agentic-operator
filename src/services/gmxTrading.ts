@@ -235,7 +235,7 @@ export async function getGmxTokenPrice(
 export function resolveGmxCollateral(
   symbol: string,
 ): Address {
-  const s = symbol.toUpperCase();
+  const s = symbol.toUpperCase().replace(/\.V\d+$/i, "");
   const TOKEN_MAP: Record<string, Address> = {
     ETH: GMX_ADDRESSES.WETH,
     WETH: GMX_ADDRESSES.WETH,
@@ -248,6 +248,7 @@ export function resolveGmxCollateral(
     LINK: "0xf97f4df75e6c8e0ce7fec36ad7c4e12f3a1c33d8" as Address,
     UNI: "0xFa7F8980b0f1E64A2062791cc3b0871572f1F7f0" as Address,
     SOL: "0x2bcC6D6CdBbDC0a4071e48bb3B969b06B3330c07" as Address,
+    XAUT: "0x7624cccCc59361D583F28BEC40D37e7771def5D" as Address,
   };
   const addr = TOKEN_MAP[s];
   if (!addr) {

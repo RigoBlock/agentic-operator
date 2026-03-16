@@ -319,6 +319,77 @@ if (res.status === 402) {
 
 ---
 
+## Composability Model — For Orchestrator Agents
+
+The `/api/chat` endpoint is an **atomic operations provider**. Each request
+accepts a single natural-language message, internally invokes zero or one tool,
+and returns a result (quote, unsigned transaction, analytics summary, etc.).
+
+### What the chat endpoint handles (one per request):
+
+| Category | Operations |
+|----------|-----------|
+| **Spot swaps** | Build swap tx (Uniswap / 0x), get quote |
+| **GMX perpetuals** | Open, close, increase positions; get positions; cancel/update orders; claim funding fees; list markets |
+| **Uniswap v4 LP** | Add/remove liquidity, list positions, collect fees |
+| **GRG staking** | Stake, undelegate, unstake, claim rewards (via vault adapter); end epoch (via staking proxy — manual only) |
+| **Cross-chain bridge** | Transfer tokens (Across Protocol), sync NAV, get bridge quote, aggregated NAV, rebalance plan |
+| **Vault management** | Get info, check token balance, deploy pool, fund pool (mint) |
+| **Delegation** | Setup, revoke all, revoke specific selectors, check status |
+| **Strategies** | Create, remove, list automated strategies (Telegram-gated) |
+| **Chain** | Switch active chain |
+
+### What the chat endpoint does NOT do:
+
+- **Multi-step orchestration** — It won't plan a sequence of operations.
+  "Rebalance to Base then LP the USDC" is two operations; the caller must
+  decompose and sequence them.
+- **Historical data** — No trade history, past performance, or historical prices.
+  Source this externally (CoinGecko, DeFi Llama, etc.).
+- **Yield estimation** — No APR/APY calculations. The caller must gather
+  yield data from protocol-specific sources.
+- **Lending protocols** — No Aave, Compound, or other lending interaction.
+- **Arbitrary on-chain reads** — Only the views exposed by tools (NAV, balances,
+  positions, delegation status).
+- **Token approvals** — The vault adapter handles these internally.
+
+### How orchestrator agents should use this API:
+
+An orchestrator agent (like OpenClaw) should:
+
+1. **Plan** — Use its own reasoning to decompose complex strategies into
+   atomic operations our API supports.
+2. **Query** — Call our API for read operations (quotes, balances, positions,
+   aggregated NAV) to gather decision-making data.
+3. **Execute** — Call our API for each action step (one chat message per action).
+4. **Handle results** — In manual mode, sign and broadcast the unsigned tx.
+   In delegated mode, check the execution result.
+5. **Iterate** — Check outcomes and decide the next step.
+
+**Example — Multi-step rebalance + stake:**
+```
+Agent: POST /api/chat "get aggregated NAV"
+  ← { reply: "NAV per chain...", ... }
+
+Agent: [decides: bridge USDC from Arbitrum to Ethereum]
+Agent: POST /api/chat "bridge 1000 USDC from Arbitrum to Ethereum"
+  ← { transaction: { ... }, reply: "Bridge ready..." }
+
+Agent: [signs/broadcasts, waits for bridge completion]
+
+Agent: POST /api/chat "swap 500 USDC for GRG on Ethereum"
+  ← { transaction: { ... }, reply: "Swap ready..." }
+
+Agent: [signs/broadcasts]
+
+Agent: POST /api/chat "stake 500 GRG"
+  ← { transaction: { ... }, reply: "Stake ready..." }
+```
+
+Each call is atomic. The orchestrator owns the plan.
+
+---
+
 ## Bazaar Discovery
 
 This service is registered in the [x402 Bazaar](https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources),

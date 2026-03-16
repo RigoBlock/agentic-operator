@@ -193,6 +193,55 @@ export const RIGOBLOCK_VAULT_ABI = [
     ],
     outputs: [],
   },
+
+  // ── EApps extension — Uniswap v4 position tracking ──
+
+  // getUniV4TokenIds() → uint256[]
+  {
+    name: "getUniV4TokenIds",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "tokenIds", type: "uint256[]" }],
+  },
+
+  // ── AStaking adapter — GRG staking (Ethereum mainnet) ──
+
+  // stake(uint256 amount)
+  {
+    name: "stake",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "amount", type: "uint256" }],
+    outputs: [],
+  },
+
+  // undelegateStake(uint256 amount) — must be called before unstake
+  {
+    name: "undelegateStake",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "amount", type: "uint256" }],
+    outputs: [],
+  },
+
+  // unstake(uint256 amount)
+  {
+    name: "unstake",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "amount", type: "uint256" }],
+    outputs: [],
+  },
+
+  // withdrawDelegatorRewards()
+  {
+    name: "withdrawDelegatorRewards",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [],
+  },
 ] as const;
 
 /**
@@ -291,4 +340,9 @@ export const ALLOWED_VAULT_SELECTORS = {
   updateOrder: "0xdd5baad2" as `0x${string}`,
   // ── AIntents Adapter (cross-chain) ──
   depositV3: "0x770d096f" as `0x${string}`,
+  // ── AStaking Adapter (GRG staking) ──
+  stake: "0xa694fc3a" as `0x${string}`,
+  undelegateStake: "0x4aace835" as `0x${string}`,
+  unstake: "0x2e17de78" as `0x${string}`,
+  withdrawDelegatorRewards: "0xb880660b" as `0x${string}`,
 };

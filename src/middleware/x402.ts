@@ -35,11 +35,14 @@ import type { Env, AppVariables } from "../types.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
 
-/** Wallet receiving x402 payments (USDC on Base mainnet) */
+/** Wallet receiving x402 payments (same EOA on all chains) */
 const PAY_TO = "0xA0F9C380ad1E1be09046319fd907335B2B452B37";
 
-/** Base mainnet (CAIP-2) */
-const NETWORK = "eip155:8453";
+/** Base mainnet — USDC payments (CAIP-2) */
+const BASE_NETWORK = "eip155:8453";
+
+/** Plasma mainnet — USDT0 payments (CAIP-2) */
+const PLASMA_NETWORK = "eip155:9745";
 
 // ── Exempt origins (our own frontends) ────────────────────────────────
 
@@ -54,12 +57,20 @@ const EXEMPT_ORIGINS = new Set([
 
 const PROTECTED_ROUTES: RoutesConfig = {
   "POST /api/chat": {
-    accepts: [{
-      scheme: "exact",
-      payTo: PAY_TO,
-      price: "$0.01",
-      network: NETWORK,
-    }],
+    accepts: [
+      {
+        scheme: "exact",
+        payTo: PAY_TO,
+        price: "$0.01",
+        network: BASE_NETWORK,
+      },
+      {
+        scheme: "exact",
+        payTo: PAY_TO,
+        price: "$0.01",
+        network: PLASMA_NETWORK,
+      },
+    ],
     description:
       "AI-powered trading assistant for Rigoblock vaults. Supports swaps (Uniswap, 0x), " +
       "perpetual positions (GMX), cross-chain bridging (Across), pool deployment, and " +
@@ -90,12 +101,20 @@ const PROTECTED_ROUTES: RoutesConfig = {
     }),
   },
   "GET /api/quote": {
-    accepts: [{
-      scheme: "exact",
-      payTo: PAY_TO,
-      price: "$0.002",
-      network: NETWORK,
-    }],
+    accepts: [
+      {
+        scheme: "exact",
+        payTo: PAY_TO,
+        price: "$0.002",
+        network: BASE_NETWORK,
+      },
+      {
+        scheme: "exact",
+        payTo: PAY_TO,
+        price: "$0.002",
+        network: PLASMA_NETWORK,
+      },
+    ],
     description: "DEX price quotes from Uniswap and 0x aggregator across all supported chains.",
     mimeType: "application/json",
     extensions: declareDiscoveryExtension({
@@ -126,14 +145,27 @@ let httpServer: x402HTTPResourceServer | null = null;
 let initPromise: Promise<void> | null = null;
 
 function buildHttpServer(env: Env): x402HTTPResourceServer {
-  // Use CDP facilitator with auth for mainnet support
+  // CDP facilitator (Base mainnet — USDC payments)
   const facilitatorConfig = createFacilitatorConfig(
     env.CDP_API_KEY_ID,
     env.CDP_API_KEY_SECRET,
   );
-  const facilitator = new HTTPFacilitatorClient(facilitatorConfig);
-  const resourceServer = new x402ResourceServer([facilitator])
-    .register(NETWORK, new ExactEvmScheme())
+  const cdpFacilitator = new HTTPFacilitatorClient(facilitatorConfig);
+
+  // Collect all facilitators
+  const facilitators: HTTPFacilitatorClient[] = [cdpFacilitator];
+
+  // Semantic facilitator (Plasma — USDT0 payments, optional)
+  if (env.SEMANTIC_FACILITATOR_URL) {
+    const semanticFacilitator = new HTTPFacilitatorClient({
+      url: env.SEMANTIC_FACILITATOR_URL,
+    });
+    facilitators.push(semanticFacilitator);
+  }
+
+  const resourceServer = new x402ResourceServer(facilitators)
+    .register(BASE_NETWORK, new ExactEvmScheme())
+    .register(PLASMA_NETWORK, new ExactEvmScheme())
     .registerExtension(bazaarResourceServerExtension);
 
   const server = new x402HTTPResourceServer(resourceServer, PROTECTED_ROUTES);
@@ -205,7 +237,16 @@ function honoAdapter(c: { req: { header(name: string): string | undefined; metho
  */
 export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
   return async (c, next) => {
-    const server = await getHttpServer(c.env);
+    let server: x402HTTPResourceServer;
+    try {
+      server = await getHttpServer(c.env);
+    } catch (err) {
+      // x402 server init failed (facilitator unreachable, bad credentials, etc.)
+      // For non-protected routes, let the request through — don't block vault reads
+      // because the payment facilitator is down.
+      console.error("[x402] Server initialization failed:", err);
+      return next();
+    }
 
     const adapter = honoAdapter(c);
     const context: HTTPRequestContext = {
@@ -215,7 +256,14 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
       paymentHeader: adapter.getHeader("x-payment"),
     };
 
-    const result: HTTPProcessResult = await server.processHTTPRequest(context);
+    let result: HTTPProcessResult;
+    try {
+      result = await server.processHTTPRequest(context);
+    } catch (err) {
+      // Payment processing failed — for non-protected routes, let through
+      console.error("[x402] processHTTPRequest failed:", err);
+      return next();
+    }
 
     if (result.type === "no-payment-required") {
       return next();

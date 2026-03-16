@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RigoBlock Agent Trader API",
-    "description": "AI-powered DeFi trading API for autonomous agents. All endpoints are protected by the x402 payment protocol \u2014 no API key required. Agents pay per request in USDC on Base (chain ID 8453) via the Coinbase Developer Platform facilitator.\n\n## x402 Payment Flow\n1. Agent makes a request \u2192 server responds `402 Payment Required` with a payment payload\n2. Agent pays in USDC on Base via `api.cdp.coinbase.com`\n3. Agent retries with the `X-Payment` header \u2192 receives structured data\n\n**Facilitator:** `api.cdp.coinbase.com`  \n**Payment token:** USDC on Base (chain ID 8453)  \n**Integration guide:** https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md",
+    "description": "AI-powered DeFi trading API for autonomous agents. All endpoints are protected by the x402 payment protocol \u2014 no API key required. Agents pay per request via one of the accepted payment methods.\n\n## x402 Payment Flow\n1. Agent makes a request \u2192 server responds `402 Payment Required` with a payment payload\n2. Agent pays via one of:\n   - **USDC on Base** (chain ID 8453) via `api.cdp.coinbase.com`\n   - **USDT0 on Plasma** (chain ID 9745) via Semantic facilitator\n3. Agent retries with the `X-Payment` header \u2192 receives structured data\n\n**Payment options:**\n- USDC on Base (eip155:8453) \u2014 CDP facilitator\n- USDT0 on Plasma (eip155:9745) \u2014 Semantic facilitator\n\n**Integration guide:** https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md",
     "version": "1.0.0",
     "contact": {
       "name": "RigoBlock",
@@ -10,7 +10,8 @@
       "email": "gab@rigoblock.com"
     },
     "license": {
-      "name": "MIT"
+      "name": "Apache-2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0"
     }
   },
   "servers": [

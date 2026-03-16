@@ -512,13 +512,16 @@ export const TOOL_DEFINITIONS = [
       name: "crosschain_transfer",
       description:
         "Bridge tokens from the vault on one chain to the same vault on a destination chain. " +
-        "Uses the Across Protocol via the AIntents adapter. The vault must hold the token being bridged. " +
+        "Uses the Across Protocol via the AIntents adapter. " +
         "Supported tokens: USDC, USDT, WETH, WBTC (not all tokens on all chains). " +
         "Supported chains: Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Unichain. " +
         "The transfer burns virtual supply on the source chain and mints via donate on the destination. " +
         "Requires the depositV3 selector to be delegated (same as other vault operations). " +
         "IMPORTANT: sourceChain defaults to the current chain if not specified, but ALWAYS include it " +
-        "when the user mentions a source (e.g., 'bridge USDC from Base to Arbitrum').",
+        "when the user mentions a source (e.g., 'bridge USDC from Base to Arbitrum'). " +
+        "For WETH bridges: if the vault holds native ETH instead of WETH, set useNativeEth=true. " +
+        "The vault will auto-wrap ETH→WETH via sourceNativeAmount in the depositV3 message. " +
+        "No WETH balance is needed when useNativeEth=true — only native ETH balance.",
       parameters: {
         type: "object",
         properties: {
@@ -537,6 +540,15 @@ export const TOOL_DEFINITIONS = [
           amount: {
             type: "string",
             description: "Amount to bridge (human-readable, e.g., '1000' USDC or '0.5' WETH).",
+          },
+          useNativeEth: {
+            type: "boolean",
+            description: "If true AND token is WETH, the vault wraps native ETH→WETH automatically via sourceNativeAmount. " +
+              "Use when the vault holds native ETH but not WETH. Default: false.",
+          },
+          shouldUnwrapOnDestination: {
+            type: "boolean",
+            description: "If true, unwrap WETH to native token on the destination chain. Default: false (receive WETH).",
           },
         },
         required: ["destinationChain", "token", "amount"],
@@ -717,6 +729,269 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  // ── Uniswap v4 LP Tools ──────────────────────────────────────────────
+  {
+    type: "function" as const,
+    function: {
+      name: "add_liquidity",
+      description:
+        "Add liquidity to a Uniswap v4 pool through the vault's modifyLiquidities adapter. " +
+        "Creates a new LP position with the specified tokens, amounts, and tick range. " +
+        "The vault must hold sufficient token balances. Both token amounts are required.",
+      parameters: {
+        type: "object",
+        properties: {
+          tokenA: {
+            type: "string",
+            description: "First token — symbol (e.g., XAUT, ETH, USDC) or address",
+          },
+          tokenB: {
+            type: "string",
+            description: "Second token — symbol (e.g., USDT, USDC, WBTC) or address",
+          },
+          amountA: {
+            type: "string",
+            description: "Amount of tokenA to provide (human-readable, e.g., '1' for 1 XAUT)",
+          },
+          amountB: {
+            type: "string",
+            description: "Amount of tokenB to provide (human-readable, e.g., '3300' for 3300 USDT)",
+          },
+          tickRange: {
+            type: "string",
+            description:
+              "Tick range preset: 'full' (default, entire price range), 'wide' (±50%), " +
+              "'narrow' (±5%), or exact 'tickLower,tickUpper' (e.g., '-887220,887220')",
+          },
+          fee: {
+            type: "number",
+            description: "Pool fee in hundredths of a bip: 100=0.01%, 500=0.05%, 3000=0.30% (default), 10000=1%",
+          },
+          tickSpacing: {
+            type: "number",
+            description: "Tick spacing (auto-derived from fee if not specified)",
+          },
+          chain: {
+            type: "string",
+            description: "Target chain name or ID (e.g., 'ethereum', 'base', '42161')",
+          },
+        },
+        required: ["tokenA", "tokenB", "amountA", "amountB"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "remove_liquidity",
+      description:
+        "Remove liquidity from a Uniswap v4 LP position through the vault's modifyLiquidities adapter. " +
+        "Requires the position's ERC-721 token ID and the liquidity amount to remove. " +
+        "Burns the NFT by default when all liquidity is removed.",
+      parameters: {
+        type: "object",
+        properties: {
+          tokenA: {
+            type: "string",
+            description: "First token in the pair — symbol or address",
+          },
+          tokenB: {
+            type: "string",
+            description: "Second token in the pair — symbol or address",
+          },
+          tokenId: {
+            type: "string",
+            description: "The ERC-721 token ID of the LP position (from the PositionManager NFT)",
+          },
+          liquidityAmount: {
+            type: "string",
+            description: "Amount of liquidity units to remove (get this from position info)",
+          },
+          burn: {
+            type: "boolean",
+            description: "Whether to burn the NFT after removal (default: true for full removal)",
+          },
+          chain: {
+            type: "string",
+            description: "Target chain name or ID",
+          },
+        },
+        required: ["tokenA", "tokenB", "tokenId", "liquidityAmount"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "get_lp_positions",
+      description:
+        "List all active Uniswap v4 LP positions held by the vault on the current chain. " +
+        "Returns token IDs, token pair, tick range, and liquidity for each position. " +
+        "Use this to see existing positions before adding/removing liquidity or collecting fees.",
+      parameters: {
+        type: "object",
+        properties: {
+          chain: {
+            type: "string",
+            description: "Chain to check positions on. Uses current chain if omitted.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "collect_lp_fees",
+      description:
+        "Collect accrued trading fees from a Uniswap v4 LP position without removing liquidity. " +
+        "Requires the position's token ID and the token pair (for settlement routing). " +
+        "Use get_lp_positions first to find the token ID and pair details.",
+      parameters: {
+        type: "object",
+        properties: {
+          tokenId: {
+            type: "string",
+            description: "The ERC-721 token ID of the LP position",
+          },
+          tokenA: {
+            type: "string",
+            description: "First token in the pair — symbol or address",
+          },
+          tokenB: {
+            type: "string",
+            description: "Second token in the pair — symbol or address",
+          },
+          chain: {
+            type: "string",
+            description: "Target chain name or ID",
+          },
+        },
+        required: ["tokenId", "tokenA", "tokenB"],
+      },
+    },
+  },
+  // ── GRG Staking Tools ────────────────────────────────────────────────
+  {
+    type: "function" as const,
+    function: {
+      name: "grg_stake",
+      description:
+        "Stake GRG tokens from the vault into the Rigoblock staking pool. " +
+        "Staking earns operator rewards (30% minimum) and attracts third-party delegated stake for additional rewards. " +
+        "The vault must hold sufficient GRG balance. Staking is on Ethereum mainnet only.",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: {
+            type: "string",
+            description: "Amount of GRG to stake (human-readable, e.g., '1000' for 1000 GRG)",
+          },
+        },
+        required: ["amount"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "grg_unstake",
+      description:
+        "Unstake GRG tokens from the staking pool back to the vault. " +
+        "IMPORTANT: You must call grg_undelegate_stake first to move stake from DELEGATED to UNDELEGATED status. " +
+        "Unstaking is only possible after undelegation and waiting for the current epoch to end. " +
+        "Ethereum mainnet only.",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: {
+            type: "string",
+            description: "Amount of GRG to unstake (human-readable)",
+          },
+        },
+        required: ["amount"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "grg_undelegate_stake",
+      description:
+        "Undelegate staked GRG (move from DELEGATED to UNDELEGATED status). " +
+        "This is a REQUIRED step before unstaking. After undelegation, wait for the epoch to end, " +
+        "then call grg_unstake to withdraw the GRG. Ethereum mainnet only.",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: {
+            type: "string",
+            description: "Amount of GRG to undelegate (human-readable, e.g., '1000')",
+          },
+        },
+        required: ["amount"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "grg_end_epoch",
+      description:
+        "Finalize the current staking epoch on the Rigoblock staking proxy. " +
+        "This is a PERMISSIONLESS call — anyone can trigger it. It distributes operator rewards. " +
+        "NOTE: This targets the staking proxy contract directly (not the vault adapter), " +
+        "so the operator must sign and send this transaction from their own wallet. " +
+        "It CANNOT be executed via delegation. Ethereum mainnet only.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "grg_claim_rewards",
+      description:
+        "Claim accumulated delegator staking rewards for the vault. " +
+        "Operator rewards are distributed automatically via endEpoch, but delegator rewards " +
+        "must be claimed explicitly with this function. Ethereum mainnet only.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  // ── Selective Delegation Revocation ──────────────────────────────────
+  {
+    type: "function" as const,
+    function: {
+      name: "revoke_selectors",
+      description:
+        "Selectively revoke specific delegated function selectors for the agent on the vault. " +
+        "Use check_delegation_status first to see which selectors are active. " +
+        "Provide the selector hex values (e.g., '0x3593564c') to revoke.",
+      parameters: {
+        type: "object",
+        properties: {
+          selectors: {
+            type: "array",
+            items: { type: "string" },
+            description: "Array of function selector hex strings to revoke (e.g., ['0x3593564c', '0x24856bc3'])",
+          },
+          chain: {
+            type: "string",
+            description: "Chain to revoke on. Uses current chain if omitted.",
+          },
+        },
+        required: ["selectors"],
+      },
+    },
+  },
 ];
 
 /**
@@ -826,6 +1101,33 @@ GMX INTENT PARSING:
 - "show my perps" / "show positions" / "gmx positions" → gmx_get_positions
 - "what markets are available on gmx" → gmx_get_markets
 
+CAPABILITIES BOUNDARY — CRITICAL:
+You can ONLY do what your tools allow. Your tools are:
+- Spot swaps (Uniswap, 0x) via build_vault_swap / get_swap_quote
+- GMX perpetuals (open/close/increase positions, get positions, cancel/update orders, claim fees, list markets)
+- Uniswap v4 LP management (add/remove liquidity, list positions, collect fees) via add_liquidity / remove_liquidity / get_lp_positions / collect_lp_fees
+- GRG staking (stake, undelegate, unstake, end epoch, claim rewards) via grg_stake / grg_undelegate_stake / grg_unstake / grg_end_epoch / grg_claim_rewards — Ethereum mainnet only\n  Note: grg_end_epoch targets the staking proxy directly (not the vault) and cannot use delegation.
+- Vault info (name, symbol, owner, supply) and single token balance checks
+- Chain switching
+- Delegation management (setup, revoke all, revoke specific selectors, check status)
+- Pool deployment and funding (mint)
+- Cross-chain bridging (transfer, sync, quote, aggregated NAV, rebalance plan)
+- Automated strategies (create, remove, list)
+That is the COMPLETE list. You CANNOT:
+- Query historical transactions, trade history, or past performance
+- Read arbitrary on-chain contract state beyond what the tools expose
+- Provide real-time price feeds (only swap quotes via DEX)
+- Manage token approvals or allowances directly
+- Interact with lending protocols (Aave, Compound, etc.)
+- Interact with any DeFi protocol other than Uniswap (spot + LP), 0x (spot), GMX (perps), Across (bridge), and Rigoblock Staking (GRG)
+
+WHEN THE USER ASKS FOR SOMETHING YOU CANNOT DO:
+- Be HONEST. Say clearly that you don't have a tool for that specific request.
+- Suggest the closest alternative you CAN do if one exists.
+- NEVER claim a tool can do something it cannot. get_aggregated_nav shows NAV and bridgeable token balances — it does NOT show LP positions, transaction history, or protocol-specific data.
+- NEVER invent capabilities. If you don't have a tool for it, say so.
+- Be brief and direct.
+
 RULES:
 - ALWAYS use actual tool calls, never write tool names as text.
 - If a previous call errored, still use tools for new requests.
@@ -864,6 +1166,9 @@ POOL FUNDING (MINT):
 
 CROSS-CHAIN (AINTENTS + ACROSS PROTOCOL):
 - Use crosschain_transfer to bridge tokens between chains via the AIntents adapter and Across Protocol.
+  IMPORTANT: For WETH bridges, if the vault holds native ETH (not WETH), set useNativeEth=true.
+  The vault auto-wraps ETH→WETH via sourceNativeAmount — no WETH balance needed, only native ETH.
+  For OpType.Transfer (simple bridge), this is the default operation type.
 - Use crosschain_sync to synchronise NAV across chains (sends a small amount with a sync message).
   Token and amount are auto-calculated if omitted — just specify destinationChain.
 - Use get_crosschain_quote to show bridge fees without executing.
@@ -874,9 +1179,14 @@ CROSS-CHAIN (AINTENTS + ACROSS PROTOCOL):
   Present the plan to the operator and ask which operations to execute.
 - Keywords: bridge, cross-chain, transfer to [chain], move to [chain], sync NAV, synchronise,
   rebalance, consolidate, aggregate NAV, portfolio overview, multichain.
+- CRITICAL: When a user says "bridge ETH from X to Y" or "transfer ETH from X to Y", this is a
+  cross-chain bridge (crosschain_transfer), NOT a swap. "ETH" in bridge context means WETH (the bridgeable token).
+  Set token="WETH" and useNativeEth=true (the vault wraps native ETH→WETH automatically).
+  NEVER route bridge/transfer requests to build_vault_swap or get_swap_quote.
 - Bridgeable tokens: USDC, USDT, WETH, WBTC (not all tokens available on all chains).
 - Supported chains: Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Unichain.
-- The vault must hold the bridged token on the source chain. Balance is checked automatically.
+- The vault must hold the bridged token on the source chain, OR for WETH bridges with useNativeEth=true,
+  the vault needs native ETH (the vault wraps it automatically).
 - Typical bridge fees: 0.01%-0.5% depending on route and amount. Max 2%.
 - Fill time: usually 2s-10min depending on the route.
 - The sourceChain and destinationChain parameters accept names ("Arbitrum", "Base") or chain IDs ("42161", "8453").

@@ -35,6 +35,7 @@ import type { Env, UnsignedTransaction, ExecutionResult } from "../types.js";
 import { getChain, getRpcUrl, sanitizeError } from "../config.js";
 import { loadAgentWalletAccount } from "./agentWallet.js";
 import { getDelegationConfig, getChainDelegation } from "./delegation.js";
+import { ALLOWED_VAULT_SELECTORS } from "../abi/rigoblockVault.js";
 import {
   executeSponsoredCalls,
   type WalletCall,
@@ -334,8 +335,12 @@ export async function executeViaDelegation(
   const selector = tx.data.slice(0, 10) as Hex;
   const allowedSelectors = chainDelegation.delegatedSelectors.map((s) => s.toLowerCase());
   if (!allowedSelectors.includes(selector.toLowerCase())) {
+    // Find the human-readable name for the selector
+    const selectorName = Object.entries(ALLOWED_VAULT_SELECTORS)
+      .find(([, v]) => v.toLowerCase() === selector.toLowerCase())?.[0] || selector;
     throw new ExecutionError(
-      `Function selector ${selector} is not in the delegated selectors for chain ${tx.chainId}`,
+      `Function selector ${selector} (${selectorName}) is not delegated on chain ${tx.chainId}. ` +
+      `Re-setup delegation on trader.rigoblock.com to add this selector.`,
       "METHOD_NOT_ALLOWED",
     );
   }
@@ -563,8 +568,9 @@ async function broadcastAgentTransaction(
       "GAS_ESTIMATION_FAILED",
     );
   }
-  // 20% buffer over the on-chain estimate for execution variance
-  const gasLimit = estimatedGas + (estimatedGas * 20n) / 100n;
+  // 30% buffer over the on-chain estimate — vault adapter routing + oracle
+  // reads can vary significantly between estimation and execution blocks.
+  const gasLimit = estimatedGas + (estimatedGas * 30n) / 100n;
 
   // ── Step 4: Estimate fees with safety caps ──
   let fees = await estimateFees(publicClient, chainId);
@@ -762,6 +768,30 @@ async function sponsoredAgentTransaction(
     );
   }
 
+  // ── Step 1b: Estimate gas on-chain ──
+  // The Alchemy bundler's internal gas estimation underestimates for complex
+  // vault adapter calls (crosschain depositV3, security tokens, etc.).
+  // We run eth_estimateGas ourselves and pass the result as callGasLimit
+  // override to the bundler via gasParamsOverride.
+  let callGasLimit: bigint | undefined;
+  try {
+    const estimatedGas = await publicClient.estimateGas({
+      account: agentAccount.address,
+      to: tx.to as Address,
+      data: tx.data as Hex,
+      value: txValue,
+    });
+    // 30% buffer over estimate: vault proxy + EIP-7702 overhead
+    callGasLimit = estimatedGas + (estimatedGas * 30n) / 100n;
+    console.log(`[Sponsored] Gas estimate: ${estimatedGas}, callGasLimit (with 30% buffer): ${callGasLimit}`);
+  } catch (estError) {
+    // If gas estimation fails but simulation passed, proceed without override.
+    // The bundler will use its own estimate (potentially too low, but better
+    // than blocking a transaction that simulated successfully).
+    const msg = estError instanceof Error ? estError.message : String(estError);
+    console.warn(`[Sponsored] Gas estimation failed (proceeding without override): ${msg}`);
+  }
+
   // ── Step 2: Execute via Alchemy Smart Wallet SDK ──
   const calls: WalletCall[] = [{
     to: tx.to as Address,
@@ -777,6 +807,7 @@ async function sponsoredAgentTransaction(
     alchemyKey,
     gasPolicyId,
     calls,
+    callGasLimit,
   );
 
   // ── Step 3: Map result to ExecutionResult ──

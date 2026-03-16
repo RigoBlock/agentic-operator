@@ -741,7 +741,12 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
       lines.push(`⏳ ${escapeHtml(desc)} — submitted: <code>${result.txHash.slice(0, 14)}…</code>`);
     } else if (error) {
       // Provide actionable guidance for delegation errors
-      if (error.includes("Delegation not active on chain")) {
+      if (error.includes("not in the delegated selectors") || error.includes("selector") && error.includes("not")) {
+        lines.push(
+          `⚠️ ${escapeHtml(desc)} — a required function selector is not delegated. ` +
+          `Visit <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to re-setup delegation on this chain.`,
+        );
+      } else if (error.includes("Delegation not active on chain") || error.includes("Delegation not configured")) {
         const chainName = SUPPORTED_CHAINS.find(ch => error.includes(String(ch.id)))?.name
           || TESTNET_CHAINS.find(ch => error.includes(String(ch.id)))?.name
           || "this chain";

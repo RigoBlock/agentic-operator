@@ -261,7 +261,11 @@ delegation.get("/status", async (c) => {
     agentAddress: walletInfo?.address || null,
     activeChains,
     sponsoredGas: config?.sponsoredGas ?? true,
-    isActiveOnChain: verifyOnChain ? (onChainStatus?.allDelegated || false) : undefined,
+    // Consider delegation active on-chain if at least one selector is delegated
+    // (some selectors may be missing for newly-added adapters, but the vault is functional)
+    isActiveOnChain: verifyOnChain
+      ? (onChainStatus ? onChainStatus.delegatedSelectors.length > 0 : false)
+      : undefined,
     isActiveInKV: chainId ? activeChains.includes(chainId) : undefined,
     delegatedChains: walletInfo?.delegatedChains || [],
     onChainStatus,
@@ -350,6 +354,14 @@ delegation.post("/execute", async (c) => {
     }
     if (err instanceof ExecutionError) {
       console.error(`[delegation/execute] ExecutionError: code=${err.code} msg=${err.message}`);
+      // For missing selectors, signal fallback to manual wallet signing
+      if (err.code === "METHOD_NOT_ALLOWED") {
+        return c.json({
+          error: sanitizeError(err.message),
+          code: err.code,
+          fallbackToManual: true,
+        }, 400);
+      }
       return c.json({ error: sanitizeError(err.message), code: err.code }, 400);
     }
     // Log the FULL error for debugging — the sanitized version hides crucial details

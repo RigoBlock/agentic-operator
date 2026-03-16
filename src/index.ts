@@ -59,29 +59,34 @@ app.get("/api/vault", async (c) => {
     return c.json({ error: "address query param required (0x…)" }, 400);
   }
 
-  // Fast path: try the requested chain
   try {
-    const info = await getVaultInfo(preferredChain, address as Address, c.env.ALCHEMY_API_KEY);
-    return c.json({ ...info, chainId: preferredChain });
-  } catch {
-    // Not found on this chain — try all others in parallel
-  }
+    // Fast path: try the requested chain
+    try {
+      const info = await getVaultInfo(preferredChain, address as Address, c.env.ALCHEMY_API_KEY);
+      return c.json({ ...info, chainId: preferredChain });
+    } catch {
+      // Not found on this chain — try all others in parallel
+    }
 
-  const otherChains = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS].filter(
-    (ch) => ch.id !== preferredChain,
-  );
-  const results = await Promise.allSettled(
-    otherChains.map(async (ch) => {
-      const info = await getVaultInfo(ch.id, address as Address, c.env.ALCHEMY_API_KEY);
-      return { ...info, chainId: ch.id };
-    }),
-  );
-  const found = results.find((r) => r.status === "fulfilled");
-  if (found && found.status === "fulfilled") {
-    return c.json(found.value);
-  }
+    const otherChains = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS].filter(
+      (ch) => ch.id !== preferredChain,
+    );
+    const results = await Promise.allSettled(
+      otherChains.map(async (ch) => {
+        const info = await getVaultInfo(ch.id, address as Address, c.env.ALCHEMY_API_KEY);
+        return { ...info, chainId: ch.id };
+      }),
+    );
+    const found = results.find((r) => r.status === "fulfilled");
+    if (found && found.status === "fulfilled") {
+      return c.json(found.value);
+    }
 
-  return c.json({ error: "Not a valid Rigoblock vault on any supported chain" }, 404);
+    return c.json({ error: "Not a valid Rigoblock vault on any supported chain" }, 404);
+  } catch (err) {
+    console.error("[vault] Error:", err);
+    return c.json({ error: "Failed to fetch vault info" }, 500);
+  }
 });
 
 // ── Supported chains ──────────────────────────────────────────────────
@@ -107,9 +112,19 @@ app.get("/api/health", (c) =>
       "automated-strategies",
     ],
     x402: {
-      network: "eip155:8453",
+      accepts: [
+        {
+          network: "eip155:8453",
+          token: "USDC",
+          facilitator: "https://api.cdp.coinbase.com/platform/v2/x402",
+        },
+        {
+          network: "eip155:9745",
+          token: "USDT0",
+          facilitator: "semantic (Plasma)",
+        },
+      ],
       payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
-      facilitator: "https://api.cdp.coinbase.com/platform/v2/x402",
       paidRoutes: {
         "POST /api/chat": "$0.01",
         "GET /api/quote": "$0.002",

@@ -36,7 +36,7 @@ const clientCache = new Map<string, PublicClient>();
 /** Cache token decimals: `${chainId}:${address}` → decimals */
 const decimalsCache = new Map<string, number>();
 
-function getClient(chainId: number, alchemyKey?: string): PublicClient {
+export function getClient(chainId: number, alchemyKey?: string): PublicClient {
   const cacheKey = `${chainId}:${alchemyKey ? "alchemy" : "public"}`;
   const existing = clientCache.get(cacheKey);
   if (existing) return existing;

@@ -100,6 +100,7 @@ export async function executeSponsoredCalls(
   alchemyKey: string,
   policyId: string,
   calls: WalletCall[],
+  callGasLimit?: bigint,
 ): Promise<SponsoredCallsResult> {
   try {
     // ── Step 1: Create signer (per SDK quickstart) ──
@@ -132,8 +133,19 @@ export async function executeSponsoredCalls(
     // ── Step 3: Prepare calls ──
     console.log(
       `[SmartWallet] Step 3: prepareCalls: ${calls.length} call(s), ` +
-      `from=${signerAddress}, policyId=${policyId}`,
+      `from=${signerAddress}, policyId=${policyId}` +
+      (callGasLimit ? `, callGasLimit=${callGasLimit}` : ""),
     );
+    const capabilities: Record<string, unknown> = {
+      paymasterService: {
+        policyId,
+      },
+    };
+    if (callGasLimit) {
+      capabilities.gasParamsOverride = {
+        callGasLimit: `0x${callGasLimit.toString(16)}`,
+      };
+    }
     const preparedCalls = await client.prepareCalls({
       calls: calls.map(c => ({
         to: c.to,
@@ -141,11 +153,7 @@ export async function executeSponsoredCalls(
         value: c.value || ("0x0" as Hex),
       })),
       from: signerAddress,
-      capabilities: {
-        paymasterService: {
-          policyId,
-        },
-      },
+      capabilities,
     });
     console.log(`[SmartWallet] Step 3 OK: Calls prepared`);
 

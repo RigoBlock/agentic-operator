@@ -115,6 +115,7 @@ export const TOKEN_MAP: Record<number, Record<string, `0x${string}`>> = {
     // Ethereum Mainnet
     ETH: "0x0000000000000000000000000000000000000000",
     WETH: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    GRG: "0x4FbB350052Bca5417566f188eB2EBCE5b19BC964",
   },
   10: {
     // Optimism
@@ -169,6 +170,21 @@ export const TOKEN_MAP: Record<number, Record<string, `0x${string}`>> = {
     ETH: "0x0000000000000000000000000000000000000000",
     WETH: "0x4200000000000000000000000000000000000006",
   },
+};
+
+/**
+ * Rigoblock Staking Proxy addresses per chain.
+ * endEpoch() is called directly on the staking proxy (not through the vault adapter).
+ * Source: https://github.com/RigoBlock/v3-contracts/blob/development/src/utils/constants.ts
+ */
+export const STAKING_PROXY: Record<number, `0x${string}`> = {
+  1: "0x730dDf7b602dB822043e0409d8926440395e07fE",
+  10: "0xB844bDCC64a748fDC8c9Ee74FA4812E4BC28FD70",
+  56: "0xa4a94cCACa8ccCdbCD442CF8eECa0cd98f69e99e",
+  130: "0x550Ed0bFFdbE38e8Bd33446D5c165668Ea071643",
+  137: "0xC87d1B952303ae3A9218727692BAda6723662dad",
+  8453: "0xc758Ea84d6D978fe86Ee29c1fbD47B4F302F1992",
+  42161: "0xD495296510257DAdf0d74846a8307bf533a0fB48",
 };
 
 import { resolveTokenBySymbol } from "./services/tokenResolver.js";

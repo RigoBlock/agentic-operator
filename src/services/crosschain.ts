@@ -679,18 +679,24 @@ export async function getCrosschainQuote(
  *   uint256 sourceNativeAmount;
  *   bool shouldUnwrapOnDestination;
  * }
+ *
+ * When sourceNativeAmount > 0, the vault wraps that amount of native ETH into
+ * WETH before bridging. This means the caller does NOT need a WETH balance —
+ * only sufficient native ETH.
  */
 function encodeSourceMessage(
   opType: OpType,
   navToleranceBps: number = DEFAULT_NAV_TOLERANCE_BPS,
+  sourceNativeAmount: bigint = 0n,
+  shouldUnwrapOnDestination: boolean = false,
 ): Hex {
   return encodeAbiParameters(
     parseAbiParameters("uint8, uint256, uint256, bool"),
     [
       opType,                          // opType
       BigInt(navToleranceBps),         // navTolerance (in bps)
-      0n,                              // sourceNativeAmount (0 = no native gas on dest)
-      false,                           // shouldUnwrapOnDestination
+      sourceNativeAmount,              // sourceNativeAmount (wei; vault wraps ETH→WETH)
+      shouldUnwrapOnDestination,       // shouldUnwrapOnDestination
     ],
   );
 }
@@ -715,11 +721,15 @@ export function buildDepositV3Calldata(params: {
   exclusivityDeadline: number;
   opType: OpType;
   navToleranceBps?: number;
+  sourceNativeAmount?: bigint;
+  shouldUnwrapOnDestination?: boolean;
 }): Hex {
   const fillDeadline = params.quoteTimestamp + DEFAULT_FILL_DEADLINE_SECS;
   const message = encodeSourceMessage(
     params.opType,
     params.navToleranceBps ?? DEFAULT_NAV_TOLERANCE_BPS,
+    params.sourceNativeAmount ?? 0n,
+    params.shouldUnwrapOnDestination ?? false,
   );
 
   // The 'depositor' field: set to vault address; AIntents will override
@@ -761,6 +771,8 @@ export async function buildCrosschainTransfer(params: {
   dstChainId: number;
   tokenSymbol: string;
   amount: string;       // human-readable
+  useNativeEth?: boolean;  // true = vault wraps native ETH→WETH via sourceNativeAmount
+  shouldUnwrapOnDestination?: boolean;
   alchemyKey?: string;
 }): Promise<{
   quote: CrosschainQuote;
@@ -772,25 +784,46 @@ export async function buildCrosschainTransfer(params: {
     throw new Error("Cross-chain transfer requires different source and destination chains.");
   }
 
-  // Check vault balance first
   const inputToken = findBridgeableToken(params.srcChainId, params.tokenSymbol);
   if (!inputToken) {
     throw new Error(`${params.tokenSymbol} is not bridgeable on chain ${params.srcChainId}.`);
   }
 
-  const { balance } = await getVaultTokenBalance(
-    params.srcChainId,
-    params.vaultAddress,
-    inputToken.address,
-    params.alchemyKey,
-  );
   const inputAmountRaw = parseUnits(params.amount, inputToken.decimals);
-  if (balance < inputAmountRaw) {
-    const available = formatUnits(balance, inputToken.decimals);
-    throw new Error(
-      `Insufficient ${inputToken.symbol} balance in vault on ${chainName(params.srcChainId)}. ` +
-      `Available: ${available}, requested: ${params.amount}.`,
+
+  // When useNativeEth is set (only valid for WETH), check native ETH balance
+  // instead of WETH balance — the vault will wrap ETH→WETH automatically
+  // via the sourceNativeAmount field in SourceMessageParams.
+  const useNative = params.useNativeEth && inputToken.type === "WETH";
+
+  if (useNative) {
+    const { balance: ethBalance } = await getVaultTokenBalance(
+      params.srcChainId,
+      params.vaultAddress,
+      "0x0000000000000000000000000000000000000000" as Address,
+      params.alchemyKey,
     );
+    if (ethBalance < inputAmountRaw) {
+      const available = formatUnits(ethBalance, 18);
+      throw new Error(
+        `Insufficient native ETH balance in vault on ${chainName(params.srcChainId)}. ` +
+        `Available: ${available}, requested: ${params.amount}.`,
+      );
+    }
+  } else {
+    const { balance } = await getVaultTokenBalance(
+      params.srcChainId,
+      params.vaultAddress,
+      inputToken.address,
+      params.alchemyKey,
+    );
+    if (balance < inputAmountRaw) {
+      const available = formatUnits(balance, inputToken.decimals);
+      throw new Error(
+        `Insufficient ${inputToken.symbol} balance in vault on ${chainName(params.srcChainId)}. ` +
+        `Available: ${available}, requested: ${params.amount}.`,
+      );
+    }
   }
 
   // Get quote
@@ -801,7 +834,7 @@ export async function buildCrosschainTransfer(params: {
     params.amount,
   );
 
-  // Build calldata
+  // Build calldata — include sourceNativeAmount when using native ETH
   const calldata = buildDepositV3Calldata({
     vaultAddress: params.vaultAddress,
     inputToken: quote.inputToken.address,
@@ -813,6 +846,8 @@ export async function buildCrosschainTransfer(params: {
     exclusiveRelayer: quote.fee.exclusiveRelayer,
     exclusivityDeadline: quote.fee.exclusivityDeadline,
     opType: OpType.Transfer,
+    sourceNativeAmount: useNative ? inputAmountRaw : undefined,
+    shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
   });
 
   const srcName = chainName(params.srcChainId);

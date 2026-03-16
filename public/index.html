@@ -1045,7 +1045,7 @@
           }
 
           const tag = isHeader ? 'th' : 'td';
-          html += '<tr>' + cells.map(c => `<${tag}>${escapeHtml(c)}</${tag}>`).join('') + '</tr>';
+          html += '<tr>' + cells.map(c => `<${tag}>${linkifyMarkdownInCell(escapeHtml(c))}</${tag}>`).join('') + '</tr>';
           if (isHeader) isHeader = false;
           continue;
         }
@@ -1088,6 +1088,11 @@
         document.execCommand('copy');
         el.remove();
       }
+    }
+
+    /** Convert markdown-style [text](url) links to <a> tags (safe for table cells after escapeHtml) */
+    function linkifyMarkdownInCell(str) {
+      return str.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
     }
 
     function linkifyUrls(str) {
@@ -1144,7 +1149,7 @@
       const statusTimers = [];
       const updateTypingStatus = (msg) => { typingContent.textContent = msg; };
       statusTimers.push(setTimeout(() => updateTypingStatus('Working on it…'), 5000));
-      statusTimers.push(setTimeout(() => updateTypingStatus('Still processing — multi-chain swaps take a moment…'), 15000));
+      statusTimers.push(setTimeout(() => updateTypingStatus('Still processing…'), 15000));
       statusTimers.push(setTimeout(() => updateTypingStatus('Taking longer than expected…'), 30000));
       const clearStatusTimers = () => statusTimers.forEach(t => clearTimeout(t));
 
@@ -1661,11 +1666,13 @@
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
           // If delegation not active on this chain, fall back to manual wallet signing
-          if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.fallbackToManual) {
+          if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.code === 'METHOD_NOT_ALLOWED' || err.fallbackToManual) {
             container.innerHTML = '';
             const manualMsg = document.createElement('div');
             manualMsg.style.cssText = 'color:var(--warning,orange);font-size:12px;margin-bottom:8px;';
-            manualMsg.textContent = 'Delegation not active on this chain — sign from your wallet instead:';
+            manualMsg.textContent = err.code === 'METHOD_NOT_ALLOWED'
+              ? 'This function selector is not delegated — re-setup delegation or sign from your wallet:'
+              : 'Delegation not active on this chain — sign from your wallet instead:';
             container.appendChild(manualMsg);
             // Re-render as manual tx card inline
             const actionsDiv = document.createElement('div');
@@ -1816,10 +1823,12 @@
           if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             // If delegation not active on this chain, show manual sign for remaining txs
-            if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.fallbackToManual) {
+            if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.code === 'METHOD_NOT_ALLOWED' || err.fallbackToManual) {
               if (rowStatusEl) rowStatusEl.textContent = '⚠️';
-              // Show manual tx card for this tx and any remaining ones
-              appendMessage('system', `Delegation not active on chain ${tx.chainId} — sign remaining transactions from your wallet:`);
+              const reason = err.code === 'METHOD_NOT_ALLOWED'
+                ? 'Function selector not delegated'
+                : `Delegation not active on chain ${tx.chainId}`;
+              appendMessage('system', `${reason} — sign remaining transactions from your wallet:`);
               for (let j = i; j < txList.length; j++) {
                 showManualTxCard(txList[j]);
               }
@@ -2271,7 +2280,15 @@
         badge.className = `delegation-status ${isOnChain ? 'active' : 'stale'}`;
 
         if (isOnChain) {
-          statusText.textContent = 'Active';
+          // Check if some selectors are missing (partial delegation)
+          const onChain = state.onChainStatus;
+          const missing = onChain?.undelegatedSelectors?.length || 0;
+          if (missing > 0) {
+            statusText.textContent = `Active (${missing} selector${missing > 1 ? 's' : ''} missing)`;
+            badge.className = 'delegation-status stale';
+          } else {
+            statusText.textContent = 'Active';
+          }
         } else {
           // Not active on current chain — chain name is already in the chain badge
           statusText.textContent = 'Not set up on this chain';

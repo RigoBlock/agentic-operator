@@ -250,3 +250,28 @@ src/
     vault.ts            ← On-chain vault reads
     bundler.ts          ← ERC-4337 bundler (gas sponsorship)
 ```
+
+---
+
+## EXTERNAL AI REFERENCES
+
+### Uniswap AI Tools
+
+When working on Uniswap v4 integration — especially LP positions, hooks, swap
+routing, or contract addresses — consult the **Uniswap AI** repository:
+
+- **Repo:** https://github.com/Uniswap/uniswap-ai
+- **Trading plugin:** `packages/plugins/uniswap-trading` — swap integration,
+  Trading API, Universal Router, supported chains
+- **Hooks plugin:** `packages/plugins/uniswap-hooks` — v4 hook development,
+  security foundations, threat models
+- **Official deployments:** https://docs.uniswap.org/contracts/v4/deployments
+
+**CRITICAL:** Uniswap v4 contract addresses (PoolManager, PositionManager,
+Universal Router) are **different on every chain**. Never hardcode a single
+address — always use per-chain lookup maps. The Ethereum address does NOT work
+on Arbitrum, Base, Optimism, etc.
+
+The `uniswapLP.ts` service maintains per-chain address maps for both
+`POOL_MANAGER` and `POSITION_MANAGER`. When adding new chain support, get the
+addresses from the official deployments page above.

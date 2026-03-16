@@ -10,17 +10,18 @@
 import OpenAI from "openai";
 import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, RequestContext } from "../types.js";
 import { TOOL_DEFINITIONS, SYSTEM_PROMPT } from "./tools.js";
-import { getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay, calculateVaultGasLimit } from "../services/uniswapTrading.js";
+import { getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay } from "../services/uniswapTrading.js";
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../services/zeroXTrading.js";
 import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint } from "../services/vault.js";
-import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
-import { decodeFunctionData, encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
+import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, getChain, getRpcUrl, STAKING_PROXY } from "../config.js";
+import { decodeFunctionData, encodeFunctionData, parseUnits, formatUnits, createPublicClient, http, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../abi/poolFactory.js";
 import { ERC20_ABI } from "../abi/erc20.js";
 import {
   prepareDelegation,
   prepareRevocation,
+  prepareSelectiveRevocation,
   checkDelegationOnChain,
   buildDefaultSelectors,
   getDelegationConfig,
@@ -39,7 +40,6 @@ import {
   buildCancelOrderCalldata,
   buildClaimFundingFeesCalldata,
   computeLeverage,
-  getGmxGasLimit,
 } from "../services/gmxTrading.js";
 import { getGmxPositionsSummary, getGmxPositions } from "../services/gmxPositions.js";
 import { ARBITRUM_CHAIN_ID, GmxOrderType } from "../abi/gmx.js";
@@ -54,6 +54,14 @@ import {
 import { CROSSCHAIN_TOKENS, getSupportedDestinations, findBridgeableToken } from "../services/crosschainConfig.js";
 import { addStrategy, removeStrategy, removeAllStrategies, getStrategies, MIN_INTERVAL_MINUTES, MAX_STRATEGIES_PER_VAULT } from "../services/strategy.js";
 import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
+import { buildAddLiquidityTx, buildRemoveLiquidityTx, getVaultLPPositions, buildCollectFeesTx } from "../services/uniswapLP.js";
+import {
+  buildStakeCalldata,
+  buildUndelegateStakeCalldata,
+  buildUnstakeCalldata,
+  buildEndEpochCalldata,
+  buildWithdrawDelegatorRewardsCalldata,
+} from "../services/grgStaking.js";
 
 /**
  * Process a chat request: send to LLM, handle tool calls, return response.
@@ -169,6 +177,7 @@ ${executionModeNote}`;
   let pendingChainSwitch: number | undefined;
   let detectedDex: string | undefined;
   let pendingSuggestions: string[] | undefined;
+  let pendingSelfContained = false;
 
   // If the LLM wants to call tools
   if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
@@ -206,6 +215,9 @@ ${executionModeNote}`;
         }
         if (toolResult.suggestions?.length) {
           pendingSuggestions = toolResult.suggestions;
+        }
+        if (toolResult.selfContained) {
+          pendingSelfContained = true;
         }
         // Detect DEX/protocol from tool call
         if ((name === "get_swap_quote" || name === "build_vault_swap") && args.dex) {
@@ -272,6 +284,21 @@ ${executionModeNote}`;
         toolCalls: [],
         chainSwitch: pendingChainSwitch,
         suggestions: pendingSuggestions,
+      };
+    }
+
+    // Self-contained reports (e.g., LP positions table) — skip follow-up LLM call
+    // to prevent the LLM from paraphrasing the already-formatted result.
+    if (pendingSelfContained) {
+      console.log("[processChat] Skipping follow-up LLM call — self-contained report");
+      const report = toolCallResults
+        .filter(tc => !tc.error && tc.result)
+        .map(tc => tc.result)
+        .join("\n");
+      return {
+        reply: report,
+        toolCalls: [],
+        chainSwitch: pendingChainSwitch,
       };
     }
 
@@ -380,12 +407,74 @@ ${executionModeNote}`;
   };
 }
 
+// ── Gas estimation helper ─────────────────────────────────────────────
+
+const DEFAULT_GAS: Record<string, bigint> = {
+  approve:    65_000n,
+  delegation: 250_000n,
+  deploy:     600_000n,
+  swap:     1_000_000n,
+  gmx:      1_500_000n,
+  bridge:   1_500_000n,
+  default:  1_000_000n,
+};
+
+/**
+ * Estimate gas for an unsigned transaction via eth_estimateGas.
+ * Returns a hex string gas limit with 30% buffer, or falls back to a
+ * category-based default if estimation fails (e.g. caller not owner).
+ *
+ * This is for the unsigned transactions returned to the frontend/operator.
+ * The delegated execution path in execution.ts runs its own eth_estimateGas
+ * before broadcasting — this estimate is for display and MetaMask hints.
+ */
+async function estimateGas(
+  chainId: number,
+  to: Address,
+  data: Hex,
+  value: string,
+  from: Address | undefined,
+  alchemyKey?: string,
+  category: keyof typeof DEFAULT_GAS = "default",
+): Promise<string> {
+  if (!from) {
+    // No sender address — can't estimate; use category default
+    const fallback = DEFAULT_GAS[category] ?? DEFAULT_GAS.default;
+    return `0x${fallback.toString(16)}`;
+  }
+  try {
+    const chain = getChain(chainId);
+    const rpcUrl = getRpcUrl(chainId, alchemyKey);
+    const transport = rpcUrl ? http(rpcUrl) : http();
+    const client = createPublicClient({ chain, transport });
+    const txValue = BigInt(value);
+    const estimated = await client.estimateGas({
+      account: from,
+      to,
+      data,
+      value: txValue,
+    });
+    // 30% buffer for execution variance
+    const buffered = estimated + (estimated * 30n) / 100n;
+    return `0x${buffered.toString(16)}`;
+  } catch (err) {
+    // Estimation can fail if the tx would revert (e.g. insufficient balance,
+    // delegation required). Fall back to category default for display.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[estimateGas] Failed for chain ${chainId} (${category}): ${msg.slice(0, 120)}`);
+    const fallback = DEFAULT_GAS[category] ?? DEFAULT_GAS.default;
+    return `0x${fallback.toString(16)}`;
+  }
+}
+
 interface ToolResult {
   message: string;
   transaction?: UnsignedTransaction;
   chainSwitch?: number;
   /** Quick-action suggestions shown as clickable chips */
   suggestions?: string[];
+  /** When true, the message is a complete report — skip the follow-up LLM call */
+  selfContained?: boolean;
 }
 
 /**
@@ -477,10 +566,6 @@ async function executeToolCall(
         // The 0x API returns a complete transaction targeting AllowanceHolder.
         // For the vault, we send the 0x calldata TO the vault address.
         // The vault's 0x adapter (when built) will route it through AllowanceHolder.
-        // Gas = 0x estimate + 200k vault adapter overhead
-        const gasEstimate = BigInt(zxQuote.gas || "300000");
-        const gasLimit = gasEstimate + 200_000n;
-
         const outputAmount = formatRawAmount(zxQuote.buyAmount, zxQuote.decimalsOut);
         const inputAmount = formatRawAmount(zxQuote.sellAmount, zxQuote.decimalsIn);
         const isExactOutput = !!intent.amountOut;
@@ -503,12 +588,18 @@ async function executeToolCall(
         const descParts = [`[0x] Sell ${sellDesc} for ${buyDesc}`];
         if (priceLine) descParts.push(priceLine);
 
+        const zxGas = await estimateGas(
+          ctx.chainId, ctx.vaultAddress as Address,
+          zxQuote.transaction.data as Hex, "0x0",
+          ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
+        );
+
         const transaction: UnsignedTransaction = {
           to: ctx.vaultAddress as Address,
           data: zxQuote.transaction.data,
           value: "0x0", // vault uses its own ETH, never pass value
           chainId: ctx.chainId,
-          gas: `0x${gasLimit.toString(16)}`,
+          gas: zxGas,
           description: descParts.join(" | "),
           swapMeta: {
             sellAmount: inputAmount,
@@ -534,7 +625,7 @@ async function executeToolCall(
           ...(priceLine ? [priceLine] : []),
           `Slippage: ${intent.slippageBps ? intent.slippageBps / 100 : 1}%`,
           `Chain: ${chainName}`,
-          `Gas limit: ${gasLimit.toString()}`,
+          `Gas limit: ${parseInt(zxGas, 16)}`,
         ].join("\n");
 
         return { message, transaction, chainSwitch: chainSwitched };
@@ -578,9 +669,6 @@ async function executeToolCall(
         );
       }
 
-      // 6. Calculate gas: Uniswap estimate + 200k vault overhead
-      const gasLimit = calculateVaultGasLimit(quote.quote.gasUseEstimate);
-
       // The operator calls vault.execute() — the vault uses its OWN ETH balance.
       // Value is always 0 regardless of what Uniswap API returns.
 
@@ -609,12 +697,18 @@ async function executeToolCall(
       if (priceLine) descParts.push(priceLine);
 
       // 7. Build the unsigned transaction for the frontend
+      const uniGas = await estimateGas(
+        ctx.chainId, ctx.vaultAddress as Address,
+        vaultCalldata as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
+      );
+
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: vaultCalldata,
         value: "0x0",
         chainId: ctx.chainId,
-        gas: `0x${gasLimit.toString(16)}`,
+        gas: uniGas,
         description: descParts.join(" | "),
         swapMeta: {
           sellAmount: inputAmount,
@@ -642,7 +736,7 @@ async function executeToolCall(
         ...(priceLine ? [priceLine] : []),
         `Slippage: ${intent.slippageBps ? intent.slippageBps / 100 : 1}%`,
         `Chain: ${chainName}`,
-        `Gas limit: ${gasLimit.toString()}`,
+        `Gas limit: ${parseInt(uniGas, 16)}`,
       ].join("\n");
 
       return { message, transaction, chainSwitch: chainSwitched };
@@ -761,15 +855,20 @@ async function executeToolCall(
       });
 
       const leverage = args.leverage || (parseFloat(sizeDeltaUsd) / (parseFloat(collateralAmount) * collateralPrice.mid)).toFixed(1);
-      const gasLimit = getGmxGasLimit();
       const collateralValueUsdDisplay = (parseFloat(collateralAmount) * collateralPrice.mid).toFixed(2);
+
+      const gmxGas = await estimateGas(
+        ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
+        calldata as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
+      );
 
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: calldata,
         value: "0x0",
         chainId: ARBITRUM_CHAIN_ID,
-        gas: `0x${gasLimit.toString(16)}`,
+        gas: gmxGas,
         description: `[GMX] ${isLong ? "Long" : "Short"} ${marketSymbol} ${leverage}x — ${collateralAmount} ${collateralSymbol} collateral (~$${collateralValueUsdDisplay}), $${sizeDeltaUsd} size`,
       };
 
@@ -854,15 +953,20 @@ async function executeToolCall(
         acceptablePriceUsd: args.acceptablePrice as string | undefined,
       });
 
-      const gasLimit = getGmxGasLimit();
       const orderLabel = orderTypeStr === "limit" ? "Limit Decrease" : orderTypeStr.includes("stop") ? "Stop-Loss" : "Market Close";
+
+      const gmxDecGas = await estimateGas(
+        ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
+        calldata as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
+      );
 
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: calldata,
         value: "0x0",
         chainId: ARBITRUM_CHAIN_ID,
-        gas: `0x${gasLimit.toString(16)}`,
+        gas: gmxDecGas,
         description: `[GMX] ${orderLabel} ${isLong ? "Long" : "Short"} ${marketSymbol} — $${sizeDeltaUsd} size`,
       };
 
@@ -919,14 +1023,19 @@ async function executeToolCall(
 
       const orderKey = args.orderKey as Hex;
       const calldata = buildCancelOrderCalldata(orderKey);
-      const gasLimit = getGmxGasLimit();
+
+      const cancelGas = await estimateGas(
+        ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
+        calldata as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
+      );
 
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: calldata,
         value: "0x0",
         chainId: ARBITRUM_CHAIN_ID,
-        gas: `0x${gasLimit.toString(16)}`,
+        gas: cancelGas,
         description: `[GMX] Cancel order ${orderKey.slice(0, 10)}…`,
       };
 
@@ -955,14 +1064,18 @@ async function executeToolCall(
         triggerPriceUsd: args.triggerPrice as string,
       });
 
-      const gasLimit = getGmxGasLimit();
+      const updateGas = await estimateGas(
+        ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
+        calldata as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
+      );
 
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: calldata,
         value: "0x0",
         chainId: ARBITRUM_CHAIN_ID,
-        gas: `0x${gasLimit.toString(16)}`,
+        gas: updateGas,
         description: `[GMX] Update order ${(args.orderKey as string).slice(0, 10)}…`,
       };
 
@@ -1010,14 +1123,18 @@ async function executeToolCall(
         tokens: claimTokens as Address[],
       });
 
-      const gasLimit = getGmxGasLimit();
+      const claimGas = await estimateGas(
+        ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
+        calldata as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
+      );
 
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: calldata,
         value: "0x0",
         chainId: ARBITRUM_CHAIN_ID,
-        gas: `0x${gasLimit.toString(16)}`,
+        gas: claimGas,
         description: `[GMX] Claim funding fees from ${claimMarkets.length} market(s)`,
       };
 
@@ -1082,12 +1199,18 @@ async function executeToolCall(
         ctx.chainId,
       );
 
+      const gas = await estimateGas(
+        ctx.chainId, ctx.vaultAddress as Address,
+        result.transaction.data as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "delegation",
+      );
+
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: result.transaction.data,
         value: "0x0",
         chainId: ctx.chainId,
-        gas: "0x30D40", // 200k gas should be plenty
+        gas,
         description: result.transaction.description,
       };
 
@@ -1126,12 +1249,18 @@ async function executeToolCall(
         ctx.chainId,
       );
 
+      const gas = await estimateGas(
+        ctx.chainId, ctx.vaultAddress as Address,
+        revocation.transaction.data as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "delegation",
+      );
+
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: revocation.transaction.data,
         value: "0x0",
         chainId: ctx.chainId,
-        gas: "0x30D40", // 200k gas
+        gas,
         description: revocation.transaction.description,
       };
 
@@ -1244,12 +1373,18 @@ async function executeToolCall(
         args: [poolName, poolSymbol, baseTokenAddress],
       });
 
+      const gas = await estimateGas(
+        ctx.chainId, POOL_FACTORY_ADDRESS as Address,
+        data, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "deploy",
+      );
+
       const transaction: UnsignedTransaction = {
         to: POOL_FACTORY_ADDRESS as Address,
         data,
         value: "0x0",
         chainId: ctx.chainId,
-        gas: "0x7A120", // 500k gas for pool deployment
+        gas,
         description: `Deploy new Rigoblock pool: ${poolName} (${poolSymbol})`,
       };
 
@@ -1348,12 +1483,18 @@ async function executeToolCall(
 
       if (isNativeBase) {
         // Native base token — send as msg.value, no approval needed
+        const mintGas = await estimateGas(
+          ctx.chainId, ctx.vaultAddress as Address,
+          mintData as Hex, "0x" + amountInWei.toString(16),
+          ctx.operatorAddress, env.ALCHEMY_API_KEY,
+        );
+
         const transaction: UnsignedTransaction = {
           to: ctx.vaultAddress as Address,
           data: mintData,
           value: "0x" + amountInWei.toString(16),
           chainId: ctx.chainId,
-          gas: "0x7A120", // 500k gas
+          gas: mintGas,
           description: `Fund pool: deposit ${amountStr} ${baseSymbol} into ${poolData.name}`,
         };
 
@@ -1382,12 +1523,18 @@ async function executeToolCall(
       });
 
       // Return the approve transaction first — the mint follows after approval
+      const approveGas = await estimateGas(
+        ctx.chainId, baseToken as Address,
+        approveData, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "approve",
+      );
+
       const transaction: UnsignedTransaction = {
         to: baseToken as Address,
         data: approveData,
         value: "0x0",
         chainId: ctx.chainId,
-        gas: "0xC350", // 50k gas for approve
+        gas: approveGas,
         description: `Approve ${amountStr} ${baseSymbol} for pool ${poolData.name}`,
       };
 
@@ -1415,6 +1562,8 @@ async function executeToolCall(
       const destChainArg = args.destinationChain as string;
       const tokenSymbol = args.token as string;
       const amount = args.amount as string;
+      const useNativeEth = args.useNativeEth as boolean | undefined;
+      const shouldUnwrapOnDestination = args.shouldUnwrapOnDestination as boolean | undefined;
 
       if (!destChainArg || !tokenSymbol || !amount) {
         throw new Error("destinationChain, token, and amount are all required.");
@@ -1441,15 +1590,23 @@ async function executeToolCall(
         dstChainId: destMatch.id,
         tokenSymbol,
         amount,
+        useNativeEth: useNativeEth ?? false,
+        shouldUnwrapOnDestination: shouldUnwrapOnDestination ?? false,
         alchemyKey: env.ALCHEMY_API_KEY,
       });
+
+      const gas = await estimateGas(
+        srcChainId, ctx.vaultAddress as Address,
+        result.calldata as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "bridge",
+      );
 
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: result.calldata,
         value: "0x0",
         chainId: srcChainId,
-        gas: "0x7A120", // 500k gas
+        gas,
         description: result.description,
       };
 
@@ -1504,12 +1661,18 @@ async function executeToolCall(
         alchemyKey: env.ALCHEMY_API_KEY,
       });
 
+      const syncGas = await estimateGas(
+        srcChainId, ctx.vaultAddress as Address,
+        result.calldata as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "bridge",
+      );
+
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: result.calldata,
         value: "0x0",
         chainId: srcChainId,
-        gas: "0x7A120", // 500k gas
+        gas: syncGas,
         description: result.description,
       };
 
@@ -1816,6 +1979,425 @@ async function executeToolCall(
           "Create a strategy",
           strategies.length > 0 ? `Remove strategy ${strategies[0].id}` : "",
         ].filter(Boolean),
+      };
+    }
+
+    // ── Uniswap v4 LP ──────────────────────────────────────────────────
+
+    case "add_liquidity": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const result = await buildAddLiquidityTx(env, {
+        tokenA: args.tokenA as string,
+        tokenB: args.tokenB as string,
+        amountA: args.amountA as string,
+        amountB: args.amountB as string,
+        fee: args.fee as number | undefined,
+        tickSpacing: args.tickSpacing as number | undefined,
+        tickRange: (args.tickRange as string) || "full",
+      }, ctx.chainId, ctx.vaultAddress as Address);
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: result.calldata,
+        value: "0x0",
+        chainId: ctx.chainId,
+        gas: "0x7A120",  // 500k gas estimate — wallet re-estimates on sign
+        description: result.description,
+      };
+
+      const chainName = resolveChainName(ctx.chainId);
+      const message = [
+        `✅ Add Liquidity ready`,
+        `${result.description}`,
+        `Tick range: [${result.tickLower}, ${result.tickUpper}]`,
+        `Pool ID: \`${result.poolId}\``,
+        `Chain: ${chainName}`,
+        ``,
+        `💡 The vault must hold sufficient balances of both tokens. Review and sign to create the LP position.`,
+      ].join("\n");
+
+      return { message, transaction, chainSwitch: chainSwitched };
+    }
+
+    case "remove_liquidity": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const result = await buildRemoveLiquidityTx(env, {
+        tokenA: args.tokenA as string,
+        tokenB: args.tokenB as string,
+        tokenId: args.tokenId as string,
+        liquidityAmount: args.liquidityAmount as string,
+        burn: args.burn as boolean | undefined,
+      }, ctx.chainId, ctx.vaultAddress as Address);
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: result.calldata,
+        value: "0x0",
+        chainId: ctx.chainId,
+        gas: "0x7A120",  // 500k gas estimate — wallet re-estimates on sign
+        description: result.description,
+      };
+
+      const chainName = resolveChainName(ctx.chainId);
+      return {
+        message: `✅ Remove Liquidity ready\n${result.description}\nChain: ${chainName}\n\n💡 Review and sign to remove the LP position.`,
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    // ── LP Position Reading & Fee Collection ────────────────────────────
+
+    case "get_lp_positions": {
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const chainName = resolveChainName(ctx.chainId);
+      const positions = await getVaultLPPositions(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+
+      if (positions.length === 0) {
+        return {
+          message: `No active Uniswap v4 LP positions found for this vault on ${chainName}.`,
+          chainSwitch: chainSwitched,
+        };
+      }
+
+      // Format amounts: trim trailing zeros, cap at 6 decimal places
+      const fmtAmt = (raw: string): string => {
+        const n = parseFloat(raw);
+        if (n === 0) return "0";
+        if (n >= 1000) return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+        if (n >= 1) return n.toFixed(4);
+        return n.toFixed(6);
+      };
+
+      // Block explorer base URLs for address links
+      const explorerBase: Record<number, string> = {
+        1: "https://etherscan.io/address/",
+        10: "https://optimistic.etherscan.io/address/",
+        56: "https://bscscan.com/address/",
+        137: "https://polygonscan.com/address/",
+        8453: "https://basescan.org/address/",
+        42161: "https://arbiscan.io/address/",
+      };
+      const explorer = explorerBase[ctx.chainId] || "";
+
+      // Sort: active positions first, closed (zero liquidity) last
+      const sorted = [...positions].sort((a, b) => {
+        const aZero = a.liquidity === "0" ? 1 : 0;
+        const bZero = b.liquidity === "0" ? 1 : 0;
+        return aZero - bZero;
+      });
+
+      const active = positions.filter((p) => p.liquidity !== "0").length;
+      const closedCount = positions.length - active;
+      const subtitle = closedCount > 0 ? ` (${active} active, ${closedCount} closed)` : "";
+
+      // Build markdown table
+      const header = `| # | Pair | Fee | ${positions[0]?.symbol0 ?? "Token0"} | ${positions[0]?.symbol1 ?? "Token1"} | Hook | Status |`;
+      const sep = "|---|------|-----|------|------|------|--------|";
+      const rows = sorted.map((p) => {
+        const status = p.liquidity === "0" ? "Closed" : "Active";
+        const hookCell = p.hooks.toLowerCase() !== "0x0000000000000000000000000000000000000000"
+          ? (explorer ? `[${p.hooks.slice(0, 6)}…${p.hooks.slice(-4)}](${explorer}${p.hooks})` : `${p.hooks.slice(0, 6)}…${p.hooks.slice(-4)}`)
+          : "—";
+        return `| ${p.tokenId} | ${p.symbol0}/${p.symbol1} | ${p.fee / 10000}% | ${fmtAmt(p.amount0)} | ${fmtAmt(p.amount1)} | ${hookCell} | ${status} |`;
+      });
+
+      const message = [
+        `📊 **Uniswap v4 LP Positions — ${chainName}** (${positions.length}${subtitle})`,
+        "",
+        header,
+        sep,
+        ...rows,
+      ].join("\n");
+
+      return {
+        message,
+        chainSwitch: chainSwitched,
+        selfContained: true,
+      };
+    }
+
+    case "collect_lp_fees": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const tokenId = args.tokenId as string;
+      const addrA = await resolveTokenAddress(ctx.chainId, args.tokenA as string);
+      const addrB = await resolveTokenAddress(ctx.chainId, args.tokenB as string);
+
+      // Sort currency0 < currency1 as required by v4
+      const isALower = addrA.toLowerCase() < addrB.toLowerCase();
+      const currency0 = (isALower ? addrA : addrB) as Address;
+      const currency1 = (isALower ? addrB : addrA) as Address;
+
+      const result = buildCollectFeesTx(tokenId, currency0, currency1, ctx.vaultAddress as Address);
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: result.calldata,
+        value: "0x0",
+        chainId: ctx.chainId,
+        gas: "0x7A120",
+        description: result.description,
+      };
+
+      const chainName = resolveChainName(ctx.chainId);
+      return {
+        message: `✅ Fee Collection ready\n${result.description}\nChain: ${chainName}\n\n💡 Sign to collect accrued trading fees from this LP position.`,
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    // ── GRG Staking ─────────────────────────────────────────────────────
+
+    case "grg_stake": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      // Staking is Ethereum mainnet only
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== 1) {
+        ctx.chainId = 1;
+        chainSwitched = 1;
+      }
+
+      const amount = args.amount as string;
+      const calldata = buildStakeCalldata(amount);
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: calldata,
+        value: "0x0",
+        chainId: 1,
+        gas: "0x493E0",  // 300k gas
+        description: `[GRG Staking] Stake ${amount} GRG`,
+      };
+
+      return {
+        message: `✅ GRG Stake ready\nAmount: ${amount} GRG\nChain: Ethereum\n\n💡 Staking earns operator rewards (30%+ share) and attracts third-party delegated stake.`,
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    case "grg_unstake": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== 1) {
+        ctx.chainId = 1;
+        chainSwitched = 1;
+      }
+
+      const amount = args.amount as string;
+      const calldata = buildUnstakeCalldata(amount);
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: calldata,
+        value: "0x0",
+        chainId: 1,
+        gas: "0x493E0",
+        description: `[GRG Staking] Unstake ${amount} GRG`,
+      };
+
+      return {
+        message: `✅ GRG Unstake ready\nAmount: ${amount} GRG\nChain: Ethereum\n\n⚠️ Make sure you called undelegate first and waited for the epoch to end before unstaking.`,
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    case "grg_undelegate_stake": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== 1) {
+        ctx.chainId = 1;
+        chainSwitched = 1;
+      }
+
+      const amount = args.amount as string;
+      const calldata = buildUndelegateStakeCalldata(amount);
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: calldata,
+        value: "0x0",
+        chainId: 1,
+        gas: "0x493E0",  // 300k gas
+        description: `[GRG Staking] Undelegate ${amount} GRG`,
+      };
+
+      return {
+        message: `✅ GRG Undelegate ready\nAmount: ${amount} GRG\nChain: Ethereum\n\n💡 After undelegation, wait for the current epoch to end, then call unstake to withdraw.`,
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    case "grg_end_epoch": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== 1) {
+        ctx.chainId = 1;
+        chainSwitched = 1;
+      }
+
+      const stakingProxy = STAKING_PROXY[1];
+      if (!stakingProxy) {
+        throw new Error("Staking proxy address not configured for Ethereum mainnet.");
+      }
+
+      const calldata = buildEndEpochCalldata();
+
+      const transaction: UnsignedTransaction = {
+        to: stakingProxy,
+        data: calldata,
+        value: "0x0",
+        chainId: 1,
+        gas: "0x7A120",  // 500k — epoch finalization can be gas-intensive
+        description: `[GRG Staking] Finalize epoch on staking proxy`,
+      };
+
+      return {
+        message: `✅ End Epoch ready\nTarget: Staking Proxy (${stakingProxy})\nChain: Ethereum\n\n⚠️ This targets the staking proxy directly — sign from your wallet (cannot use delegation).`,
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    case "grg_claim_rewards": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (ctx.chainId !== 1) {
+        ctx.chainId = 1;
+        chainSwitched = 1;
+      }
+
+      const calldata = buildWithdrawDelegatorRewardsCalldata();
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: calldata,
+        value: "0x0",
+        chainId: 1,
+        gas: "0x493E0",
+        description: `[GRG Staking] Claim delegator rewards`,
+      };
+
+      return {
+        message: `✅ Claim Rewards ready\nChain: Ethereum\n\n💡 This claims accumulated delegator staking rewards back to the vault.`,
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    // ── Selective Delegation Revocation ──────────────────────────────────
+
+    case "revoke_selectors": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const walletInfo = await getAgentWalletInfo(env.KV, ctx.vaultAddress as string);
+      if (!walletInfo?.address) {
+        throw new Error("No agent wallet found for this vault. Nothing to revoke.");
+      }
+
+      const selectorsToRevoke = (args.selectors as string[]).map((s) => s as Hex);
+      const chainName = resolveChainName(ctx.chainId);
+
+      const result = await prepareSelectiveRevocation(
+        env,
+        ctx.vaultAddress as Address,
+        walletInfo.address,
+        selectorsToRevoke,
+        ctx.chainId,
+      );
+
+      const gas = await estimateGas(
+        ctx.chainId, ctx.vaultAddress as Address,
+        result.transaction.data as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "delegation",
+      );
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: result.transaction.data,
+        value: "0x0",
+        chainId: ctx.chainId,
+        gas,
+        description: result.transaction.description,
+      };
+
+      return {
+        message: `✅ Selective Revocation ready\nRevoking ${selectorsToRevoke.length} selector(s) on ${chainName}\nSelectors: ${selectorsToRevoke.join(", ")}\n\n💡 Sign to revoke these specific delegated functions.`,
+        transaction,
+        chainSwitch: chainSwitched,
       };
     }
 

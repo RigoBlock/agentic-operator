@@ -34,6 +34,7 @@ export interface Env {
   TELEGRAM_BOT_TOKEN?: string; // Telegram Bot API token (optional, enables Telegram control)
   CDP_API_KEY_ID: string;      // Coinbase Developer Platform API key ID (x402 facilitator auth)
   CDP_API_KEY_SECRET: string;  // Coinbase Developer Platform API key secret (x402 facilitator auth)
+  SEMANTIC_FACILITATOR_URL?: string; // Semantic x402 facilitator URL (enables USDT0 on Plasma payments)
 }
 
 // ── Telegram types ────────────────────────────────────────────────────
