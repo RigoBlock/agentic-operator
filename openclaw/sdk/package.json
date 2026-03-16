@@ -1,0 +1,19 @@
+{
+  "name": "@rigoblock/openclaw-defi",
+  "version": "0.1.0",
+  "description": "OpenClaw skill for DeFi trading on Rigoblock vaults — XAUT strategies, GMX perps, Uniswap v4 LP, cross-chain bridging",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}
