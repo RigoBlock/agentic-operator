@@ -25,9 +25,7 @@
 
 | Strategy | Primary Chain | Secondary Chain | Why |
 |----------|--------------|-----------------|-----|
-| XAUT Carry Trade | Arbitrum | — | GMX V2 XAUT market is on Arbitrum |
-| XAUT LP + Hedge | Ethereum | Arbitrum | LP on mainnet (deep XAUT liquidity), hedge on Arbitrum (GMX) |
-| Capital Optimizer | All | All | Monitors cross-chain balances and deployment ratios |
+| XAUT LP + IL Hedge | Ethereum | Arbitrum | LP on mainnet (deep XAUT liquidity), hedge on Arbitrum (GMX) |
 
 ## Key Addresses
 

@@ -12,11 +12,11 @@
  * Architecture:
  *   - WDK manages the OPERATOR wallet (user's wallet — vault owner)
  *   - WDK manages the x402 PAYMENT wallet (pays for API calls)
- *   - WDK Secret Manager encrypts seed at rest (PBKDF2 + XSalsa20-Poly1305)
+ *   - WDK Secret Manager (@tetherto/wdk-secret-manager) encrypts seed at rest (PBKDF2 + XSalsa20-Poly1305)
  *   - The server-side AGENT wallet remains separate (per-vault EOA)
  *
  * Security:
- *   - Seed phrase encrypted at rest with WDK Secret Manager
+ *   - Seed phrase encrypted at rest with WDK Secret Manager (@tetherto/wdk-secret-manager)
  *   - Private keys never leave the client process
  *   - SecureWalletSession uses ES private fields (#wallet) — LLM cannot access
  *   - WDK provides memory-safe key management with dispose()
@@ -246,113 +246,18 @@ export class RigoblockWallet {
 // ─── Encrypted Wallet Store (WDK Secret Manager) ───────────────────────────
 
 /**
- * WDK Secret Manager compatible encryption for Node.js.
+ * Seed encryption using Tether's WDK Secret Manager (@tetherto/wdk-secret-manager).
  *
- * Uses the same algorithms as @tetherto/wdk-secret-manager:
+ * Algorithms (handled by the WDK package):
  *   - PBKDF2-SHA256 (100k iterations) for key derivation
  *   - XSalsa20-Poly1305 (libsodium secretbox) for authenticated encryption
  *   - BIP-39 entropy ↔ mnemonic conversion
  *
- * Why not import @tetherto/wdk-secret-manager directly?
- * It depends on `bare-crypto` which requires the Bare runtime.
- * This implementation uses Node.js `crypto` (PBKDF2) + `sodium-universal`
- * (secretbox) — same deps already used by @tetherto/wdk-wallet-evm.
- * The encrypted format is compatible.
+ * Note: bare-crypto (a WDK dependency) requires a postinstall patch to work
+ * in Node.js — see patches/patch-bare-crypto.cjs. The patch redirects
+ * bare-crypto to node:crypto, which provides the same pbkdf2Sync API.
+ * This is documented by Tether: "Node.js: Uses sodium-native and Node crypto."
  */
-
-/** Number of PBKDF2 iterations (matches WDK Secret Manager default). */
-const PBKDF2_ITERATIONS = 100_000;
-
-/**
- * Derive a 32-byte key from passkey + salt using PBKDF2-SHA256.
- * Same as WdkSecretManager.#deriveKeyFromPassKey().
- */
-async function deriveEncryptionKey(passkey: string, salt: Buffer): Promise<Buffer> {
-  const { pbkdf2Sync } = await import("node:crypto");
-  return pbkdf2Sync(passkey, salt, PBKDF2_ITERATIONS, 32, "sha256");
-}
-
-/**
- * Encrypt data with secretbox (XSalsa20-Poly1305).
- * Format: [version(1), nonce(24), length(1), ciphertext(data + MAC)]
- * Same as WdkSecretManager.#encrypt().
- */
-async function secretboxEncrypt(data: Buffer, key: Buffer): Promise<Buffer> {
-  const sodium = (await import("sodium-universal")).default;
-  const NONCE_BYTES = 24; // crypto_secretbox_NONCEBYTES
-  const MAC_BYTES = 16;   // crypto_secretbox_MACBYTES
-
-  const nonce = Buffer.alloc(NONCE_BYTES);
-  sodium.randombytes_buf(nonce);
-
-  // Output: [version(1), nonce(24), length+data+MAC]
-  const output = Buffer.alloc(1 + NONCE_BYTES + 1 + data.length + MAC_BYTES);
-  output[0] = 0; // version
-  nonce.copy(output, 1);
-
-  const cipher = output.subarray(1 + NONCE_BYTES);
-  cipher[0] = data.length;
-
-  // Plaintext = [length(1), data]
-  const plaintext = Buffer.alloc(1 + data.length);
-  plaintext[0] = data.length;
-  data.copy(plaintext, 1);
-
-  // Encrypt in place
-  const ciphertext = output.subarray(1 + NONCE_BYTES);
-  sodium.crypto_secretbox_easy(ciphertext, plaintext, nonce, key);
-
-  return output;
-}
-
-/**
- * Decrypt secretbox payload.
- * Same as WdkSecretManager.decrypt().
- */
-async function secretboxDecrypt(payload: Buffer, key: Buffer): Promise<Buffer> {
-  const sodium = (await import("sodium-universal")).default;
-  const NONCE_BYTES = 24;
-
-  const nonce = payload.subarray(1, 1 + NONCE_BYTES);
-  const ciphertext = payload.subarray(1 + NONCE_BYTES);
-
-  const plaintext = Buffer.alloc(ciphertext.length - 16); // minus MAC
-  const ok = sodium.crypto_secretbox_open_easy(plaintext, ciphertext, nonce, key);
-  if (!ok) throw new Error("Decryption failed — wrong passkey or corrupted data");
-
-  const dataLen = plaintext[0];
-  return plaintext.subarray(1, 1 + dataLen);
-}
-
-/**
- * Generate a random 16-byte salt (matches wdkSaltGenerator.generate()).
- */
-async function generateSalt(): Promise<Buffer> {
-  const sodium = (await import("sodium-universal")).default;
-  const salt = Buffer.alloc(16);
-  sodium.randombytes_buf(salt);
-  return salt;
-}
-
-/**
- * Generate random 16-byte entropy and convert to 12-word BIP-39 mnemonic.
- */
-async function generateEntropy(): Promise<{ entropy: Buffer; mnemonic: string }> {
-  const sodium = (await import("sodium-universal")).default;
-  const bip39 = await import("bip39");
-  const entropy = Buffer.alloc(16);
-  sodium.randombytes_buf(entropy);
-  const mnemonic = bip39.entropyToMnemonic(entropy.toString("hex"));
-  return { entropy, mnemonic };
-}
-
-/**
- * Convert 12-word mnemonic back to 16-byte entropy.
- */
-async function mnemonicToEntropy(mnemonic: string): Promise<Buffer> {
-  const bip39 = await import("bip39");
-  return Buffer.from(bip39.mnemonicToEntropy(mnemonic), "hex");
-}
 
 /**
  * Persisted format for an encrypted wallet. Store this as a JSON file.
@@ -464,16 +369,23 @@ export class SecureWalletSession {
       throw new Error("Passkey must be at least 12 characters");
     }
 
-    // Generate salt, entropy, and derive encryption key
-    const salt = await generateSalt();
-    const { entropy, mnemonic } = await generateEntropy();
+    // Use WDK Secret Manager for encryption
+    const { WdkSecretManager, wdkSaltGenerator } = await import("@tetherto/wdk-secret-manager");
 
-    // Derive key from passkey + salt, then encrypt entropy
-    const key = await deriveEncryptionKey(passkey, salt);
-    const encryptedEntropy = await secretboxEncrypt(entropy, key);
+    const salt = wdkSaltGenerator.generate();
+    const sm = new WdkSecretManager(passkey, salt);
 
-    // Wipe key from memory
-    key.fill(0);
+    // Generate entropy + encrypt in one shot
+    const { encryptedEntropy } = await sm.generateAndEncrypt();
+
+    // Decrypt to get mnemonic (for wallet loading + backup)
+    const entropy = sm.decrypt(encryptedEntropy);
+    const mnemonic = sm.entropyToMnemonic(entropy);
+
+    // Serialize BEFORE dispose — dispose() zeros the salt buffer in-place
+    const saltB64 = Buffer.from(salt).toString("base64");
+    const encryptedEntropyB64 = Buffer.from(encryptedEntropy).toString("base64");
+    sm.dispose();
 
     // Load wallet from the generated mnemonic via WDK
     const wallet = await RigoblockWallet.fromSeedPhrase(mnemonic, config);
@@ -481,8 +393,8 @@ export class SecureWalletSession {
     const store: EncryptedWalletStore = {
       version: 1,
       address: wallet.address,
-      salt: Buffer.from(salt).toString("base64"),
-      encryptedEntropy: Buffer.from(encryptedEntropy).toString("base64"),
+      salt: saltB64,
+      encryptedEntropy: encryptedEntropyB64,
     };
 
     return {
@@ -510,16 +422,15 @@ export class SecureWalletSession {
     store: EncryptedWalletStore,
     config?: WdkWalletConfig,
   ): Promise<SecureWalletSession> {
+    const { WdkSecretManager } = await import("@tetherto/wdk-secret-manager");
+
     const salt = Buffer.from(store.salt, "base64");
     const encryptedEntropy = Buffer.from(store.encryptedEntropy, "base64");
 
-    // Derive key from passkey + salt, then decrypt entropy
-    const key = await deriveEncryptionKey(passkey, salt);
-    const entropy = await secretboxDecrypt(encryptedEntropy, key);
-    key.fill(0); // wipe key
-
-    // Convert entropy back to mnemonic via BIP-39
-    const mnemonic = (await import("bip39")).entropyToMnemonic(entropy.toString("hex"));
+    const sm = new WdkSecretManager(passkey, salt);
+    const entropy = sm.decrypt(encryptedEntropy);
+    const mnemonic = sm.entropyToMnemonic(entropy);
+    sm.dispose();
 
     const wallet = await RigoblockWallet.fromSeedPhrase(mnemonic, config);
 
