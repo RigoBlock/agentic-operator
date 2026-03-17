@@ -10,6 +10,10 @@
  * 1. Read current NAV via `getNavDataView()` on the vault
  * 2. Simulate a vault `multicall([swap, getNavDataView])` via `eth_call`
  *    — this captures the post-swap NAV in a single atomic simulation
+ *    — the simulation runs as the vault OPERATOR (not the agent wallet),
+ *      because `multicall` is not in the agent's delegated selectors.
+ *      The operator is the vault owner and is always authorized for any
+ *      selector, so the multicall succeeds.
  * 3. Compare post-swap unitaryValue vs pre-swap unitaryValue
  * 4. If drop > MAX_NAV_DROP_PCT, reject the transaction
  * 5. Store the 24-hour baseline in KV for rolling protection
@@ -28,8 +32,10 @@
  * simulates successfully, we return `allowed: true, verified: false`.
  * This means: "the trade is valid but NAV impact could not be measured
  * atomically" — the caller decides whether to proceed (execution.ts
- * logs a warning and continues). This avoids blocking valid trades on
- * vaults/chains where multicall simulation is unsupported.
+ * logs a warning and continues). This should NOT be the normal path —
+ * the operator address is always authorized for multicall. If this
+ * fires, investigate why multicall is failing (RPC issue, adapter
+ * not installed on this vault, etc.).
  */
 
 import {

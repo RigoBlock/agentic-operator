@@ -367,9 +367,13 @@ export async function executeViaDelegation(
   // 6b. NAV Shield — prevent trades that crash the pool's unit price
   // Runs BEFORE execution (both sponsored & direct paths).
   // Simulates a multicall([swap, getNavDataView]) to measure post-swap NAV impact.
-  // Simulation uses the OPERATOR address (vault owner), not the agent wallet,
-  // because the operator is always authorized to call vault functions — this
-  // avoids simulation failures caused by agent delegation edge cases.
+  //
+  // IMPORTANT: Simulation uses the OPERATOR address (vault owner), not the agent.
+  // Reason: `multicall` is intentionally NOT in the agent's delegated selectors
+  // (delegating multicall would let the agent compose arbitrary vault calls).
+  // The operator is the vault owner, always authorized for any selector, so the
+  // multicall simulation succeeds. The actual trade is still sent by the agent
+  // wallet using only its whitelisted selectors (execute, modifyLiquidities, etc.).
   const navResult = await checkNavImpact(
     tx.to as Address,
     tx.data as Hex,

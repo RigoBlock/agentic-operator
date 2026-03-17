@@ -50,13 +50,19 @@ RULE: The NAV shield (10% max drop check) runs BEFORE every transaction broadcas
 
 - `checkNavImpact()` in `execution.ts` calls the shield from `navGuard.ts`
 - It simulates atomically via `multicall([swap, getNavDataView])` on the RPC
+- **Simulation runs as the OPERATOR (vault owner)**, not the agent wallet.
+  Reason: `multicall` is intentionally NOT in the agent's delegated selectors
+  (delegating it would let the agent compose arbitrary vault calls). The operator
+  is always authorized, so the multicall succeeds. This is NOT a shortcut — the
+  actual trade is still broadcast by the agent using only its whitelisted selectors.
 - Three distinct outcomes with separate error codes:
   1. **NAV drops > 10%** → `allowed: false, code: 'BLOCKED'` → `NAV_SHIELD_BLOCKED`
   2. **Swap itself reverts** → `allowed: false, code: 'TRADE_REVERTS'` → `SIMULATION_FAILED`
   3. **Multicall fails but swap passes** → `allowed: true, verified: false, code: 'UNVERIFIED'`
-     — the trade is valid but NAV impact couldn't be measured (vault/chain doesn't support
-     multicall simulation). Execution proceeds with a warning log.
+     — the trade is valid but NAV impact couldn't be measured. This should NOT be the
+     normal path (investigate if it fires — likely an adapter or RPC issue).
 - If the pre-swap NAV read fails → BLOCK (not skip)
+- **NEVER** add `multicall` to `ALLOWED_VAULT_SELECTORS` / delegated selectors
 - **NEVER** add a flag, env var, or config to disable the NAV shield entirely
 - **NEVER** confuse "trade reverts" with "NAV shield blocked" — use the correct error code
 
