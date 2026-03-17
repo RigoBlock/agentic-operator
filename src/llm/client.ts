@@ -74,9 +74,15 @@ export async function processChat(
   ctx: RequestContext,
   onToolResult?: (toolName: string, result: string, isError: boolean) => Promise<void>,
 ): Promise<ChatResponse> {
+  // Use user-provided AI config if available, else fall back to server's OpenAI key
+  const llmApiKey = ctx.aiApiKey || env.OPENAI_API_KEY;
+  const llmBaseUrl = ctx.aiBaseUrl; // undefined = default OpenAI
+  const llmModel = ctx.aiModel || "gpt-5-mini";
+
   const openai = new OpenAI({
-    apiKey: env.OPENAI_API_KEY,
-    timeout: 25_000, // 25s — stay well within Cloudflare's 30s subrequest limit
+    apiKey: llmApiKey,
+    ...(llmBaseUrl ? { baseURL: llmBaseUrl } : {}),
+    timeout: 45_000, // 45s — allow longer for user-chosen models (e.g. Claude Opus)
   });
 
   // Build system prompt with vault context
@@ -160,9 +166,9 @@ ${executionModeNote}`;
   }
 
   // First LLM call
-  console.log(`[LLM] Calling OpenAI gpt-5-mini with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
+  console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
   const response = await openai.chat.completions.create({
-    model: "gpt-5-mini",
+    model: llmModel,
     messages: fullMessages,
     tools: TOOL_DEFINITIONS,
     tool_choice: "auto",
@@ -306,7 +312,7 @@ ${executionModeNote}`;
     // (e.g., quotes, vault info, balance checks, chain switches)
     console.log(`[LLM] Follow-up call with ${toolMessages.length} messages (incl. ${toolCallResults.length} tool results)`);
     const followUp = await openai.chat.completions.create({
-      model: "gpt-5-mini",
+      model: llmModel,
       messages: toolMessages,
       tools: TOOL_DEFINITIONS,
       tool_choice: "auto",
@@ -376,7 +382,7 @@ ${executionModeNote}`;
 
       console.log(`[LLM] Chain follow-up with ${chainMessages.length} messages`);
       const chainFollowUp = await openai.chat.completions.create({
-        model: "gpt-5-mini",
+        model: llmModel,
         messages: chainMessages,
       });
 

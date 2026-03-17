@@ -105,6 +105,12 @@ export interface ChatRequest {
   executionMode?: ExecutionMode;
   /** When true in delegated mode, confirms the agent should execute the pending tx */
   confirmExecution?: boolean;
+  /** User-provided AI API key (OpenRouter, Anthropic, or OpenAI) */
+  aiApiKey?: string;
+  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "gpt-5-mini") */
+  aiModel?: string;
+  /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
+  aiBaseUrl?: string;
 }
 
 export interface ToolCallResult {
@@ -245,6 +251,12 @@ export interface RequestContext {
   operatorAddress?: Address;
   /** Execution mode for this request */
   executionMode?: ExecutionMode;
+  /** User-provided AI API key (overrides server OPENAI_API_KEY) */
+  aiApiKey?: string;
+  /** AI model identifier */
+  aiModel?: string;
+  /** AI provider base URL */
+  aiBaseUrl?: string;
 }
 
 // ── Swap intent ───────────────────────────────────────────────────────

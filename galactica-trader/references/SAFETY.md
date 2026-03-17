@@ -70,7 +70,7 @@ building. Combined with the NAV shield, provides two layers of price protection.
 | Spend more gas than chain cap | Hard-coded, not configurable |
 | Modify delegation settings | Only vault owner can call `updateDelegation` |
 
-## For OpenClaw Agents
+## For AI Agents
 
 The safety model means you can call tools freely — the system will block any
 dangerous operation before it reaches the blockchain. However:

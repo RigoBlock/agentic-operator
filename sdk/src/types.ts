@@ -1,5 +1,5 @@
 /**
- * Shared types for the Rigoblock OpenClaw skill.
+ * Shared types for the Rigoblock DeFi SDK.
  */
 
 // ─── API Response Types ─────────────────────────────────────────────────────

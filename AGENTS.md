@@ -355,7 +355,7 @@ and returns a result (quote, unsigned transaction, analytics summary, etc.).
 
 ### How orchestrator agents should use this API:
 
-An orchestrator agent (like OpenClaw) should:
+An orchestrator agent should:
 
 1. **Plan** — Use its own reasoning to decompose complex strategies into
    atomic operations our API supports.

@@ -1,7 +1,7 @@
 ---
 name: galactica-trader
 description: Trade DeFi on Rigoblock vaults via autonomous AI execution. Uses Tether WDK for wallet creation, signing, and x402 USDT0 payments. Supports spot swaps (Uniswap, 0x), Uniswap v4 LP, GMX V2 perpetuals, cross-chain bridging (Across), and vault management across 7 EVM chains. Primary strategy: XAUT/USDT LP with impermanent loss hedge via GMX perps and cross-chain NAV sync.
-metadata: {"openclaw":{"requires":{"env":[]},"optionalEnv":["RIGOBLOCK_VAULT_ADDRESS","SEED_PHRASE"],"primaryEnv":"RIGOBLOCK_VAULT_ADDRESS","emoji":"🏦","homepage":"https://trader.rigoblock.com"}}
+metadata: {"homepage":"https://trader.rigoblock.com"}
 ---
 
 # Rigoblock DeFi Operator
@@ -24,7 +24,7 @@ The wallet is created, encrypted, and managed entirely by Tether's **WDK**:
 **First run (agent auto-creates wallet):**
 1. WDK generates a 12-word BIP-39 seed phrase (`getRandomSeedPhrase()`)
 2. WDK Secret Manager encrypts the seed with a human-set passkey
-3. Encrypted blob saved to `~/.openclaw/rigoblock-wallet.enc.json` (mode 0600)
+3. Encrypted blob saved to `~/.rigoblock/wallet.enc.json` (mode 0600)
 4. Seed phrase shown ONCE for offline backup — then discarded from memory
 5. Wallet loaded in memory via `SecureWalletSession` (ES private field `#wallet`)
 6. The agent can sign (x402, auth, transactions) but **cannot read the private key**
@@ -49,13 +49,13 @@ The wallet is created, encrypted, and managed entirely by Tether's **WDK**:
 ### TypeScript SDK (Recommended)
 
 ```typescript
-import { setupSecureClient } from "@rigoblock/openclaw-defi";
+import { setupSecureClient } from "@rigoblock/defi-sdk";
 import path from "path";
 import os from "os";
 
 const result = await setupSecureClient({
   passkey: process.env.WALLET_PASSKEY!,  // human sets this once
-  walletStorePath: path.join(os.homedir(), ".openclaw", "rigoblock-wallet.enc.json"),
+  walletStorePath: path.join(os.homedir(), ".rigoblock", "wallet.enc.json"),
   vaultAddress: process.env.RIGOBLOCK_VAULT_ADDRESS || "0x",
   chainId: 42161,
   executionMode: "delegated",
@@ -126,14 +126,14 @@ Track per-chain: `{chainId: vaultAddress}`.
 
 Using the TypeScript SDK (secure encrypted wallet):
 ```typescript
-import { setupSecureClient } from "@rigoblock/openclaw-defi";
+import { setupSecureClient } from "@rigoblock/defi-sdk";
 import path from "path";
 import os from "os";
 
 // Auto-creates on first run, auto-unlocks on subsequent runs
 const { client, session, isNewWallet, seedPhraseBackup } = await setupSecureClient({
   passkey: process.env.WALLET_PASSKEY!,
-  walletStorePath: path.join(os.homedir(), ".openclaw", "rigoblock-wallet.enc.json"),
+  walletStorePath: path.join(os.homedir(), ".rigoblock", "wallet.enc.json"),
   vaultAddress: "0xYourVault",
   chainId: 42161,
   executionMode: "delegated",
@@ -143,7 +143,7 @@ if (isNewWallet) console.log("BACKUP:", seedPhraseBackup);
 
 Using the TypeScript SDK (plaintext seed — less secure, simpler):
 ```typescript
-import { setupRigoblockClient } from "@rigoblock/openclaw-defi";
+import { setupRigoblockClient } from "@rigoblock/defi-sdk";
 
 const { client, wallet, walletInfo } = await setupRigoblockClient({
   vaultAddress: "0xYourVault",
@@ -225,7 +225,7 @@ The system enforces a clean separation between three layers:
 
 | Layer | Responsibility | Technology |
 |-------|---------------|------------|
-| **Agent reasoning** | Strategy selection, market analysis, sequencing | OpenClaw / Gumloop / any LLM agent |
+| **Agent reasoning** | Strategy selection, market analysis, sequencing | Browser chat / Gumloop / any LLM agent |
 | **Wallet execution** | Key creation, seed encryption, signing, x402 payment | Tether WDK (`wdk-wallet-evm` + `wdk-secret-manager`) |
 | **DeFi execution** | Trading, NAV shield, delegation, on-chain ops | Rigoblock API (`trader.rigoblock.com`) |
 

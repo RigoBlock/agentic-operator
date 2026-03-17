@@ -1,5 +1,5 @@
 /**
- * WDK Wallet integration for the Rigoblock OpenClaw skill.
+ * WDK Wallet integration for the Rigoblock DeFi SDK.
  *
  * Uses Tether's WDK (`@tetherto/wdk-wallet-evm`) for self-custodial
  * wallet creation, signing, and account management. The WDK wallet:
@@ -289,7 +289,7 @@ export interface EncryptedWalletStore {
  *      - Seed phrase shown ONCE for offline backup
  *   2. Agent auto-unlocks → SecureWalletSession.unlock(passkey, store)
  *      - passkey from WALLET_PASSKEY env var (set once by human)
- *      - store from ~/.openclaw/rigoblock-wallet.enc.json
+ *      - store from ~/.rigoblock/wallet.enc.json
  *   3. Agent runs autonomously — signs x402, auth, transactions
  *   4. Human kill switch: remove WALLET_PASSKEY env var, or revoke delegation
  *
@@ -460,7 +460,7 @@ export class SecureWalletSession {
 
 /**
  * Save an encrypted wallet store to a JSON file.
- * @param filePath - Path to write (e.g., ~/.openclaw/rigoblock-wallet.enc.json)
+ * @param filePath - Path to write (e.g., ~/.rigoblock/wallet.enc.json)
  * @param store    - The encrypted wallet store
  */
 export async function saveEncryptedStore(
@@ -475,7 +475,7 @@ export async function saveEncryptedStore(
 
 /**
  * Load an encrypted wallet store from a JSON file.
- * @param filePath - Path to read (e.g., ~/.openclaw/rigoblock-wallet.enc.json)
+ * @param filePath - Path to read (e.g., ~/.rigoblock/wallet.enc.json)
  */
 export async function loadEncryptedStore(
   filePath: string,
@@ -666,7 +666,7 @@ export interface SecureSetupResult {
  * Usage:
  *   const result = await setupSecureClient({
  *     passkey: process.env.WALLET_PASSKEY!,
- *     walletStorePath: path.join(os.homedir(), ".openclaw", "rigoblock-wallet.enc.json"),
+ *     walletStorePath: path.join(os.homedir(), ".rigoblock", "wallet.enc.json"),
  *     vaultAddress: "0xYourVault",
  *     chainId: 42161,
  *     executionMode: "delegated",

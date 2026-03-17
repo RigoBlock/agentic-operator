@@ -1,214 +1,151 @@
-# OpenClaw Skill — Galactica Trader
+# Galactica Trader
 
-> An [OpenClaw](https://openclaw.ai) skill that gives **any AI agent** safe,
-> delegated access to DeFi operations on Rigoblock smart pool vaults.
-> Uses Tether WDK for wallet creation, signing, and x402 USDT0 payments.
-> Primary strategy: XAUT/USDT LP on Ethereum with impermanent loss hedge
-> via GMX perps on Arbitrum, plus cross-chain NAV sync.
+> Browser-based autonomous DeFi agent for Rigoblock smart pool vaults.
+> Open [trader.rigoblock.com](https://trader.rigoblock.com), connect your
+> wallet, pick your AI model, and start managing XAUT/USDT LP + permanent
+> hedge positions across Ethereum and Arbitrum.
 
-**Built on Tether WDK.** The agent creates and manages its own wallet using
+**Built on Tether WDK.** The backend creates and manages agent wallets using
 three Tether technologies:
 - **`@tetherto/wdk-wallet-evm`** — BIP-39 seed generation, BIP-44 key derivation, transaction signing
 - **`@tetherto/wdk-secret-manager`** — seed encryption at rest (PBKDF2 + XSalsa20-Poly1305)
-- **USDT0** — x402 micropayments on Plasma for API access
+- **USDT0** — x402 payments on Plasma for external agent API access
 
-The same seed phrase works interchangeably in Python via `eth_account`. The
-wallet pays for API access with USDT0 on Plasma via x402 and signs operator
-auth for delegated execution.
+**Model-agnostic.** The operator picks their AI model via OpenRouter (100+
+models including Claude, GPT, Gemini, Llama) or direct OpenAI key. The
+operator pays for their own AI usage; execution and safety layer are free.
 
-**Language-agnostic.** The skill is pure knowledge + HTTP API. The agent calls
-two endpoints (`GET /api/quote`, `POST /api/chat`) via any HTTP client —
-`curl`, `fetch`, `requests`, whatever the agent runtime provides. A TypeScript
-SDK with WDK wallet integration is included in `sdk/`.
+**Also accessible via x402 API.** External AI agents can call the same
+backend via `GET /api/quote` and `POST /api/chat`, paying $0.01/call in
+USDT0. A TypeScript SDK with WDK wallet integration is included in `sdk/`.
 
 ---
 
 ## Architecture
 
 ```
-OpenClaw Agent (reasoning — evaluates markets, selects strategy, sequences calls)
-    ↓ reads SKILL.md + references/ (pure knowledge, no code dependency)
-    ↓ Tether WDK creates wallet, encrypts seed, signs transactions
-    ↓ USDT0 x402 micropayments on Plasma ($0.01/call)
-Rigoblock Agentic Operator API (https://trader.rigoblock.com)
+Browser Chat UI (trader.rigoblock.com)
+    ↓ operator connects wallet, picks AI model (OpenRouter / OpenAI)
+    ↓ strategy reasoning via operator's LLM (model-agnostic)
+Cloudflare Worker Backend (trader.rigoblock.com/api)
+    ↓ routes AI calls via operator's API key
+    ↓ tool execution (Uniswap, GMX, Across, vault management)
+    ↓ own agent wallet per vault (Tether WDK)
+    ↓ EIP-7702 gas-sponsored execution
     ↓ NAV shield (10% max loss) + 7-point validation + delegation check
 Rigoblock Vault (on-chain: Ethereum + Arbitrum + 5 more chains)
     ↓ DEX spot + Uni v4 LP + GMX perps + Across bridge
 ```
 
-### What the Skill IS
+**Two interfaces, one backend:**
+- **Browser chat** — operator opens the URL, connects wallet, picks their
+  model, chats with the agent. No install, no local keys.
+- **x402 API** — external AI agents pay $0.01/call in USDT0 to use the
+  same execution backend programmatically.
 
-The skill is a **SKILL.md** file + reference docs. OpenClaw loads SKILL.md
-into the agent's context. The agent reads it and gains:
+### What the Agent Does
+
+The agent is a **browser-based AI assistant** with embedded strategy knowledge.
+The operator chats with it and it gains:
 
 1. **Knowledge** — what DeFi strategies exist, when to enter/exit, risk factors
-2. **Primitives** — the HTTP API (two endpoints) and what natural-language
-   messages to send for each operation
+2. **Primitives** — tool functions for swaps, LP, perps, bridging, vault ops
 3. **Safety rules** — what the NAV shield does, what's fail-closed, what to watch for
 
-The agent then **reasons autonomously** — it picks strategies, sequences API
-calls, monitors positions, and decides when to rebalance. We don't encode
-rigid step-by-step scripts. The agent owns the plan.
-
-### What the Skill is NOT
-
-- Not a Node.js/Python library (the agent calls HTTP directly)
-- Not a rigid orchestration engine (the agent decides the sequence)
-- Not tied to any programming language or runtime
+The agent then **reasons autonomously** — it picks strategies, sequences
+operations, monitors positions, and decides when to rebalance.
 
 ### Directory Structure
 
 ```
 agentic-operator/
-├── galactica-trader/           ← The skill (this folder — publishable to ClawHub)
-│   ├── SKILL.md                ← Skill manifest — loaded by OpenClaw
+├── galactica-trader/           ← Strategy docs + reference files
 │   ├── README.md               ← You're reading this
-│   ├── install.sh              ← One-command local install
 │   └── references/
 │       ├── API.md              ← HTTP API spec with request/response examples
 │       ├── CHAINS.md           ← Chain-specific tokens, addresses, capabilities
 │       ├── STRATEGIES.md       ← Strategy entry/exit/monitoring templates
 │       └── SAFETY.md           ← NAV shield + delegation security model
-└── sdk/                        ← Optional TypeScript SDK (separate from skill)
-    ├── package.json            ← Deps: wdk-wallet-evm, wdk-secret-manager, viem
-    ├── patches/
-    │   └── patch-bare-crypto.cjs  ← Postinstall: makes wdk-secret-manager work in Node.js
-    ├── test/
-    │   └── test-secure-wallet.ts   ← E2E test: create → encrypt → unlock → sign
-    └── src/
-        ├── wallet.ts           ← WDK wallet: SecureWalletSession, encryption, x402
-        ├── client.ts           ← x402 HTTP client wrapper
-        └── ...                 ← tools, strategies, types
+├── sdk/                        ← Optional TypeScript SDK for external agents
+│   ├── package.json            ← Deps: wdk-wallet-evm, wdk-secret-manager, viem
+│   ├── patches/
+│   │   └── patch-bare-crypto.cjs  ← Postinstall: makes wdk-secret-manager work in Node.js
+│   ├── test/
+│   │   └── test-secure-wallet.ts   ← E2E test: create → encrypt → unlock → sign
+│   └── src/
+│       ├── wallet.ts           ← WDK wallet: SecureWalletSession, encryption, x402
+│       ├── client.ts           ← x402 HTTP client wrapper
+│       └── ...                 ← tools, strategies, types
+├── src/                        ← Cloudflare Worker backend
+│   ├── llm/                    ← LLM client + tool definitions
+│   ├── routes/                 ← API routes (chat, quote, delegation)
+│   ├── services/               ← Trading, execution, safety
+│   └── middleware/             ← x402 payment gate
+└── public/
+    └── index.html              ← Browser chat UI
 ```
-
-The skill folder (`galactica-trader/`) is what gets published to ClawHub and
-loaded by OpenClaw. The `sdk/` folder is a separate developer tool — not
-required for the skill to work.
 
 ---
 
-## Installation
+## Getting Started
 
-### From ClawHub (recommended)
+### Browser (recommended)
 
-```bash
-clawhub install galactica-trader
-```
+1. Open [trader.rigoblock.com](https://trader.rigoblock.com)
+2. Connect your wallet (MetaMask, WalletConnect, etc.)
+3. Click **⚙ AI Model** → pick your provider (OpenRouter or OpenAI) → paste API key → select model
+4. Start chatting: *"Show vault info on Arbitrum"*
 
-This installs the skill (SKILL.md + references/) into your workspace's
-`skills/` folder. The skill works immediately — the agent calls
-`trader.rigoblock.com` over HTTP, no local npm dependencies needed.
+No install, no terminal, no local dependencies.
 
-### From source (includes TypeScript SDK)
-
-```bash
-cd galactica-trader && ./install.sh
-```
-
-This symlinks the skill into `~/.openclaw/skills/galactica-trader/`, AND
-installs the optional TypeScript SDK with WDK wallet integration (npm deps
-+ bare-crypto patch + E2E test). The SDK is for developers who want
-programmatic wallet creation — the skill itself works without it.
-
-### Manual install
-
-#### Step 1: Copy or symlink into OpenClaw skills
+### From source
 
 ```bash
-# Option A: symlink (development — hot reload on SKILL.md changes)
-ln -s /path/to/agentic-operator/galactica-trader ~/.openclaw/skills/galactica-trader
-
-# Option B: copy (production)
-cp -r /path/to/agentic-operator/galactica-trader ~/.openclaw/skills/galactica-trader
+git clone https://github.com/RigoBlock/agentic-operator
+cd agentic-operator && npm install && npx wrangler dev
 ```
 
-OpenClaw discovers the skill via `~/.openclaw/skills/galactica-trader/SKILL.md`.
+### SDK for external agents
 
-### Step 2: Configure environment variables (optional)
+The `sdk/` folder provides a TypeScript SDK with WDK wallet integration
+for developers who want programmatic access via x402:
 
-Add to `~/.openclaw/openclaw.json`:
-
-```jsonc
-{
-  "skills": {
-    "entries": {
-      "galactica-trader": {
-        "enabled": true,
-        "env": {
-          "RIGOBLOCK_VAULT_ADDRESS": "0xVaultAddress"
-        }
-      }
-    }
-  }
-}
+```bash
+cd sdk && npm install  # includes WDK postinstall patch
+npx ts-node test/test-secure-wallet.ts  # runs WDK E2E test
 ```
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `RIGOBLOCK_VAULT_ADDRESS` | No | A Rigoblock vault contract address on any supported chain. If not set, the agent deploys a new vault autonomously (see SKILL.md bootstrap flow). For multi-chain, the agent tracks per-chain vault addresses itself. |
-| `SEED_PHRASE` | No | Existing WDK seed phrase. If not set, a new WDK wallet is created on first run. |
-
-The agent specifies `chainId` per API request — the system is multi-chain
-by design (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).
-No default chain configuration is needed.
-
-### Step 3: Fund the WDK wallet
-
-If you provided a `SEED_PHRASE`, WDK derives the wallet. If not, the SDK
-creates a new wallet and shows the seed phrase ONCE — save it securely.
-Fund the wallet with:
-- **USDT0** on Plasma (for x402 payments to the API — recommended)
-- Or **USDC** on Base (legacy x402 payment)
-
-The wallet address is also the vault operator. It signs auth messages and
-can delegate to the agent system.
-
-> **Note:** Delegation setup requires an on-chain transaction on the vault's
-> chain, so the operator wallet also needs a small amount of ETH for gas on
-> that chain (e.g. ETH on Arbitrum).
-
-### Step 4: Set up vault delegation (for delegated execution)
-
-If you want the API to execute trades on your behalf (not just return unsigned
-transaction data), delegate your vault to the agent wallet. Ask the agent:
-*"setup delegation for my vault"* — it will guide you through it.
-
-### That's it
-
-Ask OpenClaw: *"Use the galactica-trader skill to set up the XAUT/USDT LP + hedge strategy"*
-— the agent reads SKILL.md, calls the API, and executes. No
-additional compilation needed.
 
 ---
 
 ## Quick Start for Judges
 
+1. Open [trader.rigoblock.com](https://trader.rigoblock.com) in your browser
+2. Connect wallet (MetaMask, WalletConnect, etc.)
+3. Click **⚙ AI Model** → select OpenRouter or OpenAI → paste your API key
+4. Ask: *"Show vault info on Arbitrum"*
+
+To verify the WDK integration independently:
+
 ```bash
-# 1. Clone and install
 git clone https://github.com/RigoBlock/agentic-operator
-cd agentic-operator/galactica-trader
-./install.sh    # symlinks skill + installs SDK (sibling folder) + runs WDK E2E test
+cd agentic-operator/sdk && npm install
+npx ts-node test/test-secure-wallet.ts
 ```
 
-The install script runs the full Tether WDK integration test automatically:
+This runs the full Tether WDK integration test:
 - **`@tetherto/wdk-wallet-evm`** generates a BIP-39 seed and derives an EVM account
 - **`@tetherto/wdk-secret-manager`** encrypts the seed with a passkey (PBKDF2 + XSalsa20-Poly1305)
 - Encrypted store saved to disk, reloaded, and decrypted — proving round-trip key management
 - Operator auth signature (EIP-191) produced and verified
 
-Then open OpenClaw and ask:
-```
-Use the galactica-trader skill to show vault info on Arbitrum
-```
-
-To try the full agent flow with the live API, fund the wallet address with
-USDT0 on Plasma and follow the bootstrap steps in SKILL.md.
+To try the full agent flow with the live API, open
+[trader.rigoblock.com](https://trader.rigoblock.com) and connect your wallet.
 
 ---
 
 ## How It Works (for agent developers)
 
-The skill is deliberately simple. Every DeFi operation maps to one HTTP call:
+Every DeFi operation maps to one HTTP call:
 
 | Operation | HTTP Call |
 |-----------|----------|
@@ -244,8 +181,8 @@ Sign this message to verify your wallet and access your smart pool assistant.
 
 ## Strategies
 
-The agent composes strategies from API primitives. SKILL.md provides the
-knowledge; the agent provides the reasoning. See
+The agent composes strategies from API primitives. The system prompt embeds
+strategy knowledge; the agent provides the reasoning. See
 [references/STRATEGIES.md](./references/STRATEGIES.md) for detailed templates.
 
 | Strategy | Chain(s) | What | When |
@@ -283,30 +220,18 @@ See [references/SAFETY.md](./references/SAFETY.md) for the full model.
 
 ---
 
-## Web Chat — Zero-Install Alternative
+## x402 API — For External AI Agents
 
-The same API powers a **web chat** at
-[trader.rigoblock.com](https://trader.rigoblock.com) with additional
-UX benefits over a local OpenClaw installation:
-
-| Feature | OpenClaw (local) | Web Chat |
-|---------|------------------|----------|
-| Installation | Requires OpenClaw + skill setup | None — open in browser |
-| Wallet setup | Generate or import seed | Sign with MetaMask/WalletConnect |
-| Agent uptime | Must keep terminal open | Always on (Cloudflare Workers) |
-| Strategy alerts | Poll manually | Telegram notifications + confirmations |
-| x402 payment | Agent wallet pays per call | Built-in — no separate wallet needed |
-
-**For hackathon evaluators:** The web chat is the fastest way to see the full
-system in action without installing anything. Visit
-[trader.rigoblock.com](https://trader.rigoblock.com) and connect your wallet.
+External agents can also use the same backend via `GET /api/quote` and
+`POST /api/chat`, paying $0.01/call in USDT0. See [AGENTS.md](../AGENTS.md)
+for the full x402 integration guide, auth model, and safety guarantees.
 
 ---
 
 ## Gumloop Integration (Python Agent)
 
 For agents running in **Gumloop** or any Python sandbox — fully autonomous,
-no manual setup, no Node.js needed.
+no manual setup, no Node.js needed. These agents use the x402 API endpoint.
 
 ### How It Works
 
@@ -387,8 +312,8 @@ This project demonstrates clear separation for both hackathon tracks:
 
 ```
 ┌─────────────────────────────────────────────┐
-│  Agent Layer (Gumloop / OpenClaw)           │
-│  • Reads SKILL.md for strategy knowledge    │
+│  Agent Layer (Gumloop / any framework)      │
+│  • Reads STRATEGIES.md for strategy knowledge│
 │  • Decides when/what to trade               │
 │  • Sequences multi-step operations          │
 │  • Monitors positions, rebalances           │
@@ -422,23 +347,6 @@ This project demonstrates clear separation for both hackathon tracks:
 
 ---
 
-## Publishing to ClawHub
-
-From the repo root:
-
-```bash
-cd galactica-trader
-clawhub publish . --slug galactica-trader --name "Galactica Trader" --version 1.0.0
-```
-
-Then anyone can install with:
-
-```bash
-clawhub install galactica-trader
-```
-
----
-
 ## Development
 
 ```bash
@@ -451,7 +359,4 @@ cd sdk && npm install && npx tsx test/test-secure-wallet.ts
 
 # Type-check the SDK
 cd sdk && npx tsc --noEmit
-
-# Symlink skill for OpenClaw development
-ln -s $(pwd)/galactica-trader ~/.openclaw/skills/galactica-trader
 ```

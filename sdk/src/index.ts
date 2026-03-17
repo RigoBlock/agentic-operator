@@ -1,7 +1,7 @@
 /**
- * @rigoblock/openclaw-defi — OpenClaw skill for DeFi trading on Rigoblock vaults.
+ * @rigoblock/defi-sdk — TypeScript SDK for DeFi trading on Rigoblock vaults.
  *
- * Re-exports all public modules for use by the OpenClaw agent runtime.
+ * Re-exports all public modules for use by external agents and browser integrations.
  */
 
 // Client

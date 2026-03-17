@@ -1,8 +1,8 @@
 /**
- * Tool definitions for the Rigoblock OpenClaw skill.
+ * Tool definitions for the Rigoblock DeFi SDK.
  *
  * Each tool maps to one API call on the Rigoblock Agentic Operator.
- * Tools are invoked by the OpenClaw agent via natural language or explicit
+ * Tools are invoked by the AI agent via natural language or explicit
  * function calls. The RigoblockClient handles x402 payment and auth.
  */
 

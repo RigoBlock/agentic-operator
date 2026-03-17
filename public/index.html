@@ -554,6 +554,23 @@
     <label>Chain</label>
     <span id="chain-display" class="chain-badge">Ethereum</span>
     <span id="dex-display" class="dex-badge">0x Aggregator</span>
+    <button class="btn-sm" id="ai-settings-toggle" onclick="toggleAiSettings()" title="Configure AI model">⚙ AI Model</button>
+  </div>
+
+  <!-- AI Settings bar (collapsed by default) -->
+  <div id="ai-settings-bar" style="display:none; padding: 10px 24px; border-bottom: 1px solid var(--border); background: var(--surface); gap: 12px; align-items: center; flex-wrap: wrap;">
+    <label style="font-size: 12px; color: var(--muted);">Provider</label>
+    <select id="ai-provider" onchange="onAiProviderChange()" style="background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 5px 8px; font-size: 12px; outline: none;">
+      <option value="server">Server default (free)</option>
+      <option value="openrouter">OpenRouter (100+ models)</option>
+      <option value="openai">OpenAI (direct)</option>
+    </select>
+    <label id="ai-key-label" style="font-size: 12px; color: var(--muted); display: none;">API Key</label>
+    <input id="ai-api-key" type="password" placeholder="sk-or-…" autocomplete="off" style="display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 5px 8px; font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace; width: 260px; outline: none;" />
+    <label id="ai-model-label" style="font-size: 12px; color: var(--muted); display: none;">Model</label>
+    <select id="ai-model" style="display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 5px 8px; font-size: 12px; outline: none; max-width: 260px;">
+    </select>
+    <span id="ai-status" style="font-size: 11px; color: var(--muted);"></span>
   </div>
 
   <!-- Wallet picker modal (EIP-6963) -->
@@ -735,6 +752,101 @@
     let authSignature = null;  // EIP-191 sig proving wallet ownership
     let authTimestamp = null;  // timestamp used in signed message
     let providerListenersAttached = false; // prevent duplicate event listeners
+
+    // AI model configuration (persisted in localStorage)
+    const AI_SETTINGS_KEY = 'rigoblock_ai_settings';
+    let aiSettings = loadAiSettings();
+
+    const AI_MODELS = {
+      openrouter: [
+        { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4 (recommended)' },
+        { id: 'anthropic/claude-opus-4', name: 'Claude Opus 4' },
+        { id: 'openai/gpt-4.1', name: 'GPT-4.1' },
+        { id: 'openai/gpt-4.1-mini', name: 'GPT-4.1 Mini' },
+        { id: 'openai/gpt-5-mini', name: 'GPT-5 Mini' },
+        { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+        { id: 'meta-llama/llama-4-maverick', name: 'Llama 4 Maverick' },
+      ],
+      openai: [
+        { id: 'gpt-5-mini', name: 'GPT-5 Mini' },
+        { id: 'gpt-4.1', name: 'GPT-4.1' },
+        { id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini' },
+      ],
+    };
+
+    const AI_BASE_URLS = {
+      openrouter: 'https://openrouter.ai/api/v1',
+      openai: undefined, // default OpenAI
+    };
+
+    function loadAiSettings() {
+      try {
+        const stored = localStorage.getItem(AI_SETTINGS_KEY);
+        return stored ? JSON.parse(stored) : { provider: 'server', apiKey: '', model: '' };
+      } catch { return { provider: 'server', apiKey: '', model: '' }; }
+    }
+    function saveAiSettings() {
+      localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(aiSettings));
+    }
+    function toggleAiSettings() {
+      const bar = document.getElementById('ai-settings-bar');
+      bar.style.display = bar.style.display === 'none' ? 'flex' : 'none';
+    }
+    function onAiProviderChange() {
+      const provider = document.getElementById('ai-provider').value;
+      aiSettings.provider = provider;
+      const showCustom = provider !== 'server';
+      document.getElementById('ai-key-label').style.display = showCustom ? '' : 'none';
+      document.getElementById('ai-api-key').style.display = showCustom ? '' : 'none';
+      document.getElementById('ai-model-label').style.display = showCustom ? '' : 'none';
+      document.getElementById('ai-model').style.display = showCustom ? '' : 'none';
+      if (showCustom) {
+        const modelSelect = document.getElementById('ai-model');
+        modelSelect.innerHTML = '';
+        const models = AI_MODELS[provider] || [];
+        models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m.id; opt.textContent = m.name;
+          modelSelect.appendChild(opt);
+        });
+        if (aiSettings.model && models.some(m => m.id === aiSettings.model)) {
+          modelSelect.value = aiSettings.model;
+        } else {
+          aiSettings.model = models[0]?.id || '';
+          modelSelect.value = aiSettings.model;
+        }
+        document.getElementById('ai-api-key').value = aiSettings.apiKey || '';
+        document.getElementById('ai-status').textContent = 'Your API key is sent per-request and never stored on our servers.';
+      } else {
+        aiSettings.apiKey = '';
+        aiSettings.model = '';
+        document.getElementById('ai-status').textContent = '';
+      }
+      saveAiSettings();
+    }
+    // Restore AI settings on load
+    (function restoreAiSettings() {
+      const sel = document.getElementById('ai-provider');
+      if (sel) { sel.value = aiSettings.provider; onAiProviderChange(); }
+      const keyInput = document.getElementById('ai-api-key');
+      if (keyInput) {
+        keyInput.value = aiSettings.apiKey || '';
+        keyInput.addEventListener('change', () => { aiSettings.apiKey = keyInput.value; saveAiSettings(); });
+      }
+      const modelSel = document.getElementById('ai-model');
+      if (modelSel) {
+        modelSel.addEventListener('change', () => { aiSettings.model = modelSel.value; saveAiSettings(); });
+      }
+    })();
+
+    function getAiRequestParams() {
+      if (aiSettings.provider === 'server' || !aiSettings.apiKey) return {};
+      return {
+        aiApiKey: aiSettings.apiKey,
+        aiModel: aiSettings.model,
+        aiBaseUrl: AI_BASE_URLS[aiSettings.provider],
+      };
+    }
 
     const CHAIN_NAMES = {
       1: 'Ethereum', 8453: 'Base', 42161: 'Arbitrum', 10: 'Optimism',
@@ -1170,6 +1282,7 @@
             authSignature,
             authTimestamp,
             executionMode,
+            ...getAiRequestParams(),
           }),
         });
 
@@ -1196,6 +1309,7 @@
                   authSignature,
                   authTimestamp,
                   executionMode,
+                  ...getAiRequestParams(),
                 }),
               });
               if (retryRes.ok) {

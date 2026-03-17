@@ -97,6 +97,9 @@ chat.post("/", async (c) => {
       chainId: body.chainId,
       operatorAddress: body.operatorAddress as Address | undefined,
       executionMode,
+      aiApiKey: body.aiApiKey,
+      aiModel: body.aiModel,
+      aiBaseUrl: body.aiBaseUrl,
     };
 
     const response: ChatResponse = await processChat(c.env, messages, ctx);

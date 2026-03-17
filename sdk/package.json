@@ -1,7 +1,7 @@
 {
-  "name": "@rigoblock/openclaw-defi",
+  "name": "@rigoblock/defi-sdk",
   "version": "0.2.0",
-  "description": "OpenClaw skill for DeFi trading on Rigoblock vaults — WDK wallet, XAUT strategies, GMX perps, Uniswap v4 LP, cross-chain bridging",
+  "description": "TypeScript SDK for DeFi trading on Rigoblock vaults — WDK wallet, XAUT strategies, GMX perps, Uniswap v4 LP, cross-chain bridging",
   "license": "Apache-2.0",
   "type": "module",
   "main": "src/index.ts",

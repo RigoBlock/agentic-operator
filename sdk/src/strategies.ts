@@ -1,5 +1,5 @@
 /**
- * Strategy orchestration engines for the Rigoblock OpenClaw skill.
+ * Strategy orchestration engines for the Rigoblock DeFi SDK.
  *
  * Each strategy is a sequence of atomic API calls via RigoblockClient.
  * The agent uses these as building blocks — they return descriptions

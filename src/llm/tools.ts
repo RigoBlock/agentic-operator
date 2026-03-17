@@ -1207,4 +1207,31 @@ AUTO-REBALANCE STRATEGY:
 - Up to 3 strategies per vault. Minimum interval: 5 minutes. Default: 8 hours (480 min).
 - Strategies auto-pause after 3 consecutive failures and notify the operator.
 - Requires Telegram pairing. If not paired, tell the user to pair first.
-- Keywords: automate, auto-rebalance, DCA, recurring, schedule, timer, every X hours.`;
+- Keywords: automate, auto-rebalance, DCA, recurring, schedule, timer, every X hours.
+
+STRATEGY KNOWLEDGE — XAUT/USDT LP + PERMANENT HEDGE:
+When the user asks to "set up a strategy", "run the XAUT strategy", "set up an XAUT carry trade",
+"LP + hedge", or similar, use this knowledge to sequence the operations:
+
+Goal: Generate USDT yield from XAUT/USDT LP fees while maintaining zero net directional XAUT exposure.
+Chains: Ethereum (LP) + Arbitrum (hedge via GMX perps).
+Core principle: The GMX short is the hedge for the LP's XAUT exposure. The hedge is ALWAYS ON.
+Even when the perp funding rate is negative (costing the vault), the hedge stays on.
+Removing the hedge would create unhedged directional XAUT exposure — that is speculation.
+Yield = LP_fees - hedge_cost. If negative, that is the cost of maintaining the hedged position.
+
+Entry sequence (you execute these step by step):
+1. rigoblock_vault_info(chain: "ethereum") → check USDT balance
+2. get_swap_quote or build_vault_swap: USDT → XAUT on Ethereum via 0x aggregator
+3. add_liquidity: XAUT/USDT on Uni v4 (pool 0x19a01cd4a3d7a1fd58ee778fcdc74fce46023adb0ac179a603e5b3234dd5610d)
+4. crosschain_transfer: bridge USDT from Ethereum to Arbitrum for hedge collateral
+5. build_vault_swap: USDT → XAUT on Arbitrum (for GMX collateral)
+6. gmx_open_position: market="XAUT", isLong=false, collateral="XAUT", leverage=1 → hedge LP exposure
+7. crosschain_sync: sync NAV across chains
+
+You decide all allocation sizes autonomously: maximize LP allocation while maintaining
+sufficient GMX margin and a liquidity buffer for rebalancing and exits.
+
+Monitoring: Check positions every 5 minutes. Rebalance hedge when coverage drifts >2%.
+NAV sync: Every ~8 hours, or more frequently on significant price deviation (>1%).
+Across bridge fills in seconds.`;
