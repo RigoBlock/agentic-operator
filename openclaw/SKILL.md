@@ -19,27 +19,67 @@ via the x402 protocol using a WDK wallet.
 This skill is **language-agnostic**: every operation is a plain HTTP request.
 Use `curl`, `fetch`, `requests`, or any HTTP client your runtime provides.
 
-## Wallet Setup (WDK-Compatible)
+## Wallet Setup (WDK)
 
-The agent creates its own wallet autonomously on first run — no manual setup,
-no env vars, no pre-generated keys. The wallet follows the **WDK standard**:
-BIP-39 mnemonic (12 words) + BIP-44 derivation (`m/44'/60'/0'/0/0`).
+The wallet is created, encrypted, and managed entirely by Tether's **WDK**:
+- **`@tetherto/wdk-wallet-evm`** — wallet creation, BIP-39 seed, BIP-44 key derivation, signing
+- **`@tetherto/wdk-secret-manager`** — seed encryption at rest (PBKDF2-SHA256 + XSalsa20-Poly1305)
 
-**How it works:**
-1. Agent generates a 12-word BIP-39 seed phrase (same as WDK's `getRandomSeedPhrase()`)
-2. Agent derives the private key via BIP-44 path `m/44'/60'/0'/0/0`
-3. The resulting address becomes the vault operator
-4. Agent stores seed phrase + private key for future sessions
-5. The same seed phrase works in WDK (`@tetherto/wdk-wallet-evm`) or any
-   BIP-39/BIP-44 compatible library (Python `eth_account`, ethers.js, etc.)
+### How It Works
+
+**First run (agent auto-creates wallet):**
+1. WDK generates a 12-word BIP-39 seed phrase (`getRandomSeedPhrase()`)
+2. WDK Secret Manager encrypts the seed with a human-set passkey
+3. Encrypted blob saved to `~/.openclaw/rigoblock-wallet.enc.json` (mode 0600)
+4. Seed phrase shown ONCE for offline backup — then discarded from memory
+5. Wallet loaded in memory via `SecureWalletSession` (ES private field `#wallet`)
+6. The agent can sign (x402, auth, transactions) but **cannot read the private key**
+
+**Subsequent runs (auto-unlock):**
+1. `WALLET_PASSKEY` env var → WDK Secret Manager decrypts → wallet loaded
+2. Agent runs 24/7 autonomously — no human interaction needed
+3. If passkey is removed from env → agent can't start (human kill switch)
+
+**Returning agent (restore from seed backup):**
+- Provide the saved seed phrase → WDK recreates the same wallet deterministically
+
+### Security Model
+
+| Layer | Protection |
+|-------|------------|
+| At rest | WDK Secret Manager: PBKDF2 (100k iterations) + XSalsa20-Poly1305 |
+| In memory | ES private class field (`#wallet`) — inaccessible from outside `SecureWalletSession` |
+| LLM boundary | Tool functions return only signatures/addresses — never keys or seeds |
+| Human control | Remove `WALLET_PASSKEY` env var, or revoke on-chain delegation |
+
+### TypeScript SDK (Recommended)
+
+```typescript
+import { setupSecureClient } from "@rigoblock/openclaw-defi";
+import path from "path";
+import os from "os";
+
+const result = await setupSecureClient({
+  passkey: process.env.WALLET_PASSKEY!,  // human sets this once
+  walletStorePath: path.join(os.homedir(), ".openclaw", "rigoblock-wallet.enc.json"),
+  vaultAddress: process.env.RIGOBLOCK_VAULT_ADDRESS || "0x",
+  chainId: 42161,
+  executionMode: "delegated",
+});
+
+if (result.isNewWallet) {
+  console.log("⚠️  BACKUP THIS SEED PHRASE:", result.seedPhraseBackup);
+  console.log("Fund this address:", result.session.address);
+}
+
+// result.session.signOperatorAuth() → {signature, address, timestamp}
+// result.client.chat(...) → x402 payment + API call, all automatic
+```
 
 **Funding (before the agent can operate):**
 - USDT0 on Plasma → x402 API payment ($0.01/call)
 - ETH on Arbitrum (~$1) → gas for vault deploy + delegation tx
 - ETH on Optimism (~$1) → gas for second vault deploy + delegation tx
-
-**Returning agent:**
-- Load the saved seed phrase → derive the same wallet deterministically
 
 ## Agent Bootstrap Flow (No Vault Yet)
 
@@ -47,10 +87,10 @@ If `RIGOBLOCK_VAULT_ADDRESS` is not set, the agent must bootstrap itself.
 
 ### Single-Chain Bootstrap
 
-1. **Generate wallet** — create a BIP-39 seed phrase and derive the key:
-   - Python: `Account.create()` or `Account.from_mnemonic(mnemonic)`
-   - TypeScript: `WalletManagerEvm.getRandomSeedPhrase()` → `SeedSignerEvm`
-   - Store the seed phrase and private key for future sessions.
+1. **Generate wallet** — WDK creates the wallet automatically on first run:
+   - TypeScript: `setupSecureClient({ passkey, walletStorePath, ... })` creates + encrypts
+   - Python: `Account.create_with_mnemonic(num_words=12)` (WDK-compatible BIP-39/BIP-44)
+   - Store the seed phrase securely — WDK Secret Manager encrypts it at rest.
 2. **Deploy vault** — send: `"deploy a smart pool named 'AgentVault' with symbol 'AV' on Arbitrum"`
    The API returns an unsigned `createPool()` transaction. Sign and broadcast it.
    The new vault address is in the transaction receipt logs.
@@ -90,25 +130,33 @@ Track per-chain: `{chainId: vaultAddress}`.
 - `get_aggregated_nav` — shows vault NAV and balances on ALL chains at once
 - `get_rebalance_plan` — computes optimal bridge ops to rebalance across chains
 
-Using the TypeScript SDK:
+Using the TypeScript SDK (secure encrypted wallet):
+```typescript
+import { setupSecureClient } from "@rigoblock/openclaw-defi";
+import path from "path";
+import os from "os";
+
+// Auto-creates on first run, auto-unlocks on subsequent runs
+const { client, session, isNewWallet, seedPhraseBackup } = await setupSecureClient({
+  passkey: process.env.WALLET_PASSKEY!,
+  walletStorePath: path.join(os.homedir(), ".openclaw", "rigoblock-wallet.enc.json"),
+  vaultAddress: "0xYourVault",
+  chainId: 42161,
+  executionMode: "delegated",
+});
+if (isNewWallet) console.log("BACKUP:", seedPhraseBackup);
+```
+
+Using the TypeScript SDK (plaintext seed — less secure, simpler):
 ```typescript
 import { setupRigoblockClient } from "@rigoblock/openclaw-defi";
 
-// New wallet (seed phrase generated automatically)
 const { client, wallet, walletInfo } = await setupRigoblockClient({
   vaultAddress: "0xYourVault",
   chainId: 42161,
   executionMode: "delegated",
 });
-console.log("Save this seed phrase:", walletInfo.seedPhrase);
-
-// Or load existing wallet
-const { client } = await setupRigoblockClient({
-  seedPhrase: "word1 word2 word3 ... word24",
-  vaultAddress: "0xYourVault",
-  chainId: 42161,
-  executionMode: "delegated",
-});
+if (walletInfo) console.log("Save seed:", walletInfo.seedPhrase);
 ```
 
 Using plain HTTP (no SDK):
@@ -184,7 +232,7 @@ The system enforces a clean separation between three layers:
 | Layer | Responsibility | Technology |
 |-------|---------------|------------|
 | **Agent reasoning** | Strategy selection, market analysis, sequencing | OpenClaw / Gumloop / any LLM agent |
-| **Wallet execution** | Key creation, signing, x402 payment, auth | WDK-compatible BIP-39/BIP-44 (Tether WDK or `eth_account`) |
+| **Wallet execution** | Key creation, seed encryption, signing, x402 payment | Tether WDK (`wdk-wallet-evm` + `wdk-secret-manager`) |
 | **DeFi execution** | Trading, NAV shield, delegation, on-chain ops | Rigoblock API (`trader.rigoblock.com`) |
 
 The agent decides *what* to do. WDK manages *who* signs. The API ensures *safe execution*.
