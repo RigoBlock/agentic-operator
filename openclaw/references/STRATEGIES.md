@@ -70,7 +70,7 @@ Every 2-4 hours:
 - **Funding flips negative:** Agent exits. Loss = swap fees + negative funding accrued
 - **XAUT spot liquidity:** 0x aggregator routes through 150+ sources for best price
 - **GMX position health:** 1x short = no leverage risk, no liquidation unless extreme move
-- **NAV guard:** Blocks any single trade that drops vault unit price >10%
+- **NAV shield:** Blocks any single trade that drops vault unit price >10%
 
 ---
 
@@ -159,7 +159,7 @@ Every 4-8 hours:
 - **Hedge cost:** If funding is deeply negative, cost may exceed LP fees
 - **Cross-chain latency:** Across bridges fill in minutes. Agent waits.
 - **XAUT GMX collateral:** XAUT is the index token — should be accepted
-- **NAV guard:** Protects each individual trade on each chain
+- **NAV shield:** Protects each individual trade on each chain
 
 ---
 

@@ -19,7 +19,7 @@ OpenClaw Agent (reasoning — evaluates markets, selects strategy, sequences cal
     ↓ reads SKILL.md + references/ (pure knowledge, no code dependency)
     ↓ makes HTTP calls to the API (x402 payment in header)
 Rigoblock Agentic Operator API (https://trader.rigoblock.com)
-    ↓ NAV guard (10% max loss) + 7-point validation + delegation check
+    ↓ NAV shield (10% max loss) + 7-point validation + delegation check
 Rigoblock Vault (on-chain: Ethereum + Arbitrum + 5 more chains)
     ↓ DEX spot + Uni v4 LP + GMX perps + Across bridge + GRG staking
 ```
@@ -32,7 +32,7 @@ into the agent's context. The agent reads it and gains:
 1. **Knowledge** — what DeFi strategies exist, when to enter/exit, risk factors
 2. **Primitives** — the HTTP API (two endpoints) and what natural-language
    messages to send for each operation
-3. **Safety rules** — what the NAV guard does, what's fail-closed, what to watch for
+3. **Safety rules** — what the NAV shield does, what's fail-closed, what to watch for
 
 The agent then **reasons autonomously** — it picks strategies, sequences API
 calls, monitors positions, and decides when to rebalance. We don't encode
@@ -55,7 +55,7 @@ openclaw/                       ← This is the skill
 │   ├── API.md                  ← HTTP API spec with request/response examples
 │   ├── CHAINS.md               ← Chain-specific tokens, addresses, capabilities
 │   ├── STRATEGIES.md           ← Strategy entry/exit/monitoring templates
-│   └── SAFETY.md               ← NAV guard + delegation security model
+│   └── SAFETY.md               ← NAV shield + delegation security model
 └── sdk/                        ← OPTIONAL TypeScript SDK (not required)
     ├── package.json
     ├── tsconfig.json
@@ -191,7 +191,7 @@ Every transaction passes five checks before broadcast:
 2. **Delegation** — vault must delegate to agent wallet for the function selector
 3. **7-point validation** — config, target, selector whitelist, agent ID,
    simulation, balance, gas caps
-4. **NAV guard** — blocks if vault unit price drops >10%. **Fail-closed**.
+4. **NAV shield** — blocks if vault unit price drops >10%. **Fail-closed**.
 5. **Slippage** — 1% default tolerance on all swaps
 
 See [references/SAFETY.md](./references/SAFETY.md) for the full model.

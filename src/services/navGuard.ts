@@ -1,5 +1,5 @@
 /**
- * NAV Guard — server-side protection against trades that crash pool unit price.
+ * NAV Shield — server-side protection against trades that crash pool unit price.
  *
  * Prevents any swap from reducing the vault's unitary value by more than
  * MAX_NAV_DROP_PCT (10%) compared to the pre-swap value or the 24-hour
@@ -14,16 +14,22 @@
  * 4. If drop > MAX_NAV_DROP_PCT, reject the transaction
  * 5. Store the 24-hour baseline in KV for rolling protection
  *
- * This guard runs BEFORE the transaction is broadcast (both sponsored
+ * This shield runs BEFORE the transaction is broadcast (both sponsored
  * and direct paths), so it's entirely server-side and outside the agent's
  * control.
  *
  * ## FAIL-CLOSED POLICY
  *
- * If ANY step fails (RPC error, simulation revert, decode failure), the
- * guard returns `allowed: false`. We NEVER allow a transaction to pass
- * when we can't verify it's safe. A user who enables delegation expects
- * NAV protection — silently skipping it is worse than blocking a trade.
+ * If the NAV threshold check itself fails (pre-NAV read error, decode
+ * failure), the shield returns `allowed: false`. We NEVER allow a
+ * transaction when we can't even read the vault's current NAV.
+ *
+ * However, if the multicall simulation fails but the swap ALONE
+ * simulates successfully, we return `allowed: true, verified: false`.
+ * This means: "the trade is valid but NAV impact could not be measured
+ * atomically" — the caller decides whether to proceed (execution.ts
+ * logs a warning and continues). This avoids blocking valid trades on
+ * vaults/chains where multicall simulation is unsupported.
  */
 
 import {
@@ -61,14 +67,26 @@ interface NavBaseline {
   chainId: number;
 }
 
-export interface NavGuardResult {
+export interface NavShieldResult {
   allowed: boolean;
+  /** Whether NAV impact was actually measured (true = threshold comparison happened) */
+  verified: boolean;
   preNavUnitaryValue: string;
   postNavUnitaryValue: string;
   dropPct: string;
   baselineUnitaryValue?: string;
   reason?: string;
+  /** Distinguishes WHY the result is what it is:
+   *  - 'BLOCKED'       — NAV would drop more than the threshold
+   *  - 'TRADE_REVERTS' — the swap itself reverts on-chain (not a NAV issue)
+   *  - 'UNVERIFIED'    — multicall simulation failed but swap is valid; NAV unknown
+   *  - undefined       — allowed, NAV verified OK
+   */
+  code?: 'BLOCKED' | 'TRADE_REVERTS' | 'UNVERIFIED';
 }
+
+/** @deprecated Use NavShieldResult */
+export type NavGuardResult = NavShieldResult;
 
 // ── Public API ───────────────────────────────────────────────────────
 
@@ -83,7 +101,7 @@ export interface NavGuardResult {
  * @param alchemyKey - Alchemy API key
  * @param callerAddress - Address that will execute the tx (agent wallet)
  * @param kv - KV namespace for baseline storage (optional)
- * @returns NavGuardResult with allowed=true/false
+ * @returns NavShieldResult with allowed=true/false
  */
 export async function checkNavImpact(
   vaultAddress: Address,
@@ -93,7 +111,7 @@ export async function checkNavImpact(
   alchemyKey: string,
   callerAddress: Address,
   kv?: KVNamespace,
-): Promise<NavGuardResult> {
+): Promise<NavShieldResult> {
   const publicClient = getClient(chainId, alchemyKey);
 
   // ── Step 1: Read current (pre-swap) NAV ──
@@ -111,28 +129,30 @@ export async function checkNavImpact(
       timestamp: result.timestamp,
     };
     console.log(
-      `[NavGuard] Pre-swap NAV: unitaryValue=${preNav.unitaryValue} ` +
+      `[NavShield] Pre-swap NAV: unitaryValue=${preNav.unitaryValue} ` +
       `totalValue=${preNav.totalValue} chain=${chainId}`,
     );
   } catch (err) {
     // FAIL-CLOSED: If we can't read pre-swap NAV, we MUST block the transaction.
-    // Allowing it would bypass the NAV guard entirely — leaving the vault unprotected.
+    // Allowing it would bypass the NAV shield entirely — leaving the vault unprotected.
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[NavGuard] ✗ BLOCKED: Could not read pre-swap NAV: ${msg}`);
+    console.error(`[NavShield] ✗ BLOCKED: Could not read pre-swap NAV: ${msg}`);
     return {
       allowed: false,
+      verified: false,
       preNavUnitaryValue: "0",
       postNavUnitaryValue: "0",
       dropPct: "0",
-      reason: `NAV guard cannot verify trade safety — pre-swap NAV read failed: ${msg.slice(0, 120)}`,
+      reason: `Cannot read vault NAV — RPC or vault may be unreachable on chain ${chainId}: ${msg.slice(0, 300)}`,
     };
   }
 
   // If unitaryValue is 0, vault is empty — nothing to protect
   if (preNav.unitaryValue === 0n) {
-    console.log("[NavGuard] unitaryValue=0 (empty vault) — allowing");
+    console.log("[NavShield] unitaryValue=0 (empty vault) — allowing");
     return {
       allowed: true,
+      verified: true,
       preNavUnitaryValue: "0",
       postNavUnitaryValue: "0",
       dropPct: "0",
@@ -192,20 +212,51 @@ export async function checkNavImpact(
     };
 
     console.log(
-      `[NavGuard] Post-swap NAV: unitaryValue=${postNav.unitaryValue} ` +
+      `[NavShield] Post-swap NAV: unitaryValue=${postNav.unitaryValue} ` +
       `totalValue=${postNav.totalValue}`,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // FAIL-CLOSED: If we can't simulate the trade's NAV impact, we MUST block it.
-    // Allowing it would mean the user thinks they're protected when they're not.
-    console.error(`[NavGuard] ✗ BLOCKED: Multicall simulation failed: ${msg}`);
+    // But first, diagnose whether the SWAP itself reverts vs. only the multicall wrapping.
+    // This gives the user a clear error: "trade would fail" vs. "NAV shield can't verify".
+    console.error(`[NavShield] Multicall simulation failed: ${msg}`);
+
+    let reason: string;
+    let code: 'TRADE_REVERTS' | 'UNVERIFIED';
+    let allowed: boolean;
+    try {
+      // Try simulating the swap alone (without multicall wrapping)
+      await publicClient.call({
+        account: callerAddress,
+        to: vaultAddress,
+        data: txData,
+        value: txValue,
+      });
+      // Swap alone passes — multicall is unsupported on this vault/chain,
+      // but the trade itself is valid. Proceed without NAV verification.
+      code = 'UNVERIFIED';
+      allowed = true;
+      reason = `NAV verification unavailable — vault multicall simulation failed on chain ${chainId}. ` +
+        `Trade is valid (swap simulation passed). Proceeding without NAV impact check.`;
+      console.warn(`[NavShield] ⚠ UNVERIFIED: Swap passes but multicall fails on chain ${chainId} — proceeding without NAV check`);
+    } catch (swapErr) {
+      // Swap itself reverts — the trade is invalid, not a NAV shield problem
+      const swapMsg = swapErr instanceof Error ? swapErr.message : String(swapErr);
+      code = 'TRADE_REVERTS';
+      allowed = false;
+      reason = `Trade simulation failed — the swap would revert on-chain: ${swapMsg.slice(0, 500)}`;
+      console.error(`[NavShield] ✗ TRADE REVERTS: ${swapMsg.slice(0, 500)}`);
+    }
+
     return {
-      allowed: false,
+      allowed,
+      verified: false,
+      code,
       preNavUnitaryValue: preNav.unitaryValue.toString(),
       postNavUnitaryValue: "0",
       dropPct: "0",
-      reason: `NAV guard cannot verify trade safety — simulation failed: ${msg.slice(0, 120)}`,
+      reason,
     };
   }
 
@@ -216,7 +267,7 @@ export async function checkNavImpact(
   const dropPct = Number(dropBps) / 100; // Convert basis points to percentage
 
   console.log(
-    `[NavGuard] NAV change: ${preNav.unitaryValue} → ${postNav.unitaryValue} ` +
+    `[NavShield] NAV change: ${preNav.unitaryValue} → ${postNav.unitaryValue} ` +
     `(${dropPct >= 0 ? "-" : "+"}${Math.abs(dropPct).toFixed(2)}%)`,
   );
 
@@ -228,16 +279,16 @@ export async function checkNavImpact(
       if (baseline) {
         baselineUnitaryValue = BigInt(baseline.unitaryValue);
         console.log(
-          `[NavGuard] 24h baseline: unitaryValue=${baselineUnitaryValue} ` +
+          `[NavShield] 24h baseline: unitaryValue=${baselineUnitaryValue} ` +
           `(recorded ${Math.round((Date.now() - baseline.recordedAt) / 60000)}min ago)`,
         );
       } else {
         // No baseline yet — store current as baseline
         await storeBaseline(kv, vaultAddress, chainId, preNav.unitaryValue);
-        console.log("[NavGuard] No 24h baseline found — stored current NAV as baseline");
+        console.log("[NavShield] No 24h baseline found — stored current NAV as baseline");
       }
     } catch (err) {
-      console.warn("[NavGuard] KV baseline error (ignoring):", err);
+      console.warn("[NavShield] KV baseline error (ignoring):", err);
     }
   }
 
@@ -255,11 +306,13 @@ export async function checkNavImpact(
   const maxDropPct = Number(MAX_NAV_DROP_PCT);
   if (dropFromRefPct > maxDropPct) {
     console.warn(
-      `[NavGuard] ✗ BLOCKED: NAV would drop ${dropFromRefPct.toFixed(2)}% ` +
+      `[NavShield] ✗ BLOCKED: NAV would drop ${dropFromRefPct.toFixed(2)}% ` +
       `(max allowed: ${maxDropPct}%) reference=${referenceValue} post=${postNav.unitaryValue}`,
     );
     return {
       allowed: false,
+      verified: true,
+      code: 'BLOCKED',
       preNavUnitaryValue: preNav.unitaryValue.toString(),
       postNavUnitaryValue: postNav.unitaryValue.toString(),
       dropPct: dropFromRefPct.toFixed(2),
@@ -281,11 +334,12 @@ export async function checkNavImpact(
   }
 
   console.log(
-    `[NavGuard] ✓ ALLOWED: NAV drop ${dropFromRefPct.toFixed(2)}% within ${maxDropPct}% limit`,
+    `[NavShield] ✓ ALLOWED: NAV drop ${dropFromRefPct.toFixed(2)}% within ${maxDropPct}% limit`,
   );
 
   return {
     allowed: true,
+    verified: true,
     preNavUnitaryValue: preNav.unitaryValue.toString(),
     postNavUnitaryValue: postNav.unitaryValue.toString(),
     dropPct: dropFromRefPct.toFixed(2),

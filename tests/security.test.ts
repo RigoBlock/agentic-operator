@@ -3,7 +3,7 @@
  *
  * These tests verify the critical security properties documented in CLAUDE.md:
  * 1. Delegated execution REQUIRES proven vault ownership
- * 2. NAV guard must NEVER be bypassed
+ * 2. NAV shield must NEVER be bypassed
  * 3. x402 payment ≠ operator authorization
  * 4. Selector whitelist blocks dangerous operations
  * 5. Target must be the vault (prevents cross-contract attacks)

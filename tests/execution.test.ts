@@ -27,7 +27,7 @@ describe("ExecutionError", () => {
       "SIMULATION_FAILED",
       "INSUFFICIENT_BALANCE",
       "GAS_ESTIMATION_FAILED",
-      "NAV_GUARD_BLOCKED",
+      "NAV_SHIELD_BLOCKED",
       "SPONSORED_FAILED",
       "RPC_UNAVAILABLE",
     ];
@@ -90,11 +90,11 @@ describe("execution security invariants", () => {
     expect(err.code).toBe("INSUFFICIENT_BALANCE");
   });
 
-  it("Check 7: NAV guard must pass (NAV_GUARD_BLOCKED)", () => {
+  it("Check 7: NAV shield must pass (NAV_SHIELD_BLOCKED)", () => {
     const err = new ExecutionError(
       "Trade blocked by NAV protection",
-      "NAV_GUARD_BLOCKED",
+      "NAV_SHIELD_BLOCKED",
     );
-    expect(err.code).toBe("NAV_GUARD_BLOCKED");
+    expect(err.code).toBe("NAV_SHIELD_BLOCKED");
   });
 });

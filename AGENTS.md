@@ -132,7 +132,7 @@ The signature is valid for 24 hours from `authTimestamp`.
 - Execute transactions on any vault
 - Trigger delegated execution (even if the vault has delegation active)
 - Access operator-only endpoints without a valid operator signature
-- Bypass the NAV guard or any on-chain safety check
+- Bypass the NAV shield or any on-chain safety check
 
 ### What the operator signature unlocks:
 - Delegated execution mode (our agent wallet executes on the vault)
@@ -174,7 +174,7 @@ are delegated and can revoke at any time.
 6. Agent wallet has sufficient balance for gas
 7. Gas fees within hard caps per chain
 
-### 4. NAV Guard (10% Maximum Loss)
+### 4. NAV Shield (10% Maximum Loss)
 Before every transaction broadcast, the system simulates the trade's impact
 on the vault's Net Asset Value per unit:
 
@@ -185,7 +185,7 @@ on the vault's Net Asset Value per unit:
   bypassed, or circumvented by any API caller
 
 ### 5. Slippage Protection
-Default slippage tolerance: 1% (100 basis points). Combined with the NAV guard,
+Default slippage tolerance: 1% (100 basis points). Combined with the NAV shield,
 this provides two layers of price protection.
 
 ---
@@ -197,7 +197,7 @@ Even a fully authenticated agent with delegation access CANNOT:
 | Action | Why not |
 |--------|---------|
 | Drain vault assets to external address | `withdraw` and `transferOwnership` selectors are never delegated |
-| Execute trades that lose > 10% NAV | NAV guard blocks pre-broadcast |
+| Execute trades that lose > 10% NAV | NAV shield blocks pre-broadcast |
 | Bypass slippage protection | Slippage is enforced in swap calldata building |
 | Call arbitrary contract functions | Selector whitelist — only approved vault functions |
 | Send transactions to non-vault contracts | Target address must equal vault address |
@@ -415,7 +415,7 @@ In authenticated mode: `verifyOperatorAuth` checks on-chain that the signer owns
 the vault — if they don't, the request is rejected with 403.
 
 **Q: Can an agent drain a vault through repeated small trades?**
-The NAV guard checks against a 24-hour baseline. Each trade is checked
+The NAV shield checks against a 24-hour baseline. Each trade is checked
 independently against the higher of the pre-swap NAV or the 24h baseline.
 A series of 1% losses would be individually allowed but would shift the
 baseline down over 24 hours. The 10% per-trade limit is the hard cap.

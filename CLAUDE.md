@@ -17,7 +17,7 @@ Three access layers, each with distinct security boundaries:
 | Layer | What it protects | Who controls it |
 |-------|-----------------|-----------------|
 | **Vault contract** (on-chain) | Pool assets, delegation mapping, allowed selectors | Vault owner (operator) |
-| **Agent execution** (this Worker) | NAV guard, gas caps, delegation checks, auth | Cloudflare secrets + code |
+| **Agent execution** (this Worker) | NAV shield, gas caps, delegation checks, auth | Cloudflare secrets + code |
 | **x402 payment gate** (HTTP) | API access, pricing, settlement | CDP facilitator + our middleware |
 
 ---
@@ -37,24 +37,28 @@ RULE: No code path may allow delegated (auto-execute) mode without
 - **NEVER** use `x402Paid` as a substitute for operator authentication.
 
 **Why:** A malicious agent with $0.01 could trigger trades on any delegated vault,
-enabling sandwich attacks that extract ~10% per day within NAV guard limits.
+enabling sandwich attacks that extract ~10% per day within NAV shield limits.
 
-### 2. NAV guard must NEVER be bypassed or weakened
+### 2. NAV shield must NEVER be bypassed or weakened
 
 ```
-RULE: The NAV guard (10% max drop check) runs BEFORE every transaction broadcast.
+RULE: The NAV shield (10% max drop check) runs BEFORE every transaction broadcast.
       It is outside the agent's control surface. Do NOT add code paths that skip it.
-      It is FAIL-CLOSED: if ANY step fails (RPC, simulation, decode), block the tx.
+      When NAV can be measured: FAIL-CLOSED (block if drop > threshold).
+      When NAV cannot be measured: graceful degradation (proceed with warning).
 ```
 
-- `checkNavGuard()` in `execution.ts` calls `simulateNavImpact()` from `navGuard.ts`
+- `checkNavImpact()` in `execution.ts` calls the shield from `navGuard.ts`
 - It simulates atomically via `multicall([swap, getNavDataView])` on the RPC
-- If NAV drops > 10% vs the higher of pre-swap or 24h baseline → BLOCK
+- Three distinct outcomes with separate error codes:
+  1. **NAV drops > 10%** → `allowed: false, code: 'BLOCKED'` → `NAV_SHIELD_BLOCKED`
+  2. **Swap itself reverts** → `allowed: false, code: 'TRADE_REVERTS'` → `SIMULATION_FAILED`
+  3. **Multicall fails but swap passes** → `allowed: true, verified: false, code: 'UNVERIFIED'`
+     — the trade is valid but NAV impact couldn't be measured (vault/chain doesn't support
+     multicall simulation). Execution proceeds with a warning log.
 - If the pre-swap NAV read fails → BLOCK (not skip)
-- If the multicall simulation fails → BLOCK (not skip)
-- If ANY error occurs in the guard or its caller → BLOCK (no try/catch swallow)
-- **NEVER** add a flag, env var, or config to skip the NAV guard
-- **NEVER** add a catch block that allows execution to continue when the guard errors
+- **NEVER** add a flag, env var, or config to disable the NAV shield entirely
+- **NEVER** confuse "trade reverts" with "NAV shield blocked" — use the correct error code
 
 ### 3. Auth model — three independent layers
 
@@ -112,8 +116,8 @@ These files contain security-critical logic. Changes require extra care:
 | File | What it guards |
 |------|---------------|
 | `src/routes/chat.ts` | Auth gate, execution mode resolution |
-| `src/services/execution.ts` | 7-point validation, NAV guard call |
-| `src/services/navGuard.ts` | NAV simulation and threshold check |
+| `src/services/execution.ts` | 7-point validation, NAV shield call |
+| `src/services/navGuard.ts` | NAV shield simulation and threshold check |
 | `src/services/auth.ts` | Signature verification, vault ownership |
 | `src/services/delegation.ts` | On-chain delegation state |
 | `src/services/agentWallet.ts` | Key generation, encryption, decryption |
@@ -186,7 +190,7 @@ External Agent                    Our Worker                     CDP Facilitator
                     │ 7. Gas within caps         │
                     └───────────┬───────────────┘
                                 │
-                    NAV Guard check (10% max drop)
+                    NAV Shield check (10% max drop)
                                 │
                            ──Pass──► Broadcast tx
                            ──Fail──► BLOCK + return reason
@@ -201,13 +205,15 @@ External Agent                    Our Worker                     CDP Facilitator
    requires `operatorVerified === true` (signature + on-chain ownership check).
 
 2. **Sandwich via delegated agent:** Attacker triggers swap on a vault with poor
-   slippage, sandwiches it on-chain. **Mitigated:** NAV guard blocks trades that
+   slippage, sandwiches it on-chain. **Mitigated:** NAV shield blocks trades that
    drop unit value > 10%. Slippage defaults to 1% (100bps).
 
-3. **NAV guard bypass via multicall failure:** If `multicall` simulation fails
-   (vault doesn't support it), the guard is permissive. **Mitigated:** normal
-   `eth_call` simulation still catches reverts. The 10% check is a safety net on
-   top of standard simulation.
+3. **NAV shield bypass via multicall failure:** If `multicall` simulation fails
+   (vault doesn't support it on a given chain), the shield tries the swap alone
+   as a diagnostic. If the swap itself reverts → `SIMULATION_FAILED` (trade is
+   bad). If the swap passes → execution proceeds with `verified: false` (NAV
+   impact unknown). The 10% check is a safety net that only activates when
+   multicall simulation is available.
 
 4. **Agent wallet key extraction:** Attacker with `AGENT_WALLET_SECRET` + KV read
    can decrypt all agent keys. **Mitigated:** Cloudflare secrets encryption at rest,
@@ -220,7 +226,7 @@ External Agent                    Our Worker                     CDP Facilitator
 
 6. **Prompt injection via user messages:** Attacker crafts message to trick the LLM
    into calling dangerous tool functions. **Mitigated:** Tool functions have
-   deterministic implementations (no eval/exec). NAV guard catches value-destroying
+   deterministic implementations (no eval/exec). NAV shield catches value-destroying
    operations regardless of how they were triggered.
 
 ---
@@ -241,8 +247,8 @@ src/
     telegram.ts         ← Telegram webhook handler
   services/
     auth.ts             ← Signature verification + vault ownership
-    execution.ts        ← 7-point validation + NAV guard + broadcast
-    navGuard.ts         ← NAV simulation (10% threshold)
+    execution.ts        ← 7-point validation + NAV shield + broadcast
+    navGuard.ts         ← NAV shield simulation (10% threshold)
     delegation.ts       ← Delegation state management
     agentWallet.ts      ← Key gen/encrypt/decrypt/rotate
     strategy.ts         ← Cron strategies (manual-only)

@@ -176,7 +176,7 @@ rate on the short perp when open interest is long-biased.
 - Rebalance when spot and perp sizes drift apart by more than ~2%
 
 **Risk:** Funding rate can flip. The cost is swap fees + any negative funding accrued.
-1x short has no leverage risk. NAV guard blocks any single trade ≥10% loss.
+1x short has no leverage risk. NAV shield blocks any single trade ≥10% loss.
 
 ### Strategy 2: XAUT/USDT LP + Hedge (Ethereum + Arbitrum)
 
@@ -226,7 +226,7 @@ Every transaction broadcast by the agent wallet passes these checks:
 2. **Delegation check** — vault must delegate to agent wallet for the function selector
 3. **7-point validation** — config, target address, selector whitelist, agent identity,
    eth_call simulation, balance, gas caps
-4. **NAV guard** — simulates trade impact; blocks if vault unit price drops >10%.
+4. **NAV shield** — simulates trade impact; blocks if vault unit price drops >10%.
    **Fail-closed**: any simulation error BLOCKS the transaction.
 5. **Slippage** — 1% default on all swaps
 

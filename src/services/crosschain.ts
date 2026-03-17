@@ -9,8 +9,8 @@
  * Also provides multi-chain aggregated NAV reading and rebalancing
  * recommendations that minimise the number of bridge operations.
  *
- * ## NAV Guard
- * The existing NAV guard in execution.ts (`checkNavImpact`) runs on ALL
+ * ## NAV Shield
+ * The existing NAV shield in execution.ts (`checkNavImpact`) runs on ALL
  * delegated transactions regardless of function selector. It simulates
  * `multicall([txData, getNavDataView])` via eth_call and rejects if
  * the unitary value drops >10%. This automatically covers `depositV3`
@@ -155,8 +155,8 @@ export interface AggregatedNav {
 }
 
 /** A single bridge operation recommended by the rebalancer */
-/** Maximum NAV impact per bridge operation (matches NAV guard) */
-const MAX_BRIDGE_NAV_IMPACT_PCT = 9n; // stay under the 10% guard
+/** Maximum NAV impact per bridge operation (matches NAV shield) */
+const MAX_BRIDGE_NAV_IMPACT_PCT = 9n; // stay under the 10% shield
 
 export interface BridgeRecommendation {
   srcChainId: number;
@@ -172,7 +172,7 @@ export interface BridgeRecommendation {
   estimatedTime?: string;
   /** Estimated NAV impact on source chain (%) */
   navImpactPct?: string;
-  /** true if the amount was capped to stay within the NAV guard limit */
+  /** true if the amount was capped to stay within the NAV shield limit */
   capped?: boolean;
 }
 
@@ -425,7 +425,7 @@ export async function buildRebalancePlan(params: {
         const pct = (normalised * 100n) / totalChainValue;
         impactPct = `${pct.toString()}%`;
 
-        // If bridging the full amount would exceed NAV guard, cap at safe amount
+        // If bridging the full amount would exceed NAV shield, cap at safe amount
         if (pct > MAX_BRIDGE_NAV_IMPACT_PCT) {
           const safeNormalised = (totalChainValue * MAX_BRIDGE_NAV_IMPACT_PCT) / 100n;
           bridgeAmount = safeNormalised / (10n ** (18n - BigInt(bal.token.decimals)));

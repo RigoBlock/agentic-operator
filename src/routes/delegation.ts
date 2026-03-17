@@ -354,15 +354,37 @@ delegation.post("/execute", async (c) => {
     }
     if (err instanceof ExecutionError) {
       console.error(`[delegation/execute] ExecutionError: code=${err.code} msg=${err.message}`);
-      // For missing selectors, signal fallback to manual wallet signing
-      if (err.code === "METHOD_NOT_ALLOWED") {
+      // Map error codes to appropriate HTTP status codes:
+      // - 400: malformed request or setup issue (delegation not configured, needs re-setup)
+      // - 403: forbidden (selector/target not allowed)
+      // - 422: trade-level failure (simulation reverted, NAV shield blocked, insufficient balance)
+      // - 502: upstream service failure (RPC unreachable, gas estimation failed, bundler error)
+      // - 500: internal misconfiguration (agent wallet missing/mismatched)
+      const statusMap: Record<string, number> = {
+        DELEGATION_NOT_CONFIGURED: 400,
+        DELEGATION_NOT_ON_CHAIN: 400,
+        TARGET_NOT_ALLOWED: 403,
+        METHOD_NOT_ALLOWED: 403,
+        SIMULATION_FAILED: 422,
+        NAV_SHIELD_BLOCKED: 422,
+        INSUFFICIENT_BALANCE: 422,
+        AGENT_WALLET_NOT_FOUND: 500,
+        AGENT_WALLET_MISMATCH: 500,
+        GAS_ESTIMATION_FAILED: 502,
+        SPONSORED_FAILED: 502,
+        RPC_UNAVAILABLE: 502,
+      };
+      const status = statusMap[err.code] || 500;
+      // Signal fallback to manual wallet signing for delegation/selector issues
+      const fallbackCodes = ["DELEGATION_NOT_ON_CHAIN", "METHOD_NOT_ALLOWED"];
+      if (fallbackCodes.includes(err.code)) {
         return c.json({
           error: sanitizeError(err.message),
           code: err.code,
           fallbackToManual: true,
-        }, 400);
+        }, status as 400 | 403);
       }
-      return c.json({ error: sanitizeError(err.message), code: err.code }, 400);
+      return c.json({ error: sanitizeError(err.message), code: err.code }, status as any);
     }
     // Log the FULL error for debugging — the sanitized version hides crucial details
     const errMsg = err instanceof Error ? err.message : String(err);

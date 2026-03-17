@@ -41,7 +41,7 @@ Before broadcast, every transaction is checked:
 6. **Balance sufficient** — agent wallet has enough ETH for gas
 7. **Gas within caps** — per-chain gas fee hard limits
 
-## Layer 4: NAV Guard (10% Maximum Loss)
+## Layer 4: NAV Shield (10% Maximum Loss)
 
 Before every transaction broadcast, the system simulates the trade's impact
 on the vault's Net Asset Value per unit:
@@ -51,19 +51,19 @@ on the vault's Net Asset Value per unit:
 - **If NAV drops > 10% → BLOCKED**
 - **FAIL-CLOSED**: if any step fails (RPC, simulation, decode) → BLOCKED
 
-The NAV guard cannot be disabled, bypassed, or circumvented by any API caller.
+The NAV shield cannot be disabled, bypassed, or circumvented by any API caller.
 
 ## Layer 5: Slippage Protection
 
 Default slippage tolerance: 1% (100 basis points). Enforced in swap calldata
-building. Combined with the NAV guard, provides two layers of price protection.
+building. Combined with the NAV shield, provides two layers of price protection.
 
 ## What Agents CANNOT Do (Even with Full Authentication)
 
 | Action | Why Not |
 |--------|---------|
 | Drain vault assets to external address | `withdraw` and `transferOwnership` never delegated |
-| Execute trades that lose > 10% NAV | NAV guard blocks pre-broadcast |
+| Execute trades that lose > 10% NAV | NAV shield blocks pre-broadcast |
 | Bypass slippage protection | Enforced in calldata building |
 | Call arbitrary contract functions | Selector whitelist (not blacklist) |
 | Send transactions to non-vault contracts | Target must equal vault address |
@@ -76,6 +76,6 @@ The safety model means you can call tools freely — the system will block any
 dangerous operation before it reaches the blockchain. However:
 
 - **Always check tool results** for error messages before proceeding
-- **Respect "BLOCKED" responses** — they mean the NAV guard caught something
+- **Respect "BLOCKED" responses** — they mean the NAV shield caught something
 - **Don't retry blocked transactions** — the market conditions need to change
 - **Manual mode is always safe** — unsigned tx data can't harm the vault

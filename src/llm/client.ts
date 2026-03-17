@@ -1832,7 +1832,7 @@ async function executeToolCall(
       const opLines = plan.operations.map((op, i) => {
         const fee = op.estimatedFeePct || "N/A";
         const time = op.estimatedTime || "N/A";
-        const cappedNote = op.capped ? " ⚠️ capped to stay within 10% NAV guard" : "";
+        const cappedNote = op.capped ? " ⚠️ capped to stay within 10% NAV shield" : "";
         return `  ${i + 1}. ${op.srcChainName} → ${plan.targetChainName}: ${op.amount} ${op.tokenType} (fee: ${fee}, ~${time})${cappedNote}`;
       });
 

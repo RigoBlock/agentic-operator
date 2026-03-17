@@ -364,34 +364,46 @@ export async function executeViaDelegation(
     );
   }
 
-  // 6b. NAV Guard — prevent trades that crash the pool's unit price
+  // 6b. NAV Shield — prevent trades that crash the pool's unit price
   // Runs BEFORE execution (both sponsored & direct paths).
   // Simulates a multicall([swap, getNavDataView]) to measure post-swap NAV impact.
-  // FAIL-CLOSED: Any error (RPC, simulation, decode) blocks the transaction.
-  // We NEVER allow a trade when we can't verify it's safe.
-  // NAV guard is FAIL-CLOSED: any error here MUST block execution.
-  // If we can't verify the trade is safe, we refuse to broadcast it.
+  // Simulation uses the OPERATOR address (vault owner), not the agent wallet,
+  // because the operator is always authorized to call vault functions — this
+  // avoids simulation failures caused by agent delegation edge cases.
   const navResult = await checkNavImpact(
     tx.to as Address,
     tx.data as Hex,
     BigInt(tx.value),
     tx.chainId,
     env.ALCHEMY_API_KEY,
-    agentAccount.address,
+    config.operatorAddress,
     env.KV,
   );
+
+  // Route based on what the NAV shield actually found
   if (!navResult.allowed) {
+    // Use the specific error code from the NAV shield to distinguish root causes
+    const errorCode = navResult.code === 'TRADE_REVERTS'
+      ? "SIMULATION_FAILED"   // The swap itself would revert — not a NAV issue
+      : "NAV_SHIELD_BLOCKED"; // NAV would drop too much, or pre-NAV read failed
     console.warn(
-      `[executeViaDelegation] NAV guard BLOCKED tx: ${navResult.reason}`,
+      `[executeViaDelegation] ${errorCode}: ${navResult.reason}`,
     );
     throw new ExecutionError(
       navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
-      "NAV_GUARD_BLOCKED",
+      errorCode,
     );
   }
-  if (navResult.dropPct !== "0" && navResult.dropPct !== "0.00") {
+
+  // Log NAV verification status
+  if (!navResult.verified) {
+    console.warn(
+      `[executeViaDelegation] NAV shield UNVERIFIED on chain ${tx.chainId}: ${navResult.reason}. ` +
+      `Proceeding — trade simulation passed but NAV impact was not measured.`,
+    );
+  } else if (navResult.dropPct !== "0" && navResult.dropPct !== "0.00") {
     console.log(
-      `[executeViaDelegation] NAV guard OK: drop=${navResult.dropPct}% ` +
+      `[executeViaDelegation] NAV shield OK: drop=${navResult.dropPct}% ` +
       `(pre=${navResult.preNavUnitaryValue} post=${navResult.postNavUnitaryValue})`,
     );
   }

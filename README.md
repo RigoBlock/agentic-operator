@@ -22,7 +22,7 @@ External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     �
                                   │  ├── Uniswap Trading API   │───execute()─►│
                                   │  ├── 0x Aggregator         │             │
                                   │  ├── GMX V2 (Arbitrum)     │             │
-                                  │  ├── NAV Guard (10% max)   │             │
+                                  │  ├── NAV Shield (10% max)  │             │
                                   │  └── Agent Wallet (AES-256)│             │
                                   └───────────────────────────┘
 ```
@@ -33,19 +33,19 @@ External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     �
 
 **Manual mode** — The agent builds unsigned transaction calldata. The operator signs and broadcasts from their wallet (browser or any external agent).
 
-**Delegated mode** — The vault owner sets up on-chain delegation to an encrypted agent wallet. The agent executes trades directly, gated by a 7-point validation and NAV guard.
+**Delegated mode** — The vault owner sets up on-chain delegation to an encrypted agent wallet. The agent executes trades directly, gated by a 7-point validation and NAV shield.
 
 ### Delegation Flow
 
 1. Operator connects wallet at `trader.rigoblock.com` and signs EIP-191 auth
 2. Operator activates delegation per-chain — grants the agent wallet permission to call specific vault functions (`execute()`, `modifyLiquidities()`)
 3. Agent wallet is generated per-vault, encrypted with AES-256-GCM (key derived via HKDF from `AGENT_WALLET_SECRET`)
-4. On each trade: 7-point validation → NAV guard simulation → broadcast
+4. On each trade: 7-point validation → NAV shield simulation → broadcast
 5. Operator can revoke delegation at any time via `revokeAllDelegations()`
 
 ### Safety Guarantees
 
-- **NAV Guard**: Simulates every trade's impact on vault Net Asset Value. Blocks any trade that would drop NAV > 10% vs the higher of pre-swap NAV or 24-hour baseline
+- **NAV Shield**: Simulates every trade's impact on vault Net Asset Value. Blocks any trade that would drop NAV > 10% vs the higher of pre-swap NAV or 24-hour baseline
 - **Selector whitelist**: Only `execute()` and `modifyLiquidities()` — no `withdraw`, no `transferOwnership`
 - **Target validation**: Transactions can only target the vault address itself
 - **Gas caps**: Per-chain hard limits on gas spending
@@ -130,10 +130,10 @@ src/
     ├── bundler.ts           # ERC-4337 bundler (gas sponsorship)
     ├── crosschain.ts        # Cross-chain bridging
     ├── delegation.ts        # Delegation state (KV-backed)
-    ├── execution.ts         # 7-point validation + NAV guard + broadcast
+    ├── execution.ts         # 7-point validation + NAV shield + broadcast
     ├── gmxTrading.ts        # GMX V2 perpetuals
     ├── gmxPositions.ts      # GMX position queries
-    ├── navGuard.ts          # NAV simulation (10% threshold)
+    ├── navGuard.ts          # NAV shield simulation (10% threshold)
     ├── strategy.ts          # Cron strategies (manual-only)
     ├── telegram.ts          # Telegram Bot API helpers
     ├── telegramPairing.ts   # Telegram ↔ wallet pairing
