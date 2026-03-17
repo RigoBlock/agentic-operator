@@ -7,6 +7,20 @@
 // Client
 export { RigoblockClient } from "./client.js";
 
+// WDK Wallet (Tether WDK integration for wallet creation, signing, x402)
+export {
+  RigoblockWallet,
+  createX402Fetch,
+  setupRigoblockClient,
+} from "./wallet.js";
+export type {
+  WdkWalletConfig,
+  WdkWalletInfo,
+  OperatorAuth,
+  SetupOptions,
+  SetupResult,
+} from "./wallet.js";
+
 // Tools (individual tool functions for the agent to invoke)
 export {
   rigoblockQuote,
@@ -18,10 +32,8 @@ export {
   rigoblockGmxClose,
   rigoblockGmxPositions,
   rigoblockBridge,
-  rigoblockStakeGrg,
   rigoblockVaultInfo,
   rigoblockAggregatedNav,
-  rigoblockSimulateStaking,
 } from "./tools.js";
 export type { ToolResult } from "./tools.js";
 
@@ -31,19 +43,14 @@ export {
   exitCarryTrade,
   enterLpHedge,
   exitLpHedge,
-  enterGrgStaking,
   composeStrategy,
 } from "./strategies.js";
 export type {
   StrategyStep,
   StrategyResult,
-  StakingEntryInput,
   CompositorInput,
   CompositorResult,
 } from "./strategies.js";
-
-// Staking simulation
-export { simulateStaking } from "./staking.js";
 
 // Types
 export type {
@@ -58,15 +65,9 @@ export type {
   GmxOpenParams,
   GmxCloseParams,
   BridgeParams,
-  StakeGrgParams,
   VaultInfoParams,
-  StakingSimulationInput,
-  StakingSimulationPoint,
-  StakingRecommendation,
-  StakingSimulationResult,
   StrategyName,
   CarryTradeParams,
   LpHedgeParams,
-  GrgStakingParams,
   RigoblockClientConfig,
 } from "./types.js";

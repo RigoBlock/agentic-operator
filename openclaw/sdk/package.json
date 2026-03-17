@@ -1,7 +1,7 @@
 {
   "name": "@rigoblock/openclaw-defi",
-  "version": "0.1.0",
-  "description": "OpenClaw skill for DeFi trading on Rigoblock vaults — XAUT strategies, GMX perps, Uniswap v4 LP, cross-chain bridging",
+  "version": "0.2.0",
+  "description": "OpenClaw skill for DeFi trading on Rigoblock vaults — WDK wallet, XAUT strategies, GMX perps, Uniswap v4 LP, cross-chain bridging",
   "license": "Apache-2.0",
   "type": "module",
   "main": "src/index.ts",
@@ -10,7 +10,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@tetherto/wdk-wallet-evm": "2.0.0-rc.1",
     "viem": "^2.21.0"
+  },
+  "peerDependencies": {
+    "@x402/fetch": "^2.6.0",
+    "@x402/evm": "^2.6.0"
+  },
+  "peerDependenciesMeta": {
+    "@x402/fetch": { "optional": true },
+    "@x402/evm": { "optional": true }
   },
   "devDependencies": {
     "typescript": "^5.6.0",

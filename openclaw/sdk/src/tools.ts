@@ -7,7 +7,6 @@
  */
 
 import { RigoblockClient } from "./client.js";
-import { simulateStaking } from "./staking.js";
 import type {
   QuoteParams,
   SwapParams,
@@ -16,18 +15,15 @@ import type {
   GmxOpenParams,
   GmxCloseParams,
   BridgeParams,
-  StakeGrgParams,
   VaultInfoParams,
-  StakingSimulationInput,
   QuoteResponse,
   ChatResponse,
-  StakingSimulationResult,
 } from "./types.js";
 
 // ─── Tool result type ───────────────────────────────────────────────────────
 
 export type ToolResult =
-  | { ok: true; data: QuoteResponse | ChatResponse | StakingSimulationResult }
+  | { ok: true; data: QuoteResponse | ChatResponse }
   | { ok: false; error: string };
 
 // ─── Tool implementations ───────────────────────────────────────────────────
@@ -160,18 +156,6 @@ export async function rigoblockBridge(
   }
 }
 
-export async function rigoblockStakeGrg(
-  client: RigoblockClient,
-  params: StakeGrgParams,
-): Promise<ToolResult> {
-  try {
-    const data = await client.stakeGrg(params.amount);
-    return { ok: true, data };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
 export async function rigoblockVaultInfo(
   client: RigoblockClient,
   params: VaultInfoParams,
@@ -189,17 +173,6 @@ export async function rigoblockAggregatedNav(
 ): Promise<ToolResult> {
   try {
     const data = await client.aggregatedNav();
-    return { ok: true, data };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-export function rigoblockSimulateStaking(
-  params: StakingSimulationInput,
-): ToolResult {
-  try {
-    const data = simulateStaking(params);
     return { ok: true, data };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };

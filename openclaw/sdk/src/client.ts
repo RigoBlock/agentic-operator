@@ -139,10 +139,6 @@ export class RigoblockClient {
     return this.chat(`bridge ${amount} ${token} from ${fromChain} to ${toChain}`);
   }
 
-  async stakeGrg(amount: string): Promise<ChatResponse> {
-    return this.chat(`stake ${amount} GRG`);
-  }
-
   async vaultInfo(chain?: string): Promise<ChatResponse> {
     const chainStr = chain ? ` on ${chain}` : "";
     return this.chat(`show vault info${chainStr}`);

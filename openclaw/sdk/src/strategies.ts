@@ -7,21 +7,18 @@
  */
 
 import { RigoblockClient } from "./client.js";
-import { simulateStaking } from "./staking.js";
 import type {
   CarryTradeParams,
   LpHedgeParams,
-  GrgStakingParams,
   ChatResponse,
   QuoteResponse,
-  StakingSimulationResult,
 } from "./types.js";
 
 // ─── Strategy step result ───────────────────────────────────────────────────
 
 export interface StrategyStep {
   action: string;
-  result: ChatResponse | QuoteResponse | StakingSimulationResult | null;
+  result: ChatResponse | QuoteResponse | null;
   error?: string;
 }
 
@@ -268,92 +265,6 @@ export async function exitLpHedge(
   };
 }
 
-// ─── GRG Staking ────────────────────────────────────────────────────────────
-
-const GRG_STAKING_DEFAULTS: GrgStakingParams = {
-  maxAllocationPct: 0.1,
-  slippageTolerance: 0.02,
-  rebalanceEpochs: 4,
-};
-
-export interface StakingEntryInput {
-  params?: Partial<GrgStakingParams>;
-  /** Market data for simulation — caller must provide these */
-  vaultAum: number;
-  grgPrice: number;
-  grgLiquidity: number;
-  totalPoolStake: number;
-  epochReward: number;
-}
-
-/**
- * Enter GRG staking: simulate optimal allocation, purchase GRG, stake.
- */
-export async function enterGrgStaking(
-  client: RigoblockClient,
-  input: StakingEntryInput,
-): Promise<StrategyResult> {
-  const cfg = { ...GRG_STAKING_DEFAULTS, ...input.params };
-  const steps: StrategyStep[] = [];
-
-  // 1. Simulate optimal allocation
-  const simulation = simulateStaking({
-    vaultAum: input.vaultAum,
-    grgPrice: input.grgPrice,
-    grgLiquidity: input.grgLiquidity,
-    totalPoolStake: input.totalPoolStake,
-    epochReward: input.epochReward,
-  });
-
-  steps.push({
-    action: "Simulate optimal GRG staking allocation",
-    result: simulation,
-  });
-
-  const { recommendation } = simulation;
-
-  // Respect max allocation cap
-  const effectivePct = Math.min(
-    recommendation.optimalAllocationPct / 100,
-    cfg.maxAllocationPct,
-  );
-
-  if (effectivePct <= 0) {
-    return {
-      strategy: "grg-staking",
-      steps,
-      success: true,
-      summary: "Staking simulation: optimal allocation is 0% — no staking recommended",
-    };
-  }
-
-  // 2. Check GRG balance on Ethereum
-  const info = await safeStep(steps, "Check vault info on Ethereum", () =>
-    client.vaultInfo("ethereum"),
-  );
-  if (!info) return fail("grg-staking", steps, "Could not read vault info");
-
-  // 3. Purchase GRG if needed
-  const grgNeeded = recommendation.grgAmount;
-  await safeStep(
-    steps,
-    `Purchase ${grgNeeded.toFixed(0)} GRG on Ethereum`,
-    () => client.swap("USDC", "GRG", grgNeeded.toFixed(0), "ethereum"),
-  );
-
-  // 4. Stake GRG
-  await safeStep(steps, `Stake ${grgNeeded.toFixed(0)} GRG`, () =>
-    client.stakeGrg(grgNeeded.toFixed(0)),
-  );
-
-  return {
-    strategy: "grg-staking",
-    steps,
-    success: true,
-    summary: `GRG staking: allocated ${(effectivePct * 100).toFixed(1)}% AUM → ${grgNeeded.toFixed(0)} GRG staked (est. ${recommendation.estimatedAnnualYieldPct.toFixed(2)}% annual yield)`,
-  };
-}
-
 // ─── Strategy Compositor ────────────────────────────────────────────────────
 
 export interface CompositorInput {
@@ -363,62 +274,45 @@ export interface CompositorInput {
   xautFundingRate: number;
   /** Current LP APR estimate for XAUT/USDT pool */
   lpApr: number;
-  /** GRG staking simulation input */
-  stakingInput: Omit<StakingEntryInput, "params">;
 }
 
 export interface CompositorResult {
   recommendation: {
     carryTrade: { allocate: boolean; pctOfCapital: number; expectedApr: number };
     lpHedge: { allocate: boolean; pctOfCapital: number; expectedApr: number };
-    grgStaking: { allocate: boolean; pctOfCapital: number; expectedApr: number };
     reserve: { pctOfCapital: number };
   };
   reasoning: string;
 }
 
 /**
- * Score and rank all three strategies. Returns allocation recommendations.
+ * Score and rank both strategies. Returns allocation recommendations.
  * Does NOT execute — the agent uses this to decide what to enter.
+ * The capital efficiency optimizer runs separately during monitoring.
  */
 export function composeStrategy(input: CompositorInput): CompositorResult {
   // Annualize funding rate: hourly rate * 24 * 365
   const carryApr = input.xautFundingRate * 24 * 365 * 100;
 
   // Net LP yield = LP fees − hedge funding cost
-  // Hedge cost is funding rate (negative if we're paying)
   const hedgeCost = Math.abs(
     Math.min(0, input.xautFundingRate) * 24 * 365 * 100,
   );
   const lpNetApr = input.lpApr - hedgeCost;
 
-  // Staking yield from simulation
-  const stakingResult = simulateStaking({
-    vaultAum: input.stakingInput.vaultAum,
-    grgPrice: input.stakingInput.grgPrice,
-    grgLiquidity: input.stakingInput.grgLiquidity,
-    totalPoolStake: input.stakingInput.totalPoolStake,
-    epochReward: input.stakingInput.epochReward,
-  });
-  const stakingApr = stakingResult.recommendation.riskAdjustedYieldPct;
-  const stakingPct = stakingResult.recommendation.optimalAllocationPct / 100;
-
   // Score: only allocate to positive-yield strategies
   const strategies = [
     { name: "carry-trade" as const, apr: carryApr, eligible: carryApr > 0 },
     { name: "lp-hedge" as const, apr: lpNetApr, eligible: lpNetApr > 1 },
-    { name: "grg-staking" as const, apr: stakingApr, eligible: stakingApr > 0 },
   ];
 
   const eligible = strategies.filter((s) => s.eligible);
 
-  // Allocate capital
-  let reservePct = 0.15; // 15% default reserve
-  const stakingAlloc = stakingPct > 0 ? Math.min(stakingPct, 0.1) : 0;
-
+  // Allocate capital — start with 10% reserve, optimizer reduces to 2% later
+  let reservePct = 0.10;
   let carryAlloc = 0;
   let lpAlloc = 0;
-  const deployable = 1 - reservePct - stakingAlloc;
+  const deployable = 1 - reservePct;
 
   if (eligible.some((s) => s.name === "carry-trade") && eligible.some((s) => s.name === "lp-hedge")) {
     // Both viable — split based on relative yield
@@ -435,14 +329,13 @@ export function composeStrategy(input: CompositorInput): CompositorResult {
     lpAlloc = deployable;
   } else {
     // No yield strategies viable — all to reserve
-    reservePct = 1 - stakingAlloc;
+    reservePct = 1;
   }
 
   const reasoning = [
     `Carry trade: ${carryApr > 0 ? "✓" : "✗"} APR ${carryApr.toFixed(2)}% (funding rate ${(input.xautFundingRate * 100).toFixed(4)}%/h)`,
     `LP+Hedge: ${lpNetApr > 1 ? "✓" : "✗"} net APR ${lpNetApr.toFixed(2)}% (LP ${input.lpApr.toFixed(2)}% − hedge cost ${hedgeCost.toFixed(2)}%)`,
-    `GRG Staking: ${stakingApr > 0 ? "✓" : "✗"} risk-adj APR ${stakingApr.toFixed(2)}%, optimal ${(stakingPct * 100).toFixed(1)}% AUM`,
-    `Reserve: ${(reservePct * 100).toFixed(0)}% kept in USDT`,
+    `Reserve: ${(reservePct * 100).toFixed(0)}% kept in USDT (capital optimizer targets 2% in stable conditions)`,
   ].join("\n");
 
   return {
@@ -456,11 +349,6 @@ export function composeStrategy(input: CompositorInput): CompositorResult {
         allocate: lpAlloc > 0,
         pctOfCapital: lpAlloc,
         expectedApr: lpNetApr,
-      },
-      grgStaking: {
-        allocate: stakingAlloc > 0,
-        pctOfCapital: stakingAlloc,
-        expectedApr: stakingApr,
       },
       reserve: { pctOfCapital: reservePct },
     },

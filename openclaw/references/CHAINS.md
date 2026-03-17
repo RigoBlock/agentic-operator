@@ -2,15 +2,15 @@
 
 ## Chain Reference
 
-| Chain | ID | Short Name | Swap | LP (Uni v4) | Perps (GMX) | Bridge | Staking |
-|-------|----|-----------|------|-------------|-------------|--------|---------|
-| Ethereum | 1 | `ethereum` | Uniswap, 0x | Yes | — | Across | GRG |
-| Base | 8453 | `base` | Uniswap, 0x | Yes | — | Across | — |
-| Arbitrum | 42161 | `arbitrum` | Uniswap, 0x | Yes | GMX V2 | Across | — |
-| Optimism | 10 | `optimism` | Uniswap, 0x | Yes | — | Across | — |
-| Polygon | 137 | `polygon` | Uniswap, 0x | — | — | Across | — |
-| BNB Chain | 56 | `bsc` | Uniswap, 0x | — | — | Across | — |
-| Unichain | 130 | `unichain` | Uniswap | Yes | — | — | — |
+| Chain | ID | Short Name | Swap | LP (Uni v4) | Perps (GMX) | Bridge |
+|-------|----|-----------|------|-------------|-------------|--------|
+| Ethereum | 1 | `ethereum` | Uniswap, 0x | Yes | — | Across |
+| Base | 8453 | `base` | Uniswap, 0x | Yes | — | Across |
+| Arbitrum | 42161 | `arbitrum` | Uniswap, 0x | Yes | GMX V2 | Across |
+| Optimism | 10 | `optimism` | Uniswap, 0x | Yes | — | Across |
+| Polygon | 137 | `polygon` | Uniswap, 0x | — | — | Across |
+| BNB Chain | 56 | `bsc` | Uniswap, 0x | — | — | Across |
+| Unichain | 130 | `unichain` | Uniswap | Yes | — | — |
 
 ## Key Tokens by Chain
 
@@ -21,17 +21,13 @@
 ### USDT
 - Available on all supported chains via major DEX liquidity.
 
-### GRG (Rigoblock Governance)
-- **Ethereum:** Staking available via Rigoblock staking proxy.
-- Purchase via Uniswap or 0x aggregator on Ethereum mainnet.
-
 ## Strategy-Chain Mapping
 
 | Strategy | Primary Chain | Secondary Chain | Why |
 |----------|--------------|-----------------|-----|
 | XAUT Carry Trade | Arbitrum | — | GMX V2 XAUT market is on Arbitrum |
 | XAUT LP + Hedge | Ethereum | Arbitrum | LP on mainnet (deep XAUT liquidity), hedge on Arbitrum (GMX) |
-| GRG Staking | Ethereum | — | Staking is Ethereum-only |
+| Capital Optimizer | All | All | Monitors cross-chain balances and deployment ratios |
 
 ## Key Addresses
 

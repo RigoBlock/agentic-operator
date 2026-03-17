@@ -1,7 +1,7 @@
 # Strategy Templates — Rigoblock DeFi Operator
 
-Three composable strategy templates. The OpenClaw agent selects and composes
-these based on market conditions.
+Two composable strategy templates plus a capital efficiency optimizer.
+The OpenClaw agent selects and composes these based on market conditions.
 
 ---
 
@@ -163,51 +163,66 @@ Every 4-8 hours:
 
 ---
 
-## Strategy 3: GRG Staking Optimization
+## Capital Efficiency Optimizer
 
-**Goal:** Minimize staked GRG for best risk-adjusted yield.
+**Goal:** Minimize idle cash across both strategies to maximize productive
+capital, while maintaining sufficient liquidity for rebalancing and exits.
 
-**Chain:** Ethereum mainnet (staking is Ethereum-only)
+**Default Allocation:** 80% AMM (LP), 10% GMX collateral, 10% cash reserve
 
-See [staking-strategy.md](../staking-strategy.md) for the full simulation model.
+### Optimization Logic
 
-### Entry Sequence
-
-```
-1. rigoblock_simulate_staking(
-     vaultAum, grgPrice, grgLiquidity, totalPoolStake, epochReward
-   )                                         → get optimal allocation
-2. If optimalAllocationPct > 0:
-   a. rigoblock_vault_info(ethereum)         → check GRG balance
-   b. If insufficient GRG:
-      rigoblock_swap(USDC → GRG, ethereum)   → purchase GRG
-   c. rigoblock_stake_grg(amount)            → stake optimal amount
-```
-
-### Monitoring Loop
+The agent continuously monitors on-chain conditions and adjusts the
+cash/deployed ratio:
 
 ```
-Every epoch (7 days):
-  1. Check epoch rewards received
-  2. Re-run simulation with updated market data
-  3. If optimal allocation changed significantly:
-     → Adjust stake (unstake excess or stake more)
-  4. Monitor community delegation trends
+Every 2-4 hours:
+  1. rigoblock_vault_info()                  → current token balances
+  2. rigoblock_get_lp_positions()            → LP position size vs pool depth
+  3. rigoblock_gmx_positions()               → collateral utilization
+  4. rigoblock_aggregated_nav()              → total cross-chain NAV
+  5. Calculate:
+     - pool_depth_ratio: vault_lp_size / total_pool_tvl
+     - cash_ratio: idle_usdt / total_nav
+     - utilization: (lp_value + gmx_collateral) / total_nav
+  6. Decision:
+     IF pool_depth_ratio < 2% AND cash_ratio > 2%:
+       → Deploy excess cash: add LP or increase GMX collateral
+       → Target cash_ratio = 2%
+     IF pool_depth_ratio > 10% (vault is large vs pool):
+       → Increase cash buffer to 10-15% (exit liquidity protection)
+     IF available_pool_liquidity < 0.1% of vault_position:
+       → URGENT: reduce LP exposure, increase cash to 15-20%
+       → Thin liquidity = high slippage on exit
+     IF cash_ratio < 1%:
+       → WARNING: rebalance impossible. Reduce positions to restore 2%.
 ```
 
 ### Parameters
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| `maxAllocationPct` | 10% | 1-20% | Maximum AUM % in GRG |
-| `slippageTolerance` | 2% | 1-5% | Max slippage for GRG purchase |
-| `rebalanceEpochs` | 4 | 1-12 | Re-evaluate every N epochs |
+| `minCashPct` | 2% | 1-5% | Minimum idle USDT reserve |
+| `maxCashPct` | 10% | 5-20% | Default upper bound for cash |
+| `liquidityWarningPct` | 0.1% | 0.05-0.5% | Pool depth alarm threshold |
+| `deployTriggerPct` | 2% | 1-5% | Pool depth ratio below which surplus cash is deployed |
+| `ammAllocationPct` | 80% | 60-90% | Target % of NAV in LP |
+| `gmxAllocationPct` | 10% | 5-20% | Target % of NAV in GMX collateral |
+
+### Why This Matters
+
+A naive allocation (fixed 80/10/10) leaves capital idle. The optimizer creates
+a **thinking loop**: the agent constantly evaluates whether the vault has too
+much or too little cash. Deploying excess cash to LP earns fees; but keeping
+too little cash means the agent can't rebalance or exit if conditions change.
+This tension is the core optimization problem the agent solves autonomously.
 
 ---
 
 ## Strategy Compositor — Decision Framework
 
-When asked to "run a DeFi strategy" or "optimize the vault", evaluate all three:
+When asked to "run a DeFi strategy" or "optimize the vault", evaluate both
+strategies and apply the capital efficiency optimizer:
 
 ### Step 1: Gather Data
 ```
@@ -218,7 +233,6 @@ rigoblock_quote(USDT→XAUT)      → current gold price
 # External data (from other skills or tools):
 #   GMX funding rate history
 #   Uni v4 pool fee APR
-#   GRG price + liquidity depth
 ```
 
 ### Step 2: Score Strategies
@@ -227,17 +241,21 @@ rigoblock_quote(USDT→XAUT)      → current gold price
 |----------|-----------|---------------|
 | Carry Trade | Funding rate | `funding_rate_per_hour * 24 * 365` annualized |
 | LP+Hedge | LP fees - hedge cost | `(lp_apr - |funding_cost|)` net yield |
-| GRG Staking | Risk-adjusted yield | From `rigoblock_simulate_staking` output |
 
 ### Step 3: Compose
 
-Select strategies that have positive expected yield. Allocate capital:
-- **Primary strategy** gets 50-80% of deployable capital
-- **GRG staking** gets its optimal allocation (typically 1-5%)
-- **Reserve** keeps 10-30% in USDT for rebalancing and gas
-- **Never** allocate 100% — always keep a USDT reserve
+Select the higher-yielding strategy as primary. Allocate capital:
+- **Primary strategy** gets 80-90% of deployable capital
+- **Secondary strategy** gets 0-10% if both have positive yield
+- **Cash reserve** starts at 10%, then the capital efficiency optimizer
+  reduces it toward 2% as conditions stabilize
+- **Never** go below 2% cash — always keep reserves for rebalancing and gas
 
-### Step 4: Execute and Monitor
+### Step 4: Execute, Monitor, and Optimize
 
-Enter positions via the tool sequences above. Set up monitoring intervals.
-Report to user: current allocation, yield metrics, risk metrics, next rebalance.
+Enter positions via the tool sequences above. Then continuously:
+1. **Monitor yields** — compare carry vs LP+hedge every 2-4 hours
+2. **Rebalance** — shift capital if primary/secondary yield ranking changes
+3. **Optimize cash** — run the capital efficiency loop: deploy surplus when
+   liquidity is healthy, increase reserves when liquidity thins
+4. **Report** — current allocation, yield metrics, cash utilization, next action
