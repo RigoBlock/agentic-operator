@@ -126,7 +126,7 @@ These files contain security-critical logic. Changes require extra care:
 | `src/services/navGuard.ts` | NAV shield simulation and threshold check |
 | `src/services/auth.ts` | Signature verification, vault ownership |
 | `src/services/delegation.ts` | On-chain delegation state |
-| `src/services/agentWallet.ts` | Key generation, encryption, decryption |
+| `src/services/agentWallet.ts` | WDK wallet gen (BIP-39/BIP-44), encryption, decryption |
 | `src/middleware/x402.ts` | Payment verification, exempt origins, settlement |
 | `src/services/strategy.ts` | Strategy execution controls |
 
@@ -256,7 +256,7 @@ src/
     execution.ts        ← 7-point validation + NAV shield + broadcast
     navGuard.ts         ← NAV shield simulation (10% threshold)
     delegation.ts       ← Delegation state management
-    agentWallet.ts      ← Key gen/encrypt/decrypt/rotate
+    agentWallet.ts      ← WDK wallet gen (BIP-39/BIP-44), encrypt/decrypt
     strategy.ts         ← Cron strategies (manual-only)
     uniswapTrading.ts   ← Uniswap quote/swap building
     zeroXTrading.ts     ← 0x aggregator integration

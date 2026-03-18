@@ -1,8 +1,9 @@
 /**
- * Agent Wallet Service — per-vault EOA wallet management.
+ * Agent Wallet Service — per-vault EOA wallet management with Tether WDK.
  *
- * Each smart pool gets its own agent wallet (simple EOA). The private key
- * is encrypted with AES-256-GCM using a **per-vault derived key**:
+ * Uses Tether's WDK (`@tetherto/wdk-wallet-evm`) for BIP-39 seed phrase
+ * generation and BIP-44 HD key derivation. The seed phrase is encrypted
+ * with AES-256-GCM using a **per-vault derived key**:
  *
  *   encryptionKey = HKDF(AGENT_WALLET_SECRET, salt=vaultAddress)
  *
@@ -10,6 +11,19 @@
  *   - Compromising one vault's encrypted blob doesn't help with others
  *   - Each vault has a cryptographically independent encryption key
  *   - Key versioning allows safe rotation of the master secret
+ *
+ * WDK integration (v2 wallets):
+ *   - BIP-39 mnemonic generated via WDK's SeedSignerEvm
+ *   - BIP-44 path: m/44'/60'/0'/0/0 (standard Ethereum derivation)
+ *   - HD key hierarchy: one seed → deterministic child keys
+ *   - BIP-39 seed phrase stored encrypted (not raw private key)
+ *   - Memory-safe key handling: WDK zeros private key buffers on dispose()
+ *
+ * Legacy support (v0–v1 wallets):
+ *   - Random private key generated via viem's generatePrivateKey()
+ *   - Raw private key stored encrypted
+ *   - Existing wallets continue working — loaded via viem as before
+ *   - No migration needed: old wallets stay on legacy, new wallets use WDK
  *
  * Security model:
  *   - Private keys never leave the Worker runtime unencrypted
@@ -31,9 +45,12 @@ import {
 } from "viem/accounts";
 import type { Address, Hex } from "viem";
 import type { AgentWalletInfo, Env } from "../types.js";
+// WDK: BIP-39 seed generation + BIP-44 HD key derivation
+import { SeedSignerEvm } from "@tetherto/wdk-wallet-evm/signers";
+import WalletManager from "@tetherto/wdk-wallet";
 
-/** Current encryption version */
-const CURRENT_KEY_VERSION = 1;
+/** Current encryption version — v2 = WDK seed phrase storage */
+const CURRENT_KEY_VERSION = 2;
 
 // ── KV key helpers ────────────────────────────────────────────────────
 
@@ -77,21 +94,24 @@ async function deriveVaultKey(secret: string, vaultAddress: string): Promise<Cry
   );
 }
 
-/** Stored format: JSON { v: keyVersion, d: base64(iv + ciphertext) } */
+/** Stored format: JSON { v: keyVersion, d: base64(iv + ciphertext), t: type } */
 interface EncryptedKeyEnvelope {
   v: number;
   d: string;
+  /** Key type: "seed" (WDK BIP-39 mnemonic) or "privkey" (raw hex). Absent = privkey (legacy). */
+  t?: "seed" | "privkey";
 }
 
-/** Encrypt a private key. Returns JSON envelope with version + base64(iv + ciphertext). */
-async function encryptPrivateKey(
-  privateKey: Hex,
+/** Encrypt a secret (private key or seed phrase). Returns JSON envelope. */
+async function encryptSecret(
   secret: string,
+  masterSecret: string,
   vaultAddress: string,
+  type: "seed" | "privkey",
 ): Promise<string> {
-  const key = await deriveVaultKey(secret, vaultAddress);
+  const key = await deriveVaultKey(masterSecret, vaultAddress);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encoded = new TextEncoder().encode(privateKey);
+  const encoded = new TextEncoder().encode(secret);
 
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
@@ -107,17 +127,18 @@ async function encryptPrivateKey(
   const envelope: EncryptedKeyEnvelope = {
     v: CURRENT_KEY_VERSION,
     d: btoa(String.fromCharCode(...combined)),
+    t: type,
   };
 
   return JSON.stringify(envelope);
 }
 
-/** Decrypt a private key from the envelope format. */
-async function decryptPrivateKey(
+/** Decrypt a secret from the envelope format. Returns { value, type }. */
+async function decryptSecret(
   envelopeStr: string,
-  secret: string,
+  masterSecret: string,
   vaultAddress: string,
-): Promise<Hex> {
+): Promise<{ value: string; type: "seed" | "privkey" }> {
   // Support both old format (raw base64) and new envelope format
   let envelope: EncryptedKeyEnvelope;
   try {
@@ -129,8 +150,8 @@ async function decryptPrivateKey(
 
   // For v0 (legacy), use the old global derivation; for v1+, use per-vault
   const key = envelope.v >= 1
-    ? await deriveVaultKey(secret, vaultAddress)
-    : await deriveLegacyKey(secret);
+    ? await deriveVaultKey(masterSecret, vaultAddress)
+    : await deriveLegacyKey(masterSecret);
 
   const combined = Uint8Array.from(atob(envelope.d), (c) => c.charCodeAt(0));
 
@@ -143,7 +164,10 @@ async function decryptPrivateKey(
     ciphertext,
   );
 
-  return new TextDecoder().decode(decrypted) as Hex;
+  const value = new TextDecoder().decode(decrypted);
+  // v0–v1 are always raw private keys; v2+ with t="seed" are BIP-39 mnemonics
+  const type = envelope.t === "seed" ? "seed" : "privkey";
+  return { value, type };
 }
 
 /** Legacy key derivation (v0) — global, not per-vault. For migration only. */
@@ -170,6 +194,33 @@ async function deriveLegacyKey(secret: string): Promise<CryptoKey> {
   );
 }
 
+// ── WDK helpers ───────────────────────────────────────────────────────
+
+/** BIP-44 derivation path for the first Ethereum account */
+const WDK_DERIVATION_PATH = "0'/0/0";
+
+/**
+ * Derive a viem PrivateKeyAccount from a WDK BIP-39 seed phrase.
+ * Uses WDK's SeedSignerEvm for BIP-44 HD derivation, then extracts the
+ * raw private key to create a viem account (needed for tx signing in the Worker).
+ */
+function seedToViemAccount(seedPhrase: string): { account: PrivateKeyAccount; signer: InstanceType<typeof SeedSignerEvm> } {
+  const rootSigner = new SeedSignerEvm(seedPhrase);
+  const childSigner = rootSigner.derive(WDK_DERIVATION_PATH);
+
+  // Extract raw private key from WDK's key pair
+  const keyPair = childSigner.keyPair;
+  if (!keyPair.privateKey) {
+    throw new Error("WDK signer did not produce a private key");
+  }
+
+  // Convert Uint8Array to hex string for viem
+  const hexKey = `0x${Array.from(keyPair.privateKey as Uint8Array).map((b: number) => b.toString(16).padStart(2, "0")).join("")}` as Hex;
+  const account = privateKeyToAccount(hexKey);
+
+  return { account, signer: rootSigner };
+}
+
 // ── Public API ────────────────────────────────────────────────────────
 
 /**
@@ -186,23 +237,29 @@ export async function getAgentWalletInfo(
 }
 
 /**
- * Create a new agent wallet for a vault. If one already exists, returns it.
+ * Create a new agent wallet for a vault using Tether WDK.
  *
- * Generates a fresh EOA, encrypts the private key with a per-vault derived
- * key, and stores both the wallet info and encrypted key in KV.
+ * Generates a BIP-39 seed phrase via WDK, derives the first Ethereum
+ * account via BIP-44 (m/44'/60'/0'/0/0), encrypts the seed phrase with
+ * a per-vault derived key, and stores both the wallet info and encrypted
+ * seed in KV.
+ *
+ * If a wallet already exists for this vault (legacy or WDK), returns it.
  */
 export async function createAgentWallet(
   kv: KVNamespace,
   vaultAddress: string,
   secret: string,
 ): Promise<AgentWalletInfo> {
-  // Check if one already exists
+  // Check if one already exists (legacy or WDK — don't overwrite)
   const existing = await getAgentWalletInfo(kv, vaultAddress);
   if (existing) return existing;
 
-  // Generate new EOA
-  const privateKey = generatePrivateKey();
-  const account = privateKeyToAccount(privateKey);
+  // Generate BIP-39 seed phrase via WDK
+  const seedPhrase = WalletManager.getRandomSeedPhrase();
+
+  // Derive the first Ethereum account via WDK's BIP-44 HD derivation
+  const { account, signer } = seedToViemAccount(seedPhrase);
 
   const info: AgentWalletInfo = {
     address: account.address,
@@ -211,21 +268,25 @@ export async function createAgentWallet(
     createdAt: Date.now(),
   };
 
-  // Encrypt with per-vault key and store
-  const encryptedKey = await encryptPrivateKey(privateKey, secret, vaultAddress);
+  // Encrypt the seed phrase (not the raw private key) with per-vault key
+  const encryptedSeed = await encryptSecret(seedPhrase, secret, vaultAddress, "seed");
   await Promise.all([
     kv.put(walletInfoKey(vaultAddress), JSON.stringify(info)),
-    kv.put(walletKeyKey(vaultAddress), encryptedKey),
+    kv.put(walletKeyKey(vaultAddress), encryptedSeed),
     // Reverse lookup: agent address → vault address (used by gas-policy webhook)
     kv.put(`agent-reverse:${account.address.toLowerCase()}`, vaultAddress.toLowerCase()),
   ]);
 
-  console.log(`[AgentWallet] Created wallet ${account.address} for vault ${vaultAddress}`);
+  // Zero private key material from WDK signer memory
+  signer.dispose();
+
+  console.log(`[AgentWallet] Created WDK wallet ${account.address} for vault ${vaultAddress} (BIP-44 m/44'/60'/0'/0/0)`);
   return info;
 }
 
 /**
  * Load the agent wallet account (with signing capability) for a vault.
+ * Supports both WDK wallets (v2, seed phrase) and legacy wallets (v0–v1, raw private key).
  * Returns null if no agent wallet exists.
  */
 export async function loadAgentWalletAccount(
@@ -236,14 +297,25 @@ export async function loadAgentWalletAccount(
   const encryptedKey = await kv.get(walletKeyKey(vaultAddress));
   if (!encryptedKey) return null;
 
-  const privateKey = await decryptPrivateKey(encryptedKey, secret, vaultAddress);
-  return privateKeyToAccount(privateKey);
+  const { value, type } = await decryptSecret(encryptedKey, secret, vaultAddress);
+
+  if (type === "seed") {
+    // WDK wallet: derive account from BIP-39 seed phrase
+    const { account, signer } = seedToViemAccount(value);
+    // Zero the root signer's key material after extraction
+    signer.dispose();
+    return account;
+  }
+
+  // Legacy wallet: raw private key
+  return privateKeyToAccount(value as Hex);
 }
 
 /**
  * Rotate the encryption key for a vault's agent wallet.
  *
  * Decrypts with the old secret, re-encrypts with the new secret.
+ * Preserves the key type (seed or privkey) during rotation.
  * Call this for every vault when rotating AGENT_WALLET_SECRET.
  */
 export async function rotateAgentWalletKey(
@@ -255,14 +327,14 @@ export async function rotateAgentWalletKey(
   const encryptedKey = await kv.get(walletKeyKey(vaultAddress));
   if (!encryptedKey) throw new Error("No agent wallet key found for this vault");
 
-  // Decrypt with old secret
-  const privateKey = await decryptPrivateKey(encryptedKey, oldSecret, vaultAddress);
+  // Decrypt with old secret (auto-detects seed vs privkey)
+  const { value, type } = await decryptSecret(encryptedKey, oldSecret, vaultAddress);
 
-  // Re-encrypt with new secret (and new per-vault derivation)
-  const newEncryptedKey = await encryptPrivateKey(privateKey, newSecret, vaultAddress);
+  // Re-encrypt with new secret, preserving the original type
+  const newEncryptedKey = await encryptSecret(value, newSecret, vaultAddress, type);
   await kv.put(walletKeyKey(vaultAddress), newEncryptedKey);
 
-  console.log(`[AgentWallet] Rotated key for vault ${vaultAddress}`);
+  console.log(`[AgentWallet] Rotated key for vault ${vaultAddress} (type=${type})`);
 }
 
 /**

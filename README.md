@@ -39,7 +39,7 @@ External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     �
 
 1. Operator connects wallet at `trader.rigoblock.com` and signs EIP-191 auth
 2. Operator activates delegation per-chain — grants the agent wallet permission to call specific vault functions (`execute()`, `modifyLiquidities()`)
-3. Agent wallet is generated per-vault, encrypted with AES-256-GCM (key derived via HKDF from `AGENT_WALLET_SECRET`)
+3. Agent wallet is generated per-vault using Tether WDK (`@tetherto/wdk-wallet-evm`) — BIP-39 seed phrase, BIP-44 HD derivation, encrypted with AES-256-GCM (key derived via HKDF from `AGENT_WALLET_SECRET`)
 4. On each trade: 7-point validation → NAV shield simulation → broadcast
 5. Operator can revoke delegation at any time via `revokeAllDelegations()`
 
@@ -125,7 +125,7 @@ src/
 │   ├── gasPolicy.ts         # Gas sponsorship policy (Alchemy)
 │   └── telegram.ts          # Telegram bot webhook + commands
 └── services/
-    ├── agentWallet.ts       # Key gen/encrypt/decrypt (AES-256-GCM)
+    ├── agentWallet.ts       # WDK wallet gen (BIP-39/BIP-44) + encrypt (AES-256-GCM)
     ├── auth.ts              # EIP-191 signature + vault ownership
     ├── bundler.ts           # ERC-4337 bundler (gas sponsorship)
     ├── crosschain.ts        # Cross-chain bridging

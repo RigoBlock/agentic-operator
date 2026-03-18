@@ -6,6 +6,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/patch-wdk-for-worker.cjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "build": "tsc --noEmit",
@@ -20,11 +21,14 @@
     "@account-kit/wallet-client": "^4.84.1",
     "@coinbase/x402": "^2.1.0",
     "@metamask/smart-accounts-kit": "^0.4.0-beta.1",
+    "@tetherto/wdk-wallet-evm": "^2.0.0-rc.1",
     "@x402/core": "^2.6.0",
     "@x402/evm": "^2.6.0",
     "@x402/extensions": "^2.6.0",
+    "bip39": "^3.1.0",
     "hono": "^4.6.0",
     "openai": "^4.70.0",
+    "sodium-javascript": "^0.8.0",
     "viem": "^2.21.0"
   },
   "devDependencies": {
