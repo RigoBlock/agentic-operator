@@ -96,24 +96,24 @@ If `RIGOBLOCK_VAULT_ADDRESS` is not set, the agent must bootstrap itself.
    pool tokens: send `"fund pool with 0.1 ETH"` from the operator wallet.
 6. **Start trading** — the vault is now funded and delegated. Use delegated mode.
 
-### Cross-Chain Bootstrap (Ethereum + Arbitrum)
+### Multi-Chain Bootstrap (BSC + Optimism + Arbitrum)
 
-For the LP + Hedge strategy (LP on Ethereum, hedge on Arbitrum), deploy a
-vault on **each** operating chain:
+For the LP + Hedge strategy (LP + hedge both on Arbitrum, capital raised on BSC/Optimism):
 
 1. **Generate ONE wallet** — the same address is the operator everywhere.
-2. **Fund wallet** — ETH on Ethereum (~$5 for gas) + ETH on Arbitrum (~$1) + USDT0 on Plasma.
-3. **Deploy vault on Ethereum** — `"deploy a smart pool named 'AgentVault' with symbol 'AV' on Ethereum"`
-   → sign and broadcast → save `VAULT_ADDRESS_ETHEREUM`.
-4. **Deploy vault on Arbitrum** — `"deploy a smart pool named 'AgentVault' with symbol 'AV' on Arbitrum"`
-   → sign and broadcast → save `VAULT_ADDRESS_ARBITRUM`.
-5. **Set up delegation on both** —
-   - `"setup delegation on Ethereum"` (with `vaultAddress: VAULT_ADDRESS_ETHEREUM, chainId: 1`)
-   - `"setup delegation on Arbitrum"` (with `vaultAddress: VAULT_ADDRESS_ARBITRUM, chainId: 42161`)
-6. **Fund vault on Ethereum** — `"fund pool with 1 ETH"` (investors mint pool tokens here).
-7. **Bridge to Arbitrum** — `"bridge 500 USDT from Ethereum to Arbitrum"`
-   (via Across Protocol — delegated mode, vault-to-vault transfer for hedge collateral).
-8. **Verify NAV** — `"get aggregated NAV"` shows balances on both chains.
+2. **Fund wallet** — ETH on Arbitrum (~$1 for gas) + BNB on BSC (~$1) + USDT0 on Plasma.
+3. **Deploy vault on BSC** — `"deploy a smart pool named 'AgentVault' with symbol 'AV' on BSC"`
+   → sign and broadcast → save vault address.
+4. **Deploy vault on Optimism** — `"deploy a smart pool named 'AgentVault' with symbol 'AV' on Optimism"`
+   (optional second capital chain) → sign and broadcast.
+5. **Deploy vault on Arbitrum** — `"deploy a smart pool named 'AgentVault' with symbol 'AV' on Arbitrum"`
+   → sign and broadcast.
+6. **Set up delegation on all chains** —
+   - `"setup delegation on BSC"` / `"setup delegation on Optimism"` / `"setup delegation on Arbitrum"`
+7. **Fund vault** — investors mint pool tokens on BSC or Optimism (USDT as base token).
+8. **Bridge to Arbitrum** — `"bridge USDT from BSC to Arbitrum"`
+   (via Across Protocol — delegated mode, vault-to-vault transfer).
+9. **Verify NAV** — `"get aggregated NAV"` shows balances on all chains.
 
 **Important:** Vault addresses are different on each chain (separate deployments).
 Track per-chain: `{chainId: vaultAddress}`.
@@ -268,7 +268,7 @@ X-PAYMENT: <x402-payment-header>
 | `amount` | Yes | Human-readable amount (e.g. "1" for 1 ETH) |
 | `chain` | No | Chain name or ID: `base`, `arbitrum`, `ethereum`, `8453`, etc. |
 
-Cost: **$0.002 USDC** per call.
+Cost: **$0.002** per call (USDT0 on Plasma or USDC on Base).
 
 ### 2. `POST /api/chat` — All Vault Operations
 
@@ -319,7 +319,7 @@ X-PAYMENT: <x402-payment-header>
 → { "reply": "Executed: swapped ...", "executionResult": { "txHash": "0x...", "confirmed": true } }
 ```
 
-Cost: **$0.01 USDC** per call.
+Cost: **$0.01** per call (USDT0 on Plasma or USDC on Base).
 
 ### x402 Payment (USDT0 via WDK)
 
@@ -360,8 +360,9 @@ of operations — use your own judgment on how to phrase requests:
 
 ### Uniswap v4 Liquidity
 - Add/remove LP positions, list positions, collect fees
-- The XAUT/USDT pool on Ethereum: `0x19a01cd4a3d7a1fd58ee778fcdc74fce46023adb0ac179a603e5b3234dd5610d`
-- Examples: "add liquidity to XAUT/USDT pool with 0.5 XAUT and 1500 USDT on Ethereum"
+- XAUT/USDT pool on Ethereum (legacy): `0x19a01cd4a3d7a1fd58ee778fcdc74fce46023adb0ac179a603e5b3234dd5610d`
+- The current strategy deploys XAUT/USDT LP on **Arbitrum** (same chain as GMX hedge)
+- Examples: "add liquidity to XAUT/USDT pool with 0.5 XAUT and 1500 USDT on Arbitrum"
 
 ### GMX V2 Perpetuals (Arbitrum)
 - Open, close, increase positions; get positions; cancel/update orders; claim funding
@@ -386,22 +387,22 @@ One strategy: XAUT/USDT LP + permanent hedge. **You decide** how to size
 positions and when to rebalance — these are guidelines, not rigid scripts.
 Full details in `{baseDir}/references/STRATEGIES.md`.
 
-### XAUT/USDT LP + Permanent Hedge (Ethereum + Arbitrum)
+### XAUT/USDT LP + Permanent Hedge (Arbitrum)
 
-**What it is:** Earn LP fees on the XAUT/USDT Uniswap v4 pool on Ethereum,
+**What it is:** Earn LP fees on the XAUT/USDT Uniswap v4 pool on Arbitrum,
 hedge all directional XAUT exposure with a 1x GMX short on Arbitrum.
+Both legs on the same chain — no cross-chain complexity for the strategy itself.
 The hedge is **always on** — it is not removed when funding costs money.
 Yield = LP fees minus hedge cost.
 
 **How it works:**
-- **Ethereum vault (raise + LP):** Investors fund the vault on Ethereum
-  (where the XAUT/USDT Uni v4 pool lives). Swap USDT → XAUT (0x aggregator
-  for best price), add XAUT/USDT LP on Uni v4. Earn trading fees.
-- **Arbitrum vault (hedge):** Bridge USDT collateral from Ethereum via Across
-  (fills in seconds), convert to XAUT on Arbitrum, open 1x short XAUT/USD
-  on GMX with XAUT as collateral. This offsets the LP's directional gold
-  exposure permanently.
-- **Cross-chain NAV sync:** Call `crosschain_sync` every ~8 hours AND on
+- **BSC + Optimism (capital):** Investors fund vault tokens on BSC or Optimism
+  (USDT as base token). Capital is bridged to Arbitrum via Across.
+- **Arbitrum vault (LP + hedge):** Swap USDT → XAUT, add XAUT/USDT LP on
+  Uni v4 (with Rigoblock oracle hook). Convert ~15% to USDC, open 1x short
+  XAUT/USD on GMX with USDC as collateral. Earn LP fees, hedge offsets
+  directional XAUT exposure.
+- **Cross-chain NAV sync:** Call `crosschain_sync` every ~30 minutes AND on
   significant price deviations (>1% move). Sync more frequently if NAV
   deviation is large.
 
@@ -411,27 +412,28 @@ create unhedged directional XAUT exposure — that is speculation.
 
 **Allocation:** You decide all amounts autonomously — maximize LP
 allocation while maintaining sufficient GMX margin and a liquidity buffer.
+Approximate: ~80% to LP (40% XAUT + 40% USDT), ~15% GMX collateral (USDC), ~5% buffer.
 
 **Monitoring:**
 - Check positions every **5 minutes** (perp collateral can deteriorate fast)
-- Rebalance hedge when coverage drifts > 2% from target
-- Top up GMX margin if collateral is getting thin
-- Sync NAV every ~8 hours (more often on significant deviation)
+- Rebalance hedge when coverage drifts > 5% from target
+- Top up GMX margin if leverage exceeds 12x (target 10x)
+- Sync NAV every ~30 minutes (more often on significant deviation)
 
-**Key steps (you sequence these):** get vault USDT → swap to XAUT → add LP →
-bridge collateral to Arbitrum → swap to XAUT → open short hedge → monitor
-both legs → sync NAV regularly.
+**Key steps (you sequence these):** discover funds across chains → bridge to
+Arbitrum if needed → swap USDT → XAUT → add LP (with oracle hook) → swap
+USDT → USDC → open short hedge → monitor → sync NAV regularly.
 
 **Risk:** Hedge cost reduces net yield when GMX funding is negative.
 This is expected — the cost of maintaining hedged exposure.
 
 ### Cross-Chain NAV Sync
 
-**Critical.** When the vault operates across Ethereum and Arbitrum,
+**Critical.** When the vault operates across BSC, Optimism, and Arbitrum,
 NAV must be kept in sync:
 
-- **Regular sync:** Call `crosschain_sync` every ~8 hours during normal
-  conditions. More frequently if NAV deviation is significant.
+- **Regular sync:** Call `crosschain_sync` every ~30 minutes during normal
+  conditions. More frequently if NAV deviation is significant (>2%).
 - **Price deviation sync:** If XAUT price moves >1% since last sync,
   trigger an immediate sync. Stale NAV = inaccurate accounting.
 - **Before rebalancing:** Always sync NAV before making allocation decisions

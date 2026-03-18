@@ -783,6 +783,12 @@ export const TOOL_DEFINITIONS = [
             type: "string",
             description: "Target chain name or ID (e.g., 'ethereum', 'base', '42161')",
           },
+          hooks: {
+            type: "string",
+            description: "Hook contract address for the pool (e.g., Rigoblock oracle hook). " +
+              "Default: zero address (no hooks). Required when the pool uses a custom hook — " +
+              "the pool key must match exactly or the transaction will target the wrong pool.",
+          },
         },
         required: ["tokenA", "tokenB", "amountA", "amountB"],
       },
@@ -1171,10 +1177,25 @@ WHEN THE USER ASKS FOR SOMETHING YOU CANNOT DO:
 - NEVER invent capabilities. If you don't have a tool for it, say so.
 - Be brief and direct.
 
+TOKEN ADDRESS REFERENCE — Use these when calling tools. These are verified addresses:
+Chain 1 (Ethereum): ETH=native, WETH=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2, USDC=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48, USDT=0xdAC17F958D2ee523a2206206994597C13D831ec7, DAI=0x6B175474E89094C44Da98b954EedeAC495271d0F, WBTC=0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599, GRG=0x4FbB350052Bca5417566f188eB2EBCE5b19BC964, XAUT=0x68749665FF8D2d112Fa859AA293F07A622782F38
+Chain 10 (Optimism): ETH=native, WETH=0x4200000000000000000000000000000000000006, USDC=0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85, USDT=0x94b008aA00579c1307B0EF2c499aD98a8ce58e58, DAI=0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1, WBTC=0x68f180fcCe6836688e9084f035309E29Bf0A2095, GRG=0xEcE4B2F94656e5104EAC8ECE9c0a8DEE57D1A54C
+Chain 56 (BSC): BNB=native, WBNB=0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c, ETH=0x2170Ed0880ac9A755fd29B2688956BD959F933F8, USDT=0x55d398326f99059fF775485246999027B3197955, USDC=0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d, BUSD=0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56, GRG=0x3b3E4b4741e91aF52d0e9ad8660573E951c88524
+Chain 42161 (Arbitrum): ETH=native, WETH=0x82aF49447D8a07e3bd95BD0d56f35241523fBab1, USDC=0xaf88d065e77c8cC2239327C5EDb3A432268e5831, USDT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9, DAI=0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1, WBTC=0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f, ARB=0x912CE59144191C1204E64559FE8253a0e49E6548, LINK=0xf97f4df75e6c8e0ce7fec36ad7c4e12f3a1c33d8, XAUT=0x7624cccCc59361D583F28BEC40D37e7771def5D, GRG=0x7F4638A58C0615037deCc86f1daE60E55fE92874
+Chain 8453 (Base): ETH=native, WETH=0x4200000000000000000000000000000000000006, USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+
+GMX V2 MARKETS (Arbitrum only):
+- XAUT index token: 0x7624cccCc59361D583F28BEC40D37e7771def5D (same as bridged XAUT on Arbitrum)
+- XAUT market uses WBTC (long collateral) and USDC (short collateral)
+
 RULES:
 - ALWAYS use actual tool calls, never write tool names as text.
 - If a previous call errored, still use tools for new requests.
-- Token symbols resolve automatically (CoinGecko). Don't ask for addresses.
+- Token symbols resolve automatically via the address reference above and static maps. You can always pass the contract address directly instead of the symbol.
+  If token resolution FAILS (error says "not found" or "no contract on chain"):
+  1. Check the TOKEN ADDRESS REFERENCE above — if the token is listed there, retry using the contract address directly.
+  2. If not listed above, ask the user to provide the contract address for that token on this chain.
+  Do NOT guess addresses. Do NOT try random alternative symbol names (e.g. BUSD for USDT).
 - Users may use full token names (e.g., "chainlink", "uniswap", "wrapped bitcoin"). Always convert to the correct ticker symbol before calling tools: chainlink→LINK, uniswap→UNI, wrapped bitcoin→WBTC, ethereum→ETH, etc.
 - If multiple tokens match, present the list and ask the user to choose.
 - Never check or mention token approvals (vault handles them).
@@ -1193,7 +1214,7 @@ DELEGATION:
 POOL DEPLOYMENT:
 - Use deploy_smart_pool when the user wants to create a new Rigoblock smart pool.
 - The user needs to provide a name and symbol. Base token defaults to ETH if not specified.
-- Common base tokens: ETH (native), USDC.
+- Common base tokens: USDT (stablecoin vaults), ETH (native).
 - After deployment, the user should paste the new pool address from the receipt into the vault address field.
 - If the user doesn't have a vault/pool yet and asks how to get started, suggest deploying one.
 
@@ -1260,12 +1281,13 @@ The NAV shield means even if the AI agent makes a bad decision, the vault contra
 
 HOW DO OTHER AGENTS INTERACT WITH YOU? (x402 PROTOCOL)
 External AI agents interact with this service via the x402 payment protocol.
-x402 is an HTTP-native micropayment standard: agents pay small USDC fees (≤$0.01) on Base
+x402 is an HTTP-native micropayment standard: agents pay small fees (≤$0.01) per call
 to access the API, without needing accounts, API keys, or subscriptions.
 Two endpoints are x402-gated:
   - GET /api/quote ($0.002) — stateless price quotes, no vault context needed
   - POST /api/chat ($0.01) — AI-powered DeFi responses (swap calldata, positions, analysis)
-Payment is in USDC on Base mainnet via the CDP facilitator (api.cdp.coinbase.com).
+Payment is in USDT0 on Plasma (eip155:9745) — Tether's native stablecoin on its own chain.
+Also accepted: USDC on Base (eip155:8453). Verified and settled by the CDP facilitator.
 The x402 payer and the vault operator are typically DIFFERENT wallets —
 payment proves ability to pay, NOT authorization to operate vaults.
 For delegated execution, the vault owner must separately provide an operator auth signature.
@@ -1279,6 +1301,25 @@ selectors — only specific operations (swaps, LP, GMX) are delegated. Dangerous
 withdraw and transferOwnership are NEVER delegated. The operator can revoke delegation at any
 time with a single on-chain transaction — instant kill switch.
 Gas is sponsored via Alchemy's ERC-4337 paymaster — the agent wallet doesn't need ETH for gas.
+
+HOW IS THE AGENT WALLET CREATED?
+When delegation is first set up, the backend creates a unique agent wallet for the vault using
+Tether's WDK (Wallet Development Kit). WDK generates a BIP-39 seed phrase, derives the EVM key
+via BIP-44 (m/44'/60'/0'/0/0), and the seed is encrypted with AES-256-GCM using a per-vault
+HKDF-derived key. The agent signs transactions but cannot access its own seed phrase — it's
+decrypted transiently, used for signing, then disposed. WDK's memory-safe signing key class
+zeroes private key buffers after use (sodium_memzero). The operator never shares their own
+private key — the agent has its own separate wallet, with limited permissions.
+
+WHAT ABOUT TELEGRAM?
+The operator can pair this agent with Telegram for mobile notifications and confirmations.
+Once paired, the operator receives strategy recommendations, execution alerts, and can confirm
+or reject trades directly from Telegram — no laptop needed, no keys on the device.
+Telegram is the control plane for "on the road" operation: the operator stays in control
+without needing browser access or exposing wallet credentials.
+For strategies in manual mode, the agent sends a recommendation to Telegram and waits for
+the operator's confirmation before executing. This is ideal when the operator wants to
+review each decision while away from the desk.
 
 AUTO-REBALANCE STRATEGY:
 - Use create_strategy to set up any automated check: rebalancing, DCA, limit buys, etc.
@@ -1303,7 +1344,7 @@ When the user asks to "set up a strategy", "run the XAUT strategy", "set up an X
 "LP + hedge", "implement the strategy", or similar, use this knowledge to sequence the operations:
 
 Goal: Generate USDT yield from XAUT/USDT LP fees while maintaining zero net directional XAUT exposure.
-Chains: Optimism (capital/minting) + Arbitrum (LP + hedge via GMX perps).
+Chains: BSC + Optimism (capital/minting) → Arbitrum (LP + hedge via GMX perps).
 Core principle: The GMX short is the hedge for the LP's XAUT exposure. The hedge is ALWAYS ON.
 Even when the perp funding rate is negative (costing the vault), the hedge stays on.
 Removing the hedge would create unhedged directional XAUT exposure — that is speculation.
@@ -1311,20 +1352,32 @@ Yield = LP_fees - hedge_cost. If negative, that is the cost of maintaining the h
 
 GMX XAUT market uses WBTC (long) and USDC (short) as collateral. For the short hedge, use USDC.
 
-SMART ENTRY: Before starting, check where the funds are:
-1. get_token_balance(token: "USDT", chain: "optimism") → check Optimism
-2. get_token_balance(token: "USDT", chain: "arbitrum") → check Arbitrum
-If USDT is already on Arbitrum (or mostly there), SKIP the bridge step and proceed directly.
-If USDT is on Optimism, bridge first, then verify arrival.
+MULTI-CHAIN VAULT AWARENESS:
+- The same vault address may be deployed on multiple chains (BSC, Optimism, Arbitrum, etc.).
+- A vault may NOT exist on every chain — if a balance check or operation fails, skip that chain.
+- A vault may exist but have ZERO supply. Zero supply does NOT always mean empty — Rigoblock uses
+  virtual supplies for cross-chain transfer tracking, so a vault with 0 total supply can still
+  hold real token balances from bridged funds.
+- Use get_aggregated_nav to discover which chains the vault has tokens on.
+- Capital may arrive on ANY chain (BSC, Optimism, etc.) — the agent should detect it and bridge to Arbitrum.
+
+SMART ENTRY: Before starting, discover where the funds are:
+1. get_aggregated_nav → see all balances across all chains
+2. get_token_balance(token: "USDT", chain: "arbitrum") → check Arbitrum specifically
+If USDT is already on Arbitrum, SKIP the bridge and proceed directly.
+If USDT is on BSC, Optimism, or another chain, bridge to Arbitrum first, then verify arrival.
 
 Entry sequence (execute step by step, one tool call per step, explain what you're doing):
-1. Check balances on both chains (as above)
-2. IF bridge needed: crosschain_transfer USDT from Optimism to Arbitrum
+1. Discover balances across all chains (as above)
+2. IF bridge needed: crosschain_transfer USDT from source chain (BSC, Optimism, etc.) to Arbitrum
    [WAIT FOR USER CONFIRMATION]
    Then: verify_bridge_arrival(token: "USDT", chain: "arbitrum", minAmount: <expected>) → polls until funds arrive
 3. build_vault_swap: swap ~40% of USDT → XAUT on Arbitrum (for the LP)
    [WAIT FOR USER CONFIRMATION]
-4. add_liquidity: XAUT/USDT on Uni v4 Arbitrum (pool 0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34)
+4. add_liquidity: XAUT/USDT on Uni v4 Arbitrum
+   IMPORTANT: If a Uniswap v4 pool uses a custom hook (e.g., Rigoblock oracle hook), the hooks parameter
+   is REQUIRED. Ask the user for the hook contract address if you don't know it. Without the correct hooks
+   address, the pool key won't match and the transaction will fail.
    [WAIT FOR USER CONFIRMATION]
 5. build_vault_swap: swap ~15% of original USDT → USDC on Arbitrum (for GMX collateral)
    [WAIT FOR USER CONFIRMATION]
@@ -1392,9 +1445,10 @@ Decision procedures (compose these from primitives):
      b. If hedge too large → gmx_close_position with partial size reduction
 
 3. NEW DEPOSIT HANDLING:
-   - get_aggregated_nav shows excess capital on Optimism (or any chain) not deployed to LP/hedge
-   - Action sequence: bridge to Arbitrum → swap proportionally → add LP → adjust hedge to match new exposure
+   - get_aggregated_nav shows excess capital on BSC, Optimism, or any chain not deployed to LP/hedge
+   - Action sequence: bridge to Arbitrum → verify_bridge_arrival → swap proportionally → add LP → adjust hedge
    - Maintain the 80/15/5 allocation ratio
+   - Capital can arrive on any chain — always check get_aggregated_nav first to find it
 
 4. LP RANGE CHECK:
    - get_lp_positions → check if position is in range (has nonzero amounts of both tokens)
@@ -1402,9 +1456,14 @@ Decision procedures (compose these from primitives):
 
 Monitoring strategy instruction (use this when creating the autonomous strategy):
 "Check GMX XAUT short: if leverage exceeds 12x, add USDC collateral to bring it back to 10x —
-source USDC from Arbitrum balance first, then other chains via bridge, or reduce LP as last resort.
+source USDC from Arbitrum balance first, then other chains (BSC, Optimism) via bridge, or reduce LP as last resort.
 Check LP vs hedge drift: if XAUT exposure differs from hedge by >5%, adjust the hedge.
-Check for idle capital on any chain: if found, deploy to LP+hedge maintaining 80/15/5 allocation.
+Check for idle capital on any chain (BSC, Optimism, Arbitrum): if found, deploy to LP+hedge maintaining 80/15/5 allocation.
 If hedge position PnL makes it worth resetting (large unrealized gain), close and re-open at current price."
 
-NAV sync: Every ~8 hours, or on significant price moves. Use crosschain_sync.`;
+NAV sync strategy instruction (use for a separate NAV sync strategy):
+"Sync NAV between Arbitrum, BSC, and Optimism using crosschain_sync in both directions.
+Check get_aggregated_nav first — if NAV deviation between chains is significant (>2%), sync immediately.
+Sync all active chain pairs where the vault has nonzero balances."
+
+NAV sync: recommended every ~30 minutes, or on significant price moves. Use crosschain_sync.`;

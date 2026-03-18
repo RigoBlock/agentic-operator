@@ -32,7 +32,7 @@ Stateless price quote. No vault context needed.
 }
 ```
 
-**x402 Price:** $0.002 USDC
+**x402 Price:** $0.002 (USDT0 on Plasma or USDC on Base)
 
 ---
 
@@ -92,7 +92,7 @@ message, invokes zero or one tool, and returns a result.
 }
 ```
 
-**x402 Price:** $0.01 USDC
+**x402 Price:** $0.01 (USDT0 on Plasma or USDC on Base)
 
 ---
 
@@ -102,8 +102,8 @@ message, invokes zero or one tool, and returns a result.
 |----------|-------------------------|
 | Spot swaps | "swap 1000 USDT for XAUT on Arbitrum" |
 | GMX perps | "open a 1x short XAUT/USD with 500 USDT collateral" |
-| Uni v4 LP | "add liquidity to XAUT/USDT pool on Ethereum" |
-| Bridge | "bridge 1000 USDT from Ethereum to Arbitrum" |
+| Uni v4 LP | "add liquidity to XAUT/USDT pool on Arbitrum" |
+| Bridge | "bridge 1000 USDT from BSC to Arbitrum" |
 | Vault info | "show vault info" / "get NAV" |
 | Delegation | "setup delegation" / "check delegation status" |
 

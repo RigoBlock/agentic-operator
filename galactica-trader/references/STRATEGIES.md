@@ -13,7 +13,7 @@ all allocation amounts autonomously.
 **Goal:** Generate USDT yield from XAUT/USDT LP fees while maintaining
 zero net directional XAUT exposure at all times.
 
-**Chains:** Optimism (raise funds / minting) <> Arbitrum (LP + hedge via GMX perps)
+**Chains:** BSC + Optimism (raise funds / minting) <> Arbitrum (LP + hedge via GMX perps)
 
 **Core principle:** The GMX short is the hedge for the LP's XAUT exposure.
 Even when the perp funding rate is negative (costing the vault), the hedge
@@ -25,35 +25,40 @@ maintaining the hedged position. The agent does NOT exit the hedge to
 
 ### How Capital Flows
 
-The vault raises funds on **Optimism** — investors mint pool tokens there.
-Capital is bridged to Arbitrum for both LP and hedge operations.
+The vault raises funds on **BSC** and **Optimism** — investors mint pool tokens there
+(USDT as base token). Capital is bridged to Arbitrum for both LP and hedge operations.
+The same vault address exists on multiple chains but may not exist on all chains.
+A vault with zero total supply can still hold real token balances (Rigoblock uses
+virtual supplies for cross-chain transfer tracking).
 GMX XAUT market uses WBTC (long) and USDC (short) as collateral.
 For the short hedge, the agent uses USDC collateral.
 
 The agent decides all allocation sizes autonomously:
-- How much USDT to convert to XAUT for LP (~40%)
-- How much to allocate as USDC for GMX hedge collateral (~15%)
-- How much to keep as a liquidity buffer (~5% for rebalancing, gas, exits)
+- ~80% to LP (split roughly 40% XAUT + 40% USDT)
+- ~15% to GMX hedge collateral (as USDC)
+- ~5% idle buffer for rebalancing, gas, exits
 - The agent should maximize LP allocation while maintaining sufficient
   GMX margin and an adequate liquidity buffer
 
 ### Entry Sequence
 
 ```
-1. get_token_balance(token: "USDT", chain: "optimism") → check vault balance
-2. crosschain_transfer(USDT, from: "optimism", to: "arbitrum") → bridge capital
-3. build_vault_swap(USDT → XAUT, chain: "arbitrum") → buy gold (~40% of capital)
-4. add_liquidity(
+1. get_aggregated_nav → discover where funds are across all chains
+2. get_token_balance(token: "USDT", chain: "arbitrum") → check if already on Arbitrum
+3. IF bridge needed: crosschain_transfer(USDT, from: source chain, to: "arbitrum")
+   Then: verify_bridge_arrival(token: "USDT", chain: "arbitrum", minAmount: <expected>)
+4. build_vault_swap(USDT → XAUT, chain: "arbitrum") → buy gold (~40% of capital)
+5. add_liquidity(
      tokenA: "XAUT", tokenB: "USDT",
-     pool: 0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34,
+     hooks: <rigoblock_oracle_hook_address>,
      chain: "arbitrum"
-   ) → add LP on Uni v4
-5. build_vault_swap(USDT → USDC, chain: "arbitrum") → convert ~15% to hedge collateral
-6. gmx_open_position(
+   ) → add LP on Uni v4 (with oracle hook)
+6. build_vault_swap(USDT → USDC, chain: "arbitrum") → convert ~15% to hedge collateral
+7. gmx_open_position(
      market: "XAUT", isLong: false,
      collateral: "USDC", leverage: 10
    ) → hedge LP's directional exposure
-7. crosschain_sync(from: "arbitrum", to: "optimism") → sync NAV
+8. crosschain_sync(from: "arbitrum", to: all active chains) → sync NAV
 ```
 
 ### Position Monitoring (every 5 minutes, autonomous)
@@ -73,8 +78,8 @@ Every 5 minutes:
   5. If leverage > 12x (collateral eroded):
      → Source USDC: check Arbitrum balance → other chains via bridge → reduce LP as last resort
      → gmx_increase_position to add collateral, restore 10x
-  6. If new deposit detected (excess capital on Optimism):
-     → crosschain_transfer to Arbitrum → swap → add LP → adjust hedge
+  6. If new deposit detected (excess capital on BSC, Optimism, or any chain):
+     → crosschain_transfer to Arbitrum → verify_bridge_arrival → swap → add LP → adjust hedge
      → Maintain 80/15/5 allocation ratio
 ```
 
@@ -96,21 +101,21 @@ Example: collateral health deteriorating (leverage at 13x)
 Each step is executed, results fed back to the LLM, which decides the next
 step. The agent reasons about what to do — we provide the tools.
 
-### Cross-Chain NAV Sync (every ~8 hours)
+### Cross-Chain NAV Sync (separate strategy, every ~30 minutes)
 
 NAV sync has a cost (bridge message fee), so run it less frequently than
 position monitoring. Sync more often if NAV deviation is significant.
+This is a SEPARATE strategy from the carry trade monitor.
 
 ```
-Regular schedule (~8 hours):
-  crosschain_sync(from: "arbitrum", to: "optimism")
-  crosschain_sync(from: "optimism", to: "arbitrum")
+Regular schedule (~30 minutes):
+  crosschain_sync between all active chain pairs (BSC, Optimism, Arbitrum)
 
 On XAUT price move > 1% since last sync:
   Immediate sync — stale NAV = wrong unit price for investors
 
 After any bridge operation completes:
-  Sync both chains — balances have changed
+  Sync affected chains — balances have changed
 
 Before any rebalance decision:
   get_aggregated_nav() to get accurate cross-chain picture
@@ -130,8 +135,8 @@ Only used when the operator decides to wind down the strategy entirely
 1. gmx_close_position(XAUT, short) → close hedge
 2. remove_liquidity_v4(positionId) → remove LP
 3. build_vault_swap(XAUT → USDT, arbitrum) → convert remaining XAUT
-4. crosschain_transfer(USDT, arbitrum → optimism) → return funds
-5. crosschain_sync() on both chains → final NAV sync
+4. crosschain_transfer(USDT, arbitrum → BSC or Optimism) → return funds
+5. crosschain_sync() on all active chains → final NAV sync
 6. get_vault_info() → verify final state
 ```
 
@@ -170,7 +175,7 @@ The agent continuously monitors and rebalances:
    USDT -> convert to XAUT -> add as collateral. Don't wait for liquidation.
 3. **LP range** — If price moves outside the LP range, the agent should
    evaluate whether to remove and re-add liquidity with an updated range.
-4. **Liquidity buffer** — Keep enough idle USDT on Ethereum for
+4. **Liquidity buffer** — Keep enough idle USDT on the capital chain (BSC/Optimism) for
    rebalancing operations and gas. The agent decides the appropriate amount
    based on position sizes and market volatility.
 5. **NAV deviation** — If cross-chain NAV differs significantly, sync

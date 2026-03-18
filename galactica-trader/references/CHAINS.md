@@ -25,14 +25,17 @@
 
 | Strategy | Primary Chain | Secondary Chain | Why |
 |----------|--------------|-----------------|-----|
-| XAUT LP + IL Hedge | Ethereum | Arbitrum | LP on mainnet (deep XAUT liquidity), hedge on Arbitrum (GMX) |
+| XAUT LP + IL Hedge | Arbitrum | BSC + Optimism (capital) | LP + hedge both on Arbitrum (GMX perps + Uni v4 LP on same chain) |
 
 ## Key Addresses
 
-### XAUT/USDT Uniswap v4 Pool (Ethereum)
+### XAUT/USDT Uniswap v4 Pool (Ethereum — legacy)
 ```
 0x19a01cd4a3d7a1fd58ee778fcdc74fce46023adb0ac179a603e5b3234dd5610d
 ```
+
+Note: The current strategy deploys the XAUT/USDT LP on **Arbitrum** (same chain as the GMX hedge).
+The Arbitrum pool uses a Rigoblock oracle hook — the operator provides the hook address at LP creation.
 
 ### XAUT GMX V2 Market (Arbitrum)
 ```

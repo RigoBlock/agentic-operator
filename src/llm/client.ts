@@ -2144,6 +2144,7 @@ async function executeToolCall(
         fee: args.fee as number | undefined,
         tickSpacing: args.tickSpacing as number | undefined,
         tickRange: (args.tickRange as string) || "full",
+        hooks: args.hooks as Address | undefined,
       }, ctx.chainId, ctx.vaultAddress as Address);
 
       const transaction: UnsignedTransaction = {
