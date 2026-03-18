@@ -14,7 +14,7 @@ Telegram Bot      ───┤            ┌───────────�
                      ├──►  POST   │  Hono App                 │          Rigoblock Vault
 External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     │           (Smart Pool)
   (x402 payer)                    │  ├── Operator Auth (EIP-191)│             │
-                                  │  ├── LLM (user's model) + Tools │             │
+                                  │  ├── Workers AI (default LLM) + Tools │             │
                                   │  │   ├── get_swap_quote    │             │
                                   │  │   ├── build_vault_swap  │             │
                                   │  │   ├── get_positions     │             │

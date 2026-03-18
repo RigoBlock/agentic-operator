@@ -113,6 +113,7 @@ export async function verifyPairingCode(
     address: pairData.vaultAddress,
     chainId: pairData.chainId,
     name: pairData.vaultName,
+    operatorAddress: pairData.operatorAddress,
   };
 
   if (user) {

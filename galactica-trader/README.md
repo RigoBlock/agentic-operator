@@ -2,8 +2,8 @@
 
 > Browser-based autonomous DeFi agent for Rigoblock smart pool vaults.
 > Open [trader.rigoblock.com](https://trader.rigoblock.com), connect your
-> wallet, pick your AI model, and start managing XAUT/USDT LP + permanent
-> hedge positions across Ethereum and Arbitrum.
+> wallet, and start trading — no API key needed. Uses Cloudflare Workers AI
+> (Llama 4 Scout) by default, with optional premium model override.
 
 **Built on Tether WDK.** The backend creates and manages agent wallets using
 three Tether technologies:
@@ -11,9 +11,9 @@ three Tether technologies:
 - **`@tetherto/wdk-secret-manager`** — seed encryption at rest (PBKDF2 + XSalsa20-Poly1305)
 - **USDT0** — x402 payments on Plasma for external agent API access
 
-**Model-agnostic.** The operator picks their AI model via OpenRouter (100+
-models including Claude, GPT, Gemini, Llama) or direct OpenAI key. The
-operator pays for their own AI usage; execution and safety layer are free.
+**Zero-friction AI.** Uses Cloudflare Workers AI (Llama 4 Scout) by default —
+no API key required. Power users can optionally add their own OpenRouter or
+OpenAI key for premium models, like MetaMask lets users customize RPC endpoints.
 
 **Also accessible via x402 API.** External AI agents can call the same
 backend via `GET /api/quote` and `POST /api/chat`, paying $0.01/call in
@@ -25,10 +25,10 @@ USDT0. A TypeScript SDK with WDK wallet integration is included in `sdk/`.
 
 ```
 Browser Chat UI (trader.rigoblock.com)
-    ↓ operator connects wallet, picks AI model (OpenRouter / OpenAI)
-    ↓ strategy reasoning via operator's LLM (model-agnostic)
+    ↓ operator connects wallet — starts chatting immediately
+    ↓ Workers AI default (Llama 4 Scout), optional premium model override
 Cloudflare Worker Backend (trader.rigoblock.com/api)
-    ↓ routes AI calls via operator's API key
+    ↓ Workers AI reasoning (open-source LLMs) + tool execution
     ↓ tool execution (Uniswap, GMX, Across, vault management)
     ↓ own agent wallet per vault (Tether WDK)
     ↓ EIP-7702 gas-sponsored execution
@@ -38,8 +38,8 @@ Rigoblock Vault (on-chain: Ethereum + Arbitrum + 5 more chains)
 ```
 
 **Two interfaces, one backend:**
-- **Browser chat** — operator opens the URL, connects wallet, picks their
-  model, chats with the agent. No install, no local keys.
+- **Browser chat** — operator opens the URL, connects wallet, and starts
+  chatting immediately. No API key needed (Workers AI default).
 - **x402 API** — external AI agents pay $0.01/call in USDT0 to use the
   same execution backend programmatically.
 
@@ -93,10 +93,10 @@ agentic-operator/
 
 1. Open [trader.rigoblock.com](https://trader.rigoblock.com)
 2. Connect your wallet (MetaMask, WalletConnect, etc.)
-3. Click **⚙ AI Model** → pick your provider (OpenRouter or OpenAI) → paste API key → select model
-4. Start chatting: *"Show vault info on Arbitrum"*
+3. Start chatting: *"Show vault info on Arbitrum"*
+4. (Optional) Click **⚙ AI Model** → add your own OpenRouter or OpenAI key for premium models
 
-No install, no terminal, no local dependencies.
+No install, no terminal, no local dependencies, no API key.
 
 ### From source
 
@@ -121,8 +121,8 @@ npx ts-node test/test-secure-wallet.ts  # runs WDK E2E test
 
 1. Open [trader.rigoblock.com](https://trader.rigoblock.com) in your browser
 2. Connect wallet (MetaMask, WalletConnect, etc.)
-3. Click **⚙ AI Model** → select OpenRouter or OpenAI → paste your API key
-4. Ask: *"Show vault info on Arbitrum"*
+3. Ask: *"Show vault info on Arbitrum"*  (uses Workers AI — no API key needed)
+4. (Optional) Click **⚙ AI Model** → add OpenRouter or OpenAI key for premium models
 
 To verify the WDK integration independently:
 

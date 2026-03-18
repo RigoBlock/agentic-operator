@@ -99,17 +99,23 @@ RULE: AGENT_WALLET_SECRET + KV read access = can decrypt ALL agent private keys.
 - Compromising the secret + KV = all agent wallets compromised
 - Rotation via `rotateAgentWalletKey()` — decrypt old, re-encrypt new
 
-### 5. Strategy execution is observe-only by default
+### 5. Strategy execution defaults to manual, supports autonomous
 
 ```
-RULE: Cron-triggered strategies NEVER auto-execute transactions.
-      They run in manual mode and notify the operator via Telegram.
+RULE: Cron-triggered strategies default to manual mode (notify via Telegram, 
+      await operator confirmation). When the operator explicitly creates a 
+      strategy with autoExecute: true, the strategy auto-executes in delegated
+      mode — but ALL safety layers still apply (NAV shield, delegation checks,
+      7-point validation, selector whitelist, slippage protection).
 ```
 
-- `runDueStrategies()` forces `executionMode: "manual"` regardless of delegation state
-- The LLM is instructed: "Do NOT execute any transactions — only describe"
-- Operator must explicitly reply in Telegram to trigger execution
-- Auto-pause after 3 consecutive failures
+- `runDueStrategies()` checks each strategy's `autoExecute` flag
+- Manual mode (default): `executionMode: "manual"`, LLM instructed "only describe"
+- Autonomous mode: `executionMode: "delegated"`, LLM instructed to execute if safe
+- Autonomous transactions go through the FULL execution pipeline (NAV shield, etc.)
+- The operator must explicitly opt in to autonomous mode per strategy
+- Auto-pause after 3 consecutive failures (both modes)
+- `lastRecommendation` carries context between runs (capped at 500 chars)
 
 ---
 
@@ -227,8 +233,10 @@ External Agent                    Our Worker                     CDP Facilitator
    vault owner.
 
 5. **Strategy takeover:** If an attacker deploys malicious code to the Worker, they
-   can modify strategies to execute harmful trades. **Mitigated:** Strategies run in
-   manual mode (notify only). Execution requires operator confirmation via Telegram.
+   can modify strategies to execute harmful trades. **Mitigated:** Strategies default
+   to manual mode (notify only). Even autonomous strategies go through the full
+   execution pipeline (NAV shield, delegation checks, selector whitelist). The vault
+   contract enforces these constraints on-chain.
 
 6. **Prompt injection via user messages:** Attacker crafts message to trick the LLM
    into calling dangerous tool functions. **Mitigated:** Tool functions have
@@ -257,7 +265,7 @@ src/
     navGuard.ts         ← NAV shield simulation (10% threshold)
     delegation.ts       ← Delegation state management
     agentWallet.ts      ← WDK wallet gen (BIP-39/BIP-44), encrypt/decrypt
-    strategy.ts         ← Cron strategies (manual-only)
+    strategy.ts         ← Cron strategies (manual default, autonomous opt-in)
     uniswapTrading.ts   ← Uniswap quote/swap building
     zeroXTrading.ts     ← 0x aggregator integration
     gmxTrading.ts       ← GMX perpetuals
@@ -265,6 +273,9 @@ src/
     tokenResolver.ts    ← Dynamic token address resolution
     vault.ts            ← On-chain vault reads
     bundler.ts          ← ERC-4337 bundler (gas sponsorship)
+  llm/
+    client.ts           ← LLM provider resolution (AI binding default → user key → OpenAI fallback)
+    tools.ts            ← Tool definitions (55+) + system prompt
 ```
 
 ---

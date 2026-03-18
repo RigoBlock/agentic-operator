@@ -25,6 +25,7 @@ import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
 import { createX402Middleware } from "./middleware/x402.js";
 import { runDueStrategies } from "./services/strategy.js";
+import { getStrategyEvents } from "./services/strategy.js";
 import { processChat } from "./llm/client.js";
 import type { Address } from "viem";
 
@@ -96,6 +97,17 @@ app.get("/api/chains", (c) => {
     ? [...SUPPORTED_CHAINS, ...TESTNET_CHAINS]
     : SUPPORTED_CHAINS;
   return c.json({ chains });
+});
+
+// ── Strategy events (polling endpoint for web chat notifications) ──
+app.get("/api/strategy-events", async (c) => {
+  const vault = c.req.query("vault");
+  if (!vault || vault.length !== 42) {
+    return c.json({ error: "vault query param required (0x…)" }, 400);
+  }
+  const since = Number(c.req.query("since") || "0");
+  const events = await getStrategyEvents(c.env.KV, vault, since || undefined);
+  return c.json({ events });
 });
 
 // ── Health check ──────────────────────────────────────────────────────

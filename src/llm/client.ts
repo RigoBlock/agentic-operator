@@ -64,6 +64,51 @@ import {
 } from "../services/grgStaking.js";
 
 /**
+ * Adapter: calls Workers AI via the binding and wraps the response in
+ * OpenAI-compatible format so the rest of processChat() works unchanged.
+ */
+async function callWorkersAI(
+  ai: Ai,
+  model: string,
+  messages: OpenAI.ChatCompletionMessageParam[],
+  tools?: OpenAI.ChatCompletionTool[],
+): Promise<OpenAI.ChatCompletion> {
+  const result = await (ai as any).run(model, {
+    messages: messages as any,
+    ...(tools ? { tools: tools as any } : {}),
+  });
+
+  const hasToolCalls = Array.isArray(result.tool_calls) && result.tool_calls.length > 0;
+
+  return {
+    id: `chatcmpl-wai-${Date.now()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{
+      index: 0,
+      message: {
+        role: "assistant" as const,
+        content: result.response || null,
+        ...(hasToolCalls ? {
+          tool_calls: result.tool_calls!.map((tc: any, i: number) => ({
+            id: tc.id || `call_${Date.now()}_${i}`,
+            type: "function" as const,
+            function: {
+              name: tc.function?.name || tc.name || "",
+              arguments: typeof tc.function?.arguments === "string"
+                ? tc.function.arguments
+                : JSON.stringify(tc.function?.arguments || tc.arguments || {}),
+            },
+          })),
+        } : {}),
+      },
+      finish_reason: (hasToolCalls ? "tool_calls" : "stop") as any,
+    }],
+  } as any;
+}
+
+/**
  * Process a chat request: send to LLM, handle tool calls, return response.
  * If a tool call produces an unsigned transaction, it's included in the response
  * for the frontend to prompt the operator to sign.
@@ -74,16 +119,47 @@ export async function processChat(
   ctx: RequestContext,
   onToolResult?: (toolName: string, result: string, isError: boolean) => Promise<void>,
 ): Promise<ChatResponse> {
-  // Use user-provided AI config if available, else fall back to server's OpenAI key
-  const llmApiKey = ctx.aiApiKey || env.OPENAI_API_KEY;
-  const llmBaseUrl = ctx.aiBaseUrl; // undefined = default OpenAI
-  const llmModel = ctx.aiModel || "gpt-5-mini";
+  // ── LLM provider resolution ──
+  // Priority: 1) User-provided key → 2) Workers AI binding (zero-config) → 3) Server OpenAI key
+  // Like MetaMask's default RPC: works out of the box, but users can bring their own key.
+  const DEFAULT_WORKERS_AI_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
 
-  const openai = new OpenAI({
-    apiKey: llmApiKey,
-    ...(llmBaseUrl ? { baseURL: llmBaseUrl } : {}),
-    timeout: 45_000, // 45s — allow longer for user-chosen models (e.g. Claude Opus)
-  });
+  let openai: OpenAI | null = null;
+  let useBinding = false;
+  let llmModel: string;
+
+  if (ctx.aiApiKey) {
+    // User provided their own key (OpenRouter, OpenAI, etc.)
+    openai = new OpenAI({
+      apiKey: ctx.aiApiKey,
+      ...(ctx.aiBaseUrl ? { baseURL: ctx.aiBaseUrl } : {}),
+      timeout: 45_000,
+    });
+    llmModel = ctx.aiModel || "gpt-5-mini";
+  } else if (env.AI) {
+    // Workers AI via binding (default — no API key needed, zero-config)
+    useBinding = true;
+    llmModel = ctx.aiModel || DEFAULT_WORKERS_AI_MODEL;
+  } else if (env.OPENAI_API_KEY) {
+    // Fallback to server OpenAI key
+    openai = new OpenAI({ apiKey: env.OPENAI_API_KEY, timeout: 45_000 });
+    llmModel = ctx.aiModel || "gpt-5-mini";
+  } else {
+    throw new Error("No AI provider configured. Add [ai] binding to wrangler.toml, or set OPENAI_API_KEY.");
+  }
+
+  // Unified LLM caller — routes to AI binding adapter or OpenAI SDK
+  const callLLM = async (params: {
+    model: string;
+    messages: OpenAI.ChatCompletionMessageParam[];
+    tools?: OpenAI.ChatCompletionTool[];
+    tool_choice?: "auto";
+  }) => {
+    if (useBinding) {
+      return callWorkersAI(env.AI!, params.model, params.messages, params.tools);
+    }
+    return openai!.chat.completions.create(params);
+  };
 
   // Build system prompt with vault context
   const executionModeNote = ctx.executionMode === "delegated"
@@ -167,7 +243,7 @@ ${executionModeNote}`;
 
   // First LLM call
   console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
-  const response = await openai.chat.completions.create({
+  const response = await callLLM({
     model: llmModel,
     messages: fullMessages,
     tools: TOOL_DEFINITIONS,
@@ -311,7 +387,7 @@ ${executionModeNote}`;
     // Second LLM call with tool results — only needed for non-transaction results
     // (e.g., quotes, vault info, balance checks, chain switches)
     console.log(`[LLM] Follow-up call with ${toolMessages.length} messages (incl. ${toolCallResults.length} tool results)`);
-    const followUp = await openai.chat.completions.create({
+    const followUp = await callLLM({
       model: llmModel,
       messages: toolMessages,
       tools: TOOL_DEFINITIONS,
@@ -381,7 +457,7 @@ ${executionModeNote}`;
       }
 
       console.log(`[LLM] Chain follow-up with ${chainMessages.length} messages`);
-      const chainFollowUp = await openai.chat.completions.create({
+      const chainFollowUp = await callLLM({
         model: llmModel,
         messages: chainMessages,
       });
@@ -770,6 +846,50 @@ async function executeToolCall(
       );
       const formatted = Number(balance) / 10 ** decimals;
       return { message: `Vault holds ${formatted.toFixed(6)} ${symbol}` };
+    }
+
+    case "verify_bridge_arrival": {
+      const tokenArg = args.token as string;
+      const chainArg = args.chain as string;
+      const minAmountStr = args.minAmount as string;
+
+      const targetChainId = resolveChainArg(chainArg.trim()).id;
+      const targetChainName = resolveChainName(targetChainId);
+      const tokenAddress = await resolveTokenAddress(targetChainId, tokenArg);
+      const minAmount = parseFloat(minAmountStr);
+
+      const MAX_POLLS = 10;    // 10 × 3s = 30s max
+      const POLL_INTERVAL = 3000;
+
+      for (let attempt = 1; attempt <= MAX_POLLS; attempt++) {
+        const { balance, decimals, symbol } = await getVaultTokenBalance(
+          targetChainId,
+          ctx.vaultAddress as Address,
+          tokenAddress as Address,
+          env.ALCHEMY_API_KEY,
+        );
+        const current = Number(balance) / 10 ** decimals;
+        if (current >= minAmount) {
+          return {
+            message: `✅ Bridge complete! Vault now holds ${current.toFixed(6)} ${symbol} on ${targetChainName}. Ready to proceed.`,
+          };
+        }
+        if (attempt < MAX_POLLS) {
+          await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+        }
+      }
+
+      // Timed out — funds may still be in transit
+      const { balance: finalBal, decimals: finalDec, symbol: finalSym } = await getVaultTokenBalance(
+        targetChainId,
+        ctx.vaultAddress as Address,
+        tokenAddress as Address,
+        env.ALCHEMY_API_KEY,
+      );
+      const finalAmount = Number(finalBal) / 10 ** finalDec;
+      return {
+        message: `⏳ Bridge still in progress after 30s. Current balance: ${finalAmount.toFixed(6)} ${finalSym} on ${targetChainName} (expected ≥${minAmountStr}). The bridge may take longer than usual — wait a moment and try checking the balance again.`,
+      };
     }
 
     case "switch_chain": {
@@ -1883,6 +2003,7 @@ async function executeToolCall(
         MIN_INTERVAL_MINUTES,
         Math.round(Number(args.intervalMinutes) || 480),
       );
+      const autoExecute = Boolean(args.autoExecute);
 
       if (!ctx.operatorAddress) {
         throw new Error("Wallet not connected — cannot create strategy.");
@@ -1908,20 +2029,25 @@ async function executeToolCall(
         vaultAddress: ctx.vaultAddress,
         chainId: ctx.chainId,
         operatorAddress: ctx.operatorAddress,
+        autoExecute,
       });
 
       const intervalStr = intervalMinutes >= 60
         ? `${(intervalMinutes / 60).toFixed(intervalMinutes % 60 ? 1 : 0)} hour${intervalMinutes >= 120 ? "s" : ""}`
         : `${intervalMinutes} minutes`;
 
+      const modeStr = autoExecute
+        ? `The agent will execute trades immediately — NAV shield (10% max loss) remains active.`
+        : `You'll need to confirm via Telegram before any execution.`;
+
       return {
         message:
           `✅ Strategy #${strategy.id} created!\n\n` +
           `• Instruction: "${instruction}"\n` +
           `• Check interval: every ${intervalStr}\n` +
+          `• Mode: ${autoExecute ? "⚡ Autonomous (auto-execute)" : "🔔 Manual (confirmation required)"}\n` +
           `• Notifications: via Telegram\n\n` +
-          `I'll evaluate this instruction periodically and notify you with recommendations. ` +
-          `You'll need to confirm via Telegram before any execution.`,
+          `${modeStr}`,
         suggestions: ["List strategies", "Create another strategy", "Remove strategy"],
       };
     }
@@ -1960,6 +2086,7 @@ async function executeToolCall(
 
       const lines = strategies.map((s) => {
         const status = s.active ? "✅ Active" : "⏸️ Paused";
+        const mode = s.autoExecute ? "⚡ Autonomous" : "🔔 Manual";
         const intervalStr = s.intervalMinutes >= 60
           ? `${(s.intervalMinutes / 60).toFixed(s.intervalMinutes % 60 ? 1 : 0)}h`
           : `${s.intervalMinutes}m`;
@@ -1969,10 +2096,16 @@ async function executeToolCall(
         const errors = s.consecutiveFailures > 0
           ? ` | ⚠️ ${s.consecutiveFailures} failure${s.consecutiveFailures > 1 ? "s" : ""}`
           : "";
+        const lastErrorLine = s.lastError
+          ? `\n    Last error: ${s.lastError.slice(0, 150)}`
+          : "";
+        const lastRecLine = s.lastRecommendation
+          ? `\n    Last activity: ${s.lastRecommendation.slice(0, 300)}`
+          : "";
         return (
-          `  **#${s.id}** [${status}] every ${intervalStr}\n` +
+          `  **#${s.id}** [${status}] [${mode}] every ${intervalStr}\n` +
           `    "${s.instruction}"\n` +
-          `    Last run: ${lastRun}${errors}`
+          `    Last run: ${lastRun}${errors}${lastErrorLine}${lastRecLine}`
         );
       });
 

@@ -1,7 +1,7 @@
 # Strategy — XAUT/USDT LP + Hedged Exposure
 
-One strategy: provide XAUT/USDT liquidity on Uniswap v4 (Ethereum) and
-hedge all XAUT price exposure with a 1x short on GMX (Arbitrum). The hedge
+One strategy: provide XAUT/USDT liquidity on Uniswap v4 (Arbitrum) and
+hedge all XAUT price exposure with a short on GMX (Arbitrum). The hedge
 is **always on** — it is not removed when funding costs money. The strategy
 produces synthetic USDT yield: LP fees minus hedge cost. The agent decides
 all allocation amounts autonomously.
@@ -13,7 +13,7 @@ all allocation amounts autonomously.
 **Goal:** Generate USDT yield from XAUT/USDT LP fees while maintaining
 zero net directional XAUT exposure at all times.
 
-**Chains:** Ethereum (raise funds + LP) <> Arbitrum (hedge via GMX perps)
+**Chains:** Optimism (raise funds / minting) <> Arbitrum (LP + hedge via GMX perps)
 
 **Core principle:** The GMX short is the hedge for the LP's XAUT exposure.
 Even when the perp funding rate is negative (costing the vault), the hedge
@@ -25,68 +25,76 @@ maintaining the hedged position. The agent does NOT exit the hedge to
 
 ### How Capital Flows
 
-The vault raises funds on **Ethereum** — investors mint pool tokens there.
-The XAUT/USDT Uni v4 pool is on Ethereum, so the bulk of capital stays
-on-chain without bridging. Only the hedge collateral is bridged to
-Arbitrum.
+The vault raises funds on **Optimism** — investors mint pool tokens there.
+Capital is bridged to Arbitrum for both LP and hedge operations.
+GMX XAUT market uses WBTC (long) and USDC (short) as collateral.
+For the short hedge, the agent uses USDC collateral.
 
 The agent decides all allocation sizes autonomously:
-- How much USDT to convert to XAUT for LP
-- How much USDT to bridge to Arbitrum for hedge collateral (converted to
-  XAUT on Arbitrum as GMX collateral)
-- How much to keep as a liquidity buffer (for rebalancing, gas, exits)
+- How much USDT to convert to XAUT for LP (~40%)
+- How much to allocate as USDC for GMX hedge collateral (~15%)
+- How much to keep as a liquidity buffer (~5% for rebalancing, gas, exits)
 - The agent should maximize LP allocation while maintaining sufficient
   GMX margin and an adequate liquidity buffer
 
 ### Entry Sequence
 
 ```
-1. rigoblock_vault_info(chain: "ethereum")   -> check USDT balance
-2. rigoblock_swap(
-     USDT -> XAUT, chain: "ethereum", dex: "0x"
-   )                                         -> buy gold (0x aggregator for best price)
-3. rigoblock_add_liquidity(
-     token0: "XAUT", token1: "USDT",
-     amount0: <xaut_amount>, amount1: <usdt_amount>,
-     chain: "ethereum"
-   )                                         -> add LP position on Uni v4
-     Pool: 0x19a01cd4a3d7a1fd58ee778fcdc74fce46023adb0ac179a603e5b3234dd5610d
-4. rigoblock_bridge(
-     USDT, from: "ethereum", to: "arbitrum"
-   )                                         -> bridge USDT for hedge collateral
-5. rigoblock_swap(
-     USDT -> XAUT, chain: "arbitrum"
-   )                                         -> convert to XAUT on Arbitrum
-6. rigoblock_gmx_open(
-     market: "XAUT/USD", direction: "short",
-     collateral: "XAUT",
-     collateralAmount: <xaut_amount>,
-     leverage: 1
-   )                                         -> hedge LP's directional exposure
-7. rigoblock_sync_nav(
-     from: "ethereum", to: "arbitrum"
-   )                                         -> sync NAV across chains after entry
+1. get_token_balance(token: "USDT", chain: "optimism") → check vault balance
+2. crosschain_transfer(USDT, from: "optimism", to: "arbitrum") → bridge capital
+3. build_vault_swap(USDT → XAUT, chain: "arbitrum") → buy gold (~40% of capital)
+4. add_liquidity(
+     tokenA: "XAUT", tokenB: "USDT",
+     pool: 0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34,
+     chain: "arbitrum"
+   ) → add LP on Uni v4
+5. build_vault_swap(USDT → USDC, chain: "arbitrum") → convert ~15% to hedge collateral
+6. gmx_open_position(
+     market: "XAUT", isLong: false,
+     collateral: "USDC", leverage: 10
+   ) → hedge LP's directional exposure
+7. crosschain_sync(from: "arbitrum", to: "optimism") → sync NAV
 ```
 
-### Position Monitoring (every 5 minutes)
+### Position Monitoring (every 5 minutes, autonomous)
 
-Perp collateral value can deteriorate quickly. Check positions frequently.
+The agent composes monitoring from available primitives — no hardcoded logic.
 
 ```
 Every 5 minutes:
-  1. rigoblock_get_lp_positions(ethereum)    -> LP health + fees accrued
-  2. rigoblock_gmx_positions()               -> perp P&L, funding, margin health
-  3. Calculate:
-     - Hedge coverage: perp_size vs LP's XAUT exposure
-     - GMX margin ratio (is collateral getting thin?)
-     - LP fees accrued since last check
-  4. If hedge coverage drifts > 2% from target:
-     -> Adjust perp size (increase/decrease position)
-  5. If GMX margin is deteriorating:
-     -> Add collateral or reduce position size
-  6. If LP fees > collection threshold:
-     -> Collect: rigoblock_collect_lp_fees (if available)
+  1. get_lp_positions → LP XAUT amount (exposure)
+  2. gmx_get_positions → hedge size, PnL, leverage, liquidation price
+  3. Analyze:
+     - Hedge drift: |LP_XAUT_usd - hedge_size_usd| / LP_XAUT_usd
+     - Collateral health: current leverage vs target 10x
+     - Idle capital: undeployed balances on any chain
+  4. If hedge drift > 5%:
+     → gmx_increase_position or gmx_close_position (partial) to match
+  5. If leverage > 12x (collateral eroded):
+     → Source USDC: check Arbitrum balance → other chains via bridge → reduce LP as last resort
+     → gmx_increase_position to add collateral, restore 10x
+  6. If new deposit detected (excess capital on Optimism):
+     → crosschain_transfer to Arbitrum → swap → add LP → adjust hedge
+     → Maintain 80/15/5 allocation ratio
 ```
+
+### Multi-step Autonomous Execution
+
+When the strategy engine detects a condition requiring action, it runs an
+**agentic loop** — up to 6 sequential operations per run:
+
+```
+Example: collateral health deteriorating (leverage at 13x)
+  Step 1: get_token_balance("USDC") on Arbitrum → $0 idle
+  Step 2: get_aggregated_nav → $8 USDT idle on Optimism
+  Step 3: crosschain_transfer(USDT, optimism → arbitrum)
+  Step 4: build_vault_swap(USDT → USDC on Arbitrum)
+  Step 5: gmx_increase_position (add USDC collateral)
+  → Leverage restored to ~10x
+```
+
+Each step is executed, results fed back to the LLM, which decides the next
+step. The agent reasons about what to do — we provide the tools.
 
 ### Cross-Chain NAV Sync (every ~8 hours)
 
@@ -95,8 +103,8 @@ position monitoring. Sync more often if NAV deviation is significant.
 
 ```
 Regular schedule (~8 hours):
-  rigoblock_sync_nav(from: "ethereum", to: "arbitrum")
-  rigoblock_sync_nav(from: "arbitrum", to: "ethereum")
+  crosschain_sync(from: "arbitrum", to: "optimism")
+  crosschain_sync(from: "optimism", to: "arbitrum")
 
 On XAUT price move > 1% since last sync:
   Immediate sync — stale NAV = wrong unit price for investors
@@ -105,7 +113,7 @@ After any bridge operation completes:
   Sync both chains — balances have changed
 
 Before any rebalance decision:
-  rigoblock_aggregated_nav() to get accurate cross-chain picture
+  get_aggregated_nav() to get accurate cross-chain picture
 ```
 
 **Why NAV sync matters:** Investors can mint/burn vault tokens at any time
@@ -119,13 +127,12 @@ Only used when the operator decides to wind down the strategy entirely
 (not triggered by funding cost).
 
 ```
-1. rigoblock_gmx_close(XAUT/USD, short)       -> close hedge
-2. rigoblock_swap(XAUT -> USDT, arbitrum)       -> convert Arb XAUT back
-3. rigoblock_bridge(USDT, arbitrum -> ethereum)  -> return funds to mainnet
-4. rigoblock_remove_liquidity(positionId, ethereum) -> remove LP
-5. rigoblock_swap(XAUT -> USDT, ethereum)         -> convert remaining XAUT
-6. rigoblock_sync_nav() on both chains            -> final NAV sync
-7. rigoblock_vault_info()                          -> verify final state
+1. gmx_close_position(XAUT, short) → close hedge
+2. remove_liquidity_v4(positionId) → remove LP
+3. build_vault_swap(XAUT → USDT, arbitrum) → convert remaining XAUT
+4. crosschain_transfer(USDT, arbitrum → optimism) → return funds
+5. crosschain_sync() on both chains → final NAV sync
+6. get_vault_info() → verify final state
 ```
 
 ### Key Parameters

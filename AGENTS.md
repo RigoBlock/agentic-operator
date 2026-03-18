@@ -102,6 +102,17 @@ Content-Type: application/json
   }
 ```
 
+**The `confirmExecution` field:**
+When `confirmExecution` is `true`, the system executes transactions immediately
+and returns the result (tx hash, confirmation status, explorer URL). When omitted
+or `false`, the system returns unsigned transaction data for the caller to sign
+and broadcast.
+
+This enables **fully autonomous agent operation**: the calling agent sends
+`confirmExecution: true` and receives execution results — no human in the loop.
+The NAV shield, delegation checks, and 7-point validation still run on every
+transaction. See [Safety Guarantees](#safety-guarantees) below.
+
 **Requirements for Tier 2:**
 1. The `operatorAddress` must be the vault owner on at least one supported chain
 2. The `authSignature` must be a valid EIP-191 signature of the auth message,
@@ -336,7 +347,7 @@ and returns a result (quote, unsigned transaction, analytics summary, etc.).
 | **Cross-chain bridge** | Transfer tokens (Across Protocol), sync NAV, get bridge quote, aggregated NAV, rebalance plan |
 | **Vault management** | Get info, check token balance, deploy pool, fund pool (mint) |
 | **Delegation** | Setup, revoke all, revoke specific selectors, check status |
-| **Strategies** | Create, remove, list automated strategies (Telegram-gated) |
+| **Strategies** | Create (manual or autonomous), remove, list automated strategies |
 | **Chain** | Switch active chain |
 
 ### What the chat endpoint does NOT do:
@@ -424,3 +435,61 @@ baseline down over 24 hours. The 10% per-trade limit is the hard cap.
 The vault owner can revoke delegation at any time via `revokeAllDelegations()`.
 The agent wallet can only call whitelisted selectors on the vault — cannot
 withdraw funds or transfer ownership.
+
+**Q: Is fully autonomous execution safe?**
+Yes, when delegation is active. Every auto-executed transaction still passes
+through the full safety stack: operator authentication, delegation verification,
+7-point validation, NAV shield (10% max loss), and slippage protection. The
+vault contract enforces selector-level permissions on-chain. The operator can
+revoke delegation at any time to stop all autonomous execution instantly.
+
+---
+
+## Autonomous Strategies
+
+Strategies are cron-triggered automated evaluations that run on a configurable
+interval (minimum 5 minutes). Each strategy stores a natural-language instruction
+that the LLM evaluates against live market data.
+
+### Two Modes
+
+| Mode | Behavior | Use case |
+|------|----------|----------|
+| **Manual** (default) | LLM analyzes, sends recommendation via Telegram. Operator confirms to execute. | Low-frequency, high-conviction trades |
+| **Autonomous** | LLM analyzes and executes immediately. Operator notified after execution. | Frequent rebalancing, time-sensitive hedging |
+
+### Why Autonomous Mode is Safe
+
+Autonomous strategies execute through the same safety stack as any delegated
+transaction:
+
+1. **NAV Shield** — every trade is simulated pre-broadcast; >10% NAV drop is blocked
+2. **Selector whitelist** — only approved vault functions can be called
+3. **Target enforcement** — transactions can only target the vault address
+4. **Slippage protection** — 1% default tolerance on all swaps
+5. **Auto-pause** — strategy pauses after 3 consecutive failures
+6. **Instant revocation** — operator can revoke delegation on-chain at any time
+
+The vault contract enforces these constraints independently of the agent. Even
+if the agent's LLM produces a harmful recommendation, the on-chain safety layers
+block it.
+
+### Context Continuity
+
+Each strategy run carries forward the previous recommendation (capped at 500
+characters) so the LLM can assess whether market conditions have changed since
+the last evaluation. This prevents stale recommendations and enables the agent
+to track evolving positions.
+
+### Creating an Autonomous Strategy
+
+Via the chat interface (browser or API):
+
+```
+"Create a 15-minute autonomous strategy to rebalance my XAUT/USDT LP
+ position when it drifts more than 2% from the target range"
+```
+
+The `autoExecute` parameter controls the mode:
+- `autoExecute: true` → autonomous (execute immediately)
+- `autoExecute: false` (default) → manual (notify and wait for confirmation)

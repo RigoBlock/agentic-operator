@@ -561,8 +561,9 @@
   <div id="ai-settings-bar" style="display:none; padding: 10px 24px; border-bottom: 1px solid var(--border); background: var(--surface); gap: 12px; align-items: center; flex-wrap: wrap;">
     <label style="font-size: 12px; color: var(--muted);">Provider</label>
     <select id="ai-provider" onchange="onAiProviderChange()" style="background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 5px 8px; font-size: 12px; outline: none;">
-      <option value="server">Server default (free)</option>
+      <option value="server">Workers AI — Llama 4 (default, free)</option>
       <option value="openrouter">OpenRouter (100+ models)</option>
+      <option value="anthropic">Anthropic (direct)</option>
       <option value="openai">OpenAI (direct)</option>
     </select>
     <label id="ai-key-label" style="font-size: 12px; color: var(--muted); display: none;">API Key</label>
@@ -593,6 +594,10 @@
     <label id="sponsor-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, gas fees are sponsored (no agent funding needed). When disabled, the agent pays gas from its own ETH balance.">
       <input type="checkbox" id="sponsor-toggle" onchange="toggleSponsoredGas(this.checked)" />
       <span>Sponsored gas</span>
+    </label>
+    <label id="autonomous-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, the agent executes trades immediately without asking for confirmation. The NAV shield (10% max loss) and on-chain vault protections remain active.">
+      <input type="checkbox" id="autonomous-toggle" onchange="toggleAutonomousMode(this.checked)" />
+      <span>Autonomous</span>
     </label>
     <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
     <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
@@ -752,6 +757,35 @@
     let authSignature = null;  // EIP-191 sig proving wallet ownership
     let authTimestamp = null;  // timestamp used in signed message
     let providerListenersAttached = false; // prevent duplicate event listeners
+    let strategyPollTimer = null; // strategy events polling interval
+    let lastEventTimestamp = 0;  // last seen strategy event timestamp
+
+    // ── Chat persistence (sessionStorage — survives refresh, clears on tab close) ──
+    const CHAT_STORAGE_KEY = 'rigoblock_chat_history';
+    function persistChat() {
+      try {
+        const vault = vaultInput.value.trim();
+        if (!vault) return;
+        sessionStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({
+          vault, chainId: currentChainId, messages: conversationHistory.slice(-40),
+        }));
+      } catch { /* quota exceeded — ignore */ }
+    }
+    function restoreChat() {
+      try {
+        const raw = sessionStorage.getItem(CHAT_STORAGE_KEY);
+        if (!raw) return false;
+        const saved = JSON.parse(raw);
+        const vault = vaultInput.value.trim();
+        if (saved.vault?.toLowerCase() !== vault?.toLowerCase()) return false;
+        conversationHistory = saved.messages || [];
+        // Re-render saved messages
+        for (const msg of conversationHistory) {
+          appendMessage(msg.role, msg.content, null, true);
+        }
+        return conversationHistory.length > 0;
+      } catch { return false; }
+    }
 
     // AI model configuration (persisted in localStorage)
     const AI_SETTINGS_KEY = 'rigoblock_ai_settings';
@@ -759,13 +793,17 @@
 
     const AI_MODELS = {
       openrouter: [
+        { id: 'anthropic/claude-opus-4', name: 'Claude Opus 4 (best reasoning)' },
         { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4 (recommended)' },
-        { id: 'anthropic/claude-opus-4', name: 'Claude Opus 4' },
         { id: 'openai/gpt-4.1', name: 'GPT-4.1' },
         { id: 'openai/gpt-4.1-mini', name: 'GPT-4.1 Mini' },
         { id: 'openai/gpt-5-mini', name: 'GPT-5 Mini' },
         { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
         { id: 'meta-llama/llama-4-maverick', name: 'Llama 4 Maverick' },
+      ],
+      anthropic: [
+        { id: 'claude-opus-4-20250514', name: 'Claude Opus 4 (best reasoning)' },
+        { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
       ],
       openai: [
         { id: 'gpt-5-mini', name: 'GPT-5 Mini' },
@@ -776,6 +814,7 @@
 
     const AI_BASE_URLS = {
       openrouter: 'https://openrouter.ai/api/v1',
+      anthropic: 'https://api.anthropic.com/v1',
       openai: undefined, // default OpenAI
     };
 
@@ -820,7 +859,7 @@
       } else {
         aiSettings.apiKey = '';
         aiSettings.model = '';
-        document.getElementById('ai-status').textContent = '';
+        document.getElementById('ai-status').textContent = 'Using Workers AI (Llama 4 Scout) — no API key needed.';
       }
       saveAiSettings();
     }
@@ -962,7 +1001,40 @@
       } else {
         updateChainDisplay();
       }
+
+      // Restore chat history from sessionStorage (survives page refresh)
+      if (vaults.length > 0) restoreChat();
     })();
+
+    /* ================================================================
+       Strategy Event Polling — shows notifications for cron-triggered actions
+       ================================================================ */
+    function startStrategyPoller() {
+      stopStrategyPoller();
+      const vault = vaultInput.value.trim();
+      if (!vault || vault.length !== 42) return;
+      lastEventTimestamp = Date.now(); // only show events after page load
+      strategyPollTimer = setInterval(() => pollStrategyEvents(vault), 30000);
+    }
+
+    function stopStrategyPoller() {
+      if (strategyPollTimer) { clearInterval(strategyPollTimer); strategyPollTimer = null; }
+    }
+
+    async function pollStrategyEvents(vault) {
+      try {
+        const res = await fetch(`/api/strategy-events?vault=${vault}&since=${lastEventTimestamp}`);
+        if (!res.ok) return;
+        const { events } = await res.json();
+        if (!events || events.length === 0) return;
+        for (const ev of events) {
+          if (ev.timestamp > lastEventTimestamp) lastEventTimestamp = ev.timestamp;
+          const icon = ev.success ? (ev.autoExecute ? '⚡' : '🔔') : '⚠️';
+          const label = ev.autoExecute ? 'Auto-executed' : 'Recommendation';
+          appendMessage('system', `${icon} Strategy #${ev.strategyId} — ${label}: ${ev.summary}`);
+        }
+      } catch { /* network error — silent */ }
+    }
 
     // Close saved vaults dropdown when clicking outside
     document.addEventListener('click', (e) => {
@@ -1040,6 +1112,7 @@
 
         saveVault(addr, foundChainId, name);
         refreshDelegationStatus();
+        startStrategyPoller();
       } catch {
         status.className = 'vault-info-badge error';
         status.textContent = 'not a vault on any chain';
@@ -1082,7 +1155,27 @@
       }
     });
 
-    function appendMessage(role, content, extras) {
+    /**
+     * Auto-progress: after a tx is confirmed, automatically send a follow-up
+     * to the agent so it can continue a multi-step strategy without the user
+     * manually typing "next". The message is added to conversation history
+     * and sent silently.
+     */
+    function autoProgressAfterTx(description) {
+      const followUp = description
+        ? `Transaction confirmed: ${description}. Continue to the next step.`
+        : `Transaction confirmed. Continue to the next step.`;
+      // Add to conversation history as if the user said it
+      conversationHistory.push({ role: 'user', content: followUp });
+      persistChat();
+      // Show a subtle system message so the user sees the auto-progress
+      appendMessage('system', '⏭️ Proceeding to next step…');
+      // Trigger sendMessage with the follow-up already in history
+      inputEl.value = followUp;
+      sendMessage();
+    }
+
+    function appendMessage(role, content, extras, isRestore) {
       const div = document.createElement('div');
       div.className = `msg ${role}`;
 
@@ -1094,6 +1187,13 @@
         div.appendChild(contentDiv);
       } else if (content) {
         div.textContent = content;
+      }
+
+      // Skip interactive elements (tool calls, tx cards, suggestions) on restore
+      if (isRestore) {
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return;
       }
 
       if (extras?.toolCall) {
@@ -1247,6 +1347,7 @@
 
       appendMessage('user', text);
       conversationHistory.push({ role: 'user', content: text });
+      persistChat();
 
       const typingEl = document.createElement('div');
       typingEl.className = 'msg assistant typing';
@@ -1282,6 +1383,7 @@
             authSignature,
             authTimestamp,
             executionMode,
+            ...(autonomousMode && executionMode === 'delegated' ? { confirmExecution: true } : {}),
             ...getAiRequestParams(),
           }),
         });
@@ -1309,6 +1411,7 @@
                   authSignature,
                   authTimestamp,
                   executionMode,
+                  ...(autonomousMode && executionMode === 'delegated' ? { confirmExecution: true } : {}),
                   ...getAiRequestParams(),
                 }),
               });
@@ -1371,6 +1474,7 @@
           }
         }
         conversationHistory.push({ role: 'assistant', content: historyContent });
+        persistChat();
       } else if (data.toolCalls?.length > 0) {
         // Reply is empty (e.g., transaction ready) — still push tool results to history
         const resultsText = data.toolCalls
@@ -1379,6 +1483,7 @@
           .join('\n');
         if (resultsText) {
           conversationHistory.push({ role: 'assistant', content: resultsText });
+          persistChat();
         }
       }
 
@@ -1558,6 +1663,8 @@
                 ? `✅ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}${meta.price ? ' (' + meta.price + ')' : ''}`
                 : `✅ Transaction confirmed`;
               appendMessage('system', chatMsg);
+              // Auto-progress to next strategy step if agent is leading a multi-step flow
+              setTimeout(() => autoProgressAfterTx(chatMsg), 4500);
             } else {
               statusEl.style.color = 'var(--error)';
               statusEl.textContent = '✗ Transaction reverted';
@@ -1820,6 +1927,12 @@
           // If not yet final, poll for confirmation
           if (!r.confirmed && !r.reverted) {
             pollPendingTx(r, tx.swapMeta);
+          } else if (r.confirmed) {
+            // Auto-progress to next strategy step
+            const desc = tx.swapMeta
+              ? `${tx.swapMeta.sellAmount} ${tx.swapMeta.sellToken} → ${tx.swapMeta.buyAmount} ${tx.swapMeta.buyToken}`
+              : tx.description || 'transaction';
+            setTimeout(() => autoProgressAfterTx(desc), 2000);
           }
 
           // Refresh agent balance
@@ -2059,6 +2172,11 @@
             clearInterval(pollInterval);
             if (data.status === 'confirmed') {
               showTxReceiptCard({ ...r, ...data, confirmed: true }, swapMeta);
+              // Auto-progress to next strategy step
+              const desc = swapMeta
+                ? `${swapMeta.sellAmount} ${swapMeta.sellToken} → ${swapMeta.buyAmount} ${swapMeta.buyToken}`
+                : 'transaction';
+              setTimeout(() => autoProgressAfterTx(desc), 2000);
             } else {
               showTxReceiptCard({ ...r, ...data, reverted: true }, swapMeta);
             }
@@ -2324,6 +2442,7 @@
        ================================================================ */
     let executionMode = 'manual'; // 'manual' | 'delegated'
     let delegationState = null;   // cached delegation status from backend
+    let autonomousMode = localStorage.getItem('rigoblock_autonomous') === 'true'; // persisted
 
     /** Auto-detect execution mode from delegation state.
      *  Allows delegated mode if delegation is active on ANY chain,
@@ -2376,6 +2495,8 @@
       const balanceEl = document.getElementById('agent-balance-display');
       const sponsorLabel = document.getElementById('sponsor-toggle-label');
       const sponsorToggle = document.getElementById('sponsor-toggle');
+      const autonomousLabel = document.getElementById('autonomous-toggle-label');
+      const autonomousToggle = document.getElementById('autonomous-toggle');
 
       if (!state || !state.enabled) {
         badge.className = 'delegation-status inactive';
@@ -2388,6 +2509,7 @@
         agentAddr.style.display = 'none';
         balanceEl.style.display = 'none';
         if (sponsorLabel) sponsorLabel.style.display = 'none';
+        if (autonomousLabel) autonomousLabel.style.display = 'none';
       } else {
         // Use on-chain status if available, fall back to KV status
         const isOnChain = state.isActiveOnChain != null ? state.isActiveOnChain : (state.isActiveInKV || false);
@@ -2427,6 +2549,17 @@
             sponsorLabel.style.display = '';
           } else {
             sponsorLabel.style.display = 'none';
+          }
+        }
+
+        // Autonomous toggle — visible when delegation is active on any chain
+        if (autonomousLabel && autonomousToggle) {
+          const hasAnyDelegation = isOnChain || (state.activeChains && state.activeChains.length > 0);
+          if (hasAnyDelegation) {
+            autonomousToggle.checked = autonomousMode;
+            autonomousLabel.style.display = '';
+          } else {
+            autonomousLabel.style.display = 'none';
           }
         }
 
@@ -2482,6 +2615,15 @@
         appendMessage('system', `Failed to update gas setting: ${err.message}`);
         document.getElementById('sponsor-toggle').checked = !checked; // revert
       }
+    }
+
+    /** Toggle autonomous execution mode */
+    function toggleAutonomousMode(checked) {
+      autonomousMode = checked;
+      localStorage.setItem('rigoblock_autonomous', checked);
+      appendMessage('system', checked
+        ? '⚡ Autonomous mode ON — the agent will execute trades immediately without confirmation. NAV shield (10% max loss) and on-chain vault protections remain active.'
+        : '🛑 Autonomous mode OFF — the agent will ask for confirmation before executing trades.');
     }
 
     /* ================================================================

@@ -58,3 +58,71 @@ if (fs.existsSync(bareCrypto)) {
 } else {
   console.log('⚠ bare-crypto not found — skip patch');
 }
+
+// ── Patch sha512-universal → pure JS (skip sha512-wasm WebAssembly) ──
+// sha512-universal unconditionally require('sha512-wasm') which calls
+// new WebAssembly.Module() at load time — blocked by Cloudflare Workers.
+// It has a built-in pure JS fallback (sha512.js) so we just use that.
+const sha512Universal = path.join(__dirname, '..', 'node_modules', 'sha512-universal', 'index.js');
+if (fs.existsSync(sha512Universal)) {
+  fs.writeFileSync(
+    sha512Universal,
+    "// Patched for Cloudflare Workers: use pure JS (skip WASM)\n" +
+    "const Sha512 = require('./sha512.js');\n" +
+    "module.exports = function () { return new Sha512(); };\n" +
+    "module.exports.ready = function (cb) { if (cb) cb(); };\n" +
+    "module.exports.WASM_SUPPORTED = false;\n" +
+    "module.exports.WASM_LOADED = false;\n" +
+    "module.exports.SHA512_BYTES = 64;\n"
+  );
+  console.log('✓ Patched sha512-universal → pure JS (skip WASM)');
+} else {
+  console.log('⚠ sha512-universal not found — skip patch');
+}
+
+// ── Patch sha256-universal → pure JS (skip sha256-wasm WebAssembly) ──
+const sha256Universal = path.join(__dirname, '..', 'node_modules', 'sha256-universal', 'index.js');
+if (fs.existsSync(sha256Universal)) {
+  fs.writeFileSync(
+    sha256Universal,
+    "// Patched for Cloudflare Workers: use pure JS (skip WASM)\n" +
+    "const Sha256 = require('./sha256.js');\n" +
+    "module.exports = function () { return new Sha256(); };\n" +
+    "module.exports.ready = function (cb) { if (cb) cb(); };\n" +
+    "module.exports.WASM_SUPPORTED = false;\n" +
+    "module.exports.WASM_LOADED = false;\n" +
+    "module.exports.SHA256_BYTES = 32;\n"
+  );
+  console.log('✓ Patched sha256-universal → pure JS (skip WASM)');
+} else {
+  console.log('⚠ sha256-universal not found — skip patch');
+}
+
+// ── Patch xsalsa20 → stub WASM loader (force pure JS fallback) ───────
+// xsalsa20/xsalsa20.js contains embedded WASM binary + new WebAssembly.Module()
+// at load time. esbuild bundles it even when guarded by `typeof WebAssembly`.
+// Replace the WASM loader with a stub that returns false → triggers JS fallback.
+const xsalsa20Wasm = path.join(__dirname, '..', 'node_modules', 'xsalsa20', 'xsalsa20.js');
+if (fs.existsSync(xsalsa20Wasm)) {
+  fs.writeFileSync(
+    xsalsa20Wasm,
+    "// Patched for Cloudflare Workers: stub — forces pure JS fallback in index.js\n" +
+    "module.exports = function () { return false; };\n"
+  );
+  console.log('✓ Patched xsalsa20/xsalsa20.js → stub (forces JS fallback)');
+} else {
+  console.log('⚠ xsalsa20/xsalsa20.js not found — skip patch');
+}
+
+// ── Patch siphash24 → stub WASM loader (force pure JS fallback) ─────
+const siphash24Wasm = path.join(__dirname, '..', 'node_modules', 'siphash24', 'siphash24.js');
+if (fs.existsSync(siphash24Wasm)) {
+  fs.writeFileSync(
+    siphash24Wasm,
+    "// Patched for Cloudflare Workers: stub — forces pure JS fallback in index.js\n" +
+    "module.exports = function () { return false; };\n"
+  );
+  console.log('✓ Patched siphash24/siphash24.js → stub (forces JS fallback)');
+} else {
+  console.log('⚠ siphash24/siphash24.js not found — skip patch');
+}

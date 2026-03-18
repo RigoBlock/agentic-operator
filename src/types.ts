@@ -24,8 +24,11 @@ export interface Env {
   // Vars (wrangler.toml [vars])
   // No more VAULT_ADDRESS / CHAIN_ID here — they come from the frontend per-request.
 
+  // Workers AI binding (configured in wrangler.toml [ai] — zero-config, no secrets needed)
+  AI?: Ai;
+
   // Secrets (wrangler secret put)
-  OPENAI_API_KEY: string;
+  OPENAI_API_KEY?: string;  // Optional — fallback if AI binding not available
   UNISWAP_API_KEY: string;  // Uniswap Trading API key (developers.uniswap.org)
   ZEROX_API_KEY: string;    // 0x Swap API key (dashboard.0x.org)
   ALCHEMY_API_KEY: string;  // Alchemy RPC key (avoids public RPC rate limits)
@@ -59,6 +62,8 @@ export interface TelegramVaultLink {
   address: Address;
   chainId: number;
   name: string;
+  /** Operator address that paired this vault (supports multi-wallet per Telegram) */
+  operatorAddress?: Address;
 }
 
 /** A pending pairing code — stored in KV as `tg-pair:{code}` with 5 min TTL */
@@ -107,7 +112,7 @@ export interface ChatRequest {
   confirmExecution?: boolean;
   /** User-provided AI API key (OpenRouter, Anthropic, or OpenAI) */
   aiApiKey?: string;
-  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "gpt-5-mini") */
+  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/meta/llama-4-scout-17b-16e-instruct") */
   aiModel?: string;
   /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
   aiBaseUrl?: string;

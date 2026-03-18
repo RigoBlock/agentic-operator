@@ -45,6 +45,7 @@ import {
   switchActiveVault,
   unlinkVault,
   createPairingCode,
+  getTelegramUserIdByAddress,
 } from "../services/telegramPairing.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { getVaultInfo } from "../services/vault.js";
@@ -97,6 +98,54 @@ telegram.post("/webhook", async (c) => {
   c.executionCtx.waitUntil(handleUpdate(c.env, token, update));
 
   return c.json({ ok: true });
+});
+
+// ── Pair endpoint (called from web UI) ────────────────────────────────
+
+// ── Unpair endpoint (called from web UI) ──────────────────────────────
+
+telegram.post("/unpair", async (c) => {
+  try {
+    const body = await c.req.json<{
+      operatorAddress: string;
+      vaultAddress: string;
+      authSignature: string;
+      authTimestamp: number;
+      chainId: number;
+    }>();
+
+    // Verify the caller is actually the vault owner
+    await verifyOperatorAuth({
+      operatorAddress: body.operatorAddress,
+      vaultAddress: body.vaultAddress,
+      authSignature: body.authSignature,
+      authTimestamp: body.authTimestamp,
+      preferredChainId: body.chainId,
+      alchemyKey: c.env.ALCHEMY_API_KEY,
+    });
+
+    // Find their Telegram user ID via operator address
+    const tgUserId = await getTelegramUserIdByAddress(
+      c.env.KV,
+      body.operatorAddress as Address,
+    );
+    if (!tgUserId) {
+      return c.json({ error: "No Telegram account paired to this wallet" }, 404);
+    }
+
+    const removed = await unlinkVault(c.env.KV, tgUserId, body.vaultAddress);
+    if (!removed) {
+      return c.json({ error: "Vault not found in linked list" }, 404);
+    }
+
+    return c.json({ ok: true, message: "Vault unlinked from Telegram" });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return c.json({ error: err.message }, err.status as 401 | 403);
+    }
+    const msg = err instanceof Error ? err.message : "Internal error";
+    return c.json({ error: sanitizeError(msg) }, 500);
+  }
 });
 
 // ── Pair endpoint (called from web UI) ────────────────────────────────
@@ -353,6 +402,7 @@ async function handleMessage(
             address: vaultInfo.address,
             chainId: vaultInfo.chainId,
             name: vaultInfo.name,
+            operatorAddress: user.operatorAddress,
           };
           const existing = user.vaults.findIndex(
             (v) => v.address.toLowerCase() === link.address.toLowerCase()
@@ -429,7 +479,7 @@ async function handleMessage(
   const ctx: RequestContext = {
     vaultAddress: vault.address,
     chainId: vault.chainId,
-    operatorAddress: user.operatorAddress,
+    operatorAddress: vault.operatorAddress || user.operatorAddress,
     executionMode,
   };
 
