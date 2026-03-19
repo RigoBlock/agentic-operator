@@ -378,11 +378,18 @@ async function handleMessage(
             return { ...info, chainId: ch.id };
           }),
         );
-        // Collect ALL chains where this vault exists and is owned by the operator
+        // Collect all known operator addresses from the user's vault links
+        const knownOperators = new Set<string>();
+        knownOperators.add(user.operatorAddress.toLowerCase());
+        for (const v of user.vaults) {
+          if (v.operatorAddress) knownOperators.add(v.operatorAddress.toLowerCase());
+        }
+
+        // Collect ALL chains where this vault exists and is owned by ANY known operator
         type VaultResult = { address: Address; name: string; symbol: string; owner: Address; totalSupply: string; chainId: number };
         const foundVaults: VaultResult[] = [];
         for (const r of results) {
-          if (r.status === "fulfilled" && r.value.owner.toLowerCase() === user.operatorAddress.toLowerCase()) {
+          if (r.status === "fulfilled" && knownOperators.has(r.value.owner.toLowerCase())) {
             foundVaults.push(r.value as VaultResult);
           }
         }
@@ -390,7 +397,7 @@ async function handleMessage(
         if (foundVaults.length === 0) {
           await sendMessage(
             token, chatId,
-            "Could not find a vault at that address owned by your paired wallet on any supported chain.",
+            "Could not find a vault at that address owned by any of your paired wallets on any supported chain.",
           );
           return;
         }
@@ -402,7 +409,7 @@ async function handleMessage(
             address: vaultInfo.address,
             chainId: vaultInfo.chainId,
             name: vaultInfo.name,
-            operatorAddress: user.operatorAddress,
+            operatorAddress: vaultInfo.owner,  // use actual on-chain owner
           };
           const existing = user.vaults.findIndex(
             (v) => v.address.toLowerCase() === link.address.toLowerCase()
@@ -420,6 +427,14 @@ async function handleMessage(
         user.activeVaultIndex = user.vaults.length - 1;
         await saveTelegramUser(env.KV, user);
         await clearConversation(env.KV, userId);
+
+        // Ensure reverse lookup exists for all operators (for strategy push notifications)
+        const addedOperators = new Set(foundVaults.map((v) => v.owner.toLowerCase()));
+        await Promise.all(
+          [...addedOperators].map((op) =>
+            env.KV.put(`tg-addr:${op}`, String(userId)),
+          ),
+        );
 
         const summary = addedNames.length === 1
           ? `✅ Found ${addedNames[0]}.\nIt's now your active vault — start trading!`
@@ -586,10 +601,11 @@ async function handleMessage(
       }
 
       if (executableTxs.length > 0) {
-        // Store only executable transactions
+        // Store executable transactions with timestamp for staleness detection
         const txKey = `tg-pending-tx:${userId}`;
-        await env.KV.put(txKey, JSON.stringify(executableTxs), {
-          expirationTtl: 300, // 5 min expiry
+        const payload = { txs: executableTxs, createdAt: Date.now() };
+        await env.KV.put(txKey, JSON.stringify(payload), {
+          expirationTtl: 120, // 2 min — swap quotes expire quickly
         });
 
         // Build trade summary for executable transactions
@@ -710,9 +726,11 @@ async function handleCallbackQuery(
       return;
     }
 
-    // Parse stored transactions — supports both single tx (legacy) and array
+    // Parse stored transactions — supports legacy (array/single tx) and new { txs, createdAt } format
     const parsed = JSON.parse(raw);
-    const txList: UnsignedTransaction[] = (Array.isArray(parsed) ? parsed : [parsed]).map(
+    const rawTxs = parsed.txs ? parsed.txs : (Array.isArray(parsed) ? parsed : [parsed]);
+    const storedAt: number | undefined = parsed.createdAt;
+    const txList: UnsignedTransaction[] = (rawTxs as Record<string, unknown>[]).map(
       (t: Record<string, unknown>) => ({
         to: t.to as Address,
         data: t.data as `0x${string}`,
@@ -723,6 +741,11 @@ async function handleCallbackQuery(
         swapMeta: t.swapMeta as UnsignedTransaction["swapMeta"],
       }),
     );
+
+    // Warn if the quote is likely stale (>90s old)
+    const ageMs = storedAt ? Date.now() - storedAt : undefined;
+    const isLikelyStale = ageMs !== undefined && ageMs > 90_000;
+    const hasSwaps = txList.some(tx => tx.swapMeta);
 
     // Delete pending txs
     await env.KV.delete(txKey);
@@ -748,11 +771,20 @@ async function handleCallbackQuery(
     const resultLines = formatTelegramOutcomes(outcomes);
     const allSuccess = outcomes.every(o => o.result?.confirmed && !o.result?.reverted);
 
+    // Detect stale swap quote failures: simulation failed on a swap that sat too long
+    const hasSimFailure = outcomes.some(o => o.error?.includes("simulation failed") || o.error?.includes("would revert"));
+    let staleHint = "";
+    if (hasSimFailure && hasSwaps) {
+      staleHint = isLikelyStale
+        ? "\n\n💡 The swap quote likely expired before execution. Swap quotes are valid for ~2 minutes. Please request the swap again for a fresh quote."
+        : "\n\n💡 The swap may have reverted due to an expired quote or changed market conditions. Please request the swap again for a fresh quote.";
+    }
+
     // Final summary
     const header = allSuccess
       ? (txList.length > 1 ? `✅ <b>All ${txList.length} trades confirmed</b>` : "✅ <b>Trade confirmed</b>")
       : "⚠️ <b>Some trades failed</b>";
-    const finalMsg = `${header}\n\n${resultLines}`;
+    const finalMsg = `${header}\n\n${resultLines}${staleHint}`;
     const truncated = finalMsg.length > 4000 ? finalMsg.slice(0, 3990) + "…" : finalMsg;
     await editMessageText(token, chatId, messageId, truncated);
 

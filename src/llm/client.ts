@@ -479,6 +479,9 @@ ${executionModeNote}`;
             pendingChainSwitch = toolResult.chainSwitch;
             ctx.chainId = toolResult.chainSwitch;
           }
+          if (toolResult.selfContained) {
+            pendingSelfContained = true;
+          }
           // Detect DEX from chained tool call args
           if ((name === "get_swap_quote" || name === "build_vault_swap") && args.dex) {
             const dexArg = (args.dex as string).toLowerCase();
@@ -507,6 +510,20 @@ ${executionModeNote}`;
           transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
           chainSwitch: pendingChainSwitch,
           dexProvider: detectedDex,
+        };
+      }
+
+      // Self-contained reports in chained calls — skip LLM to avoid paraphrasing
+      if (pendingSelfContained) {
+        console.log("[processChat] Skipping chain follow-up LLM call — self-contained report");
+        const report = toolCallResults
+          .filter(tc => !tc.error && tc.result)
+          .map(tc => tc.result)
+          .join("\n");
+        return {
+          reply: report,
+          toolCalls: [],
+          chainSwitch: pendingChainSwitch,
         };
       }
 

@@ -70,7 +70,7 @@ function walletKeyKey(vaultAddress: string): string {
  * Uses HKDF with the vault address as salt, so each vault gets a
  * cryptographically independent key from the same master secret.
  */
-async function deriveVaultKey(secret: string, vaultAddress: string): Promise<CryptoKey> {
+async function deriveVaultKey(secret: string, vaultAddress: string, version: number = CURRENT_KEY_VERSION): Promise<CryptoKey> {
   const encoder = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
@@ -85,7 +85,7 @@ async function deriveVaultKey(secret: string, vaultAddress: string): Promise<Cry
       hash: "SHA-256",
       // Salt is the vault address — makes each vault's key independent
       salt: encoder.encode(`vault:${vaultAddress.toLowerCase()}`),
-      info: encoder.encode(`agentic-operator-wallet-v${CURRENT_KEY_VERSION}`),
+      info: encoder.encode(`agentic-operator-wallet-v${version}`),
     },
     keyMaterial,
     { name: "AES-GCM", length: 256 },
@@ -149,8 +149,10 @@ async function decryptSecret(
   }
 
   // For v0 (legacy), use the old global derivation; for v1+, use per-vault
+  // CRITICAL: pass envelope.v (not CURRENT_KEY_VERSION) so v1 wallets
+  // decrypt with the same HKDF info they were encrypted with.
   const key = envelope.v >= 1
-    ? await deriveVaultKey(masterSecret, vaultAddress)
+    ? await deriveVaultKey(masterSecret, vaultAddress, envelope.v)
     : await deriveLegacyKey(masterSecret);
 
   const combined = Uint8Array.from(atob(envelope.d), (c) => c.charCodeAt(0));
