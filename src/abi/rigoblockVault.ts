@@ -120,22 +120,48 @@ export const RIGOBLOCK_VAULT_ABI = [
     outputs: [{ name: "results", type: "bytes[]" }],
   },
 
-  // ── Pool data view ──
+  // ── Pool data views (ISmartPoolState — V4) ──
 
-  // getData() → (string name, string symbol, uint256 decimals, address owner, address baseToken)
+  // getPool() → ReturnedPool { name, symbol, decimals, owner, baseToken }
   {
-    name: "getData",
+    name: "getPool",
     type: "function",
     stateMutability: "view",
     inputs: [],
     outputs: [
-      { name: "poolName", type: "string" },
-      { name: "poolSymbol", type: "string" },
-      { name: "poolDecimals", type: "uint256" },
-      { name: "poolOwner", type: "address" },
-      { name: "poolBaseToken", type: "address" },
+      {
+        name: "pool",
+        type: "tuple",
+        components: [
+          { name: "name", type: "string" },
+          { name: "symbol", type: "string" },
+          { name: "decimals", type: "uint8" },
+          { name: "owner", type: "address" },
+          { name: "baseToken", type: "address" },
+        ],
+      },
     ],
   },
+
+  // getPoolTokens() → PoolTokens { unitaryValue, totalSupply }
+  {
+    name: "getPoolTokens",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      {
+        name: "poolTokens",
+        type: "tuple",
+        components: [
+          { name: "unitaryValue", type: "uint256" },
+          { name: "totalSupply", type: "uint256" },
+        ],
+      },
+    ],
+  },
+
+
 
   // ── Capital provision (minting pool tokens) ──
 

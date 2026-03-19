@@ -595,10 +595,7 @@
       <input type="checkbox" id="sponsor-toggle" onchange="toggleSponsoredGas(this.checked)" />
       <span>Sponsored gas</span>
     </label>
-    <label id="autonomous-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, the agent executes trades immediately without asking for confirmation. The NAV shield (10% max loss) and on-chain vault protections remain active.">
-      <input type="checkbox" id="autonomous-toggle" onchange="toggleAutonomousMode(this.checked)" />
-      <span>Autonomous</span>
-    </label>
+
     <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
     <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
     <button id="telegram-pair-btn" class="btn-delegation telegram" onclick="openTelegramPairing()" style="display:none;" title="Control this pool from Telegram">⬡ Telegram</button>
@@ -1383,7 +1380,6 @@
             authSignature,
             authTimestamp,
             executionMode,
-            ...(autonomousMode && executionMode === 'delegated' ? { confirmExecution: true } : {}),
             ...getAiRequestParams(),
           }),
         });
@@ -1411,7 +1407,6 @@
                   authSignature,
                   authTimestamp,
                   executionMode,
-                  ...(autonomousMode && executionMode === 'delegated' ? { confirmExecution: true } : {}),
                   ...getAiRequestParams(),
                 }),
               });
@@ -1514,11 +1509,13 @@
         ? data.transactions
         : data.transaction ? [data.transaction] : [];
 
-      if (txList.length > 1 && executionMode === 'delegated') {
+      // operatorOnly transactions always go through standard wallet modal
+      const anyOperatorOnly = txList.some(tx => tx.operatorOnly);
+      if (txList.length > 1 && executionMode === 'delegated' && !anyOperatorOnly) {
         // Multi-transaction delegated mode: show combined card
         console.log('[tx-modal] Showing multi-tx delegated confirmation:', txList.length, 'transactions');
         showMultiDelegatedConfirmation(txList);
-      } else if (txList.length > 1 && executionMode !== 'delegated') {
+      } else if (txList.length > 1 && (executionMode !== 'delegated' || anyOperatorOnly)) {
         // Multi-transaction manual mode: show each as individual in-chat card
         console.log('[tx-modal] Showing multi-tx manual cards:', txList.length, 'transactions');
         for (const tx of txList) {
@@ -1526,7 +1523,7 @@
         }
       } else if (data.transaction) {
         console.log('[tx-modal] Showing transaction modal:', data.transaction);
-        if (executionMode === 'delegated') {
+        if (executionMode === 'delegated' && !data.transaction.operatorOnly) {
           // In delegated mode: show in-chat confirmation instead of wallet modal
           showDelegatedConfirmation(data.transaction);
         } else {
@@ -1663,6 +1660,8 @@
                 ? `✅ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}${meta.price ? ' (' + meta.price + ')' : ''}`
                 : `✅ Transaction confirmed`;
               appendMessage('system', chatMsg);
+              // Refresh delegation status (handles chat-based delegation setup)
+              refreshDelegationStatus();
               // Auto-progress to next strategy step if agent is leading a multi-step flow
               setTimeout(() => autoProgressAfterTx(chatMsg), 4500);
             } else {
@@ -1798,6 +1797,15 @@
               statusEl.textContent = `✓ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}`;
             } else {
               statusEl.textContent = success ? '✓ Transaction confirmed' : '✗ Transaction reverted';
+            }
+            if (success) {
+              // Refresh delegation status (handles chat-based delegation setup)
+              refreshDelegationStatus();
+              // Auto-progress to next strategy step
+              const desc = meta
+                ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
+                : tx.description || 'transaction';
+              setTimeout(() => autoProgressAfterTx(desc), 2000);
             }
             return;
           }
@@ -2442,13 +2450,15 @@
        ================================================================ */
     let executionMode = 'manual'; // 'manual' | 'delegated'
     let delegationState = null;   // cached delegation status from backend
-    let autonomousMode = localStorage.getItem('rigoblock_autonomous') === 'true'; // persisted
+    // autonomousMode removed — chat always requires user confirmation.
+    // Autonomous execution only happens via cron strategies (autoExecute flag).
 
     /** Auto-detect execution mode from delegation state.
      *  Allows delegated mode if delegation is active on ANY chain,
      *  not just the current one — enables multi-chain delegated swaps. */
     function syncExecutionMode() {
-      if (delegationState && delegationState.enabled &&
+      if (delegationState &&
+          (delegationState.enabled || delegationState.isActiveOnChain) &&
           (delegationState.isActiveOnChain || (delegationState.activeChains && delegationState.activeChains.length > 0))) {
         executionMode = 'delegated';
       } else {
@@ -2470,6 +2480,32 @@
         const res = await fetch(`/api/delegation/status?vaultAddress=${vault}&chainId=${currentChainId}&verify=true`);
         if (!res.ok) throw new Error('Failed to fetch');
         delegationState = await res.json();
+
+        // Auto-heal: if on-chain delegation is active but KV doesn't have this chain,
+        // sync KV by calling the confirm endpoint (handles chat-based delegation setup)
+        if (delegationState.isActiveOnChain && !delegationState.isActiveInKV &&
+            delegationState.agentAddress && connectedAddress && authSignature && authTimestamp) {
+          try {
+            const confirmRes = await fetch('/api/delegation/confirm', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                operatorAddress: connectedAddress,
+                vaultAddress: vault,
+                chainId: currentChainId,
+                authSignature,
+                authTimestamp,
+                txHash: '0x' + '0'.repeat(64), // placeholder — on-chain state is proof enough
+              }),
+            });
+            if (confirmRes.ok) {
+              // Re-fetch with updated KV
+              const res2 = await fetch(`/api/delegation/status?vaultAddress=${vault}&chainId=${currentChainId}&verify=true`);
+              if (res2.ok) delegationState = await res2.json();
+            }
+          } catch { /* best-effort sync */ }
+        }
+
         updateDelegationUI(delegationState);
         syncExecutionMode();
 
@@ -2477,7 +2513,7 @@
         const isActive = delegationState.isActiveOnChain != null
           ? delegationState.isActiveOnChain
           : (delegationState.isActiveInKV || false);
-        if (delegationState.enabled && delegationState.agentAddress && isActive) {
+        if (delegationState.agentAddress && isActive) {
           fetchAgentBalance(vault);
         }
       } catch {
@@ -2495,10 +2531,9 @@
       const balanceEl = document.getElementById('agent-balance-display');
       const sponsorLabel = document.getElementById('sponsor-toggle-label');
       const sponsorToggle = document.getElementById('sponsor-toggle');
-      const autonomousLabel = document.getElementById('autonomous-toggle-label');
-      const autonomousToggle = document.getElementById('autonomous-toggle');
 
-      if (!state || !state.enabled) {
+
+      if (!state || (!state.enabled && !state.isActiveOnChain)) {
         badge.className = 'delegation-status inactive';
         statusText.textContent = state?.agentAddress ? 'Not active on this chain' : 'Not set up';
         setupBtn.style.display = '';
@@ -2509,7 +2544,7 @@
         agentAddr.style.display = 'none';
         balanceEl.style.display = 'none';
         if (sponsorLabel) sponsorLabel.style.display = 'none';
-        if (autonomousLabel) autonomousLabel.style.display = 'none';
+
       } else {
         // Use on-chain status if available, fall back to KV status
         const isOnChain = state.isActiveOnChain != null ? state.isActiveOnChain : (state.isActiveInKV || false);
@@ -2552,16 +2587,7 @@
           }
         }
 
-        // Autonomous toggle — visible when delegation is active on any chain
-        if (autonomousLabel && autonomousToggle) {
-          const hasAnyDelegation = isOnChain || (state.activeChains && state.activeChains.length > 0);
-          if (hasAnyDelegation) {
-            autonomousToggle.checked = autonomousMode;
-            autonomousLabel.style.display = '';
-          } else {
-            autonomousLabel.style.display = 'none';
-          }
-        }
+
 
         if (state.agentAddress) {
           agentAddr.textContent = `Agent: ${state.agentAddress}`;
@@ -2617,14 +2643,7 @@
       }
     }
 
-    /** Toggle autonomous execution mode */
-    function toggleAutonomousMode(checked) {
-      autonomousMode = checked;
-      localStorage.setItem('rigoblock_autonomous', checked);
-      appendMessage('system', checked
-        ? '⚡ Autonomous mode ON — the agent will execute trades immediately without confirmation. NAV shield (10% max loss) and on-chain vault protections remain active.'
-        : '🛑 Autonomous mode OFF — the agent will ask for confirmation before executing trades.');
-    }
+
 
     /* ================================================================
        Telegram Pairing

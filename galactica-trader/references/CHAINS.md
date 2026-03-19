@@ -16,7 +16,7 @@
 
 ### XAUT (Tether Gold)
 - **Ethereum:** `0x68749665FF8D2d112Fa859AA293F07A622782F38`
-- **Arbitrum:** `0x7624cccCc59361D583F28BEC40D37e7771def5D` (bridged)
+- **Arbitrum:** `0x40461291347e1eCbb09499F3371D3f17f10d7159` (bridged)
 
 ### USDT
 - Available on all supported chains via major DEX liquidity.
@@ -40,5 +40,5 @@ The Arbitrum pool uses a Rigoblock oracle hook — the operator provides the hoo
 ### XAUT GMX V2 Market (Arbitrum)
 ```
 Market: XAUT.v2/USD [WBTC.b-USDC]
-Index Token: 0x7624cccCc59361D583F28BEC40D37e7771def5D
+Index Token: 0x40461291347e1eCbb09499F3371D3f17f10d7159
 ```

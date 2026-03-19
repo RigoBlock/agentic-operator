@@ -366,7 +366,7 @@ of operations — use your own judgment on how to phrase requests:
 
 ### GMX V2 Perpetuals (Arbitrum)
 - Open, close, increase positions; get positions; cancel/update orders; claim funding
-- XAUT/USD market: `XAUT.v2/USD [WBTC.b-USDC]`, index `0x7624cccCc59361D583F28BEC40D37e7771def5D`
+- XAUT/USD market: `XAUT.v2/USD [WBTC.b-USDC]`, index `0x40461291347e1eCbb09499F3371D3f17f10d7159`
 - Examples: "open a 1x short XAUT/USD position with 500 USDT collateral on GMX"
 
 ### Cross-Chain Bridge (Across Protocol)

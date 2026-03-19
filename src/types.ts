@@ -135,6 +135,10 @@ export interface UnsignedTransaction {
   chainId: number;
   gas: string;          // hex-encoded gas limit
   description: string;  // human-readable summary for the confirm modal
+  /** When true, this tx MUST be signed by the operator wallet, not the agent.
+   *  Used for delegation setup, pool deployment, pool funding — operations
+   *  that cannot go through delegated execution. */
+  operatorOnly?: boolean;
   /** Structured swap metadata for the frontend to display on confirmation */
   swapMeta?: {
     sellAmount: string;   // human-readable
@@ -280,4 +284,6 @@ export interface VaultInfo {
   symbol: string;
   owner: Address;
   totalSupply: string;
+  /** Base token decimals for NAV formatting */
+  decimals: number;
 }

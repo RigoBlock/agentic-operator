@@ -111,6 +111,8 @@ export async function getTokenDecimals(
 
 /**
  * Fetch basic vault information.
+ * Uses V4's getPool() which returns name, symbol, decimals, owner, baseToken
+ * in a single call. Falls back to individual getters if unavailable.
  */
 export async function getVaultInfo(
   chainId: number,
@@ -120,21 +122,12 @@ export async function getVaultInfo(
   const client = getClient(chainId, alchemyKey);
 
   try {
-    const [name, symbol, owner, totalSupply] = await Promise.all([
+    // Try V4's getPool() first — single call for all fields
+    const [poolResult, totalSupply] = await Promise.all([
       client.readContract({
         address: vaultAddress,
         abi: RIGOBLOCK_VAULT_ABI,
-        functionName: "name",
-      }),
-      client.readContract({
-        address: vaultAddress,
-        abi: RIGOBLOCK_VAULT_ABI,
-        functionName: "symbol",
-      }),
-      client.readContract({
-        address: vaultAddress,
-        abi: RIGOBLOCK_VAULT_ABI,
-        functionName: "owner",
+        functionName: "getPool",
       }),
       client.readContract({
         address: vaultAddress,
@@ -142,23 +135,49 @@ export async function getVaultInfo(
         functionName: "totalSupply",
       }),
     ]);
-
+    const pool = poolResult as { name: string; symbol: string; decimals: number; owner: Address; baseToken: Address };
+    const dec = Number(pool.decimals);
     return {
       address: vaultAddress,
-      name: name as string,
-      symbol: symbol as string,
-      owner: owner as Address,
-      totalSupply: formatUnits(totalSupply as bigint, 18),
+      name: pool.name,
+      symbol: pool.symbol,
+      owner: pool.owner,
+      totalSupply: formatUnits(totalSupply as bigint, dec),
+      decimals: dec,
     };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("is not valid JSON") || msg.includes("Unexpected token")) {
-      throw new Error(
-        `RPC error on chain ${chainId}: could not read vault at ${vaultAddress.slice(0, 10)}…. ` +
-        `The RPC endpoint may be unavailable.`,
-      );
+  } catch {
+    // Fallback to individual calls
+    try {
+      const [name, symbol, owner, totalSupply, decimals] = await Promise.all([
+        client.readContract({ address: vaultAddress, abi: RIGOBLOCK_VAULT_ABI, functionName: "name" }),
+        client.readContract({ address: vaultAddress, abi: RIGOBLOCK_VAULT_ABI, functionName: "symbol" }),
+        client.readContract({ address: vaultAddress, abi: RIGOBLOCK_VAULT_ABI, functionName: "owner" }),
+        client.readContract({ address: vaultAddress, abi: RIGOBLOCK_VAULT_ABI, functionName: "totalSupply" }),
+        client.readContract({
+          address: vaultAddress,
+          abi: [{ name: "decimals", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] }] as const,
+          functionName: "decimals",
+        }).catch(() => 18),
+      ]);
+      const dec = Number(decimals);
+      return {
+        address: vaultAddress,
+        name: name as string,
+        symbol: symbol as string,
+        owner: owner as Address,
+        totalSupply: formatUnits(totalSupply as bigint, dec),
+        decimals: dec,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("is not valid JSON") || msg.includes("Unexpected token")) {
+        throw new Error(
+          `RPC error on chain ${chainId}: could not read vault at ${vaultAddress.slice(0, 10)}…. ` +
+          `The RPC endpoint may be unavailable.`,
+        );
+      }
+      throw err;
     }
-    throw err;
   }
 }
 
@@ -289,7 +308,7 @@ export async function isVaultOwner(
 
 // ── Pool data & capital provision ──────────────────────────────────────
 
-/** Pool data returned by vault.getData() */
+/** Pool data returned by vault.getPool() */
 export interface PoolData {
   name: string;
   symbol: string;
@@ -300,6 +319,8 @@ export interface PoolData {
 
 /**
  * Read the pool's core data including base token address.
+ * Uses V4's getPool() (returns struct with baseToken), falls back
+ * to individual view calls if getPool() is unavailable.
  */
 export async function getPoolData(
   chainId: number,
@@ -307,19 +328,43 @@ export async function getPoolData(
   alchemyKey?: string,
 ): Promise<PoolData> {
   const client = getClient(chainId, alchemyKey);
-  const result = await client.readContract({
-    address: vaultAddress,
-    abi: RIGOBLOCK_VAULT_ABI,
-    functionName: "getData",
-  });
-  const [name, symbol, decimals, owner, baseToken] = result as [string, string, bigint, Address, Address];
-  return {
-    name,
-    symbol,
-    decimals: Number(decimals),
-    owner,
-    baseToken,
-  };
+
+  try {
+    const result = await client.readContract({
+      address: vaultAddress,
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "getPool",
+    });
+    const pool = result as { name: string; symbol: string; decimals: number; owner: Address; baseToken: Address };
+    return {
+      name: pool.name,
+      symbol: pool.symbol,
+      decimals: Number(pool.decimals),
+      owner: pool.owner,
+      baseToken: pool.baseToken,
+    };
+  } catch {
+    // Fallback to individual view calls
+    const simpleAbi = [
+      { name: "name", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
+      { name: "symbol", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
+      { name: "decimals", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
+      { name: "owner", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
+    ] as const;
+    const [name, symbol, decimals, owner] = await Promise.all([
+      client.readContract({ address: vaultAddress, abi: simpleAbi, functionName: "name" }),
+      client.readContract({ address: vaultAddress, abi: simpleAbi, functionName: "symbol" }),
+      client.readContract({ address: vaultAddress, abi: simpleAbi, functionName: "decimals" }),
+      client.readContract({ address: vaultAddress, abi: simpleAbi, functionName: "owner" }),
+    ]);
+    return {
+      name: name as string,
+      symbol: symbol as string,
+      decimals: Number(decimals),
+      owner: owner as Address,
+      baseToken: "0x0000000000000000000000000000000000000000" as Address,
+    };
+  }
 }
 
 /** NAV data returned by vault.getNavDataView() */

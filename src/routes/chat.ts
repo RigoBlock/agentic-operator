@@ -117,7 +117,11 @@ chat.post("/", async (c) => {
           : [];
 
       if (txList.length > 0) {
-        const outcomes = await executeTxList(c.env, txList, body.vaultAddress);
+        // Filter out operatorOnly transactions — those must be signed by the vault owner
+        const executableTxs = txList.filter(tx => !tx.operatorOnly);
+        const outcomes = executableTxs.length > 0
+          ? await executeTxList(c.env, executableTxs, body.vaultAddress)
+          : [];
         const results = outcomes.filter(o => o.result).map(o => o.result!);
 
         if (results.length === 1) {

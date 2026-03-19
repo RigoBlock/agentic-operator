@@ -189,7 +189,12 @@ export async function executeSponsoredCalls(
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     const errStack = err instanceof Error ? err.stack : undefined;
+    // Log full error details for debugging bundler/paymaster failures
+    const errDetails = (err as any)?.details || (err as any)?.cause?.message || "";
+    const errCode = (err as any)?.code || (err as any)?.cause?.code || "";
     console.error(`[SmartWallet] FAILED: ${errMsg}`);
+    if (errDetails) console.error(`[SmartWallet] Details: ${errDetails}`);
+    if (errCode) console.error(`[SmartWallet] Code: ${errCode}`);
     if (errStack) console.error(`[SmartWallet] Stack: ${errStack}`);
     // Re-throw with the original error for the caller to handle
     throw err;

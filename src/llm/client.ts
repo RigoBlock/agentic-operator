@@ -78,7 +78,48 @@ async function callWorkersAI(
     ...(tools ? { tools: tools as any } : {}),
   });
 
-  const hasToolCalls = Array.isArray(result.tool_calls) && result.tool_calls.length > 0;
+  let hasToolCalls = Array.isArray(result.tool_calls) && result.tool_calls.length > 0;
+  let toolCalls = hasToolCalls ? result.tool_calls : undefined;
+  let textContent: string | null = result.response || null;
+
+  // Workers AI sometimes embeds tool calls as JSON text instead of structured
+  // tool_calls. Detect and extract them so they get executed properly.
+  // Matches: {"function": "name", "parameters": {...}}
+  //          {"function_name": "name", "parameters": {...}}
+  //          {"name": "name", "parameters": {...}}
+  //          ```json\n{"name": ...}\n``` (markdown code blocks)
+  if (!hasToolCalls && textContent) {
+    // Strip markdown code fences if present
+    const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
+    // Match the key and function name, then capture everything after "parameters": up to matching }
+    const keyPattern = /\{\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
+    const keyMatch = cleaned.match(keyPattern);
+    if (keyMatch) {
+      const fnName = keyMatch[1];
+      const afterKey = cleaned.slice(keyMatch.index! + keyMatch[0].length);
+      // Extract balanced braces for the parameters object
+      let depth = 0;
+      let end = -1;
+      for (let i = 0; i < afterKey.length; i++) {
+        if (afterKey[i] === '{') depth++;
+        else if (afterKey[i] === '}') {
+          depth--;
+          if (depth === 0) { end = i + 1; break; }
+        }
+      }
+      if (end > 0) {
+        const fnArgs = afterKey.slice(0, end);
+        // Verify this is a real tool name (not random JSON in the response)
+        const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
+        if (validTools.includes(fnName)) {
+          console.log(`[Workers AI] Extracted text-embedded tool call: ${fnName}`);
+          hasToolCalls = true;
+          toolCalls = [{ function: { name: fnName, arguments: fnArgs } }];
+          textContent = null; // discard the text — the tool call replaces it
+        }
+      }
+    }
+  }
 
   return {
     id: `chatcmpl-wai-${Date.now()}`,
@@ -89,9 +130,12 @@ async function callWorkersAI(
       index: 0,
       message: {
         role: "assistant" as const,
-        content: result.response || null,
+        // When the model returns tool_calls, discard text content — Workers AI
+        // often echoes the tool call as text (e.g. '{"function": ...}') which
+        // gets shown to the user as garbage.
+        content: hasToolCalls ? null : textContent,
         ...(hasToolCalls ? {
-          tool_calls: result.tool_calls!.map((tc: any, i: number) => ({
+          tool_calls: toolCalls!.map((tc: any, i: number) => ({
             id: tc.id || `call_${Date.now()}_${i}`,
             type: "function" as const,
             function: {
@@ -239,6 +283,16 @@ ${executionModeNote}`;
     } catch (err) {
       console.log(`[LLM] Fast-path GMX error, falling back to LLM: ${err}`);
     }
+  }
+
+  // ── Strategy keyword detection: inject a focused hint for the LLM ──
+  const strategyPattern = /\b(carry\s*trade|xaut\s*(strategy|lp|carry|liquidity)|lp\s*\+?\s*hedge|hedge.*xaut|provide\s*liquidity.*xaut|gold\s*strategy|set\s*up\s*(the\s*)?strategy|implement.*strategy|fund.*strategy)\b/i;
+  if (strategyPattern.test(lastUserMsg)) {
+    console.log("[LLM] Strategy keywords detected — injecting carry trade hint");
+    fullMessages.splice(fullMessages.length - 1, 0, {
+      role: "system" as const,
+      content: "IMPORTANT: The user is asking for the XAUT carry trade strategy. Follow the STRATEGY KNOWLEDGE section in your instructions. Start by calling get_aggregated_nav to discover where funds are, then execute the multi-step entry sequence (bridge → swap → LP → swap → hedge). Do NOT stop after get_aggregated_nav — proceed with the full plan.",
+    });
   }
 
   // First LLM call
@@ -590,6 +644,23 @@ async function executeToolCall(
       if (!intent.amountIn && !intent.amountOut) {
         throw new Error("Either amountIn or amountOut must be specified.");
       }
+      // XAUT (Tether Gold) only exists on Arbitrum (42161) and Ethereum (1).
+      // Reject immediately if the LLM tries to quote it on any other chain.
+      if (
+        /xaut/i.test(intent.tokenIn) || /xaut/i.test(intent.tokenOut) ||
+        intent.tokenIn === "0x40461291347e1eCbb09499F3371D3f17f10d7159" ||
+        intent.tokenOut === "0x40461291347e1eCbb09499F3371D3f17f10d7159" ||
+        intent.tokenIn === "0x68749665FF8D2d112Fa859AA293F07A622782F38" ||
+        intent.tokenOut === "0x68749665FF8D2d112Fa859AA293F07A622782F38"
+      ) {
+        if (ctx.chainId !== 1 && ctx.chainId !== 42161) {
+          throw new Error(
+            `XAUT (Tether Gold) is only available on Arbitrum (chain 42161) and Ethereum (chain 1). ` +
+            `Current chain: ${resolveChainName(ctx.chainId)} (${ctx.chainId}). ` +
+            `Switch to Arbitrum first, then retry the swap.`,
+          );
+        }
+      }
       const dex = ((args.dex as string) || "0x").toLowerCase();
       if (dex === "0x" || dex === "zerox") {
         const quote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
@@ -626,6 +697,23 @@ async function executeToolCall(
       if (!intent.amountIn && !intent.amountOut) {
         throw new Error("Either amountIn or amountOut must be specified.");
       }
+      // XAUT (Tether Gold) only exists on Arbitrum (42161) and Ethereum (1).
+      // Hard reject here so the LLM can't accidentally execute on the wrong chain.
+      if (
+        /xaut/i.test(intent.tokenIn) || /xaut/i.test(intent.tokenOut) ||
+        intent.tokenIn === "0x40461291347e1eCbb09499F3371D3f17f10d7159" ||
+        intent.tokenOut === "0x40461291347e1eCbb09499F3371D3f17f10d7159" ||
+        intent.tokenIn === "0x68749665FF8D2d112Fa859AA293F07A622782F38" ||
+        intent.tokenOut === "0x68749665FF8D2d112Fa859AA293F07A622782F38"
+      ) {
+        if (ctx.chainId !== 1 && ctx.chainId !== 42161) {
+          throw new Error(
+            `XAUT (Tether Gold) is only available on Arbitrum (chain 42161) and Ethereum (chain 1). ` +
+            `Current chain: ${resolveChainName(ctx.chainId)} (${ctx.chainId}). ` +
+            `Switch to Arbitrum first, then retry the swap.`,
+          );
+        }
+      }
 
       // Ownership already verified by auth layer (verifyOperatorAuth checks
       // all supported chains). Skipping redundant on-chain owner() call here
@@ -634,6 +722,31 @@ async function executeToolCall(
 
       // Resolve chain name for display
       const chainName = resolveChainName(ctx.chainId);
+
+      // ── Balance pre-check for exact-input swaps ──
+      // Prevents wasting time on DEX API calls and confusing the user with
+      // transactions that would inevitably revert (insufficient balance).
+      if (intent.amountIn) {
+        try {
+          const sellAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn);
+          const { balance, decimals, symbol } = await getVaultTokenBalance(
+            ctx.chainId, ctx.vaultAddress as Address, sellAddr as Address, env.ALCHEMY_API_KEY,
+          );
+          const requestedRaw = parseUnits(intent.amountIn, decimals);
+          if (requestedRaw > balance) {
+            const available = formatUnits(balance, decimals);
+            throw new Error(
+              `Insufficient ${symbol} balance. ` +
+              `Requested: ${intent.amountIn} ${symbol}, ` +
+              `Available: ${available} ${symbol} on ${chainName}. ` +
+              `Use a smaller amount or bridge more ${symbol} to this chain first.`,
+            );
+          }
+        } catch (err) {
+          // Re-throw balance errors; swallow resolution errors (let DEX handle)
+          if (err instanceof Error && err.message.includes("Insufficient")) throw err;
+        }
+      }
 
       // Determine which DEX to use
       const dex = ((args.dex as string) || "0x").toLowerCase();
@@ -823,13 +936,28 @@ async function executeToolCall(
 
     case "get_vault_info": {
       const info = await getVaultInfo(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+
+      // Fetch NAV data for richer display
+      const navInfo = await getNavData(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY)
+        .catch(() => null);
+
+      const decimals = info.decimals ?? 18;
+      const supplyFormatted = parseFloat(info.totalSupply).toFixed(4);
+      const unitaryFormatted = navInfo
+        ? (Number(navInfo.unitaryValue) / (10 ** decimals)).toFixed(6)
+        : "N/A";
+      const totalValueFormatted = navInfo
+        ? (Number(navInfo.totalValue) / (10 ** decimals)).toFixed(6)
+        : "N/A";
+
+      const chainLabel = resolveChainName(ctx.chainId);
+
       return {
         message: [
-          `Vault: ${info.name} (${info.symbol})`,
-          `Address: ${info.address}`,
-          `Owner: ${info.owner}`,
-          `Total Supply: ${info.totalSupply}`,
+          `**${info.name}** (${info.symbol}) on ${chainLabel}`,
+          `Supply: ${supplyFormatted} | Unitary value: ${unitaryFormatted} | Total value: ${totalValueFormatted}`,
         ].join("\n"),
+        selfContained: true,
       };
     }
 
@@ -845,7 +973,7 @@ async function executeToolCall(
         env.ALCHEMY_API_KEY,
       );
       const formatted = Number(balance) / 10 ** decimals;
-      return { message: `Vault holds ${formatted.toFixed(6)} ${symbol}` };
+      return { message: `Vault holds ${formatted.toFixed(6)} ${symbol}`, selfContained: true };
     }
 
     case "verify_bridge_arrival": {
@@ -858,37 +986,50 @@ async function executeToolCall(
       const tokenAddress = await resolveTokenAddress(targetChainId, tokenArg);
       const minAmount = parseFloat(minAmountStr);
 
+      // Snapshot balance BEFORE polling — so we detect actual increase,
+      // not a pre-existing balance that already exceeds minAmount.
+      const { balance: initialBal, decimals, symbol } = await getVaultTokenBalance(
+        targetChainId,
+        ctx.vaultAddress as Address,
+        tokenAddress as Address,
+        env.ALCHEMY_API_KEY,
+      );
+      const initialAmount = Number(initialBal) / 10 ** decimals;
+
       const MAX_POLLS = 10;    // 10 × 3s = 30s max
       const POLL_INTERVAL = 3000;
 
       for (let attempt = 1; attempt <= MAX_POLLS; attempt++) {
-        const { balance, decimals, symbol } = await getVaultTokenBalance(
+        if (attempt > 1) {
+          await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+        }
+        const { balance } = await getVaultTokenBalance(
           targetChainId,
           ctx.vaultAddress as Address,
           tokenAddress as Address,
           env.ALCHEMY_API_KEY,
         );
         const current = Number(balance) / 10 ** decimals;
-        if (current >= minAmount) {
+        const increase = current - initialAmount;
+        if (increase >= minAmount * 0.90) {
+          // Accept if increase is ≥ 90% of expected (bridge fees reduce the output)
           return {
-            message: `✅ Bridge complete! Vault now holds ${current.toFixed(6)} ${symbol} on ${targetChainName}. Ready to proceed.`,
+            message: `✅ Bridge complete! ${increase.toFixed(6)} ${symbol} arrived on ${targetChainName} (vault now holds ${current.toFixed(6)} ${symbol}). Ready to proceed.`,
           };
-        }
-        if (attempt < MAX_POLLS) {
-          await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
         }
       }
 
       // Timed out — funds may still be in transit
-      const { balance: finalBal, decimals: finalDec, symbol: finalSym } = await getVaultTokenBalance(
+      const { balance: finalBal } = await getVaultTokenBalance(
         targetChainId,
         ctx.vaultAddress as Address,
         tokenAddress as Address,
         env.ALCHEMY_API_KEY,
       );
-      const finalAmount = Number(finalBal) / 10 ** finalDec;
+      const finalAmount = Number(finalBal) / 10 ** decimals;
+      const totalIncrease = finalAmount - initialAmount;
       return {
-        message: `⏳ Bridge still in progress after 30s. Current balance: ${finalAmount.toFixed(6)} ${finalSym} on ${targetChainName} (expected ≥${minAmountStr}). The bridge may take longer than usual — wait a moment and try checking the balance again.`,
+        message: `⏳ Bridge still in progress after 30s. Balance increased by ${totalIncrease.toFixed(6)} ${symbol} on ${targetChainName} (current: ${finalAmount.toFixed(6)}, expected increase ≥${minAmountStr}). The bridge may take longer — Across fills can take minutes. Check the balance again after waiting.`,
       };
     }
 
@@ -965,6 +1106,25 @@ async function executeToolCall(
         collateralAmount = (collateralValueUsd / collateralPrice.mid).toFixed(collateralDecimals <= 8 ? collateralDecimals : 6);
       } else {
         throw new Error("Please specify either collateralAmount or notionalUsd for the position.");
+      }
+
+      // Balance pre-check: verify vault holds enough collateral
+      try {
+        const { balance: colBal } = await getVaultTokenBalance(
+          ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, collateralAddr, env.ALCHEMY_API_KEY,
+        );
+        const requestedRaw = parseUnits(collateralAmount, collateralDecimals);
+        if (requestedRaw > colBal) {
+          const available = formatUnits(colBal, collateralDecimals);
+          throw new Error(
+            `Insufficient ${collateralSymbol} balance for GMX collateral. ` +
+            `Requested: ${collateralAmount} ${collateralSymbol}, ` +
+            `Available: ${available} ${collateralSymbol} on Arbitrum. ` +
+            `Use a smaller collateral amount or swap more ${collateralSymbol} first.`,
+          );
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("Insufficient")) throw err;
       }
 
       const calldata = buildCreateIncreaseOrderCalldata({
@@ -1335,6 +1495,7 @@ async function executeToolCall(
         chainId: ctx.chainId,
         gas,
         description: result.transaction.description,
+        operatorOnly: true,
       };
 
       const message = [
@@ -1385,6 +1546,7 @@ async function executeToolCall(
         chainId: ctx.chainId,
         gas,
         description: revocation.transaction.description,
+        operatorOnly: true,
       };
 
       const message = [
@@ -1509,6 +1671,7 @@ async function executeToolCall(
         chainId: ctx.chainId,
         gas,
         description: `Deploy new Rigoblock pool: ${poolName} (${poolSymbol})`,
+        operatorOnly: true,
       };
 
       const baseLabel = baseTokenArg.toUpperCase() === "ETH"
@@ -1619,6 +1782,7 @@ async function executeToolCall(
           chainId: ctx.chainId,
           gas: mintGas,
           description: `Fund pool: deposit ${amountStr} ${baseSymbol} into ${poolData.name}`,
+          operatorOnly: true,
         };
 
         const message = [
@@ -1659,6 +1823,7 @@ async function executeToolCall(
         chainId: ctx.chainId,
         gas: approveGas,
         description: `Approve ${amountStr} ${baseSymbol} for pool ${poolData.name}`,
+        operatorOnly: true,
       };
 
       const message = [
@@ -1685,8 +1850,8 @@ async function executeToolCall(
       const destChainArg = args.destinationChain as string;
       const tokenSymbol = args.token as string;
       const amount = args.amount as string;
-      const useNativeEth = args.useNativeEth as boolean | undefined;
-      const shouldUnwrapOnDestination = args.shouldUnwrapOnDestination as boolean | undefined;
+      const useNativeEth = args.useNativeEth === true || args.useNativeEth === "true";
+      const shouldUnwrapOnDestination = args.shouldUnwrapOnDestination === true || args.shouldUnwrapOnDestination === "true";
 
       if (!destChainArg || !tokenSymbol || !amount) {
         throw new Error("destinationChain, token, and amount are all required.");
@@ -1713,10 +1878,10 @@ async function executeToolCall(
         dstChainId: destMatch.id,
         tokenSymbol,
         amount,
-        useNativeEth: useNativeEth ?? false,
+        useNativeEth,
         // If vault wraps native ETH→WETH for bridging, unwrap on destination too.
         // If user is sending actual WETH tokens, they want WETH on destination.
-        shouldUnwrapOnDestination: shouldUnwrapOnDestination ?? (useNativeEth ?? false),
+        shouldUnwrapOnDestination: shouldUnwrapOnDestination || useNativeEth,
         alchemyKey: env.ALCHEMY_API_KEY,
       });
 
@@ -1879,11 +2044,14 @@ async function executeToolCall(
           chainLines.push(`  ${snap.chainName}: ⚠️ ${snap.error}`);
           continue;
         }
-        if (snap.totalValue === 0n && snap.tokenBalances.every((b) => b.balance === 0n)) {
-          continue; // skip chains with no data
+        if (snap.totalValue === 0n && snap.tokenBalances.every((b) => b.balance === 0n)
+            && snap.baseTokenSymbol === "N/A") {
+          continue; // skip chains where the pool doesn't exist
         }
         const delegation = snap.delegationActive ? "✅" : "❌";
-        const unitaryStr = (Number(snap.unitaryValue) / 1e18).toFixed(6);
+        const divisor = 10 ** snap.baseTokenDecimals;
+        const unitaryStr = (Number(snap.unitaryValue) / divisor).toFixed(6);
+        const supplyStr = (Number(snap.totalSupply) / divisor).toFixed(4);
         const tokenLines = snap.tokenBalances
           .filter((b) => b.balance > 0n)
           .map((b) => `    ${b.token.symbol}: ${b.balanceFormatted}`)
@@ -1891,7 +2059,7 @@ async function executeToolCall(
 
         chainLines.push(
           `  **${snap.chainName}** (delegation: ${delegation})` +
-          `\n    Base token: ${snap.baseTokenSymbol} | Unitary value: ${unitaryStr}` +
+          `\n    Base token: ${snap.baseTokenSymbol} | Supply: ${supplyStr} | Unitary value: ${unitaryStr}` +
           (tokenLines ? `\n${tokenLines}` : ""),
         );
       }
@@ -1925,11 +2093,12 @@ async function executeToolCall(
 
       return {
         message,
+        selfContained: true,
         suggestions: [
-          "Rebalance to Base",
-          "Rebalance to Arbitrum",
-          "Bridge USDC to Base",
-          "Sync NAV to Arbitrum",
+          "Bridge USDT to Arbitrum",
+          "Set up the XAUT carry trade",
+          "Check LP positions",
+          "Sync NAV across chains",
         ],
       };
     }

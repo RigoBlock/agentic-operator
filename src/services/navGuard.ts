@@ -47,8 +47,18 @@ import {
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { getClient } from "./vault.js";
 
-/** Maximum allowed NAV drop per transaction (10%) */
-const MAX_NAV_DROP_PCT = 10n;
+/** Default maximum allowed NAV drop per transaction (10%) — used for swaps */
+const DEFAULT_MAX_NAV_DROP_PCT = 10n;
+
+/** Known on-chain custom error selectors for clear error reporting */
+const KNOWN_ERRORS: Record<string, string> = {
+  // NavImpactLib — keccak256("NavImpactTooHigh()")[:4]
+  "0x3471741b": "Transfer amount exceeds maximum allowed NAV impact (NavImpactTooHigh). " +
+    "The on-chain contract limits how much value can leave the vault in a single transaction.",
+  // NavImpactLib — keccak256("EffectiveSupplyTooLow()")[:4]
+  "0x0f6e887f": "Effective supply too low after operation (EffectiveSupplyTooLow). " +
+    "Cannot bridge more than 87.5% of pool supply (on-chain MINIMUM_SUPPLY_RATIO = 8).",
+};
 
 /** KV key prefix for 24-hour NAV baseline */
 const NAV_BASELINE_PREFIX = "nav-baseline:";
@@ -97,6 +107,21 @@ export type NavGuardResult = NavShieldResult;
 // ── Public API ───────────────────────────────────────────────────────
 
 /**
+ * Parse a revert message for known on-chain custom error selectors.
+ * Returns a human-readable description if recognized, or null.
+ */
+function parseKnownError(errMsg: string): string | null {
+  const lower = errMsg.toLowerCase();
+  for (const [selector, description] of Object.entries(KNOWN_ERRORS)) {
+    // Custom errors appear as hex selectors in revert data
+    if (lower.includes(selector.slice(2))) {
+      return description;
+    }
+  }
+  return null;
+}
+
+/**
  * Check if a transaction would drop the vault's NAV per unit by more
  * than the allowed threshold.
  *
@@ -107,6 +132,12 @@ export type NavGuardResult = NavShieldResult;
  * @param alchemyKey - Alchemy API key
  * @param callerAddress - Address that will execute the tx (agent wallet)
  * @param kv - KV namespace for baseline storage (optional)
+ * @param maxDropPct - Maximum allowed NAV drop percentage (default 10).
+ *   Swaps use the default 10%. Bridge transfers use a higher threshold
+ *   (87%) because assets leave the source chain and arrive on the
+ *   destination chain — the source chain NAV WILL drop by the transfer amount.
+ *   The on-chain contract independently enforces its own navToleranceBps
+ *   and MINIMUM_SUPPLY_RATIO (12.5% minimum effective supply).
  * @returns NavShieldResult with allowed=true/false
  */
 export async function checkNavImpact(
@@ -117,6 +148,7 @@ export async function checkNavImpact(
   alchemyKey: string,
   callerAddress: Address,
   kv?: KVNamespace,
+  maxDropPct: bigint = DEFAULT_MAX_NAV_DROP_PCT,
 ): Promise<NavShieldResult> {
   const publicClient = getClient(chainId, alchemyKey);
 
@@ -226,7 +258,9 @@ export async function checkNavImpact(
     // FAIL-CLOSED: If we can't simulate the trade's NAV impact, we MUST block it.
     // But first, diagnose whether the SWAP itself reverts vs. only the multicall wrapping.
     // This gives the user a clear error: "trade would fail" vs. "NAV shield can't verify".
-    console.error(`[NavShield] Multicall simulation failed: ${msg}`);
+    // Also check if the multicall error itself is a known on-chain error.
+    const knownMulticallError = parseKnownError(msg);
+    console.error(`[NavShield] Multicall simulation failed: ${knownMulticallError ?? msg}`);
 
     let reason: string;
     let code: 'TRADE_REVERTS' | 'UNVERIFIED';
@@ -247,12 +281,16 @@ export async function checkNavImpact(
         `Trade is valid (swap simulation passed). Proceeding without NAV impact check.`;
       console.warn(`[NavShield] ⚠ UNVERIFIED: Swap passes but multicall fails on chain ${chainId} — proceeding without NAV check`);
     } catch (swapErr) {
-      // Swap itself reverts — the trade is invalid, not a NAV shield problem
+      // Swap itself reverts — parse the actual error
       const swapMsg = swapErr instanceof Error ? swapErr.message : String(swapErr);
       code = 'TRADE_REVERTS';
       allowed = false;
-      reason = `Trade simulation failed — the swap would revert on-chain: ${swapMsg.slice(0, 500)}`;
-      console.error(`[NavShield] ✗ TRADE REVERTS: ${swapMsg.slice(0, 500)}`);
+      // Try to match known on-chain custom errors for clear reporting
+      const knownError = parseKnownError(swapMsg);
+      reason = knownError
+        ? `On-chain error: ${knownError}`
+        : `Trade simulation failed — the transaction would revert on-chain: ${swapMsg.slice(0, 500)}`;
+      console.error(`[NavShield] ✗ TRADE REVERTS: ${reason}`);
     }
 
     return {
@@ -309,11 +347,11 @@ export async function checkNavImpact(
   const dropFromRefPct = Number(dropFromRefBps) / 100;
 
   // ── Step 5: Enforce threshold ──
-  const maxDropPct = Number(MAX_NAV_DROP_PCT);
-  if (dropFromRefPct > maxDropPct) {
+  const maxDrop = Number(maxDropPct);
+  if (dropFromRefPct > maxDrop) {
     console.warn(
       `[NavShield] ✗ BLOCKED: NAV would drop ${dropFromRefPct.toFixed(2)}% ` +
-      `(max allowed: ${maxDropPct}%) reference=${referenceValue} post=${postNav.unitaryValue}`,
+      `(max allowed: ${maxDrop}%) reference=${referenceValue} post=${postNav.unitaryValue}`,
     );
     return {
       allowed: false,
@@ -324,7 +362,7 @@ export async function checkNavImpact(
       dropPct: dropFromRefPct.toFixed(2),
       baselineUnitaryValue: baselineUnitaryValue?.toString(),
       reason: `Trade would reduce pool unit price by ${dropFromRefPct.toFixed(2)}% ` +
-        `(max allowed: ${maxDropPct}%). This protects the pool from excessive value impact.`,
+        `(max allowed: ${maxDrop}%). This protects the pool from excessive value impact.`,
     };
   }
 
@@ -340,7 +378,7 @@ export async function checkNavImpact(
   }
 
   console.log(
-    `[NavShield] ✓ ALLOWED: NAV drop ${dropFromRefPct.toFixed(2)}% within ${maxDropPct}% limit`,
+    `[NavShield] ✓ ALLOWED: NAV drop ${dropFromRefPct.toFixed(2)}% within ${maxDrop}% limit`,
   );
 
   return {

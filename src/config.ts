@@ -87,6 +87,7 @@ export function resolveChainId(chainArg: string): number {
 const ALCHEMY_NETWORK: Record<number, string> = {
   1: "eth-mainnet",
   10: "opt-mainnet",
+  56: "bnb-mainnet",
   130: "unichain-mainnet",
   137: "polygon-mainnet",
   8453: "base-mainnet",
@@ -178,7 +179,7 @@ export const TOKEN_MAP: Record<number, Record<string, `0x${string}`>> = {
     ARB: "0x912CE59144191C1204E64559FE8253a0e49E6548",
     LINK: "0xf97f4df75e6c8e0ce7fec36ad7c4e12f3a1c33d8",
     UNI: "0xFa7F8980b0f1E64A2062791cc3b0871572f1F7f0",
-    XAUT: "0x7624cccCc59361D583F28BEC40D37e7771def5D",
+    XAUT: "0x40461291347e1eCbb09499F3371D3f17f10d7159",
     GRG: "0x7F4638A58C0615037deCc86f1daE60E55fE92874",
   },
   11155111: {

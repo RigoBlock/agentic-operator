@@ -285,17 +285,19 @@ function bumpFees(fees: FeeEstimate, chainId: number): FeeEstimate {
 /**
  * Execute a transaction via the agent wallet.
  *
- * The agent sends the transaction directly to the vault contract.
- * The vault validates the agent is authorized via its delegation mapping.
+ * This is the ONLY public function that broadcasts transactions from the agent
+ * wallet. ALL delegated transactions go through here — there is no alternative
+ * code path. The NAV shield runs unconditionally before broadcast; it cannot
+ * be skipped, disabled, or bypassed.
  *
- * Safety checks:
+ * Safety checks (all mandatory, in order):
  * 1. Delegation config exists and is enabled
- * 2. Transaction target is the delegated vault
- * 3. Function selector is in the allowed set
- * 4. Agent wallet exists and matches config
- * 5. Transaction simulation passes (eth_call)
- * 6. Agent has sufficient ETH for gas
- * 7. Gas fees are within hard caps
+ * 2. Per-chain delegation state verified
+ * 3. Transaction target == vault address (no cross-contract calls)
+ * 4. Function selector in allowed whitelist
+ * 5. Agent wallet loaded and matches config
+ * 6. **NAV SHIELD** — simulates trade impact on vault unit price (MANDATORY)
+ * 7. Transaction broadcast (sponsored or direct) with gas caps
  */
 export async function executeViaDelegation(
   env: Env,
@@ -364,9 +366,11 @@ export async function executeViaDelegation(
     );
   }
 
-  // 6b. NAV Shield — prevent trades that crash the pool's unit price
-  // Runs BEFORE execution (both sponsored & direct paths).
-  // Simulates a multicall([swap, getNavDataView]) to measure post-swap NAV impact.
+  // ══════════════════════════════════════════════════════════════════════
+  // ██ NAV SHIELD — MANDATORY (cannot be skipped, disabled, or bypassed) ██
+  // ══════════════════════════════════════════════════════════════════════
+  // Simulates multicall([tx, getNavDataView]) as the OPERATOR (vault owner).
+  // If NAV drops > threshold → transaction BLOCKED, never broadcast.
   //
   // IMPORTANT: Simulation uses the OPERATOR address (vault owner), not the agent.
   // Reason: `multicall` is intentionally NOT in the agent's delegated selectors
@@ -374,6 +378,18 @@ export async function executeViaDelegation(
   // The operator is the vault owner, always authorized for any selector, so the
   // multicall simulation succeeds. The actual trade is still sent by the agent
   // wallet using only its whitelisted selectors (execute, modifyLiquidities, etc.).
+  //
+  // Bridge operations (depositV3) use a higher threshold: assets leave the source
+  // chain and arrive on the destination chain, so source-chain NAV WILL drop by
+  // the transfer amount. The on-chain contract independently enforces its own
+  // navToleranceBps and MINIMUM_SUPPLY_RATIO (12.5% minimum effective supply).
+  const txSelector = (tx.data as Hex).slice(0, 10).toLowerCase();
+  const isBridge = txSelector === ALLOWED_VAULT_SELECTORS.depositV3.toLowerCase();
+  const navMaxDropPct = isBridge ? 87n : undefined; // undefined = default 10%
+  if (isBridge) {
+    console.log(`[executeViaDelegation] Bridge operation detected — using 87% NAV threshold`);
+  }
+
   const navResult = await checkNavImpact(
     tx.to as Address,
     tx.data as Hex,
@@ -382,6 +398,7 @@ export async function executeViaDelegation(
     env.ALCHEMY_API_KEY,
     config.operatorAddress,
     env.KV,
+    navMaxDropPct,
   );
 
   // Route based on what the NAV shield actually found

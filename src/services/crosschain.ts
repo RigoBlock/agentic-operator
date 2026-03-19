@@ -18,9 +18,10 @@
  *
  * ## Decimals
  * Token decimals vary across chains (BSC USDC/USDT are 18 vs 6 elsewhere).
- * All amounts are normalised through `applyBscDecimalConversion` before
- * hitting the Across API, and converted back for display.  The Across API
- * itself also validates amounts.
+ * Amounts are sent to the Across API in the input token's native decimals
+ * with `allowUnmatchedDecimals=true` for cross-decimal routes. The Across
+ * API returns outputAmount in output token decimals. The on-chain AIntents
+ * adapter handles rebasing internally (CrosschainLib._rebaseOutputAmount).
  *
  * @see https://github.com/RigoBlock/v3-contracts/blob/master/contracts/protocol/extensions/adapters/AIntents.sol
  */
@@ -42,7 +43,6 @@ import {
   CROSSCHAIN_TOKENS,
   findBridgeableToken,
   getOutputToken,
-  applyBscDecimalConversion,
   getAcrossHandler,
   type BridgeableToken,
   type BridgeableTokenType,
@@ -61,6 +61,17 @@ const DEFAULT_FILL_DEADLINE_SECS = 6 * 60 * 60; // 21 600
 
 /** Default NAV tolerance for Sync ops (100 bps = 1%) */
 const DEFAULT_NAV_TOLERANCE_BPS = 100;
+
+/** NAV tolerance for Transfer ops (8700 bps = 87%).
+ *  On-chain MINIMUM_SUPPLY_RATIO = 8 → effective supply must stay ≥ totalSupply/8
+ *  → max bridgeable = 87.5% of total. We use 8700 bps (87%) with margin. */
+const TRANSFER_NAV_TOLERANCE_BPS = 8700;
+
+/** Max bridgeable fraction of vault balance (7/8 = 87.5%).
+ *  On-chain NavImpactLib.MINIMUM_SUPPLY_RATIO = 8 means effective supply
+ *  must be ≥ totalSupply / 8 after bridging. */
+const MAX_BRIDGE_FRACTION_NUM = 7n;
+const MAX_BRIDGE_FRACTION_DEN = 8n;
 
 /** Across suggested-fees API base URL */
 const ACROSS_API = "https://app.across.to/api/suggested-fees";
@@ -96,6 +107,8 @@ export interface AcrossFeeQuote {
   spokePoolAddress: Address;
   /** Whether the amount is too low for Across */
   isAmountTooLow: boolean;
+  /** Output amount in output token's native decimals (from Across API) */
+  outputAmountRaw: bigint;
 }
 
 export interface CrosschainQuote {
@@ -118,10 +131,12 @@ export interface CrosschainQuote {
 export interface ChainNavSnapshot {
   chainId: number;
   chainName: string;
-  /** NAV per pool token (18 decimals) — 0n if pool doesn't exist on this chain */
+  /** NAV per pool token (in base token decimals) — 0n if pool doesn't exist on this chain */
   unitaryValue: bigint;
   /** Total pool value in base token units */
   totalValue: bigint;
+  /** Total pool token supply (18 decimals) */
+  totalSupply: bigint;
   /** Pool base token address on this chain */
   baseToken: Address;
   /** Pool base token symbol (ETH, WETH, POL, etc.) */
@@ -155,8 +170,9 @@ export interface AggregatedNav {
 }
 
 /** A single bridge operation recommended by the rebalancer */
-/** Maximum NAV impact per bridge operation (matches NAV shield) */
-const MAX_BRIDGE_NAV_IMPACT_PCT = 9n; // stay under the 10% shield
+/** Maximum bridge fraction of a chain's value (7/8 = 87.5%).
+ *  Matches on-chain NavImpactLib.MINIMUM_SUPPLY_RATIO = 8. */
+const MAX_BRIDGE_NAV_IMPACT_PCT = 87n;
 
 export interface BridgeRecommendation {
   srcChainId: number;
@@ -253,7 +269,7 @@ export async function getAggregatedNav(
   }
 
   const missingDelegationChains = snapshots
-    .filter((s) => !s.delegationActive && !s.error && s.totalValue > 0n)
+    .filter((s) => !s.delegationActive && !s.error && (s.totalValue > 0n || s.totalSupply > 0n))
     .map((s) => s.chainId);
 
   return {
@@ -275,33 +291,24 @@ async function readChainSnapshot(
 ): Promise<ChainNavSnapshot> {
   const name = chainName(chainId);
   try {
-    // Read pool data + NAV + all bridgeable token balances in parallel
+    // Read pool data + NAV + total supply + all bridgeable token balances in parallel
     const bridgeableTokens = CROSSCHAIN_TOKENS[chainId] || [];
 
-    const [poolData, navData, ...balances] = await Promise.all([
+    const [poolData, navData, totalSupplyRaw, ...balances] = await Promise.all([
       getPoolData(chainId, vaultAddress, alchemyKey).catch(() => null),
       getNavData(chainId, vaultAddress, alchemyKey).catch(() => null),
+      getClient(chainId, alchemyKey).readContract({
+        address: vaultAddress,
+        abi: [{ name: "totalSupply", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] }] as const,
+        functionName: "totalSupply",
+      }).catch(() => 0n),
       ...bridgeableTokens.map((token) =>
         getVaultTokenBalance(chainId, vaultAddress, token.address, alchemyKey)
           .catch(() => ({ balance: 0n, decimals: token.decimals, symbol: token.symbol })),
       ),
     ]);
 
-    // If pool doesn't exist on this chain, return a minimal snapshot
-    if (!poolData) {
-      return {
-        chainId,
-        chainName: name,
-        unitaryValue: 0n,
-        totalValue: 0n,
-        baseToken: "0x0000000000000000000000000000000000000000" as Address,
-        baseTokenSymbol: "N/A",
-        baseTokenDecimals: 18,
-        tokenBalances: [],
-        delegationActive,
-      };
-    }
-
+    // Build token balances regardless of whether pool data loaded
     const tokenBalances: TokenBalance[] = bridgeableTokens.map((token, i) => {
       const bal = balances[i];
       return {
@@ -310,6 +317,40 @@ async function readChainSnapshot(
         balanceFormatted: formatUnits(bal.balance, token.decimals),
       };
     }).filter((b) => b.balance > 0n);
+
+    // If pool data unavailable (shouldn't happen with V4's getPool()), use
+    // individual calls for decimals and match base token from bridgeable tokens.
+    if (!poolData) {
+      let fallbackDecimals = 18;
+      try {
+        const dec = await getClient(chainId, alchemyKey).readContract({
+          address: vaultAddress,
+          abi: [{ name: "decimals", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] }] as const,
+          functionName: "decimals",
+        });
+        fallbackDecimals = Number(dec);
+      } catch { /* keep default 18 */ }
+
+      // Match by decimals against bridgeable tokens — prefer stablecoins
+      let fallbackSymbol = "UNKNOWN";
+      const matchingTokens = bridgeableTokens.filter((t) => t.decimals === fallbackDecimals);
+      if (matchingTokens.length > 0) {
+        fallbackSymbol = matchingTokens[0].symbol;
+      }
+
+      return {
+        chainId,
+        chainName: name,
+        unitaryValue: navData?.unitaryValue ?? 0n,
+        totalValue: navData?.totalValue ?? 0n,
+        totalSupply: totalSupplyRaw as bigint,
+        baseToken: "0x0000000000000000000000000000000000000000" as Address,
+        baseTokenSymbol: (navData || tokenBalances.length > 0) ? fallbackSymbol : "N/A",
+        baseTokenDecimals: fallbackDecimals,
+        tokenBalances,
+        delegationActive,
+      };
+    }
 
     // Determine base token symbol — different on each chain
     let baseTokenSymbol = "ETH";
@@ -329,6 +370,7 @@ async function readChainSnapshot(
       chainName: name,
       unitaryValue: navData?.unitaryValue ?? 0n,
       totalValue: navData?.totalValue ?? 0n,
+      totalSupply: totalSupplyRaw as bigint,
       baseToken: poolData.baseToken,
       baseTokenSymbol,
       baseTokenDecimals: poolData.decimals,
@@ -341,6 +383,7 @@ async function readChainSnapshot(
       chainName: name,
       unitaryValue: 0n,
       totalValue: 0n,
+      totalSupply: 0n,
       baseToken: "0x0000000000000000000000000000000000000000" as Address,
       baseTokenSymbol: "N/A",
       baseTokenDecimals: 18,
@@ -489,6 +532,28 @@ export async function buildRebalancePlan(params: {
 // ── Across fee quoting ────────────────────────────────────────────────
 
 /**
+ * Fixed USD-equivalent deduction from outputAmount per destination chain.
+ *
+ * The Across solver must execute handleV3AcrossMessage on the destination vault,
+ * which runs NAV calculation + donate — significantly more gas than a plain
+ * token transfer. Across doesn't know about this overhead (it can't simulate
+ * the AIntents adapter), so we deduct it manually from the minimum output
+ * the solver must deliver. Without this, solvers won't fill profitably.
+ *
+ * For stablecoins (USDC/USDT), 1 USD ≈ 1 token unit — deduction is exact.
+ * For WETH/WBTC, the overhead is negligible relative to token value — no deduction.
+ */
+const AINTENTS_GAS_OVERHEAD_USD: Record<number, number> = {
+  1:     0.50,   // Ethereum mainnet — high gas costs
+  56:    0.15,   // BSC
+  137:   0.15,   // Polygon
+  10:    0.05,   // Optimism
+  8453:  0.05,   // Base
+  42161: 0.05,   // Arbitrum
+  130:   0.05,   // Unichain
+};
+
+/**
  * Fetch suggested fees from the Across API.
  *
  * Uses the `app.across.to/api/suggested-fees` endpoint with:
@@ -500,6 +565,8 @@ export async function getAcrossSuggestedFees(
   inputToken: Address,
   outputToken: Address,
   amount: bigint,
+  inputDecimals: number,
+  outputDecimals: number,
 ): Promise<AcrossFeeQuote> {
   const url = new URL(ACROSS_API);
   url.searchParams.set("inputToken", inputToken);
@@ -508,6 +575,12 @@ export async function getAcrossSuggestedFees(
   url.searchParams.set("destinationChainId", dstChainId.toString());
   url.searchParams.set("amount", amount.toString());
   url.searchParams.set("skipAmountLimit", "true");
+
+  // BSC USDC/USDT are 18 decimals while other chains use 6.
+  // The Across API requires this flag for cross-decimal routes.
+  if (inputDecimals !== outputDecimals) {
+    url.searchParams.set("allowUnmatchedDecimals", "true");
+  }
 
   const resp = await fetch(url.toString());
   if (!resp.ok) {
@@ -525,6 +598,7 @@ export async function getAcrossSuggestedFees(
     exclusivityDeadline: number;
     spokePoolAddress: string;
     isAmountTooLow: boolean;
+    outputAmount: string;
   };
 
   return {
@@ -536,6 +610,7 @@ export async function getAcrossSuggestedFees(
     exclusivityDeadline: data.exclusivityDeadline,
     spokePoolAddress: data.spokePoolAddress as Address,
     isAmountTooLow: data.isAmountTooLow,
+    outputAmountRaw: BigInt(data.outputAmount),
   };
 }
 
@@ -544,8 +619,17 @@ export async function getAcrossSuggestedFees(
 /**
  * Build a complete cross-chain quote (fee estimation, input/output amounts).
  *
- * Handles decimal normalisation between chains (e.g. BSC USDC is 18 decimals,
- * all others are 6). The Across API expects normalised amounts.
+ * The Across API expects amounts in the input token's native decimals and
+ * returns outputAmount in the output token's native decimals. For BSC
+ * USDC/USDT (18 decimals vs 6 on other chains), the `allowUnmatchedDecimals`
+ * flag is required.
+ *
+ * The on-chain AIntents adapter handles decimal rebasing internally
+ * (CrosschainLib._rebaseOutputAmount) — we pass amounts as-is.
+ *
+ * A fixed USD-equivalent is deducted from the Across outputAmount to cover
+ * the AIntents handleV3AcrossMessage overhead on the destination chain
+ * (NAV calculation + donate call). See AINTENTS_GAS_OVERHEAD_USD.
  */
 export async function getCrosschainQuote(
   srcChainId: number,
@@ -571,24 +655,18 @@ export async function getCrosschainQuote(
     );
   }
 
-  // Parse amount using source token decimals
+  // Parse amount in input token's native decimals (e.g. 18 for BSC USDT)
   const inputAmountRaw = parseUnits(amount, inputToken.decimals);
 
-  // For Across API: normalise amount (BSC tokens need decimal conversion)
-  // Across expects amounts in the canonical decimals (6 for USDC, 18 for WETH, etc.)
-  const acrossAmount = applyBscDecimalConversion(
-    inputToken.address,
-    outputToken.address,
-    inputAmountRaw,
-  );
-
-  // Fetch suggested fees
+  // Fetch suggested fees — amount in input token native decimals
   const fee = await getAcrossSuggestedFees(
     srcChainId,
     dstChainId,
     inputToken.address,
     outputToken.address,
-    acrossAmount,
+    inputAmountRaw,
+    inputToken.decimals,
+    outputToken.decimals,
   );
 
   if (fee.isAmountTooLow) {
@@ -598,9 +676,9 @@ export async function getCrosschainQuote(
     );
   }
 
-  // Validate fee doesn't exceed 2% (matches AIntents MAX_BRIDGE_FEE_BPS)
+  // Fee is in input token decimals — validate against MAX_BRIDGE_FEE_BPS
   const feeBps = Number(
-    (fee.totalRelayFeeRaw * 10_000n) / acrossAmount,
+    (fee.totalRelayFeeRaw * 10_000n) / inputAmountRaw,
   );
   if (feeBps > MAX_BRIDGE_FEE_BPS) {
     throw new Error(
@@ -609,15 +687,20 @@ export async function getCrosschainQuote(
     );
   }
 
-  // OutputAmount = inputAmount - fee (in Across-normalised units)
-  const outputAmountRaw = acrossAmount - fee.totalRelayFeeRaw;
-
-  // Convert back to destination decimals if BSC is involved
-  const displayOutputRaw = applyBscDecimalConversion(
-    outputToken.address,
-    inputToken.address,
-    outputAmountRaw,
-  );
+  // Across API returns outputAmount in output token's native decimals.
+  // Deduct the AIntents gas overhead (handleV3AcrossMessage: NAV calc + donate)
+  // that the solver must pay on the destination chain. Across doesn't model
+  // the AIntents adapter, so without this the outputAmount is too high and
+  // solvers won't fill profitably.
+  // Applied to stablecoins only (USDC/USDT ≈ 1 USD per unit).
+  let outputAmountRaw = fee.outputAmountRaw;
+  if (outputToken.type === "USDC" || outputToken.type === "USDT") {
+    const overheadUsd = AINTENTS_GAS_OVERHEAD_USD[dstChainId] ?? 0.05;
+    const overheadRaw = parseUnits(overheadUsd.toFixed(6), outputToken.decimals);
+    if (outputAmountRaw > overheadRaw) {
+      outputAmountRaw = outputAmountRaw - overheadRaw;
+    }
+  }
 
   const feePctNum = (Number(fee.totalRelayFeePct) / 1e18) * 100;
 
@@ -628,8 +711,8 @@ export async function getCrosschainQuote(
     outputToken,
     inputAmount: amount,
     inputAmountRaw,
-    outputAmount: formatUnits(displayOutputRaw, outputToken.decimals),
-    outputAmountRaw: outputAmountRaw,
+    outputAmount: formatUnits(outputAmountRaw, outputToken.decimals),
+    outputAmountRaw,
     fee,
     feePct: `${feePctNum.toFixed(4)}%`,
     estimatedTime: fee.estimatedFillTimeSec < 60
@@ -759,7 +842,8 @@ export async function buildCrosschainTransfer(params: {
     throw new Error(`${params.tokenSymbol} is not bridgeable on chain ${params.srcChainId}.`);
   }
 
-  const inputAmountRaw = parseUnits(params.amount, inputToken.decimals);
+  let inputAmountRaw = parseUnits(params.amount, inputToken.decimals);
+  let bridgeAmount = params.amount; // may be capped below
 
   // When useNativeEth is set (only valid for WETH), check native ETH balance
   // instead of WETH balance — the vault will wrap ETH→WETH automatically
@@ -780,6 +864,21 @@ export async function buildCrosschainTransfer(params: {
         `Available: ${available}, requested: ${params.amount}.`,
       );
     }
+    // The on-chain MINIMUM_SUPPLY_RATIO = 8 check only applies when
+    // totalSupply > 0 (virtual supply cannot exceed 87.5% of total supply).
+    // When totalSupply = 0, the ratio check is irrelevant — no cap needed.
+    const totalSupply = await getClient(params.srcChainId, params.alchemyKey).readContract({
+      address: params.vaultAddress,
+      abi: [{ name: "totalSupply", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] }] as const,
+      functionName: "totalSupply",
+    }).catch(() => 0n) as bigint;
+    if (totalSupply > 0n) {
+      const maxBridge = (ethBalance * MAX_BRIDGE_FRACTION_NUM) / MAX_BRIDGE_FRACTION_DEN;
+      if (inputAmountRaw > maxBridge) {
+        inputAmountRaw = maxBridge;
+        bridgeAmount = formatUnits(inputAmountRaw, 18);
+      }
+    }
   } else {
     const { balance } = await getVaultTokenBalance(
       params.srcChainId,
@@ -794,6 +893,19 @@ export async function buildCrosschainTransfer(params: {
         `Available: ${available}, requested: ${params.amount}.`,
       );
     }
+    // Only cap when totalSupply > 0 — see comment above
+    const totalSupply = await getClient(params.srcChainId, params.alchemyKey).readContract({
+      address: params.vaultAddress,
+      abi: [{ name: "totalSupply", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] }] as const,
+      functionName: "totalSupply",
+    }).catch(() => 0n) as bigint;
+    if (totalSupply > 0n) {
+      const maxBridge = (balance * MAX_BRIDGE_FRACTION_NUM) / MAX_BRIDGE_FRACTION_DEN;
+      if (inputAmountRaw > maxBridge) {
+        inputAmountRaw = maxBridge;
+        bridgeAmount = formatUnits(inputAmountRaw, inputToken.decimals);
+      }
+    }
   }
 
   // Get quote
@@ -801,7 +913,7 @@ export async function buildCrosschainTransfer(params: {
     params.srcChainId,
     params.dstChainId,
     params.tokenSymbol,
-    params.amount,
+    bridgeAmount,
   );
 
   // Build calldata — include sourceNativeAmount when using native ETH
@@ -816,6 +928,7 @@ export async function buildCrosschainTransfer(params: {
     exclusiveRelayer: quote.fee.exclusiveRelayer,
     exclusivityDeadline: quote.fee.exclusivityDeadline,
     opType: OpType.Transfer,
+    navToleranceBps: TRANSFER_NAV_TOLERANCE_BPS,
     sourceNativeAmount: useNative ? inputAmountRaw : undefined,
     shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
   });
@@ -823,8 +936,9 @@ export async function buildCrosschainTransfer(params: {
   const srcName = chainName(params.srcChainId);
   const dstName = chainName(params.dstChainId);
   const description =
-    `Bridge ${params.amount} ${quote.inputToken.symbol} from ${srcName} → ${dstName}` +
-    ` (receive ~${quote.outputAmount} ${quote.outputToken.symbol}, fee ${quote.feePct}, ${quote.estimatedTime})`;
+    `Bridge ${bridgeAmount} ${quote.inputToken.symbol} from ${srcName} → ${dstName}` +
+    ` (receive ~${quote.outputAmount} ${quote.outputToken.symbol}, fee ${quote.feePct}, ${quote.estimatedTime})` +
+    (bridgeAmount !== params.amount ? ` [capped to 87.5% of supply — on-chain MINIMUM_SUPPLY_RATIO]` : "");
 
   return { quote, calldata, description };
 }

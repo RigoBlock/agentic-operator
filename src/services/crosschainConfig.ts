@@ -138,32 +138,6 @@ export function getOutputToken(
 }
 
 /**
- * Apply BSC decimal conversion (BSC USDC/USDT are 18 decimals, others are 6).
- */
-export function applyBscDecimalConversion(
-  inputTokenAddress: Address,
-  outputTokenAddress: Address,
-  amount: bigint,
-): bigint {
-  const BSC_USDC = "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d".toLowerCase();
-  const BSC_USDT = "0x55d398326f99059fF775485246999027B3197955".toLowerCase();
-  const inputLower = inputTokenAddress.toLowerCase();
-  const outputLower = outputTokenAddress.toLowerCase();
-
-  // From BSC (18 decimals) → normalize to 6 decimals
-  if (inputLower === BSC_USDC || inputLower === BSC_USDT) {
-    return amount / 1_000_000_000_000n;
-  }
-
-  // To BSC (6 decimals) → convert to 18 decimals
-  if (outputLower === BSC_USDC || outputLower === BSC_USDT) {
-    return amount * 1_000_000_000_000n;
-  }
-
-  return amount;
-}
-
-/**
  * List chains that support a given token type.
  */
 export function chainsForTokenType(tokenType: BridgeableTokenType): number[] {
