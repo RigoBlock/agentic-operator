@@ -536,15 +536,25 @@ export async function buildRebalancePlan(params: {
  *
  * The Across solver must execute handleV3AcrossMessage on the destination vault,
  * which runs NAV calculation + donate — significantly more gas than a plain
- * token transfer. Across doesn't know about this overhead (it can't simulate
- * the AIntents adapter), so we deduct it manually from the minimum output
- * the solver must deliver. Without this, solvers won't fill profitably.
+ * token transfer (~300-500k gas). Across doesn't know about this overhead
+ * (it can't simulate the AIntents adapter), so we deduct it manually from
+ * the minimum output the solver must deliver. Without this, solvers won't
+ * fill profitably.
  *
- * For stablecoins (USDC/USDT), 1 USD ≈ 1 token unit — deduction is exact.
- * For WETH/WBTC, the overhead is negligible relative to token value — no deduction.
+ * These values are always applied (not a cap). For non-stablecoin tokens
+ * (WETH/WBTC), the USD overhead is converted to token units using a live
+ * market price fetched at quote time via fetchTokenPriceUsd().
+ *
+ * TODO: Replace static USD overheads with dynamic gas cost estimation.
+ * We should estimate actual destination gas cost as:
+ *   gasUsed * currentGasPrice * nativeTokenPrice
+ * This would make the overhead resilient to gas price and token price
+ * changes (e.g. if ETH price 10x, USD gas costs also 10x but our
+ * static values won't reflect that). Requires fetching live gas prices
+ * per chain + native token prices.
  */
 const AINTENTS_GAS_OVERHEAD_USD: Record<number, number> = {
-  1:     0.50,   // Ethereum mainnet — high gas costs
+  1:     2.00,   // Ethereum mainnet — ~300-500k gas at low gwei
   56:    0.15,   // BSC
   137:   0.15,   // Polygon
   10:    0.05,   // Optimism
@@ -552,6 +562,41 @@ const AINTENTS_GAS_OVERHEAD_USD: Record<number, number> = {
   42161: 0.05,   // Arbitrum
   130:   0.05,   // Unichain
 };
+
+/** CoinGecko API IDs for live price lookups */
+const COINGECKO_IDS: Record<string, string> = {
+  WETH: "ethereum",
+  WBTC: "bitcoin",
+};
+
+/**
+ * Fetch live USD price for a bridgeable token type.
+ * Stablecoins return 1 without a network call.
+ * For WETH/WBTC, queries the CoinGecko Simple Price API (free, no key).
+ * Falls back to a conservative floor if the API is unavailable.
+ */
+async function fetchTokenPriceUsd(tokenType: BridgeableTokenType): Promise<number> {
+  if (tokenType === "USDC" || tokenType === "USDT") return 1;
+
+  const id = COINGECKO_IDS[tokenType];
+  if (!id) return 1;
+
+  try {
+    const resp = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`,
+    );
+    if (!resp.ok) throw new Error(`CoinGecko HTTP ${resp.status}`);
+    const data = (await resp.json()) as Record<string, { usd?: number }>;
+    const price = data[id]?.usd;
+    if (price && price > 0) return price;
+    throw new Error("No price in response");
+  } catch {
+    // Conservative floor: intentionally LOW so we deduct MORE tokens as
+    // overhead, giving the solver better margin. Safe for fills but the
+    // user pays slightly more than necessary.
+    return tokenType === "WBTC" ? 30000 : 1000;
+  }
+}
 
 /**
  * Fetch suggested fees from the Across API.
@@ -658,16 +703,19 @@ export async function getCrosschainQuote(
   // Parse amount in input token's native decimals (e.g. 18 for BSC USDT)
   const inputAmountRaw = parseUnits(amount, inputToken.decimals);
 
-  // Fetch suggested fees — amount in input token native decimals
-  const fee = await getAcrossSuggestedFees(
-    srcChainId,
-    dstChainId,
-    inputToken.address,
-    outputToken.address,
-    inputAmountRaw,
-    inputToken.decimals,
-    outputToken.decimals,
-  );
+  // Fetch suggested fees and live token price in parallel (zero added latency)
+  const [fee, tokenPrice] = await Promise.all([
+    getAcrossSuggestedFees(
+      srcChainId,
+      dstChainId,
+      inputToken.address,
+      outputToken.address,
+      inputAmountRaw,
+      inputToken.decimals,
+      outputToken.decimals,
+    ),
+    fetchTokenPriceUsd(outputToken.type),
+  ]);
 
   if (fee.isAmountTooLow) {
     throw new Error(
@@ -692,14 +740,15 @@ export async function getCrosschainQuote(
   // that the solver must pay on the destination chain. Across doesn't model
   // the AIntents adapter, so without this the outputAmount is too high and
   // solvers won't fill profitably.
-  // Applied to stablecoins only (USDC/USDT ≈ 1 USD per unit).
   let outputAmountRaw = fee.outputAmountRaw;
-  if (outputToken.type === "USDC" || outputToken.type === "USDT") {
-    const overheadUsd = AINTENTS_GAS_OVERHEAD_USD[dstChainId] ?? 0.05;
-    const overheadRaw = parseUnits(overheadUsd.toFixed(6), outputToken.decimals);
-    if (outputAmountRaw > overheadRaw) {
-      outputAmountRaw = outputAmountRaw - overheadRaw;
-    }
+  const overheadUsd = AINTENTS_GAS_OVERHEAD_USD[dstChainId] ?? 0.05;
+  const overheadInToken = overheadUsd / tokenPrice;
+  const overheadRaw = parseUnits(
+    overheadInToken.toFixed(outputToken.decimals),
+    outputToken.decimals,
+  );
+  if (outputAmountRaw > overheadRaw) {
+    outputAmountRaw = outputAmountRaw - overheadRaw;
   }
 
   const feePctNum = (Number(fee.totalRelayFeePct) / 1e18) * 100;

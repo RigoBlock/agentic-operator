@@ -52,6 +52,8 @@ const REQUIRED_TOOLS = [
   "create_strategy",
   "remove_strategy",
   "list_strategies",
+  // Bridge verification
+  "verify_bridge_arrival",
 ];
 
 describe("TOOL_DEFINITIONS", () => {

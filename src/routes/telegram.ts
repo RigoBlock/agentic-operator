@@ -485,6 +485,32 @@ async function handleMessage(
   // Append user message
   conv.messages.push({ role: "user", content: text });
 
+  // Check for pending strategy recommendation — inject context if user is replying to one
+  const recKey = `tg-strategy-rec:${userId}`;
+  const pendingRec = await env.KV.get(recKey);
+  if (pendingRec) {
+    const rec = JSON.parse(pendingRec) as {
+      strategyId: number;
+      instruction: string;
+      recommendation: string;
+    };
+    // Check if the user's message looks like they want to act on the recommendation
+    const actPatterns = /\b(act|execute|do it|go|yes|proceed|confirm|ok|sure|let'?s go|approved?)\b/i;
+    if (actPatterns.test(text)) {
+      // Inject the recommendation as prior context so the LLM knows what to execute
+      conv.messages.splice(conv.messages.length - 1, 0,
+        { role: "user", content: `[STRATEGY #${rec.strategyId}] ${rec.instruction}` },
+        { role: "assistant", content: rec.recommendation },
+      );
+      // Replace user's vague reply with a clear instruction
+      conv.messages[conv.messages.length - 1] = {
+        role: "user",
+        content: `Execute the strategy recommendation above. Build and execute the transactions.`,
+      };
+      await env.KV.delete(recKey);
+    }
+  }
+
   // Check if delegation is active on current chain OR any chain
   // This allows multi-chain swaps where target chains have delegation
   const delegationOnCurrentChain = await isDelegationActive(env.KV, vault.address, vault.chainId);
@@ -712,6 +738,97 @@ async function handleCallbackQuery(
       chat: { id: chatId },
       text,
     });
+    return;
+  }
+
+  // ── Strategy recommendation: act on it ──
+  if (data.startsWith("strategy-act:")) {
+    await answerCallbackQuery(token, query.id, "Processing…");
+
+    const recKey = `tg-strategy-rec:${userId}`;
+    const recRaw = await env.KV.get(recKey);
+    if (!recRaw) {
+      await editMessageText(token, chatId, messageId,
+        "⏰ This recommendation has expired. Wait for the next strategy check.");
+      return;
+    }
+    await env.KV.delete(recKey);
+
+    const rec = JSON.parse(recRaw) as {
+      strategyId: number;
+      instruction: string;
+      recommendation: string;
+      vaultAddress: string;
+      chainId: number;
+      operatorAddress: string;
+    };
+
+    // Update the message to show we're processing
+    await editMessageText(token, chatId, messageId,
+      `⏳ Executing strategy #${rec.strategyId} recommendation…`);
+
+    // Inject the recommendation as conversation context so the LLM knows what to do
+    const syntheticMessages: ChatMessage[] = [
+      {
+        role: "user",
+        content:
+          `[STRATEGY #${rec.strategyId}] ${rec.instruction}`,
+      },
+      {
+        role: "assistant",
+        content: rec.recommendation,
+      },
+      {
+        role: "user",
+        content: "Execute the recommendation above. Build and execute the transactions.",
+      },
+    ];
+
+    const ctx: RequestContext = {
+      vaultAddress: rec.vaultAddress as Address,
+      chainId: rec.chainId,
+      operatorAddress: (rec.operatorAddress) as Address,
+      executionMode: "delegated",
+    };
+
+    try {
+      const response = await processChat(env, syntheticMessages, ctx);
+
+      const txList = response.transactions && response.transactions.length > 0
+        ? response.transactions
+        : response.transaction
+          ? [response.transaction]
+          : [];
+
+      if (txList.length > 0) {
+        // Execute immediately — user already clicked "Act on this"
+        const outcomes = await executeTxList(env, txList, rec.vaultAddress);
+        const resultText = formatTelegramOutcomes(outcomes);
+        const allSuccess = outcomes.every(o => o.result?.confirmed && !o.result?.reverted);
+        const icon = allSuccess ? "✅" : "⚠️";
+
+        await editMessageText(token, chatId, messageId,
+          `${icon} Strategy #${rec.strategyId}\n\n${resultText}`);
+      } else {
+        // LLM didn't produce transactions — show its analysis
+        const replyText = response.reply || "No action needed.";
+        await editMessageText(token, chatId, messageId,
+          `📋 Strategy #${rec.strategyId}\n\n${escapeHtml(replyText.slice(0, 3900))}`);
+      }
+    } catch (err) {
+      const safeMsg = sanitizeError(err instanceof Error ? err.message : String(err));
+      await editMessageText(token, chatId, messageId,
+        `⚠️ Strategy execution failed: ${escapeHtml(safeMsg.slice(0, 200))}`);
+    }
+    return;
+  }
+
+  // ── Strategy recommendation: skip ──
+  if (data.startsWith("strategy-skip:")) {
+    await answerCallbackQuery(token, query.id, "Skipped");
+    await env.KV.delete(`tg-strategy-rec:${userId}`);
+    await editMessageText(token, chatId, messageId,
+      "⏭️ Recommendation skipped.");
     return;
   }
 

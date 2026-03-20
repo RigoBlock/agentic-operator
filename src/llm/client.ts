@@ -2190,6 +2190,7 @@ async function executeToolCall(
         Math.round(Number(args.intervalMinutes) || 480),
       );
       const autoExecute = Boolean(args.autoExecute);
+      const maxExecutions = args.maxExecutions ? Math.max(1, Math.round(Number(args.maxExecutions))) : undefined;
 
       if (!ctx.operatorAddress) {
         throw new Error("Wallet not connected — cannot create strategy.");
@@ -2216,6 +2217,7 @@ async function executeToolCall(
         chainId: ctx.chainId,
         operatorAddress: ctx.operatorAddress,
         autoExecute,
+        maxExecutions,
       });
 
       const intervalStr = intervalMinutes >= 60
@@ -2226,12 +2228,17 @@ async function executeToolCall(
         ? `The agent will execute trades immediately — NAV shield (10% max loss) remains active.`
         : `You'll need to confirm via Telegram before any execution.`;
 
+      const execCountStr = maxExecutions
+        ? `• Executions: ${maxExecutions === 1 ? "one-shot (auto-removes after 1 execution)" : `up to ${maxExecutions} times (then auto-removes)`}\n`
+        : "";
+
       return {
         message:
           `✅ Strategy #${strategy.id} created!\n\n` +
           `• Instruction: "${instruction}"\n` +
           `• Check interval: every ${intervalStr}\n` +
           `• Mode: ${autoExecute ? "⚡ Autonomous (auto-execute)" : "🔔 Manual (confirmation required)"}\n` +
+          execCountStr +
           `• Notifications: via Telegram\n\n` +
           `${modeStr}`,
         suggestions: ["List strategies", "Create another strategy", "Remove strategy"],
@@ -2242,7 +2249,7 @@ async function executeToolCall(
       const id = Number(args.id);
 
       if (id === 0) {
-        const count = await removeAllStrategies(env.KV, ctx.vaultAddress);
+        const count = await removeAllStrategies(env.KV, ctx.vaultAddress, ctx.operatorAddress);
         return {
           message: count > 0
             ? `✅ Removed all ${count} strategies for this vault.`
@@ -2251,7 +2258,7 @@ async function executeToolCall(
         };
       }
 
-      const removed = await removeStrategy(env.KV, ctx.vaultAddress, id);
+      const removed = await removeStrategy(env.KV, ctx.vaultAddress, id, ctx.operatorAddress);
       return {
         message: removed
           ? `✅ Strategy #${id} removed.`

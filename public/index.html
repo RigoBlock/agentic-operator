@@ -22,64 +22,55 @@
 
     /* ── Header ─────────────────────────────────────────── */
     header {
-      padding: 12px 24px; border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 16px 32px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
     }
-    header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; }
-    .header-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    header h1 { font-size: 26px; font-weight: 600; white-space: nowrap; }
+    .header-actions { margin-left: auto; display: flex; align-items: center; gap: 13px; flex-wrap: wrap; }
     .btn-sm {
-      font-size: 12px; padding: 6px 12px; border-radius: 6px;
+      font-size: 19px; padding: 10px 19px; border-radius: 8px;
       border: 1px solid var(--border); background: var(--surface);
       color: var(--text); cursor: pointer; font-weight: 500;
       transition: background 0.15s, border-color 0.15s;
     }
     .btn-sm:hover { border-color: var(--accent); }
     .btn-sm.active { border-color: var(--success); color: var(--success); }
-    .addr { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px; color: var(--muted); }
+    .addr { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 18px; color: var(--muted); }
 
     /* ── Setup bar ──────────────────────────────────────── */
     #setup-bar {
-      padding: 12px 24px; border-bottom: 1px solid var(--border);
-      background: var(--surface); display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+      padding: 13px 26px; border-bottom: 1px solid var(--border);
+      background: var(--surface); display: flex; gap: 13px; align-items: center; flex-wrap: wrap;
     }
-    #setup-bar label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    #setup-bar label { font-size: 15px; color: var(--muted); white-space: nowrap; }
     #setup-bar input {
-      background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-      color: var(--text); padding: 6px 10px; font-size: 13px; outline: none;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+      color: var(--text); padding: 8px 13px; font-size: 17px; outline: none;
       font-family: 'SF Mono', 'Fira Code', monospace;
     }
     #setup-bar input:focus { border-color: var(--accent); }
-    #vault-input { width: 370px; max-width: 100%; }
+    #vault-input { width: 384px; max-width: 100%; }
     .chain-badge {
-      display: inline-flex; align-items: center; font-size: 12px;
-      padding: 5px 12px; border-radius: 6px;
+      display: inline-flex; align-items: center; font-size: 15px;
+      padding: 6px 15px; border-radius: 7px;
       background: rgba(88, 166, 255, 0.1); color: var(--accent);
       font-family: 'SF Mono', 'Fira Code', monospace;
       border: 1px solid rgba(88, 166, 255, 0.2);
     }
     .vault-info-badge {
-      font-size: 11px; padding: 3px 8px; border-radius: 4px;
+      font-size: 14px; padding: 4px 10px; border-radius: 5px;
       background: rgba(63,185,80,0.1); color: var(--success);
       font-family: 'SF Mono', 'Fira Code', monospace;
     }
     .vault-info-badge.error { background: rgba(248,81,73,0.1); color: var(--error); }
-    .dex-badge {
-      display: inline-flex; align-items: center; font-size: 12px;
-      padding: 5px 12px; border-radius: 6px;
-      background: rgba(210, 153, 34, 0.1); color: var(--warn);
-      font-family: 'SF Mono', 'Fira Code', monospace;
-      border: 1px solid rgba(210, 153, 34, 0.2);
-      transition: opacity 0.2s;
-    }
-    .dex-badge.hidden { display: none; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinner {
-      display: inline-block; width: 12px; height: 12px;
+      display: inline-block; width: 16px; height: 16px;
       border: 2px solid var(--border); border-top-color: var(--accent);
       border-radius: 50%; animation: spin 0.8s linear infinite;
     }
     .saved-vaults-btn {
-      font-size: 11px; padding: 4px 8px; border-radius: 4px;
+      font-size: 14px; padding: 5px 10px; border-radius: 5px;
       border: 1px solid var(--border); background: var(--bg);
       color: var(--muted); cursor: pointer;
     }
@@ -87,45 +78,45 @@
 
     /* ── Testnet toggle ──────────────────────────────────── */
     .testnet-toggle {
-      display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted);
+      display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted);
       cursor: pointer; user-select: none;
     }
     .testnet-toggle input { display: none; }
     .testnet-toggle .toggle-track {
-      width: 28px; height: 16px; background: var(--border); border-radius: 8px;
+      width: 48px; height: 28px; background: var(--border); border-radius: 14px;
       position: relative; transition: background 0.2s;
     }
     .testnet-toggle .toggle-track::after {
-      content: ''; width: 12px; height: 12px; background: var(--muted); border-radius: 50%;
-      position: absolute; top: 2px; left: 2px; transition: transform 0.2s, background 0.2s;
+      content: ''; width: 22px; height: 22px; background: var(--muted); border-radius: 50%;
+      position: absolute; top: 3px; left: 3px; transition: transform 0.2s, background 0.2s;
     }
     .testnet-toggle input:checked + .toggle-track {
       background: var(--warn);
     }
     .testnet-toggle input:checked + .toggle-track::after {
-      transform: translateX(12px); background: #000;
+      transform: translateX(20px); background: #000;
     }
 
     /* ── Chat ───────────────────────────────────────────── */
     #chat {
-      flex: 1; overflow-y: auto; padding: 24px;
-      display: flex; flex-direction: column; gap: 16px;
+      flex: 1; overflow-y: auto; padding: 32px;
+      display: flex; flex-direction: column; gap: 22px;
     }
     .msg {
-      max-width: 720px; padding: 12px 16px; border-radius: 12px;
-      line-height: 1.5; font-size: 14px; white-space: pre-wrap; word-break: break-word;
+      max-width: 960px; padding: 19px 26px; border-radius: 13px;
+      line-height: 1.5; font-size: 22px; white-space: pre-wrap; word-break: break-word;
     }
-    .msg.user { align-self: flex-end; background: var(--accent-dim); border-bottom-right-radius: 4px; }
-    .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
-    .msg.compact { width: fit-content; min-width: 220px; max-width: 340px; white-space: normal; box-sizing: border-box; }
-    .msg.system { align-self: center; color: var(--muted); font-size: 12px; background: none; padding: 2px 0; white-space: normal; }
+    .msg.user { align-self: flex-end; background: var(--accent-dim); border-bottom-right-radius: 5px; }
+    .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 5px; }
+    .msg.compact { width: fit-content; min-width: 288px; max-width: 480px; white-space: normal; box-sizing: border-box; }
+    .msg.system { align-self: center; color: var(--muted); font-size: 19px; background: none; padding: 3px 0; white-space: normal; }
     .msg .tool-call {
-      margin-top: 8px; padding: 8px 12px; background: rgba(0,0,0,0.3); border-radius: 6px;
-      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--warn);
+      margin-top: 13px; padding: 13px 19px; background: rgba(0,0,0,0.3); border-radius: 8px;
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 19px; color: var(--warn);
     }
     .msg .tool-result {
-      margin-top: 8px; padding: 8px 12px; background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.3);
-      border-radius: 6px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--success);
+      margin-top: 13px; padding: 13px 19px; background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.3);
+      border-radius: 8px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 19px; color: var(--success);
     }
     .msg .error-result { background: rgba(248,81,73,0.1); border-color: rgba(248,81,73,0.3); color: var(--error); }
     .typing .msg-content { color: var(--muted); font-style: italic; }
@@ -138,26 +129,26 @@
     }
     .msg.assistant .msg-content a:hover { text-decoration: underline; }
     .msg.assistant .msg-content table {
-      border-collapse: collapse; margin: 8px 0; font-size: 13px; width: 100%;
+      border-collapse: collapse; margin: 13px 0; font-size: 21px; width: 100%;
       white-space: nowrap;
     }
     .msg.assistant .msg-content th,
     .msg.assistant .msg-content td {
-      padding: 4px 10px; border: 1px solid var(--border); text-align: left;
+      padding: 6px 16px; border: 1px solid var(--border); text-align: left;
     }
     .msg.assistant .msg-content th {
-      background: var(--bg); font-weight: 600; font-size: 12px; color: var(--muted);
+      background: var(--bg); font-weight: 600; font-size: 19px; color: var(--muted);
     }
-    .msg.assistant .msg-content td { font-size: 12px; }
+    .msg.assistant .msg-content td { font-size: 19px; }
     .msg.assistant .msg-content { overflow-x: auto; }
 
     /* ── Suggestion chips ───────────────────────────────── */
     .suggestions {
-      display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding-top: 8px;
+      display: flex; flex-wrap: wrap; gap: 13px; margin-top: 16px; padding-top: 13px;
       border-top: 1px solid var(--border);
     }
     .suggestion-chip {
-      font-size: 12px; padding: 6px 14px; border-radius: 16px;
+      font-size: 19px; padding: 10px 22px; border-radius: 19px;
       border: 1px solid var(--accent-dim); background: rgba(31, 111, 235, 0.08);
       color: var(--accent); cursor: pointer; font-weight: 500;
       transition: background 0.15s, border-color 0.15s;
@@ -167,16 +158,16 @@
     }
 
     /* ── Input ──────────────────────────────────────────── */
-    #input-area { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; gap: 12px; }
+    #input-area { padding: 22px 32px; border-top: 1px solid var(--border); display: flex; gap: 19px; }
     #input-area textarea {
-      flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-      color: var(--text); padding: 10px 14px; font-size: 14px; font-family: inherit;
-      resize: none; outline: none; min-height: 44px; max-height: 120px;
+      flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+      color: var(--text); padding: 16px 22px; font-size: 22px; font-family: inherit;
+      resize: none; outline: none; min-height: 64px; max-height: 160px;
     }
     #input-area textarea:focus { border-color: var(--accent); }
     #input-area button {
-      background: var(--accent-dim); color: #fff; border: none; border-radius: 8px;
-      padding: 0 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+      background: var(--accent-dim); color: #fff; border: none; border-radius: 10px;
+      padding: 0 29px; font-size: 22px; font-weight: 600; cursor: pointer;
     }
     #input-area button:hover { background: var(--accent); }
     #input-area button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -188,62 +179,62 @@
     }
     .modal-overlay.visible { display: flex; }
     .modal-content {
-      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-      padding: 24px; min-width: 0; width: 480px; max-width: calc(100vw - 24px);
-      max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px);
+      background: var(--surface); border: 1px solid var(--border); border-radius: 13px;
+      padding: 32px; min-width: 0; width: 640px; max-width: calc(100vw - 20px);
+      max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px);
       overflow-y: auto;
     }
-    .modal-content h3 { font-size: 16px; margin-bottom: 16px; }
-    .modal-close { float: right; background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; }
+    .modal-content h3 { font-size: 26px; margin-bottom: 19px; }
+    .modal-close { float: right; background: none; border: none; color: var(--muted); font-size: 26px; cursor: pointer; }
     .modal-close:hover { color: var(--text); }
     .tx-detail {
-      padding: 12px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border);
-      font-size: 13px; margin-bottom: 16px;
+      padding: 19px; background: var(--bg); border-radius: 10px; border: 1px solid var(--border);
+      font-size: 21px; margin-bottom: 19px;
     }
-    .tx-detail .row { display: flex; justify-content: space-between; padding: 4px 0; }
+    .tx-detail .row { display: flex; justify-content: space-between; padding: 6px 0; }
     .tx-detail .label { color: var(--muted); }
-    .tx-detail .value { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; text-align: right; max-width: 260px; word-break: break-all; }
-    .tx-actions { display: flex; gap: 12px; }
+    .tx-detail .value { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 19px; text-align: right; max-width: 336px; word-break: break-all; }
+    .tx-actions { display: flex; gap: 19px; }
     .tx-actions .btn-confirm {
-      flex: 1; background: var(--success); color: #000; border: none; border-radius: 8px;
-      padding: 10px; font-size: 14px; font-weight: 600; cursor: pointer;
+      flex: 1; background: var(--success); color: #000; border: none; border-radius: 10px;
+      padding: 16px; font-size: 22px; font-weight: 600; cursor: pointer;
     }
     .tx-actions .btn-confirm:hover { opacity: 0.9; }
     .tx-actions .btn-cancel {
       flex: 1; background: transparent; color: var(--error); border: 1px solid var(--error);
-      border-radius: 8px; padding: 10px; font-size: 14px; cursor: pointer;
+      border-radius: 10px; padding: 16px; font-size: 22px; cursor: pointer;
     }
 
     /* ── Wallet picker modal ────────────────────────────── */
     .wallet-option {
-      display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 8px;
-      border: 1px solid var(--border); background: var(--bg); cursor: pointer; margin-bottom: 8px;
+      display: flex; align-items: center; gap: 16px; padding: 16px; border-radius: 10px;
+      border: 1px solid var(--border); background: var(--bg); cursor: pointer; margin-bottom: 10px;
     }
     .wallet-option:hover { border-color: var(--accent); }
-    .wallet-option img { width: 32px; height: 32px; border-radius: 6px; }
-    .wallet-option .wallet-name { font-weight: 500; font-size: 14px; }
-    .wallet-option .wallet-rdns { font-size: 11px; color: var(--muted); }
-    .no-wallets { color: var(--muted); font-size: 13px; padding: 12px 0; }
+    .wallet-option img { width: 38px; height: 38px; border-radius: 8px; }
+    .wallet-option .wallet-name { font-weight: 500; font-size: 22px; }
+    .wallet-option .wallet-rdns { font-size: 18px; color: var(--muted); }
+    .no-wallets { color: var(--muted); font-size: 21px; padding: 19px 0; }
 
     /* ── Saved vaults dropdown ──────────────────────────── */
     #saved-vaults-dropdown {
       display: none; position: absolute; background: var(--surface);
-      border: 1px solid var(--border); border-radius: 8px; padding: 8px; z-index: 50;
-      min-width: 280px; max-width: calc(100vw - 32px);
-      max-height: 200px; overflow-y: auto; margin-top: 4px;
+      border: 1px solid var(--border); border-radius: 10px; padding: 13px; z-index: 50;
+      min-width: 384px; max-width: calc(100vw - 26px);
+      max-height: 240px; overflow-y: auto; margin-top: 6px;
     }
     #saved-vaults-dropdown.visible { display: block; }
     .saved-vault-item {
-      padding: 8px; border-radius: 4px; cursor: pointer; font-size: 12px;
+      padding: 11px; border-radius: 6px; cursor: pointer; font-size: 19px;
       font-family: 'SF Mono', 'Fira Code', monospace;
       display: flex; justify-content: space-between; align-items: center;
     }
     .saved-vault-item:hover { background: var(--bg); }
     .saved-vault-item .vault-label { color: var(--text); }
-    .saved-vault-item .vault-chain { color: var(--muted); font-size: 11px; }
+    .saved-vault-item .vault-chain { color: var(--muted); font-size: 18px; }
     .saved-vault-item .remove-vault {
-      color: var(--error); cursor: pointer; padding: 2px 6px; border: none; background: none;
-      font-size: 14px; opacity: 0.6;
+      color: var(--error); cursor: pointer; padding: 3px 10px; border: none; background: none;
+      font-size: 22px; opacity: 0.6;
     }
     .saved-vault-item .remove-vault:hover { opacity: 1; }
 
@@ -257,7 +248,7 @@
       #vault-input { width: 100%; min-width: 0; font-size: 16px; padding: 8px 10px; }
       #setup-bar label { font-size: 11px; }
       #setup-bar input { font-size: 16px; }
-      .chain-badge, .dex-badge { font-size: 11px; padding: 3px 8px; }
+      .chain-badge { font-size: 11px; padding: 3px 8px; }
       .saved-vaults-btn { font-size: 10px; }
       #chat { padding: 10px; gap: 10px; }
       .msg { max-width: 100%; padding: 8px 10px; font-size: 13px; }
@@ -290,7 +281,7 @@
     @media (max-width: 400px) {
       header h1 { font-size: 12px; letter-spacing: -0.3px; }
       .header-actions { gap: 4px; }
-      .chain-badge, .dex-badge { font-size: 10px; padding: 2px 6px; }
+      .chain-badge { font-size: 10px; padding: 2px 6px; }
       .msg { padding: 6px 8px; font-size: 12px; }
       .suggestion-chip { font-size: 10px; padding: 4px 8px; }
       #input-area textarea { font-size: 16px; padding: 8px 10px; }
@@ -298,14 +289,14 @@
     }
     /* ── Delegation panel ────────────────────────────── */
     #delegation-panel {
-      padding: 10px 24px; border-bottom: 1px solid var(--border);
-      background: var(--surface); gap: 12px; align-items: center; flex-wrap: wrap;
-      font-size: 12px;
+      padding: 11px 26px; border-bottom: 1px solid var(--border);
+      background: var(--surface); gap: 13px; align-items: center; flex-wrap: wrap;
+      font-size: 15px;
     }
     #delegation-panel.visible { display: flex; }
     .delegation-status {
       display: inline-flex; align-items: center; gap: 6px;
-      padding: 4px 10px; border-radius: 6px; font-size: 11px;
+      padding: 5px 13px; border-radius: 6px; font-size: 14px;
       font-family: 'SF Mono', 'Fira Code', monospace;
     }
     .delegation-status.active {
@@ -321,13 +312,13 @@
       border: 1px solid rgba(139,148,158,0.2);
     }
     .delegation-status .dot {
-      width: 6px; height: 6px; border-radius: 50%; display: inline-block;
+      width: 10px; height: 10px; border-radius: 50%; display: inline-block;
     }
     .delegation-status.active .dot { background: var(--success); }
     .delegation-status.stale .dot { background: var(--warn); }
     .delegation-status.inactive .dot { background: var(--muted); }
     .btn-delegation {
-      font-size: 11px; padding: 5px 12px; border-radius: 6px;
+      font-size: 14px; padding: 6px 15px; border-radius: 6px;
       border: 1px solid var(--accent-dim); background: rgba(31,111,235,0.08);
       color: var(--accent); cursor: pointer; font-weight: 500;
       transition: background 0.15s;
@@ -342,20 +333,20 @@
     }
     .btn-delegation.telegram:hover { background: rgba(34,158,217,0.18); }
     .sponsor-toggle {
-      display: inline-flex; align-items: center; gap: 4px;
-      font-size: 11px; color: var(--muted); cursor: pointer;
-      margin: 0 4px;
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 14px; color: var(--muted); cursor: pointer;
+      margin: 0 5px;
     }
-    .sponsor-toggle input { width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent); }
+    .sponsor-toggle input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
     .agent-balance {
-      font-size: 11px; color: var(--muted);
+      font-size: 14px; color: var(--muted);
       font-family: 'SF Mono', 'Fira Code', monospace;
     }
     .agent-balance.low { color: var(--warn); }
 
     /* ── Tx receipt card (in-chat) ──────────────────────── */
     .tx-receipt-card {
-      padding: 10px 12px; border-radius: 8px; font-size: 12px;
+      padding: 16px 19px; border-radius: 10px; font-size: 19px;
       white-space: normal;
     }
     .tx-receipt-card.success {
@@ -368,13 +359,13 @@
       background: rgba(248,81,73,0.06); border: 1px solid rgba(248,81,73,0.2);
     }
     .tx-receipt-card .receipt-header {
-      display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px;
+      display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 21px;
     }
-    .tx-receipt-card .receipt-status { font-size: 14px; }
+    .tx-receipt-card .receipt-status { font-size: 22px; }
     .tx-receipt-card .receipt-trade { color: var(--text); }
-    .tx-receipt-card .receipt-price { font-size: 11px; color: var(--muted); margin: 2px 0 0 0; }
+    .tx-receipt-card .receipt-price { font-size: 18px; color: var(--muted); margin: 3px 0 0 0; }
     .tx-receipt-card .receipt-details {
-      font-size: 11px; color: var(--muted); margin-top: 2px;
+      font-size: 18px; color: var(--muted); margin-top: 3px;
       font-family: 'SF Mono', 'Fira Code', monospace;
     }
     .tx-receipt-card .receipt-details a {
@@ -382,55 +373,55 @@
     }
     .tx-receipt-card .receipt-details a:hover { text-decoration: underline; }
     /* ── Delegation setup modal ─────────────────────────── */
-    .delegation-step { margin-bottom: 16px; }
+    .delegation-step { margin-bottom: 22px; }
     .delegation-step h4 {
-      font-size: 13px; color: var(--accent); margin-bottom: 6px;
-      display: flex; align-items: center; gap: 6px;
+      font-size: 21px; color: var(--accent); margin-bottom: 8px;
+      display: flex; align-items: center; gap: 8px;
     }
     .delegation-step .step-num {
-      width: 20px; height: 20px; border-radius: 50%;
-      background: var(--accent-dim); color: #fff; font-size: 11px;
+      width: 29px; height: 29px; border-radius: 50%;
+      background: var(--accent-dim); color: #fff; font-size: 18px;
       display: inline-flex; align-items: center; justify-content: center;
     }
-    .delegation-step p { font-size: 12px; color: var(--muted); line-height: 1.5; }
+    .delegation-step p { font-size: 19px; color: var(--muted); line-height: 1.5; }
     .delegation-info {
-      padding: 10px; background: var(--bg); border: 1px solid var(--border);
-      border-radius: 6px; font-size: 11px; font-family: 'SF Mono', 'Fira Code', monospace;
-      margin: 8px 0; word-break: break-all;
+      padding: 14px; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; font-size: 18px; font-family: 'SF Mono', 'Fira Code', monospace;
+      margin: 11px 0; word-break: break-all;
     }
-    .delegation-info .row { display: flex; justify-content: space-between; padding: 3px 0; }
+    .delegation-info .row { display: flex; justify-content: space-between; padding: 5px 0; }
     .delegation-info .label { color: var(--muted); }
     .delegation-info .value { color: var(--text); }
-    .copyable-addr { cursor: pointer; user-select: all; font-family: monospace; font-size: 11px; word-break: break-all; }
+    .copyable-addr { cursor: pointer; user-select: all; font-family: monospace; font-size: 18px; word-break: break-all; }
     .copyable-addr:hover { color: var(--accent); }
-    .copyable-addr::after { content: ' 📋'; font-size: 10px; opacity: 0.5; }
-    .copy-toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #000; padding: 6px 16px; border-radius: 6px; font-size: 12px; z-index: 10000; pointer-events: none; animation: fadeOut 1.5s ease forwards; }
+    .copyable-addr::after { content: ' 📋'; font-size: 16px; opacity: 0.5; }
+    .copy-toast { position: fixed; bottom: 13px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #000; padding: 10px 22px; border-radius: 8px; font-size: 19px; z-index: 10000; pointer-events: none; animation: fadeOut 1.5s ease forwards; }
     @keyframes fadeOut { 0%,60% { opacity: 1; } 100% { opacity: 0; } }
-    .caveat-list { list-style: none; margin: 6px 0; }
+    .caveat-list { list-style: none; margin: 8px 0; }
     .caveat-list li {
-      padding: 4px 8px; font-size: 11px; color: var(--success);
-      border-left: 2px solid var(--success); margin-bottom: 4px;
+      padding: 6px 13px; font-size: 18px; color: var(--success);
+      border-left: 2px solid var(--success); margin-bottom: 6px;
     }
 
     /* ── Delegated execution confirmation (in-chat) ────── */
     .delegated-confirm {
-      padding: 10px 12px; background: rgba(31,111,235,0.06);
-      border: 1px solid rgba(31,111,235,0.15); border-radius: 8px;
+      padding: 16px 19px; background: rgba(31,111,235,0.06);
+      border: 1px solid rgba(31,111,235,0.15); border-radius: 10px;
       white-space: normal; word-break: break-word; box-sizing: border-box;
     }
     .delegated-confirm .trade-pair {
-      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-      font-size: 13px; font-weight: 600;
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      font-size: 21px; font-weight: 600;
     }
-    .delegated-confirm .trade-arrow { color: var(--muted); font-size: 12px; }
+    .delegated-confirm .trade-arrow { color: var(--muted); font-size: 19px; }
     .delegated-confirm .trade-amount.sell { color: var(--text); }
     .delegated-confirm .trade-amount.buy { color: var(--success); }
     .delegated-confirm .trade-meta {
-      font-size: 11px; color: var(--muted); margin: 4px 0 8px;
+      font-size: 18px; color: var(--muted); margin: 6px 0 13px;
     }
-    .delegated-confirm .confirm-actions { display: flex; gap: 6px; }
+    .delegated-confirm .confirm-actions { display: flex; gap: 10px; }
     .delegated-confirm .btn-agent-exec {
-      font-size: 11px; padding: 5px 12px; border-radius: 6px;
+      font-size: 18px; padding: 8px 19px; border-radius: 8px;
       border: none; cursor: pointer; font-weight: 500;
     }
     .delegated-confirm .btn-agent-exec.approve {
@@ -440,46 +431,46 @@
       background: transparent; color: var(--muted); border: 1px solid var(--border);
     }
     .delegated-confirm .exec-status {
-      font-size: 11px; margin-top: 6px; white-space: normal;
+      font-size: 18px; margin-top: 8px; white-space: normal;
       word-break: break-word; overflow-wrap: anywhere;
     }
     .delegated-confirm .multi-tx-header {
-      font-size: 11px; color: var(--muted); margin-bottom: 6px; font-weight: 600;
+      font-size: 18px; color: var(--muted); margin-bottom: 8px; font-weight: 600;
     }
     .multi-trade-row {
-      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-      font-size: 13px; font-weight: 600; padding: 4px 0;
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      font-size: 21px; font-weight: 600; padding: 6px 0;
       border-bottom: 1px solid rgba(255,255,255,0.05);
     }
-    .multi-trade-row:last-of-type { border-bottom: none; margin-bottom: 8px; }
+    .multi-trade-row:last-of-type { border-bottom: none; margin-bottom: 13px; }
     .multi-trade-row .trade-chain {
-      font-size: 10px; color: var(--accent); background: rgba(31,111,235,0.12);
-      padding: 1px 6px; border-radius: 4px; font-weight: 500;
+      font-size: 16px; color: var(--accent); background: rgba(31,111,235,0.12);
+      padding: 2px 10px; border-radius: 5px; font-weight: 500;
     }
     .multi-trade-row .multi-tx-status {
-      margin-left: auto; font-size: 12px;
+      margin-left: auto; font-size: 19px;
     }
 
     /* ── Pool onboarding ─────────────────────────────── */
     .onboarding-card {
       background: rgba(31,111,235,0.06);
       border: 1px solid rgba(31,111,235,0.2);
-      border-radius: 10px;
-      padding: 16px;
-      margin: 12px 0;
+      border-radius: 11px;
+      padding: 22px;
+      margin: 16px 0;
       text-align: center;
     }
     .onboarding-card h3 {
-      font-size: 15px; color: var(--accent); margin: 0 0 8px 0;
+      font-size: 24px; color: var(--accent); margin: 0 0 11px 0;
     }
     .onboarding-card p {
-      font-size: 12px; color: var(--muted); margin: 0 0 12px 0; line-height: 1.5;
+      font-size: 19px; color: var(--muted); margin: 0 0 16px 0; line-height: 1.5;
     }
     .onboarding-actions {
-      display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;
+      display: flex; gap: 13px; justify-content: center; flex-wrap: wrap;
     }
     .onboarding-actions button {
-      font-size: 12px; padding: 8px 16px; border-radius: 8px;
+      font-size: 19px; padding: 13px 26px; border-radius: 10px;
       border: 1px solid rgba(31,111,235,0.3); cursor: pointer;
       background: transparent; color: var(--accent); font-weight: 500;
       transition: background 0.15s;
@@ -494,15 +485,15 @@
       background: #1a6fd8;
     }
     /* ── Deploy pool modal ───────────────────────────── */
-    .deploy-field { margin-bottom: 12px; }
+    .deploy-field { margin-bottom: 16px; }
     .deploy-field label {
-      display: block; font-size: 11px; color: var(--muted);
-      margin-bottom: 4px; font-weight: 500;
+      display: block; font-size: 18px; color: var(--muted);
+      margin-bottom: 6px; font-weight: 500;
     }
     .deploy-field input, .deploy-field select {
-      width: 100%; padding: 8px 10px; border-radius: 6px;
+      width: 100%; padding: 13px 16px; border-radius: 8px;
       border: 1px solid rgba(255,255,255,0.12); background: var(--surface);
-      color: var(--text); font-size: 13px; box-sizing: border-box;
+      color: var(--text); font-size: 21px; box-sizing: border-box;
     }
     .deploy-field select { color-scheme: dark; }
     .deploy-field select option {
@@ -512,7 +503,7 @@
       border-color: var(--accent); outline: none;
     }
     .deploy-field .hint {
-      font-size: 10px; color: var(--muted); margin-top: 3px;
+      font-size: 16px; color: var(--muted); margin-top: 5px;
     }
 
     @media (max-width: 640px) {
@@ -527,11 +518,12 @@
 </head>
 <body>
   <header>
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
     </svg>
     <h1>Rigoblock Vault Operator</h1>
     <div class="header-actions">
+      <button class="btn-sm" id="ai-settings-toggle" onclick="toggleAiSettings()" title="Configure AI model">⚙ AI Model</button>
       <label class="testnet-toggle" title="Switch between mainnet and testnet chains">
         <input type="checkbox" id="testnet-toggle" onchange="toggleTestnet()" />
         <span class="toggle-track"></span>
@@ -553,25 +545,23 @@
     <span id="vault-status"></span>
     <label>Chain</label>
     <span id="chain-display" class="chain-badge">Ethereum</span>
-    <span id="dex-display" class="dex-badge">0x Aggregator</span>
-    <button class="btn-sm" id="ai-settings-toggle" onclick="toggleAiSettings()" title="Configure AI model">⚙ AI Model</button>
   </div>
 
   <!-- AI Settings bar (collapsed by default) -->
-  <div id="ai-settings-bar" style="display:none; padding: 10px 24px; border-bottom: 1px solid var(--border); background: var(--surface); gap: 12px; align-items: center; flex-wrap: wrap;">
-    <label style="font-size: 12px; color: var(--muted);">Provider</label>
-    <select id="ai-provider" onchange="onAiProviderChange()" style="background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 5px 8px; font-size: 12px; outline: none;">
+  <div id="ai-settings-bar" style="display:none; padding: 11px 26px; border-bottom: 1px solid var(--border); background: var(--surface); gap: 13px; align-items: center; flex-wrap: wrap;">
+    <label style="font-size: 15px; color: var(--muted);">Provider</label>
+    <select id="ai-provider" onchange="onAiProviderChange()" style="background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 6px 10px; font-size: 15px; outline: none;">
       <option value="server">Workers AI — Llama 4 (default, free)</option>
       <option value="openrouter">OpenRouter (100+ models)</option>
       <option value="anthropic">Anthropic (direct)</option>
       <option value="openai">OpenAI (direct)</option>
     </select>
-    <label id="ai-key-label" style="font-size: 12px; color: var(--muted); display: none;">API Key</label>
-    <input id="ai-api-key" type="password" placeholder="sk-or-…" autocomplete="off" style="display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 5px 8px; font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace; width: 260px; outline: none;" />
-    <label id="ai-model-label" style="font-size: 12px; color: var(--muted); display: none;">Model</label>
-    <select id="ai-model" style="display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 5px 8px; font-size: 12px; outline: none; max-width: 260px;">
+    <label id="ai-key-label" style="font-size: 15px; color: var(--muted); display: none;">API Key</label>
+    <input id="ai-api-key" type="password" placeholder="sk-or-…" autocomplete="off" style="display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 6px 10px; font-size: 15px; font-family: 'SF Mono', 'Fira Code', monospace; width: 256px; outline: none;" />
+    <label id="ai-model-label" style="font-size: 15px; color: var(--muted); display: none;">Model</label>
+    <select id="ai-model" style="display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 6px 10px; font-size: 15px; outline: none; max-width: 256px;">
     </select>
-    <span id="ai-status" style="font-size: 11px; color: var(--muted);"></span>
+    <span id="ai-status" style="font-size: 14px; color: var(--muted);"></span>
   </div>
 
   <!-- Wallet picker modal (EIP-6963) -->
@@ -628,7 +618,7 @@
         <p>Sign and send the delegation transaction from your wallet. You can revoke at any time by calling <code>revokeAllDelegations(agentAddress)</code>.</p>
       </div>
 
-      <div id="delegation-setup-status" style="font-size: 12px; margin-bottom: 12px;"></div>
+      <div id="delegation-setup-status" style="font-size: 24px; margin-bottom: 20px;"></div>
       <div class="tx-actions">
         <button class="btn-cancel" onclick="closeModal('delegation-modal')">Cancel</button>
         <button class="btn-confirm" id="delegation-confirm-btn" onclick="startDelegationSetup()">Set Up Agent</button>
@@ -666,7 +656,7 @@
         <label>Custom Token Address</label>
         <input id="deploy-custom-token" placeholder="0x…" />
       </div>
-      <div id="deploy-pool-status" style="font-size: 12px; margin-bottom: 12px;"></div>
+      <div id="deploy-pool-status" style="font-size: 24px; margin-bottom: 20px;"></div>
       <div class="tx-actions">
         <button class="btn-cancel" onclick="closeModal('deploy-pool-modal')">Cancel</button>
         <button class="btn-confirm" id="deploy-pool-btn" onclick="deploySmartPool()">Deploy Pool</button>
@@ -676,22 +666,22 @@
 
   <!-- Telegram pairing modal -->
   <div id="telegram-modal" class="modal-overlay">
-    <div class="modal-content" style="max-width: 380px;">
+    <div class="modal-content" style="max-width: 560px;">
       <button class="modal-close" onclick="closeModal('telegram-modal')">&times;</button>
       <h3>⬡ Pair Telegram</h3>
-      <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;">
+      <p style="font-size: 21px; color: var(--text-secondary); margin-bottom: 19px;">
         Control your pool from Telegram via <a href="https://t.me/RigoVibeBot" target="_blank" rel="noopener" style="color: var(--accent);">@RigoVibeBot</a> — trade, check positions, and manage your vault without a wallet app.
       </p>
-      <div id="telegram-pair-status" style="font-size: 12px; margin-bottom: 12px;"></div>
-      <div id="telegram-pair-code" style="display:none; text-align: center; margin: 16px 0;">
-        <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 8px;">Your pairing code:</div>
-        <code id="telegram-code-value" style="font-size: 28px; letter-spacing: 4px; font-weight: 700; color: var(--accent); user-select: all; cursor: pointer;"></code>
-        <div style="font-size: 11px; color: var(--text-secondary); margin-top: 8px;">Expires in 5 minutes</div>
+      <div id="telegram-pair-status" style="font-size: 19px; margin-bottom: 16px;"></div>
+      <div id="telegram-pair-code" style="display:none; text-align: center; margin: 19px 0;">
+        <div style="font-size: 18px; color: var(--text-secondary); margin-bottom: 11px;">Your pairing code:</div>
+        <code id="telegram-code-value" style="font-size: 38px; letter-spacing: 5px; font-weight: 700; color: var(--accent); user-select: all; cursor: pointer;"></code>
+        <div style="font-size: 18px; color: var(--text-secondary); margin-top: 11px;">Expires in 5 minutes</div>
       </div>
-      <div id="telegram-bot-link" style="display:none; text-align: center; margin-bottom: 12px;">
-        <a id="telegram-bot-url" href="https://t.me/RigoVibeBot" target="_blank" rel="noopener" class="btn-confirm" style="display: inline-block; text-decoration: none; font-size: 14px; padding: 10px 24px;">Open in Telegram →</a>
+      <div id="telegram-bot-link" style="display:none; text-align: center; margin-bottom: 16px;">
+        <a id="telegram-bot-url" href="https://t.me/RigoVibeBot" target="_blank" rel="noopener" class="btn-confirm" style="display: inline-block; text-decoration: none; font-size: 22px; padding: 16px 32px;">Open in Telegram →</a>
       </div>
-      <div style="font-size: 11px; color: var(--text-secondary); padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px; margin-bottom: 12px;">
+      <div style="font-size: 18px; color: var(--text-secondary); padding: 13px; background: rgba(255,255,255,0.03); border-radius: 8px; margin-bottom: 16px;">
         <b>Steps:</b><br>
         1. Click "Generate Code" below<br>
         2. Click the "Open in Telegram" button<br>
@@ -709,13 +699,13 @@
     <div class="modal-content">
       <button class="modal-close" onclick="closeModal('tx-modal')">&times;</button>
       <h3>Confirm Transaction</h3>
-      <div id="tx-description" style="margin-bottom: 12px; font-size: 14px; color: var(--accent);"></div>
+      <div id="tx-description" style="margin-bottom: 20px; font-size: 28px; color: var(--accent);"></div>
       <div class="tx-detail" id="tx-details"></div>
       <div class="tx-actions">
         <button class="btn-cancel" onclick="closeModal('tx-modal')">Cancel</button>
         <button class="btn-confirm" id="tx-confirm-btn" onclick="confirmTransaction()">Swap</button>
       </div>
-      <div id="tx-status" style="margin-top: 12px; font-size: 12px;"></div>
+      <div id="tx-status" style="margin-top: 20px; font-size: 24px;"></div>
     </div>
   </div>
 
@@ -961,7 +951,7 @@
       const dd = document.getElementById('saved-vaults-dropdown');
       const vaults = getSavedVaults();
       if (vaults.length === 0) {
-        dd.innerHTML = '<div style="padding:8px;color:var(--muted);font-size:12px;">No saved vaults yet.</div>';
+        dd.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:24px;">No saved vaults yet.</div>';
         return;
       }
       dd.innerHTML = vaults.map(v => `
@@ -1496,12 +1486,9 @@
         refreshDelegationStatus();
       }
 
-      // Update DEX provider badge
+      // Update DEX provider (internal tracking only, no badge)
       if (data.dexProvider) {
-        const dexEl = document.getElementById('dex-display');
-        const labels = { '0x': '0x Aggregator', 'Uniswap': 'Uniswap', 'GMX': 'GMX v2 Perps' };
-        dexEl.textContent = labels[data.dexProvider] || data.dexProvider;
-        dexEl.classList.remove('hidden');
+        // DEX badge removed — dexProvider tracked internally
       }
 
       // Handle multiple transactions (multi-chain swaps)
@@ -1898,7 +1885,7 @@
           if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.code === 'METHOD_NOT_ALLOWED' || err.fallbackToManual) {
             container.innerHTML = '';
             const manualMsg = document.createElement('div');
-            manualMsg.style.cssText = 'color:var(--warning,orange);font-size:12px;margin-bottom:8px;';
+            manualMsg.style.cssText = 'color:var(--warning,orange);font-size:24px;margin-bottom:16px;';
             manualMsg.textContent = err.code === 'METHOD_NOT_ALLOWED'
               ? 'This function selector is not delegated — re-setup delegation or sign from your wallet:'
               : 'Delegation not active on this chain — sign from your wallet instead:';
@@ -1958,7 +1945,7 @@
 
     function rejectDelegatedExecution(btn) {
       const container = btn.closest('.delegated-confirm');
-      container.innerHTML = '<div style="color:var(--muted);font-size:12px;">Execution cancelled.</div>';
+      container.innerHTML = '<div style="color:var(--muted);font-size:24px;">Execution cancelled.</div>';
       appendMessage('system', 'Delegated execution cancelled by operator.');
     }
 

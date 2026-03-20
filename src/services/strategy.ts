@@ -23,8 +23,28 @@ import type { Env, ChatMessage, ChatResponse, RequestContext } from "../types.js
 import type { Address } from "viem";
 import { getTelegramUserIdByAddress } from "./telegramPairing.js";
 import { sendMessage } from "./telegram.js";
+import type { TgInlineKeyboardMarkup } from "./telegram.js";
 import { executeTxList, formatOutcomesMarkdown } from "./execution.js";
 import { sanitizeError } from "../config.js";
+
+/**
+ * Clean up Telegram recommendation cache when strategies are removed.
+ * Deletes `tg-strategy-rec:{userId}` so stale recommendations can't
+ * be acted on after the underlying strategy is gone.
+ */
+async function cleanupTelegramStrategyCache(
+  kv: KVNamespace,
+  operatorAddress: string,
+): Promise<void> {
+  try {
+    const userId = await getTelegramUserIdByAddress(kv, operatorAddress);
+    if (userId) {
+      await kv.delete(`tg-strategy-rec:${userId}`);
+    }
+  } catch {
+    // Non-critical — don't fail strategy removal if cache cleanup fails
+  }
+}
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -67,6 +87,10 @@ export interface Strategy {
   autoExecute?: boolean;
   /** LLM recommendation from the last run (carried forward as context for the next run) */
   lastRecommendation?: string;
+  /** Max number of successful executions before auto-removal. undefined = unlimited (recurring). */
+  maxExecutions?: number;
+  /** Number of successful executions so far (for maxExecutions tracking). */
+  executionCount?: number;
 }
 
 /** A compact event record for strategy runs, stored in KV for web polling. */
@@ -86,9 +110,19 @@ export interface StrategyEvent {
 // ── KV helpers ────────────────────────────────────────────────────────
 
 const STRATEGY_PREFIX = "strategies:";
+/** Tombstone prefix: written on delete, checked on save. Prevents in-flight
+ *  cron runs (old code) from resurrecting deleted strategies via KV save. */
+const TOMBSTONE_PREFIX = "strategy-deleted:";
+/** Tombstone TTL — long enough to outlive any in-flight cron run (LLM calls
+ *  can take several minutes, and old code may not have staleness checks). */
+const TOMBSTONE_TTL = 1800; // 30 minutes
 
 function strategyKey(vaultAddress: string): string {
   return `${STRATEGY_PREFIX}${vaultAddress.toLowerCase()}`;
+}
+
+function tombstoneKey(vaultAddress: string): string {
+  return `${TOMBSTONE_PREFIX}${vaultAddress.toLowerCase()}`;
 }
 
 export async function getStrategies(
@@ -113,7 +147,7 @@ export async function saveStrategies(
 
 export async function addStrategy(
   kv: KVNamespace,
-  strategy: Omit<Strategy, "id" | "createdAt" | "consecutiveFailures" | "active"> & { autoExecute?: boolean },
+  strategy: Omit<Strategy, "id" | "createdAt" | "consecutiveFailures" | "active" | "executionCount"> & { autoExecute?: boolean; maxExecutions?: number },
 ): Promise<Strategy> {
   const existing = await getStrategies(kv, strategy.vaultAddress);
   if (existing.length >= MAX_STRATEGIES_PER_VAULT) {
@@ -129,6 +163,8 @@ export async function addStrategy(
     createdAt: Date.now(),
     consecutiveFailures: 0,
     autoExecute: strategy.autoExecute || false,
+    maxExecutions: strategy.maxExecutions,
+    executionCount: 0,
   };
   existing.push(newStrategy);
   await saveStrategies(kv, strategy.vaultAddress, existing);
@@ -139,20 +175,38 @@ export async function removeStrategy(
   kv: KVNamespace,
   vaultAddress: string,
   strategyId: number,
+  operatorAddress?: string,
 ): Promise<boolean> {
   const existing = await getStrategies(kv, vaultAddress);
   const filtered = existing.filter((s) => s.id !== strategyId);
   if (filtered.length === existing.length) return false;
+  // Write tombstone so in-flight cron runs can't resurrect this strategy
+  await kv.put(tombstoneKey(vaultAddress), Date.now().toString(), {
+    expirationTtl: TOMBSTONE_TTL,
+  });
   await saveStrategies(kv, vaultAddress, filtered);
+  // Clean up Telegram recommendation cache for this operator
+  if (operatorAddress) {
+    await cleanupTelegramStrategyCache(kv, operatorAddress);
+  }
   return true;
 }
 
 export async function removeAllStrategies(
   kv: KVNamespace,
   vaultAddress: string,
+  operatorAddress?: string,
 ): Promise<number> {
   const existing = await getStrategies(kv, vaultAddress);
+  // Write tombstone so in-flight cron runs can't resurrect deleted strategies
+  await kv.put(tombstoneKey(vaultAddress), Date.now().toString(), {
+    expirationTtl: TOMBSTONE_TTL,
+  });
   await kv.delete(strategyKey(vaultAddress));
+  // Clean up Telegram recommendation cache for this operator
+  if (operatorAddress) {
+    await cleanupTelegramStrategyCache(kv, operatorAddress);
+  }
   return existing.length;
 }
 
@@ -160,6 +214,20 @@ export async function removeAllStrategies(
 
 function eventsKey(vaultAddress: string): string {
   return `strategy-events:${vaultAddress.toLowerCase()}`;
+}
+
+/**
+ * Check if a strategy has been deleted or replaced in KV since we loaded it.
+ * Returns true if the strategy no longer exists or has a different createdAt
+ * (meaning the user deleted and re-created a strategy with the same ID).
+ */
+async function isStrategyStale(
+  kv: KVNamespace,
+  strategy: Strategy,
+): Promise<boolean> {
+  const current = await getStrategies(kv, strategy.vaultAddress);
+  const match = current.find((s) => s.id === strategy.id);
+  return !match || match.createdAt !== strategy.createdAt;
 }
 
 /** Append a strategy event. Keeps last MAX_EVENTS, 24h TTL. */
@@ -221,6 +289,14 @@ export async function runDueStrategies(
   const list = await kv.list({ prefix: STRATEGY_PREFIX });
 
   for (const key of list.keys) {
+    // Check tombstone — if strategies were recently deleted, note the
+    // deletion time. Strategies created AFTER the tombstone are safe to
+    // run; strategies that existed before it are skipped (prevents
+    // in-flight cron from resurrecting deleted strategies).
+    const vaultAddr = key.name.slice(STRATEGY_PREFIX.length);
+    const tombstone = await kv.get(tombstoneKey(vaultAddr));
+    const tombstoneTime = tombstone ? parseInt(tombstone, 10) : 0;
+
     let strategies: Strategy[];
     try {
       const raw = await kv.get(key.name);
@@ -235,9 +311,23 @@ export async function runDueStrategies(
     for (const strategy of strategies) {
       if (!strategy.active) continue;
 
+      // Skip strategies that predate a recent deletion tombstone
+      if (tombstoneTime && strategy.createdAt <= tombstoneTime) {
+        console.log(`Strategy ${strategy.id} predates tombstone — skipping.`);
+        continue;
+      }
+
       // Check if interval has elapsed
       const elapsed = now - (strategy.lastRun || 0);
       if (elapsed < strategy.intervalMinutes * 60_000) continue;
+
+      // Early staleness check: verify this strategy still exists in KV
+      // before starting the expensive LLM evaluation. Catches deletions
+      // that happened after we loaded the strategies array.
+      if (await isStrategyStale(kv, strategy)) {
+        console.log(`Strategy ${strategy.id} (${strategy.vaultAddress}) deleted — skipping.`);
+        continue;
+      }
 
       try {
         // Build context with previous recommendation for continuity
@@ -250,8 +340,20 @@ export async function runDueStrategies(
         }
 
         const executionInstruction = strategy.autoExecute
-          ? `Execute the recommended actions immediately if they are safe and beneficial.`
-          : `Do NOT execute any transactions — only describe what should be done and why.`;
+          ? `Execute the recommended actions immediately if they are safe and beneficial. ` +
+            `Follow the instruction EXACTLY — use the exact token amounts, thresholds, and conditions specified. ` +
+            `Do NOT change amounts, invent conditions, or deviate from what the instruction says.`
+          : `Do NOT execute any transactions — only recommend what should be done. ` +
+            `Be CONCISE: state what action to take and why in 2-3 short sentences. ` +
+            `Do NOT show your reasoning process, analysis steps, or tool call plans. ` +
+            `Just give the actionable recommendation.`;
+
+        const comparisonGuidance =
+          `IMPORTANT: If the instruction contains a price condition (e.g. "if price is below X"), ` +
+          `you MUST verify the comparison carefully. Check: is the actual price LESS THAN the threshold? ` +
+          `For example, 0.000045 < 0.001 means the condition "below 0.001" IS met. ` +
+          `Double-check your comparison before concluding whether to act or wait. ` +
+          `If NO action is needed, start your reply with "NO ACTION:" followed by the reason.`;
 
         // Build synthetic message for the LLM
         const messages: ChatMessage[] = [
@@ -261,7 +363,8 @@ export async function runDueStrategies(
               `[AUTOMATED STRATEGY CHECK — ID: ${strategy.id}]\n\n` +
               `Instruction: ${strategy.instruction}\n\n` +
               `Analyze the current state and recommend specific actions. ` +
-              executionInstruction +
+              executionInstruction + `\n\n` +
+              comparisonGuidance +
               contextNote,
           },
         ];
@@ -307,6 +410,14 @@ export async function runDueStrategies(
             break;
           }
 
+          // Before executing, verify the strategy hasn't been deleted/replaced
+          // while the LLM was thinking. Prevents stale cron runs from executing
+          // trades for a strategy the user already removed.
+          if (await isStrategyStale(kv, strategy)) {
+            console.log(`Strategy ${strategy.id} (${strategy.vaultAddress}) is stale — skipping execution.`);
+            break;
+          }
+
           // Execute and record outcomes
           const outcomes = await executeTxList(env, txList, strategy.vaultAddress);
           const stepSummary = formatOutcomesMarkdown(outcomes);
@@ -342,6 +453,16 @@ export async function runDueStrategies(
         strategy.lastRecommendation = result.reply?.slice(0, 2000) || undefined;
         changed = true;
 
+        // Track executions for maxExecutions support (one-shot strategies)
+        if (allOutcomes.length > 0) {
+          strategy.executionCount = (strategy.executionCount || 0) + 1;
+        }
+
+        // Auto-remove if maxExecutions reached
+        if (strategy.maxExecutions && (strategy.executionCount || 0) >= strategy.maxExecutions) {
+          strategy.active = false;
+        }
+
         // Record event for web polling
         await recordEvent(kv, strategy.vaultAddress, {
           strategyId: strategy.id,
@@ -353,6 +474,15 @@ export async function runDueStrategies(
           success: true,
         });
 
+        // Before notifying, verify the strategy hasn't been deleted/replaced
+        // while the LLM was thinking. Prevents stale cron runs from sending
+        // notifications for old strategies the user already replaced.
+        if (await isStrategyStale(kv, strategy)) {
+          console.log(`Strategy ${strategy.id} (${strategy.vaultAddress}) is stale — skipping notification.`);
+          changed = false; // Don't merge stale state
+          continue;
+        }
+
         // Send Telegram notification
         if (env.TELEGRAM_BOT_TOKEN && (result.reply || executionSummary)) {
           const telegramUserId = await getTelegramUserIdByAddress(
@@ -362,25 +492,68 @@ export async function runDueStrategies(
           if (telegramUserId) {
             if (strategy.autoExecute && executionSummary) {
               // Autonomous mode: notify AFTER execution with results
+              const completedNote = (!strategy.active && strategy.maxExecutions)
+                ? `\n\n✅ Strategy completed (${strategy.executionCount}/${strategy.maxExecutions} executions) — auto-removed.`
+                : "";
               const text = [
                 `<b>⚡ Strategy #${strategy.id} — auto-executed</b>`,
                 `<i>${escapeHtml(strategy.instruction)}</i>`,
                 ``,
                 escapeHtml(executionSummary),
                 result.reply ? `\n${escapeHtml(result.reply)}` : ``,
+                completedNote,
               ].join("\n");
               await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
             } else if (result.reply) {
-              // Manual mode: notify with recommendation, await operator confirmation
-              const text = [
-                `<b>⏰ Strategy #${strategy.id}</b>`,
-                `<i>${escapeHtml(strategy.instruction)}</i>`,
-                ``,
-                escapeHtml(result.reply),
-                ``,
-                `Reply to act on this recommendation, or ignore to skip.`,
-              ].join("\n");
-              await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
+              // Manual mode: notify with recommendation, await operator confirmation.
+              // If the LLM says "no action needed", send a plain notification (no buttons).
+              const isNoAction = /^NO ACTION:/i.test(result.reply.trim());
+              const hasTx = !!(result.transaction || (result.transactions && result.transactions.length > 0));
+
+              if (!isNoAction && (hasTx || !result.reply.toLowerCase().includes("no action"))) {
+                // Actionable recommendation — store payload and show Act/Skip buttons
+                const recPayload = {
+                  strategyId: strategy.id,
+                  instruction: strategy.instruction,
+                  recommendation: result.reply,
+                  vaultAddress: strategy.vaultAddress,
+                  chainId: strategy.chainId,
+                  operatorAddress: strategy.operatorAddress,
+                  createdAt: Date.now(),
+                };
+                await kv.put(
+                  `tg-strategy-rec:${telegramUserId}`,
+                  JSON.stringify(recPayload),
+                  { expirationTtl: strategy.intervalMinutes * 60 },
+                );
+
+                const text = [
+                  `<b>⏰ Strategy #${strategy.id}</b>`,
+                  `<i>${escapeHtml(strategy.instruction)}</i>`,
+                  ``,
+                  escapeHtml(result.reply),
+                ].join("\n");
+
+                const keyboard: TgInlineKeyboardMarkup = {
+                  inline_keyboard: [
+                    [
+                      { text: "✅ Act on this", callback_data: `strategy-act:${telegramUserId}` },
+                      { text: "❌ Skip", callback_data: `strategy-skip:${telegramUserId}` },
+                    ],
+                  ],
+                };
+
+                await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text, { replyMarkup: keyboard });
+              } else {
+                // No-action recommendation — plain notification, no buttons
+                const text = [
+                  `<b>⏰ Strategy #${strategy.id}</b>`,
+                  `<i>${escapeHtml(strategy.instruction)}</i>`,
+                  ``,
+                  escapeHtml(result.reply.replace(/^NO ACTION:\s*/i, "")),
+                ].join("\n");
+                await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
+              }
             }
           }
         }
@@ -436,7 +609,49 @@ export async function runDueStrategies(
     if (changed) {
       // Extract vault address from key: "strategies:0x..."
       const vaultAddr = key.name.slice(STRATEGY_PREFIX.length);
-      await saveStrategies(kv, vaultAddr, strategies);
+
+      // Re-read from KV to avoid overwriting concurrent deletions.
+      // If the operator removed a strategy while the cron was running,
+      // we must not restore it by saving our stale copy.
+      const freshStrategies = await getStrategies(kv, vaultAddr);
+      const freshIds = new Set(freshStrategies.map((s) => s.id));
+
+      // Merge: only update strategies that still exist in KV AND have
+      // the same createdAt (prevents a stale cron run from overwriting
+      // a newly created strategy that reused the same ID).
+      // Also remove completed one-shot strategies (maxExecutions reached)
+      let merged = freshStrategies
+        .map((fresh) => {
+          const updated = strategies.find(
+            (s) => s.id === fresh.id && s.createdAt === fresh.createdAt,
+          );
+          return updated || fresh;
+        })
+        .filter((s) => {
+          // Remove completed one-shot strategies
+          if (s.maxExecutions && (s.executionCount || 0) >= s.maxExecutions) return false;
+          return true;
+        });
+
+      // If all strategies were removed, don't re-create them
+      if (freshIds.size === 0 && freshStrategies.length === 0) {
+        continue;
+      }
+
+      // Check tombstone: if strategies were recently deleted, filter out
+      // strategies that predate the deletion. Strategies created after the
+      // tombstone are safe to save (they're genuinely new, not resurrected).
+      const tombstoneForSave = await kv.get(tombstoneKey(vaultAddr));
+      if (tombstoneForSave) {
+        const ts = parseInt(tombstoneForSave, 10);
+        merged = merged.filter((s) => s.createdAt > ts);
+        if (merged.length === 0) {
+          console.log(`Strategy tombstone found for ${vaultAddr} — all strategies predate it, skipping save.`);
+          continue;
+        }
+      }
+
+      await saveStrategies(kv, vaultAddr, merged);
     }
   }
 }

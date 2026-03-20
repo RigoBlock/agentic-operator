@@ -97,8 +97,9 @@ describe("getRpcUrl", () => {
     }
   });
 
-  it("returns undefined for BSC (no Alchemy support)", () => {
-    expect(getRpcUrl(56, "key")).toBeUndefined();
+  it("returns Alchemy URL for BSC", () => {
+    const url = getRpcUrl(56, "key");
+    expect(url).toContain("bnb-mainnet");
   });
 });
 
