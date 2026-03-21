@@ -97,6 +97,16 @@ function parseSponsoredError(raw: string, chainId: number, agentAddress: string)
   const lower = raw.toLowerCase();
   const token = NATIVE_TOKEN[chainId] || "ETH";
 
+  // Invalid RPC parameters — usually a bundler/EIP-7702 configuration issue
+  if (lower.includes("invalid parameters") || lower.includes("invalid params") ||
+      lower.includes("invalid method params") || lower.includes("invalid request")) {
+    return (
+      `Gas-sponsored execution failed due to an RPC parameter error. ` +
+      `This is usually a temporary bundler issue — please try again in a moment. ` +
+      `If the problem persists, the gas sponsorship policy may need to be reconfigured for chain ${chainId}.`
+    );
+  }
+
   // Per-user transaction count limit
   if (lower.includes("max number of user ops") || lower.includes("policy limit") ||
       lower.includes("exceeded the maximum") || lower.includes("rate limit") ||
@@ -331,16 +341,17 @@ export async function executeViaDelegation(
     );
   }
 
-  // 4. Verify the function selector is allowed
+  // 4. Verify the function selector is in our code-level whitelist.
+  //    We check against ALLOWED_VAULT_SELECTORS (the canonical set) rather than
+  //    the KV-stored selectors — the KV config may be stale if new selectors
+  //    were added after the initial delegation setup. The on-chain delegation
+  //    is the ultimate guard (eth_call simulation at step 7 catches unauthorized calls).
   const selector = tx.data.slice(0, 10) as Hex;
-  const allowedSelectors = chainDelegation.delegatedSelectors.map((s) => s.toLowerCase());
-  if (!allowedSelectors.includes(selector.toLowerCase())) {
-    // Find the human-readable name for the selector
-    const selectorName = Object.entries(ALLOWED_VAULT_SELECTORS)
-      .find(([, v]) => v.toLowerCase() === selector.toLowerCase())?.[0] || selector;
+  const whitelistedSelectors = Object.values(ALLOWED_VAULT_SELECTORS).map((s) => s.toLowerCase());
+  if (!whitelistedSelectors.includes(selector.toLowerCase())) {
     throw new ExecutionError(
-      `Function selector ${selector} (${selectorName}) is not delegated on chain ${tx.chainId}. ` +
-      `Re-setup delegation on trader.rigoblock.com to add this selector.`,
+      `Function selector ${selector} is not in the allowed set. ` +
+      `Only whitelisted vault functions can be called via delegation.`,
       "METHOD_NOT_ALLOWED",
     );
   }
@@ -436,67 +447,98 @@ export async function executeViaDelegation(
     `sponsoredGas=${config.sponsoredGas}, policyId=${env.ALCHEMY_GAS_POLICY_ID ? 'SET' : 'MISSING'}, ` +
     `agent=${agentAccount.address}, chain=${tx.chainId}`);
 
+  // Track whether the NAV shield ran as operator and confirmed the transaction is valid.
+  // We use this to distinguish "trade is bad" (SIMULATION_FAILED from NAV shield) from
+  // "agent lacks on-chain delegation for this selector" (SIMULATION_FAILED from broadcast).
+  // If the operator simulation succeeded (verified OR unverified-but-swap-passed),
+  // the transaction is valid and the operator CAN execute it — but the agent may not be
+  // delegated for this specific selector. In that case, fall back to manual signing.
+  const operatorValidated = navResult.allowed; // always true here (we threw above if not)
+  void operatorValidated; // prevents unused-var lint warnings
+
   let result: ExecutionResult;
 
-  if (useSponsored) {
-    // ── Sponsored path: submit as UserOperation via Alchemy bundler ──
-    // The paymaster sponsors gas, so the agent wallet doesn't need ETH.
-    // The agent EOA must have EIP-7702 authorization (auto-set on first use).
-    console.log(`[executeViaDelegation] Calling sponsoredAgentTransaction...`);
-    try {
-      result = await sponsoredAgentTransaction(
-        agentAccount,
-        tx,
-        tx.chainId,
-        env.ALCHEMY_API_KEY,
-        env.ALCHEMY_GAS_POLICY_ID!,
-        env.KV,
-      );
-    } catch (sponsoredErr) {
-      // If simulation failed, the transaction itself is bad — don't retry via direct
-      if (sponsoredErr instanceof ExecutionError && sponsoredErr.code === "SIMULATION_FAILED") {
-        throw sponsoredErr;
-      }
-      // For bundler/paymaster errors (e.g. policy expired, chain not covered),
-      // fall back to direct broadcast so the agent wallet pays gas instead.
-      const sponsoredMsg = sponsoredErr instanceof Error ? sponsoredErr.message : String(sponsoredErr);
-      console.warn(
-        `[executeViaDelegation] Sponsored execution failed, falling back to direct broadcast. ` +
-        `Error: ${sponsoredMsg}`,
-      );
+  try {
+    if (useSponsored) {
+      // ── Sponsored path: submit as UserOperation via Alchemy bundler ──
+      // The paymaster sponsors gas, so the agent wallet doesn't need ETH.
+      // The agent EOA must have EIP-7702 authorization (auto-set on first use).
+      console.log(`[executeViaDelegation] Calling sponsoredAgentTransaction...`);
       try {
-        result = await broadcastAgentTransaction(
+        result = await sponsoredAgentTransaction(
           agentAccount,
           tx,
           tx.chainId,
           env.ALCHEMY_API_KEY,
+          env.ALCHEMY_GAS_POLICY_ID!,
+          env.KV,
         );
-      } catch (directErr) {
-        // If direct broadcast also fails due to no balance, the real problem is the
-        // sponsored path. Surface a user-friendly message about what went wrong.
-        if (directErr instanceof ExecutionError && directErr.code === "INSUFFICIENT_BALANCE") {
-          const friendly = parseSponsoredError(sponsoredMsg, tx.chainId, agentAccount.address);
-          const sanitizedMsg = sanitizeError(sponsoredMsg);
-          throw new ExecutionError(
-            friendly ||
-            `Gas-sponsored execution failed: ${sanitizedMsg}. ` +
-            `Direct broadcast also failed (agent wallet has no balance on chain ${tx.chainId}). ` +
-            `Send ${NATIVE_TOKEN[tx.chainId] || "ETH"} to ${agentAccount.address} to cover gas, ` +
-            `or wait for the sponsorship limit to reset.`,
-            "SPONSORED_FAILED",
-          );
+      } catch (sponsoredErr) {
+        // If simulation failed, don't retry via direct — let outer catch handle it
+        if (sponsoredErr instanceof ExecutionError && sponsoredErr.code === "SIMULATION_FAILED") {
+          throw sponsoredErr;
         }
-        throw directErr;
+        // For bundler/paymaster errors (e.g. policy expired, chain not covered),
+        // fall back to direct broadcast so the agent wallet pays gas instead.
+        const sponsoredMsg = sponsoredErr instanceof Error ? sponsoredErr.message : String(sponsoredErr);
+        console.warn(
+          `[executeViaDelegation] Sponsored execution failed, falling back to direct broadcast. ` +
+          `Error: ${sponsoredMsg}`,
+        );
+        try {
+          result = await broadcastAgentTransaction(
+            agentAccount,
+            tx,
+            tx.chainId,
+            env.ALCHEMY_API_KEY,
+          );
+        } catch (directErr) {
+          // If direct broadcast also fails due to no balance, the real problem is the
+          // sponsored path. Surface a user-friendly message about what went wrong.
+          if (directErr instanceof ExecutionError && directErr.code === "INSUFFICIENT_BALANCE") {
+            const friendly = parseSponsoredError(sponsoredMsg, tx.chainId, agentAccount.address);
+            const sanitizedMsg = sanitizeError(sponsoredMsg);
+            throw new ExecutionError(
+              friendly ||
+              `Gas-sponsored execution failed: ${sanitizedMsg}. ` +
+              `This is usually a temporary issue — please try again in a moment. ` +
+              `If the problem persists, the gas sponsorship policy may need to be reconfigured for chain ${tx.chainId}.`,
+              "SPONSORED_FAILED",
+            );
+          }
+          throw directErr;
+        }
       }
+    } else {
+      // ── Direct broadcast: agent wallet pays gas ──
+      result = await broadcastAgentTransaction(
+        agentAccount,
+        tx,
+        tx.chainId,
+        env.ALCHEMY_API_KEY,
+      );
     }
-  } else {
-    // ── Direct broadcast: agent wallet pays gas ──
-    result = await broadcastAgentTransaction(
-      agentAccount,
-      tx,
-      tx.chainId,
-      env.ALCHEMY_API_KEY,
-    );
+  } catch (execErr) {
+    // Detect the "agent not delegated on-chain" pattern:
+    // The NAV shield already validated the transaction as the OPERATOR (vault owner),
+    // which means the transaction is structurally valid. If the agent's own simulation
+    // now fails, it means the vault has rejected the call because this function selector
+    // is not in the agent's on-chain delegation mapping.
+    //
+    // In this case, the operator can still execute the transaction by signing it
+    // directly from their wallet — signal fallbackToManual to the caller.
+    if (execErr instanceof ExecutionError && execErr.code === "SIMULATION_FAILED") {
+      console.warn(
+        `[executeViaDelegation] Agent simulation failed but operator validation passed — ` +
+        `selector ${selector} is likely not delegated on-chain. Signalling AGENT_NOT_DELEGATED.`,
+      );
+      throw new ExecutionError(
+        `The agent wallet is not delegated for function selector ${selector} on-chain. ` +
+        `Update your delegation to add this function, or sign this transaction directly from your wallet.`,
+        "AGENT_NOT_DELEGATED",
+      );
+    }
+    throw execErr;
   }
 
   // Store pending tx in KV for async monitoring (if not yet confirmed)

@@ -79,3 +79,30 @@ dangerous operation before it reaches the blockchain. However:
 - **Respect "BLOCKED" responses** — they mean the NAV shield caught something
 - **Don't retry blocked transactions** — the market conditions need to change
 - **Manual mode is always safe** — unsigned tx data can't harm the vault
+
+## User Wallet Security (Self-Custodial)
+
+The built-in wallet uses an encrypted keystore model:
+
+1. **Key derivation**: PBKDF2-SHA256 with 310,000 iterations (OWASP 2023) + random 32-byte salt
+2. **Encryption**: AES-256-GCM with 12-byte IV
+3. **Storage**: Encrypted keystore in browser `localStorage` — server never stores seed or password
+4. **Signing**: Browser decrypts keystore with user's password → signs locally → wipes key from memory
+5. **Import**: Uses Web Crypto API entirely client-side — imported seed phrases never touch the server
+6. **Gas sponsorship**: EIP-7702 via Alchemy — split-signing (server prepares UserOp, browser signs, server submits)
+
+**Threat model:**
+- Server compromise → attacker cannot decrypt keystores (no passwords or seeds on server)
+- localStorage compromise → attacker gets encrypted blob, needs password to decrypt
+- Network interception → only encrypted keystore transits after creation (HTTPS + AES-256-GCM)
+- New wallet creation → seed transits over HTTPS from WDK generation (server wipes immediately)
+
+## Agent Wallet Security (Delegation)
+
+Agent wallets (for delegated execution) are encrypted server-side:
+
+1. **Per-vault key derivation**: `HKDF(AGENT_WALLET_SECRET, salt=vaultAddress)` → unique AES key per vault
+2. **Encryption**: AES-256-GCM — encrypted mnemonic stored in Cloudflare KV
+3. **Access control**: `AGENT_WALLET_SECRET` is a Cloudflare secret (encrypted at rest)
+4. **Compromise scenario**: `AGENT_WALLET_SECRET` + KV read access = all agent keys exposed
+5. **Mitigation**: Key rotation available via `rotateAgentWalletKey()`, delegation revocable on-chain

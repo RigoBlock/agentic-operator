@@ -8,4 +8,6 @@ dist/
 .env
 .env.*
 !.env.example
+public/wdk-evm.js
+public/wdk-secret-manager.js
 content/

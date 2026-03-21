@@ -46,7 +46,12 @@ The wallet is created, encrypted, and managed entirely by Tether's **WDK**:
 | LLM boundary | Tool functions return only signatures/addresses — never keys or seeds |
 | Human control | Remove `WALLET_PASSKEY` env var, or revoke on-chain delegation |
 
-### TypeScript SDK (Recommended)
+### TypeScript SDK (Optional — for local wallet management)
+
+The SDK provides convenient WDK wallet management but is **not required**.
+External agents can call the HTTP API directly with any HTTP client.
+The SDK is useful when you want WDK wallet creation, encrypted storage,
+and x402 payment wired up automatically.
 
 ```typescript
 import { setupSecureClient } from "@rigoblock/defi-sdk";
@@ -124,7 +129,7 @@ Track per-chain: `{chainId: vaultAddress}`.
 - `get_aggregated_nav` — shows vault NAV and balances on ALL chains at once
 - `get_rebalance_plan` — computes optimal bridge ops to rebalance across chains
 
-Using the TypeScript SDK (secure encrypted wallet):
+Using the TypeScript SDK (optional — secure encrypted wallet):
 ```typescript
 import { setupSecureClient } from "@rigoblock/defi-sdk";
 import path from "path";
@@ -141,7 +146,7 @@ const { client, session, isNewWallet, seedPhraseBackup } = await setupSecureClie
 if (isNewWallet) console.log("BACKUP:", seedPhraseBackup);
 ```
 
-Using the TypeScript SDK (plaintext seed — less secure, simpler):
+Using the TypeScript SDK (optional — plaintext seed, simpler):
 ```typescript
 import { setupRigoblockClient } from "@rigoblock/defi-sdk";
 
@@ -153,7 +158,7 @@ const { client, wallet, walletInfo } = await setupRigoblockClient({
 if (walletInfo) console.log("Save seed:", walletInfo.seedPhrase);
 ```
 
-Using plain HTTP (no SDK):
+Using plain HTTP (no SDK required — recommended for external agents):
 ```typescript
 import WalletManagerEvm from "@tetherto/wdk-wallet-evm";
 import { SeedSignerEvm } from "@tetherto/wdk-wallet-evm/signers";
@@ -360,8 +365,11 @@ of operations — use your own judgment on how to phrase requests:
 
 ### Uniswap v4 Liquidity
 - Add/remove LP positions, list positions, collect fees
-- XAUT/USDT pool on Ethereum (legacy): `0x19a01cd4a3d7a1fd58ee778fcdc74fce46023adb0ac179a603e5b3234dd5610d`
-- The current strategy deploys XAUT/USDT LP on **Arbitrum** (same chain as GMX hedge)
+- XAUT/USDT pool on Arbitrum (the carry trade pool):
+  - Pool ID: `0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34`
+  - fee: `6000` (0.60%), tickSpacing: `120`, hooks: `0x0000000000000000000000000000000000000000`
+  - currency0: XAUT `0x40461291347e1eCbb09499F3371D3f17f10d7159`, currency1: USDT `0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9`
+- For unknown pools: call `get_pool_info` with the pool ID to discover fee, tickSpacing, and hooks before adding liquidity
 - Examples: "add liquidity to XAUT/USDT pool with 0.5 XAUT and 1500 USDT on Arbitrum"
 
 ### GMX V2 Perpetuals (Arbitrum)
@@ -399,7 +407,7 @@ Yield = LP fees minus hedge cost.
 - **BSC + Optimism (capital):** Investors fund vault tokens on BSC or Optimism
   (USDT as base token). Capital is bridged to Arbitrum via Across.
 - **Arbitrum vault (LP + hedge):** Swap USDT → XAUT, add XAUT/USDT LP on
-  Uni v4 (with Rigoblock oracle hook). Convert ~15% to USDC, open 1x short
+  Uni v4 (fee=6000, tickSpacing=120, no hooks). Convert ~15% to USDC, open 1x short
   XAUT/USD on GMX with USDC as collateral. Earn LP fees, hedge offsets
   directional XAUT exposure.
 - **Cross-chain NAV sync:** Call `crosschain_sync` every ~30 minutes AND on
@@ -478,9 +486,12 @@ The same API powers a **web chat** at `https://trader.rigoblock.com` with
 additional UX benefits:
 
 - **No local install** — works from any browser
+- **Built-in encrypted wallet** — create wallet with just a password (no MetaMask needed)
+- **Gas-sponsored** — EIP-7702 via Alchemy, no ETH needed
+- **Self-custodial** — encrypted keystore in browser localStorage, server never stores seed
 - **Agent always on** — no need to keep a terminal open
 - **Telegram integration** — receive strategy notifications and confirmations
-- **Operator auth built-in** — sign once via MetaMask/WalletConnect
+- **Operator auth built-in** — sign once (browser-local with WDK)
 
 For hackathon evaluation, the web chat provides the fastest path to see the
 system in action without installing anything locally.

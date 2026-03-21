@@ -42,13 +42,20 @@ enabling sandwich attacks that extract ~10% per day within NAV shield limits.
 ### 2. NAV shield must NEVER be bypassed or weakened
 
 ```
-RULE: The NAV shield (10% max drop check) runs BEFORE every transaction broadcast.
+RULE: The NAV shield (10% max drop check) runs BEFORE every swap transaction
+      is returned or broadcast. It protects ALL execution modes:
+        - Manual: runs when building unsigned calldata (preCheckNavImpact in client.ts)
+        - Delegated: runs BOTH when building calldata AND at broadcast time (execution.ts)
       It is outside the agent's control surface. Do NOT add code paths that skip it.
       When NAV can be measured: FAIL-CLOSED (block if drop > threshold).
       When NAV cannot be measured: graceful degradation (proceed with warning).
 ```
 
-- `checkNavImpact()` in `execution.ts` calls the shield from `navGuard.ts`
+- **Pre-check** (`preCheckNavImpact()` in `client.ts`): runs before returning unsigned
+  calldata from `build_vault_swap`. Blocks toxic swaps before the user sees them.
+- **Broadcast check** (`checkNavImpact()` in `execution.ts`): runs before delegated
+  broadcast. Belt-and-suspenders — catches changes between building and broadcasting.
+- Both call the same `checkNavImpact()` from `navGuard.ts`
 - It simulates atomically via `multicall([swap, getNavDataView])` on the RPC
 - **Simulation runs as the OPERATOR (vault owner)**, not the agent wallet.
   Reason: `multicall` is intentionally NOT in the agent's delegated selectors
@@ -94,10 +101,12 @@ RULE: AGENT_WALLET_SECRET + KV read access = can decrypt ALL agent private keys.
       Treat AGENT_WALLET_SECRET with the same gravity as a root CA private key.
 ```
 
-- Each vault has a unique agent EOA, encrypted with AES-256-GCM
-- Encryption key = `HKDF(AGENT_WALLET_SECRET, salt=vaultAddress)`
-- Compromising the secret + KV = all agent wallets compromised
-- Rotation via `rotateAgentWalletKey()` — decrypt old, re-encrypt new
+- Each vault has a unique agent EOA, encrypted with WdkSecretManager (XSalsa20-Poly1305, v3+)
+- Passkey = `${AGENT_WALLET_SECRET}:${vaultAddress.toLowerCase()}` — per-vault key isolation
+- Salt = 16-byte random (stored alongside ciphertext in KV); seed stored as 16-byte BIP-39 entropy
+- Legacy wallets (v0–v2) decryptable via AES-256-GCM fallback; new wallets always use v3
+- Compromising AGENT_WALLET_SECRET + KV = all agent wallets compromised
+- Rotation via `rotateAgentWalletKey()` — decrypt old (any version), re-encrypt new (v3)
 
 ### 5. Strategy execution defaults to manual, supports autonomous
 
@@ -117,6 +126,46 @@ RULE: Cron-triggered strategies default to manual mode (notify via Telegram,
 - Auto-pause after 3 consecutive failures (both modes)
 - `lastRecommendation` carries context between runs (capped at 500 chars)
 
+### 6. User wallet is self-custodial — server never stores seed or password
+
+```
+RULE: The self-custodial wallet (browser UI) uses an encrypted keystore model.
+      The server generates the seed (via WDK) but NEVER stores it. The password
+      NEVER leaves the browser. Do NOT add code that persists plaintext seed
+      phrases or passwords on the server side.
+```
+
+- **Creation**: Done entirely in the browser — `wdkSaltGenerator.generate()` creates a
+  16-byte random salt → Web Crypto PBKDF2-SHA256 (100k iterations) derives a 32-byte key →
+  `WdkSecretManager.generateAndEncrypt(null, derivedKey)` generates random entropy and
+  encrypts it with XSalsa20-Poly1305 (libsodium) → address derived via
+  `WalletAccountEvm.fromSeed()` → v2 keystore `{ version: 2, address, salt (hex),
+  encryptedEntropy (hex) }` stored in `localStorage` → seed shown once for backup → cleared.
+  **No server call. Seed never leaves the browser tab.**
+- **Import**: Done entirely client-side — `sm.mnemonicToEntropy(seedPhrase)` converts
+  user's 12-word phrase to entropy → `generateAndEncrypt(entropy, derivedKey)` re-encrypts
+  with the user's new password. NEVER touches the server.
+- **Storage**: Encrypted keystore (v2) in browser `localStorage` — server has no copy.
+  v1 keystores (AES-256-GCM) are still decryptable for backward compat.
+- **Key derivation**: Uses Web Crypto `SubtleCrypto.deriveBits()` (PBKDF2-SHA256, 100k
+  iterations) in the browser to produce a 32-byte key, then passes it directly as `derivedKey`
+  to `WdkSecretManager`. This bypasses `bare-crypto.pbkdf2Sync` (unavailable in browser).
+- **Signing**: Browser decrypts with password → entropy → mnemonic → creates WDK
+  `WalletAccountEvm` (cached for session) → signs locally → private key never leaves browser.
+  Unlock once per session (like MetaMask).
+- **Browser WDK bundles**:
+  - `public/wdk-evm.js` — `@tetherto/wdk-wallet-evm` (wallet + signer). `npm run build:wdk-browser`.
+  - `public/wdk-secret-manager.js` — `@tetherto/wdk-secret-manager` (encryption).
+    `npm run build:wdk-secret-manager`. Uses `scripts/bare-crypto-browser-shim.cjs` as
+    a stub (never called — derivedKey is always passed pre-computed).
+  Both loaded lazily via dynamic `import()`.
+- **Gas sponsorship**: EIP-7702 split-signing — server calls `prepareCalls()` (no key needed)
+  → browser signs → server calls `sendPreparedCalls()` (no key needed)
+- **NEVER** add server-side storage of plaintext seeds, passwords, or decrypted keystores
+- **NEVER** add a code path where the server decrypts a user's keystore
+- **NEVER** add `pbkdf2Sync` to the browser environment — always use Web Crypto + pass
+  `derivedKey` to WdkSecretManager methods that accept it
+
 ---
 
 ## CODING RULES
@@ -128,11 +177,13 @@ These files contain security-critical logic. Changes require extra care:
 | File | What it guards |
 |------|---------------|
 | `src/routes/chat.ts` | Auth gate, execution mode resolution |
-| `src/services/execution.ts` | 7-point validation, NAV shield call |
+| `src/llm/client.ts` | NAV shield pre-check for all swap calldata |
+| `src/services/execution.ts` | 7-point validation, NAV shield at broadcast |
 | `src/services/navGuard.ts` | NAV shield simulation and threshold check |
 | `src/services/auth.ts` | Signature verification, vault ownership |
 | `src/services/delegation.ts` | On-chain delegation state |
 | `src/services/agentWallet.ts` | WDK wallet gen (BIP-39/BIP-44), encryption, decryption |
+| `src/services/userWallet.ts` | Self-custodial wallet gen + encrypted keystore |
 | `src/middleware/x402.ts` | Payment verification, exempt origins, settlement |
 | `src/services/strategy.ts` | Strategy execution controls |
 
@@ -258,6 +309,8 @@ src/
     chat.ts             ← Auth gate + execution mode (CRITICAL)
     quote.ts            ← Price quotes (safe — no vault mutation)
     delegation.ts       ← Delegation management endpoints
+    wallet.ts           ← Self-custodial wallet (create, prepare-tx, submit-signed)
+    gasPolicy.ts        ← Gas sponsorship policy (Alchemy)
     telegram.ts         ← Telegram webhook handler
   services/
     auth.ts             ← Signature verification + vault ownership
@@ -265,6 +318,7 @@ src/
     navGuard.ts         ← NAV shield simulation (10% threshold)
     delegation.ts       ← Delegation state management
     agentWallet.ts      ← WDK wallet gen (BIP-39/BIP-44), encrypt/decrypt
+    userWallet.ts       ← Self-custodial wallet gen + encrypted keystore (PBKDF2+AES-256-GCM)
     strategy.ts         ← Cron strategies (manual default, autonomous opt-in)
     uniswapTrading.ts   ← Uniswap quote/swap building
     zeroXTrading.ts     ← 0x aggregator integration
@@ -276,6 +330,14 @@ src/
   llm/
     client.ts           ← LLM provider resolution (AI binding default → user key → OpenAI fallback)
     tools.ts            ← Tool definitions (55+) + system prompt
+public/
+  index.html            ← Chat UI + wallet connect (self-custodial WDK wallet)
+  wdk-evm.js            ← esbuild bundle of @tetherto/wdk-wallet-evm for browser
+  wdk-secret-manager.js ← esbuild bundle of @tetherto/wdk-secret-manager for browser
+scripts/
+  patch-wdk-for-worker.cjs      ← Postinstall: patches WDK deps for Cloudflare Workers
+  wdk-buffer-shim.js            ← Buffer polyfill for WDK browser bundles
+  bare-crypto-browser-shim.cjs  ← bare-crypto stub (pbkdf2Sync never called when derivedKey passed)
 ```
 
 ---

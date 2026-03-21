@@ -43,22 +43,26 @@ The agent decides all allocation sizes autonomously:
 ### Entry Sequence
 
 ```
-1. get_aggregated_nav → discover where funds are across all chains
-2. get_token_balance(token: "USDT", chain: "arbitrum") → check if already on Arbitrum
-3. IF bridge needed: crosschain_transfer(USDT, from: source chain, to: "arbitrum")
+1. plan_carry_trade → computes exact amounts for every step:
+   - Checks USDT balance on Arbitrum, gets live XAUT/USDT price
+   - Calculates: USDT→XAUT swap amount, LP amounts, GMX collateral, hedge size
+   - If no USDT on Arbitrum, checks other chains and suggests bridging
+2. IF bridge needed: crosschain_transfer(USDT, from: source chain, to: "arbitrum")
    Then: verify_bridge_arrival(token: "USDT", chain: "arbitrum", minAmount: <expected>)
-4. build_vault_swap(USDT → XAUT, chain: "arbitrum") → buy gold (~40% of capital)
-5. add_liquidity(
+   Then: plan_carry_trade again (to recompute with updated balance)
+3. build_vault_swap(USDT → XAUT, chain: "arbitrum") → buy gold (amount from plan)
+4. add_liquidity(
      tokenA: "XAUT", tokenB: "USDT",
-     hooks: <rigoblock_oracle_hook_address>,
+     fee: 6000, tickSpacing: 120, hooks: "0x0000000000000000000000000000000000000000",
      chain: "arbitrum"
-   ) → add LP on Uni v4 (with oracle hook)
-6. build_vault_swap(USDT → USDC, chain: "arbitrum") → convert ~15% to hedge collateral
-7. gmx_open_position(
+   ) → add LP on Uni v4 (amounts from plan)
+   Pool ID: 0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34
+5. build_vault_swap(USDT → USDC, chain: "arbitrum") → convert to hedge collateral (amount from plan)
+6. gmx_open_position(
      market: "XAUT", isLong: false,
      collateral: "USDC", leverage: 10
-   ) → hedge LP's directional exposure
-8. crosschain_sync(from: "arbitrum", to: all active chains) → sync NAV
+   ) → hedge LP's directional exposure (size from plan)
+7. crosschain_sync(from: "arbitrum", to: all active chains) → sync NAV
 ```
 
 ### Position Monitoring (every 5 minutes, autonomous)
@@ -133,7 +137,7 @@ Only used when the operator decides to wind down the strategy entirely
 
 ```
 1. gmx_close_position(XAUT, short) → close hedge
-2. remove_liquidity_v4(positionId) → remove LP
+2. remove_liquidity(positionId) → remove LP
 3. build_vault_swap(XAUT → USDT, arbitrum) → convert remaining XAUT
 4. crosschain_transfer(USDT, arbitrum → BSC or Optimism) → return funds
 5. crosschain_sync() on all active chains → final NAV sync

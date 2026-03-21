@@ -28,12 +28,12 @@ chat.post("/", async (c) => {
     if (!body.messages || !Array.isArray(body.messages)) {
       return c.json({ error: "messages array is required" }, 400);
     }
-    if (!body.vaultAddress) {
-      return c.json({ error: "vaultAddress is required" }, 400);
-    }
     if (!body.chainId) {
       return c.json({ error: "chainId is required" }, 400);
     }
+    // vaultAddress is optional — zero address signals "no vault yet" (pool deployment flow)
+    const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
+    const resolvedVaultAddress: Address = (body.vaultAddress || ZERO_ADDRESS) as Address;
 
     // ── Auth gate ──
     // x402 payment = API access fee. Operator auth = vault authorization.
@@ -41,9 +41,13 @@ chat.post("/", async (c) => {
     //   - x402 paid + no auth → manual mode only (unsigned tx data)
     //   - x402 paid + auth    → manual or delegated (full access)
     //   - browser (exempt) + auth → manual or delegated (full access)
+    //   - browser (exempt) + no auth → manual mode only (read-only, non-owner viewing a vault)
     // Delegated execution ALWAYS requires proven vault ownership.
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
     let operatorVerified = false;
+
+    // Detect browser-origin requests (same-origin or Telegram exempt)
+    const isBrowserRequest = c.req.header("sec-fetch-site") === "same-origin";
 
     if (hasAuthCredentials) {
       // Auth credentials provided — verify regardless of x402 status
@@ -56,11 +60,11 @@ chat.post("/", async (c) => {
         alchemyKey: c.env.ALCHEMY_API_KEY,
       });
       operatorVerified = true;
-    } else if (!c.get("x402Paid")) {
-      // No auth + no x402 payment → reject
+    } else if (!c.get("x402Paid") && !isBrowserRequest) {
+      // No auth + no x402 payment + not browser → reject
       throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
     }
-    // else: x402 paid + no auth → allowed in manual mode only (below)
+    // else: x402 paid or browser without auth → allowed in manual mode only (below)
 
     // ── Resolve execution mode ──
     // Delegated execution REQUIRES proven vault ownership. No exceptions.
@@ -93,7 +97,7 @@ chat.post("/", async (c) => {
     const messages = allMessages.slice(-10);
 
     const ctx: RequestContext = {
-      vaultAddress: body.vaultAddress as Address,
+      vaultAddress: resolvedVaultAddress,
       chainId: body.chainId,
       operatorAddress: body.operatorAddress as Address | undefined,
       executionMode,

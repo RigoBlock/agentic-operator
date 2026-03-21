@@ -4,6 +4,8 @@ A Cloudflare Worker that gives AI agents and human operators safe access to DeFi
 
 Three access interfaces: **Web chat**, **Telegram bot**, and **x402-gated API** for external AI agents.
 
+**Built-in self-custodial wallet** with encrypted keystore (PBKDF2 + AES-256-GCM) and EIP-7702 gas sponsorship — users can trade without MetaMask or ETH for gas.
+
 ## Architecture
 
 ```
@@ -34,6 +36,19 @@ External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     �
 **Manual mode** — The agent builds unsigned transaction calldata. The operator signs and broadcasts from their wallet (browser or any external agent).
 
 **Delegated mode** — The vault owner sets up on-chain delegation to an encrypted agent wallet. The agent executes trades directly, gated by a 7-point validation and NAV shield.
+
+### Self-Custodial Wallet (Built-in)
+
+The web UI includes a zero-dependency encrypted wallet:
+
+1. User chooses a password → server generates BIP-39 seed via Tether WDK
+2. Seed is encrypted with PBKDF2-SHA256 (310k iterations) + AES-256-GCM
+3. Encrypted keystore stored in browser localStorage — server never stores seed or password
+4. User enters password to unlock → browser decrypts → signs transactions locally
+5. Import flow uses client-side Web Crypto — imported seed phrases never touch the server
+6. Transactions gas-sponsored via EIP-7702 (Alchemy) — no ETH needed
+
+This enables judges, evaluators, and new users to start trading immediately with zero on-chain setup.
 
 ### Delegation Flow
 
@@ -123,9 +138,11 @@ src/
 │   ├── quote.ts             # GET  /api/quote (stateless pricing)
 │   ├── delegation.ts        # Delegation management + execute
 │   ├── gasPolicy.ts         # Gas sponsorship policy (Alchemy)
+│   ├── wallet.ts            # Self-custodial wallet (create, prepare-tx, submit-signed)
 │   └── telegram.ts          # Telegram bot webhook + commands
 └── services/
-    ├── agentWallet.ts       # WDK wallet gen (BIP-39/BIP-44) + encrypt (AES-256-GCM)
+    ├── agentWallet.ts       # Agent wallet gen (BIP-39/BIP-44) + encrypt (AES-256-GCM)
+    ├── userWallet.ts        # User wallet gen + encrypted keystore (PBKDF2+AES-256-GCM)
     ├── auth.ts              # EIP-191 signature + vault ownership
     ├── bundler.ts           # ERC-4337 bundler (gas sponsorship)
     ├── crosschain.ts        # Cross-chain bridging
@@ -158,6 +175,11 @@ public/
 | `POST` | `/api/delegation/setup` | operator auth | Initialize delegation |
 | `GET` | `/api/delegation/status` | — | Delegation status |
 | `POST` | `/api/delegation/execute` | operator auth | Execute via agent wallet |
+| `POST` | `/api/wallet/create` | — | Create encrypted WDK wallet |
+| `POST` | `/api/wallet/derive-address` | — | Derive address from seed |
+| `POST` | `/api/wallet/prepare-tx` | — | Prepare gas-sponsored UserOp (EIP-7702) |
+| `POST` | `/api/wallet/submit-signed` | — | Submit client-signed UserOp |
+| `POST` | `/api/wallet/rpc` | — | Alchemy RPC proxy (whitelisted methods) |
 | `POST` | `/api/telegram/webhook` | webhook secret | Telegram updates |
 
 ## Setup

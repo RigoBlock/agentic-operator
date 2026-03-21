@@ -18,6 +18,7 @@ export default defineConfig({
         inline: [
           "@tetherto/wdk-wallet-evm",
           "@tetherto/wdk-wallet",
+          "@tetherto/wdk-secret-manager",
           "sodium-universal",
           "sodium-native",
           "sodium-javascript",

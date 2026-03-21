@@ -2,40 +2,25 @@
  * Agent Wallet Service — per-vault EOA wallet management with Tether WDK.
  *
  * Uses Tether's WDK (`@tetherto/wdk-wallet-evm`) for BIP-39 seed phrase
- * generation and BIP-44 HD key derivation. The seed phrase is encrypted
- * with AES-256-GCM using a **per-vault derived key**:
+ * generation and BIP-44 HD key derivation.
  *
- *   encryptionKey = HKDF(AGENT_WALLET_SECRET, salt=vaultAddress)
+ * Encryption at rest (v3, current):
+ *   Uses Tether `@tetherto/wdk-secret-manager` (XSalsa20-Poly1305 via libsodium).
+ *   Key: PBKDF2-SHA256(AGENT_WALLET_SECRET + vault-scoped salt, 100k iterations).
+ *   The vault address is embedded as a prefix in the passkey so each vault's
+ *   encryption key is cryptographically independent.
  *
- * This means:
- *   - Compromising one vault's encrypted blob doesn't help with others
- *   - Each vault has a cryptographically independent encryption key
- *   - Key versioning allows safe rotation of the master secret
- *
- * WDK integration (v2 wallets):
- *   - BIP-39 mnemonic generated via WDK's SeedSignerEvm
- *   - BIP-44 path: m/44'/60'/0'/0/0 (standard Ethereum derivation)
- *   - HD key hierarchy: one seed → deterministic child keys
- *   - BIP-39 seed phrase stored encrypted (not raw private key)
- *   - Memory-safe key handling: WDK zeros private key buffers on dispose()
- *
- * Legacy support (v0–v1 wallets):
- *   - Random private key generated via viem's generatePrivateKey()
- *   - Raw private key stored encrypted
- *   - Existing wallets continue working — loaded via viem as before
- *   - No migration needed: old wallets stay on legacy, new wallets use WDK
+ * Legacy support (v0–v2 wallets, AES-256-GCM via Web Crypto):
+ *   Existing wallets continue working. Decrypted with AES-GCM, re-encrypted
+ *   with WdkSecretManager on next rotation.
  *
  * Security model:
+ *   - All key generation: WDK (BIP-39/BIP-44, memory-zeroed on dispose)
+ *   - All new encryption: WdkSecretManager (XSalsa20-Poly1305)
  *   - Private keys never leave the Worker runtime unencrypted
  *   - Each vault has a unique agent wallet (no key reuse)
- *   - Per-vault key derivation isolates compromise blast radius
+ *   - Per-vault passkey prefix isolates compromise blast radius
  *   - The EIP-7702 delegation framework limits what the agent wallet can do
- *   - KV key: `agent-wallet:${vaultAddress}` (lowercased)
- *
- * Key rotation procedure:
- *   1. Set AGENT_WALLET_SECRET_V2 in wrangler secrets
- *   2. Call rotateAgentWalletKey() for each vault — decrypts with old, re-encrypts with new
- *   3. Once all vaults migrated, rename V2 → AGENT_WALLET_SECRET, remove old
  */
 
 import {
@@ -48,9 +33,11 @@ import type { AgentWalletInfo, Env } from "../types.js";
 // WDK: BIP-39 seed generation + BIP-44 HD key derivation
 import { SeedSignerEvm } from "@tetherto/wdk-wallet-evm/signers";
 import WalletManager from "@tetherto/wdk-wallet";
+// WDK: XSalsa20-Poly1305 encryption at rest
+import { WdkSecretManager, wdkSaltGenerator } from "@tetherto/wdk-secret-manager";
 
-/** Current encryption version — v2 = WDK seed phrase storage */
-const CURRENT_KEY_VERSION = 2;
+/** Current encryption version — v3 = WdkSecretManager (XSalsa20-Poly1305) */
+const CURRENT_KEY_VERSION = 3;
 
 // ── KV key helpers ────────────────────────────────────────────────────
 
@@ -94,52 +81,115 @@ async function deriveVaultKey(secret: string, vaultAddress: string, version: num
   );
 }
 
-/** Stored format: JSON { v: keyVersion, d: base64(iv + ciphertext), t: type } */
+/** Stored format: JSON { v: keyVersion, d: base64(data), t: type, s?: salt(hex) } */
 interface EncryptedKeyEnvelope {
   v: number;
   d: string;
   /** Key type: "seed" (WDK BIP-39 mnemonic) or "privkey" (raw hex). Absent = privkey (legacy). */
   t?: "seed" | "privkey";
+  /** WdkSecretManager salt (hex, 16 bytes) — only present in v3+ */
+  s?: string;
 }
 
-/** Encrypt a secret (private key or seed phrase). Returns JSON envelope. */
+// ── WdkSecretManager helpers (v3 — XSalsa20-Poly1305) ─────────────────
+
+/**
+ * Build a per-vault passkey for WdkSecretManager.
+ * Embeds the vault address so each vault gets a distinct encryption context
+ * even if the same master secret is used.
+ */
+function vaultPasskey(masterSecret: string, vaultAddress: string): string {
+  return `${masterSecret}:${vaultAddress.toLowerCase()}`;
+}
+
+/**
+ * Encrypt a BIP-39 seed phrase using WdkSecretManager (XSalsa20-Poly1305).
+ *
+ * Flow: mnemonic → 16-byte entropy → WdkSecretManager internal PBKDF2 + XSalsa20 →
+ * encryptedEntropy buffer stored as hex. On decrypt: entropy → mnemonic.
+ * This stays within WdkSecretManager's 64-byte payload limit (entropy is always 16 bytes).
+ */
+async function encryptWithWdk(
+  seedPhrase: string,
+  masterSecret: string,
+  vaultAddress: string,
+): Promise<string> {
+  const salt = wdkSaltGenerator.generate() as Buffer;
+  const passkey = vaultPasskey(masterSecret, vaultAddress);
+  const sm = new WdkSecretManager(passkey, salt);
+  // Convert 12-word mnemonic → 16-byte BIP-39 entropy
+  const entropy = sm.mnemonicToEntropy(seedPhrase) as Buffer;
+  // generateAndEncrypt encrypts the entropy with PBKDF2-derived key + XSalsa20-Poly1305
+  // (sodium_memzero zeroes out the entropy buffer after encrypting — intentional)
+  const { encryptedEntropy } = await sm.generateAndEncrypt(entropy);
+  const envelope: EncryptedKeyEnvelope = {
+    v: CURRENT_KEY_VERSION,
+    d: (encryptedEntropy as Buffer).toString("hex"),
+    t: "seed",
+    s: salt.toString("hex"),
+  };
+  return JSON.stringify(envelope);
+}
+
+/**
+ * Decrypt a v3 (WdkSecretManager) seed envelope.
+ * Reverses encryptWithWdk: encryptedEntropy → 16-byte entropy → mnemonic.
+ */
+function decryptWithWdk(
+  envelope: EncryptedKeyEnvelope,
+  masterSecret: string,
+  vaultAddress: string,
+): string {
+  if (!envelope.s) throw new Error("Missing salt in v3 envelope");
+  const salt = Buffer.from(envelope.s, "hex");
+  const passkey = vaultPasskey(masterSecret, vaultAddress);
+  const sm = new WdkSecretManager(passkey, salt);
+  const encryptedEntropy = Buffer.from(envelope.d, "hex");
+  const entropy = sm.decrypt(encryptedEntropy) as Buffer;
+  return sm.entropyToMnemonic(entropy);
+}
+
+/**
+ * Encrypt a seed or private key for storage.
+ * v3 (current, seed only): WdkSecretManager — mnemonic → entropy → XSalsa20-Poly1305.
+ * Fallback for "privkey" type: AES-256-GCM v2 (no new wallets use this path;
+ * only reached during key rotation of old pre-WDK wallets).
+ */
 async function encryptSecret(
   secret: string,
   masterSecret: string,
   vaultAddress: string,
   type: "seed" | "privkey",
 ): Promise<string> {
+  if (type === "seed") {
+    return encryptWithWdk(secret, masterSecret, vaultAddress);
+  }
+  // Legacy AES-256-GCM path for raw private key wallets created before WDK integration.
+  // New wallets are always BIP-39 seeds; this branch is only reached during rotation.
   const key = await deriveVaultKey(masterSecret, vaultAddress);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encoded = new TextEncoder().encode(secret);
-
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
     key,
-    encoded,
+    new TextEncoder().encode(secret),
   );
-
-  // Prepend IV to ciphertext
-  const combined = new Uint8Array(iv.length + new Uint8Array(ciphertext).length);
+  const combined = new Uint8Array(12 + new Uint8Array(ciphertext).length);
   combined.set(iv);
-  combined.set(new Uint8Array(ciphertext), iv.length);
-
+  combined.set(new Uint8Array(ciphertext), 12);
   const envelope: EncryptedKeyEnvelope = {
-    v: CURRENT_KEY_VERSION,
+    v: 2,
     d: btoa(String.fromCharCode(...combined)),
-    t: type,
+    t: "privkey",
   };
-
   return JSON.stringify(envelope);
 }
 
-/** Decrypt a secret from the envelope format. Returns { value, type }. */
+/** Decrypt a secret from the envelope. Handles v0–v3. Returns { value, type }. */
 async function decryptSecret(
   envelopeStr: string,
   masterSecret: string,
   vaultAddress: string,
 ): Promise<{ value: string; type: "seed" | "privkey" }> {
-  // Support both old format (raw base64) and new envelope format
   let envelope: EncryptedKeyEnvelope;
   try {
     envelope = JSON.parse(envelopeStr);
@@ -148,31 +198,31 @@ async function decryptSecret(
     envelope = { v: 0, d: envelopeStr };
   }
 
-  // For v0 (legacy), use the old global derivation; for v1+, use per-vault
-  // CRITICAL: pass envelope.v (not CURRENT_KEY_VERSION) so v1 wallets
-  // decrypt with the same HKDF info they were encrypted with.
-  const key = envelope.v >= 1
-    ? await deriveVaultKey(masterSecret, vaultAddress, envelope.v)
-    : await deriveLegacyKey(masterSecret);
+  let value: string;
 
-  const combined = Uint8Array.from(atob(envelope.d), (c) => c.charCodeAt(0));
+  if (envelope.v >= 3) {
+    // v3: WdkSecretManager (XSalsa20-Poly1305)
+    value = decryptWithWdk(envelope, masterSecret, vaultAddress);
+  } else {
+    // v0–v2: AES-256-GCM via Web Crypto (legacy fallback)
+    const key = envelope.v >= 1
+      ? await deriveVaultKey(masterSecret, vaultAddress, envelope.v)
+      : await deriveLegacyKey(masterSecret);
 
-  const iv = combined.slice(0, 12);
-  const ciphertext = combined.slice(12);
+    const combined = Uint8Array.from(atob(envelope.d), (c) => c.charCodeAt(0));
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: combined.slice(0, 12) },
+      key,
+      combined.slice(12),
+    );
+    value = new TextDecoder().decode(decrypted);
+  }
 
-  const decrypted = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv },
-    key,
-    ciphertext,
-  );
-
-  const value = new TextDecoder().decode(decrypted);
-  // v0–v1 are always raw private keys; v2+ with t="seed" are BIP-39 mnemonics
   const type = envelope.t === "seed" ? "seed" : "privkey";
   return { value, type };
 }
 
-/** Legacy key derivation (v0) — global, not per-vault. For migration only. */
+/** Legacy key derivation (v0) — global, not per-vault. For decrypting old wallets only. */
 async function deriveLegacyKey(secret: string): Promise<CryptoKey> {
   const encoder = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
@@ -195,6 +245,7 @@ async function deriveLegacyKey(secret: string): Promise<CryptoKey> {
     ["encrypt", "decrypt"],
   );
 }
+
 
 // ── WDK helpers ───────────────────────────────────────────────────────
 

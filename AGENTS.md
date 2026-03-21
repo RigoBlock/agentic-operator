@@ -44,7 +44,10 @@ Content-Type: application/json
 {
   "messages": [{"role": "user", "content": "swap 1 ETH for USDC on Base"}],
   "vaultAddress": "0xYourVault",
-  "chainId": 8453
+  "chainId": 8453,
+  "aiApiKey": "sk-or-...",
+  "aiModel": "anthropic/claude-sonnet-4",
+  "aiBaseUrl": "https://openrouter.ai/api/v1"
 }
 
 → 200: {
@@ -128,6 +131,69 @@ Sign this message to verify your wallet and access your smart pool assistant.
 ```
 
 The signature is valid for 24 hours from `authTimestamp`.
+
+---
+
+## AI Model Selection
+
+By default, the service uses **Workers AI (Meta Llama 4 Scout)** — zero-config,
+no API key needed, included in the x402 price. Agents can bring their own LLM
+provider by including these optional fields in the `/api/chat` request body:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `aiApiKey` | string | API key for the LLM provider (OpenRouter, Anthropic, OpenAI, etc.) |
+| `aiModel` | string | Model identifier (e.g. `"anthropic/claude-sonnet-4"`, `"gpt-5-mini"`) |
+| `aiBaseUrl` | string | Provider base URL (e.g. `"https://openrouter.ai/api/v1"`) |
+
+**Resolution priority:**
+1. **User-provided key** (`aiApiKey` + `aiModel` + `aiBaseUrl`) — agent's own provider
+2. **Workers AI binding** — Meta Llama 4 Scout (default)
+3. **Server OpenAI key** — server fallback
+
+This is like MetaMask's default RPC: it works out of the box, but you can bring
+your own. The tool definitions, safety layers, and system prompt are the same
+regardless of which LLM processes the request.
+
+---
+
+## Extensibility — Building on Top
+
+The `/api/chat` endpoint is an **atomic operations provider**. External developers
+can build their own agents, skills, or plugins that compose on top of it:
+
+- **Your agent calls our x402 API** for DeFi primitives (swaps, LP, bridges,
+  staking, positions, NAV queries)
+- **Your agent adds its own logic** — custom strategies, yield optimization,
+  risk models, portfolio rebalancing, cross-protocol workflows
+- **Your code runs on your infrastructure** — it never executes inside our
+  Cloudflare environment
+
+**Why this is safe:** Every operation that touches the vault — regardless of
+which agent originated it — passes through our full safety stack: NAV shield
+(10% max loss), delegation checks, selector whitelist, slippage protection.
+The vault contract enforces these constraints on-chain, independently of the
+calling agent's code.
+
+**Example — external yield optimizer:**
+```
+External Agent                    Rigoblock x402 API
+     │                                │
+     ├─ "get aggregated NAV" ────────►│ ← atomic read
+     │◄─ NAV per chain ──────────────┤
+     │                                │
+     │  [agent's own yield logic]     │
+     │  [decides: move USDC to Base]  │
+     │                                │
+     ├─ "bridge 5000 USDC to Base" ──►│ ← atomic action
+     │◄─ bridge tx ──────────────────┤
+     │                                │
+     ├─ "add 5000 USDC/ETH LP" ─────►│ ← atomic action
+     │◄─ LP tx ─────────────────────┤
+```
+
+Each call is atomic. The external agent owns the orchestration plan. Our API
+provides the safe DeFi execution layer.
 
 ---
 

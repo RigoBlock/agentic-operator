@@ -365,6 +365,7 @@ delegation.post("/execute", async (c) => {
         DELEGATION_NOT_ON_CHAIN: 400,
         TARGET_NOT_ALLOWED: 403,
         METHOD_NOT_ALLOWED: 403,
+        AGENT_NOT_DELEGATED: 403,
         SIMULATION_FAILED: 422,
         NAV_SHIELD_BLOCKED: 422,
         INSUFFICIENT_BALANCE: 422,
@@ -376,7 +377,7 @@ delegation.post("/execute", async (c) => {
       };
       const status = statusMap[err.code] || 500;
       // Signal fallback to manual wallet signing for delegation/selector issues
-      const fallbackCodes = ["DELEGATION_NOT_ON_CHAIN", "METHOD_NOT_ALLOWED"];
+      const fallbackCodes = ["DELEGATION_NOT_ON_CHAIN", "METHOD_NOT_ALLOWED", "AGENT_NOT_DELEGATED"];
       if (fallbackCodes.includes(err.code)) {
         return c.json({
           error: sanitizeError(err.message),

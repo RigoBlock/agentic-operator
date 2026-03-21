@@ -25,10 +25,12 @@ const REQUIRED_TOOLS = [
   "gmx_get_markets",
   "gmx_increase_position",
   // Uniswap LP
+  "get_pool_info",
   "add_liquidity",
   "remove_liquidity",
   "get_lp_positions",
   "collect_lp_fees",
+  "burn_position",
   // Cross-chain
   "crosschain_transfer",
   "get_crosschain_quote",
@@ -54,6 +56,8 @@ const REQUIRED_TOOLS = [
   "list_strategies",
   // Bridge verification
   "verify_bridge_arrival",
+  // Carry trade planner
+  "plan_carry_trade",
 ];
 
 describe("TOOL_DEFINITIONS", () => {

@@ -353,7 +353,14 @@ export const ALLOWED_VAULT_SELECTORS = {
   // execute(bytes,bytes[])
   execute: "0x24856bc3" as `0x${string}`,
   // modifyLiquidities(bytes,uint256)
-  modifyLiquidities: "0xee3e8b0e" as `0x${string}`,
+  modifyLiquidities: "0xdd46508f" as `0x${string}`,
+  // ── Multicall variants (vault adapter wraps individual calls, each checked against its own selector) ──
+  // multicall(bytes[])
+  multicall: "0xac9650d8" as `0x${string}`,
+  // multicall(uint256,bytes[])
+  multicallDeadline: "0x5ae401dc" as `0x${string}`,
+  // multicall(bytes32,bytes[])
+  multicallHash: "0x1f0464d1" as `0x${string}`,
   // ── 0x Aggregator (IA0x / AllowanceHolder) ──
   // execute(address,address,uint256,address,bytes) — AllowanceHolder entry point
   zeroXExecute: "0x2213bc0b" as `0x${string}`,

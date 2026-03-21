@@ -1,15 +1,22 @@
 /**
  * Uniswap v4 Liquidity Management Service
  *
- * Encodes `modifyLiquidities(unlockData, deadline)` calldata for the Rigoblock
- * vault adapter. The vault routes calls to the Uniswap v4 PositionManager.
+ * Uses the official @uniswap/v4-sdk to encode LP calldata, then wraps it
+ * for the Rigoblock vault adapter. The vault routes calls to the Uniswap v4
+ * PositionManager.
+ *
+ * Flow:
+ *   1. Read pool state from chain (sqrtPriceX96, tick, liquidity via StateView)
+ *   2. Build SDK Pool + Position objects (handles liquidity math + tick alignment)
+ *   3. V4PositionManager.addCallParameters() encodes modifyLiquidities calldata
+ *   4. SDK output targets PositionManager — since the vault adapter uses the same
+ *      function signature, the calldata is byte-for-byte identical. We just send
+ *      it to the vault address instead.
  *
  * Supports:
  *   - Mint new LP positions (add_liquidity)
  *   - Decrease/burn existing positions (remove_liquidity)
- *
- * The calldata targets the vault address (same as swaps). The vault's
- * Uniswap adapter handles PositionManager routing and token settlement.
+ *   - Collect fees from existing positions
  */
 
 import {
@@ -19,9 +26,9 @@ import {
   keccak256,
   parseUnits,
   formatUnits,
-  decodeFunctionResult,
-  encodeFunctionData,
 } from "viem";
+import { Pool, Position, V4PositionManager } from "@uniswap/v4-sdk";
+import { Token, Ether, Percent, type Currency } from "@uniswap/sdk-core";
 import { encodeVaultModifyLiquidities, getTokenDecimals, getClient } from "./vault.js";
 import { resolveTokenAddress } from "../config.js";
 import type { Env } from "../types.js";
@@ -48,8 +55,20 @@ const POOL_MANAGER: Record<number, Address> = {
   84532:    "0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408", // Base Sepolia
 };
 
-/** Storage slot of the `_pools` mapping in PoolManager (from StateLibrary.sol) */
-const POOLS_SLOT = 6n;
+/**
+ * Uniswap v4 StateView — per-chain deployments.
+ * Source: https://docs.uniswap.org/contracts/v4/deployments
+ * Provides getSlot0() and getLiquidity() — no raw storage assumptions.
+ */
+const STATE_VIEW: Record<number, Address> = {
+  1:     "0x7ffe42c4a5deea5b0fec41c94c136cf115597227", // Ethereum
+  10:    "0xc18a3169788f4f75a170290584eca6395c75ecdb", // Optimism
+  56:    "0xd13dd3d6e93f276fafc9db9e6bb47c1180aee0c4", // BNB Chain
+  130:   "0x86e8631a016f9068c3f085faf484ee3f5fdee8f2", // Unichain
+  137:   "0x5ea1bd7974c8a611cbab0bdcafcb1d9cc9b3ba5a", // Polygon
+  8453:  "0xa3c0c9b65bad0b08107aa264b0f3db444b867a71", // Base
+  42161: "0x76fd297e2d437cd7f76d50f01afe6160f86e9990", // Arbitrum
+};
 
 /** Q96 = 2^96 for fixed-point sqrtPrice math */
 const Q96 = 2n ** 96n;
@@ -58,16 +77,12 @@ const Q96 = 2n ** 96n;
 const MIN_TICK = -887272;
 const MAX_TICK = 887272;
 
-// ── V4 PositionManager Action Codes ───────────────────────────────────
+// ── V4 PositionManager Action Codes (for manual encoding — fee collection, remove) ──
 
 const Actions = {
-  INCREASE_LIQUIDITY: 0x00,
   DECREASE_LIQUIDITY: 0x01,
-  MINT_POSITION: 0x02,
   BURN_POSITION: 0x03,
-  CLOSE_CURRENCY: 0x11,
-  SETTLE_PAIR: 0x14,
-  TAKE_PAIR: 0x16,
+  TAKE_PAIR: 0x11,
 } as const;
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -83,55 +98,70 @@ interface PoolKey {
 interface PoolState {
   sqrtPriceX96: bigint;
   tick: number;
+  liquidity: bigint;
 }
 
-// ── Pool State Reading ─────────────────────────────────────────────────
+// ── Pool State Reading (via StateView contract) ───────────────────────
 
-const EXTSLOAD_ABI = [{
-  name: "extsload",
-  type: "function" as const,
-  stateMutability: "view" as const,
-  inputs: [{ name: "slot", type: "bytes32" as const }],
-  outputs: [{ name: "", type: "bytes32" as const }],
-}] as const;
+const STATEVIEW_ABI = [
+  {
+    name: "getSlot0",
+    type: "function" as const,
+    stateMutability: "view" as const,
+    inputs: [{ name: "poolId", type: "bytes32" as const }],
+    outputs: [
+      { name: "sqrtPriceX96", type: "uint160" as const },
+      { name: "tick", type: "int24" as const },
+      { name: "protocolFee", type: "uint24" as const },
+      { name: "lpFee", type: "uint24" as const },
+    ],
+  },
+  {
+    name: "getLiquidity",
+    type: "function" as const,
+    stateMutability: "view" as const,
+    inputs: [{ name: "poolId", type: "bytes32" as const }],
+    outputs: [{ name: "liquidity", type: "uint128" as const }],
+  },
+] as const;
 
 /**
- * Read pool slot0 from PoolManager via extsload.
- * slot0 packs: sqrtPriceX96 (160 bits) | tick (24 bits) | protocolFee (24 bits) | lpFee (24 bits)
+ * Read pool state (sqrtPriceX96, tick, liquidity) via the Uniswap v4 StateView contract.
+ * Uses getSlot0() and getLiquidity() — no raw storage slot assumptions.
  */
-async function readPoolSlot0(
+async function readPoolState(
   poolId: Hex,
   chainId: number,
   alchemyApiKey: string,
 ): Promise<PoolState> {
-  const slot = keccak256(
-    encodeAbiParameters(
-      [{ type: "bytes32" }, { type: "uint256" }],
-      [poolId, POOLS_SLOT],
-    ),
-  );
-
-  const poolManager = POOL_MANAGER[chainId];
-  if (!poolManager) throw new Error(`Uniswap v4 PoolManager not available on chain ${chainId}.`);
+  const stateView = STATE_VIEW[chainId];
+  if (!stateView) throw new Error(`Uniswap v4 StateView not available on chain ${chainId}.`);
 
   const client = getClient(chainId, alchemyApiKey);
-  const result = await client.readContract({
-    address: poolManager,
-    abi: EXTSLOAD_ABI,
-    functionName: "extsload",
-    args: [slot],
-  });
 
-  const raw = BigInt(result);
-  const sqrtPriceX96 = raw & ((1n << 160n) - 1n);
-  const tickRaw = Number((raw >> 160n) & 0xFFFFFFn);
-  const tick = tickRaw >= 0x800000 ? tickRaw - 0x1000000 : tickRaw;
+  const [slot0Result, liqResult] = await Promise.all([
+    client.readContract({
+      address: stateView,
+      abi: STATEVIEW_ABI,
+      functionName: "getSlot0",
+      args: [poolId],
+    }),
+    client.readContract({
+      address: stateView,
+      abi: STATEVIEW_ABI,
+      functionName: "getLiquidity",
+      args: [poolId],
+    }),
+  ]);
+
+  const sqrtPriceX96 = slot0Result[0];
+  const tick = slot0Result[1];
+  const liquidity = liqResult;
 
   if (sqrtPriceX96 === 0n) {
     throw new Error("Pool not initialized or pool ID not found on this chain.");
   }
-
-  return { sqrtPriceX96, tick };
+  return { sqrtPriceX96, tick, liquidity };
 }
 
 // ── Tick Math ──────────────────────────────────────────────────────────
@@ -151,40 +181,15 @@ function alignTick(tick: number, tickSpacing: number): number {
   return Math.floor(tick / tickSpacing) * tickSpacing;
 }
 
-// ── Liquidity Math ─────────────────────────────────────────────────────
+// ── Liquidity Math (for position reading only — SDK handles add/remove) ──
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 
-function getLiquidityForAmount0(sqrtA: bigint, sqrtB: bigint, amount0: bigint): bigint {
-  if (sqrtA > sqrtB) [sqrtA, sqrtB] = [sqrtB, sqrtA];
-  return (amount0 * sqrtA * sqrtB) / (Q96 * (sqrtB - sqrtA));
-}
-
-function getLiquidityForAmount1(sqrtA: bigint, sqrtB: bigint, amount1: bigint): bigint {
-  if (sqrtA > sqrtB) [sqrtA, sqrtB] = [sqrtB, sqrtA];
-  return (amount1 * Q96) / (sqrtB - sqrtA);
-}
-
-/** Compute maximum liquidity providable given both token amounts and current price. */
-function getLiquidityForAmounts(
-  sqrtPriceX96: bigint,
-  sqrtRatioAX96: bigint,
-  sqrtRatioBX96: bigint,
-  amount0: bigint,
-  amount1: bigint,
-): bigint {
-  if (sqrtRatioAX96 > sqrtRatioBX96) {
-    [sqrtRatioAX96, sqrtRatioBX96] = [sqrtRatioBX96, sqrtRatioAX96];
-  }
-  if (sqrtPriceX96 <= sqrtRatioAX96) {
-    return getLiquidityForAmount0(sqrtRatioAX96, sqrtRatioBX96, amount0);
-  }
-  if (sqrtPriceX96 < sqrtRatioBX96) {
-    const liq0 = getLiquidityForAmount0(sqrtPriceX96, sqrtRatioBX96, amount0);
-    const liq1 = getLiquidityForAmount1(sqrtRatioAX96, sqrtPriceX96, amount1);
-    return liq0 < liq1 ? liq0 : liq1;
-  }
-  return getLiquidityForAmount1(sqrtRatioAX96, sqrtRatioBX96, amount1);
+/** Map an on-chain address to an SDK Currency object (Ether for native, Token otherwise). */
+function toCurrency(chainId: number, address: Address, decimals: number): Currency {
+  return address.toLowerCase() === ZERO_ADDRESS.toLowerCase()
+    ? Ether.onChain(chainId)
+    : new Token(chainId, address, decimals);
 }
 
 /** Compute token amounts from liquidity and current pool price (inverse of getLiquidityForAmounts). */
@@ -225,45 +230,21 @@ function computePoolId(poolKey: PoolKey): Hex {
   );
 }
 
-/** Default fee → tickSpacing mapping (matches Uniswap v4 defaults). */
+/**
+ * Default fee → tickSpacing mapping for the standard Uniswap v4 tiers.
+ * Uniswap v4 permits any uint24 fee and any int24 tickSpacing — custom pools
+ * may use values not covered here.  When in doubt, call getPoolInfoById() to
+ * read the exact tickSpacing from the pool's Initialize event.
+ */
 function defaultTickSpacing(fee: number): number {
-  if (fee <= 100) return 1;
-  if (fee <= 500) return 10;
+  if (fee <= 100)  return 1;
+  if (fee <= 500)  return 10;
   if (fee <= 3000) return 60;
+  if (fee <= 6000) return 120;  // 0.6% tier (e.g. XAUT/USDT on Arbitrum)
   return 200;
 }
 
-// ── ABI Encoding Helpers ───────────────────────────────────────────────
-
-const POOL_KEY_ABI = {
-  type: "tuple" as const,
-  components: [
-    { type: "address" as const, name: "currency0" },
-    { type: "address" as const, name: "currency1" },
-    { type: "uint24" as const, name: "fee" },
-    { type: "int24" as const, name: "tickSpacing" },
-    { type: "address" as const, name: "hooks" },
-  ],
-};
-
-function encodeMintParams(
-  poolKey: PoolKey,
-  tickLower: number,
-  tickUpper: number,
-  liquidity: bigint,
-  amount0Max: bigint,
-  amount1Max: bigint,
-  owner: Address,
-): Hex {
-  return encodeAbiParameters(
-    [POOL_KEY_ABI, { type: "int24" }, { type: "int24" }, { type: "uint256" }, { type: "uint128" }, { type: "uint128" }, { type: "address" }, { type: "bytes" }],
-    [{ currency0: poolKey.currency0, currency1: poolKey.currency1, fee: poolKey.fee, tickSpacing: poolKey.tickSpacing, hooks: poolKey.hooks }, tickLower, tickUpper, liquidity, amount0Max, amount1Max, owner, "0x"],
-  );
-}
-
-function encodeSettlePairParams(c0: Address, c1: Address): Hex {
-  return encodeAbiParameters([{ type: "address" }, { type: "address" }], [c0, c1]);
-}
+// ── ABI Encoding Helpers (remove/fee collection only — SDK handles add) ──
 
 function encodeTakePairParams(c0: Address, c1: Address, to: Address): Hex {
   return encodeAbiParameters([{ type: "address" }, { type: "address" }, { type: "address" }], [c0, c1, to]);
@@ -298,11 +279,22 @@ function resolveTickRange(
 ): { tickLower: number; tickUpper: number } {
   switch (range.toLowerCase()) {
     case "full":
-      return { tickLower: alignTick(MIN_TICK, tickSpacing), tickUpper: alignTick(MAX_TICK, tickSpacing) };
-    case "wide": // ±50% price
-      return { tickLower: alignTick(currentTick - 5000, tickSpacing), tickUpper: alignTick(currentTick + 5000, tickSpacing) };
-    case "narrow": // ±5% price
-      return { tickLower: alignTick(currentTick - 500, tickSpacing), tickUpper: alignTick(currentTick + 500, tickSpacing) };
+      // Align inward: ceil for lower bound (stay >= MIN_TICK), floor for upper (stay <= MAX_TICK).
+      // Using floor for MIN_TICK would produce e.g. -887280 < -887272, causing SDK "Invariant failed: TICK".
+      return {
+        tickLower: Math.ceil(MIN_TICK / tickSpacing) * tickSpacing,
+        tickUpper: Math.floor(MAX_TICK / tickSpacing) * tickSpacing,
+      };
+    case "wide": { // ±50% price, symmetric around nearest tickSpacing multiple
+      const center = Math.round(currentTick / tickSpacing) * tickSpacing;
+      const half = Math.ceil(5000 / tickSpacing) * tickSpacing;
+      return { tickLower: center - half, tickUpper: center + half };
+    }
+    case "narrow": { // ±5% price, symmetric around nearest tickSpacing multiple
+      const center = Math.round(currentTick / tickSpacing) * tickSpacing;
+      const half = Math.ceil(500 / tickSpacing) * tickSpacing;
+      return { tickLower: center - half, tickUpper: center + half };
+    }
     default: {
       const [lo, hi] = range.split(",").map(Number);
       if (isNaN(lo) || isNaN(hi)) throw new Error(`Invalid tick range: "${range}". Use "full", "wide", "narrow", or "tickLower,tickUpper".`);
@@ -314,23 +306,27 @@ function resolveTickRange(
 // ── Public API ─────────────────────────────────────────────────────────
 
 export interface AddLiquidityParams {
-  tokenA: string;     // symbol or address
+  tokenA: string;        // symbol or address
   tokenB: string;
-  amountA: string;    // human-readable amount of tokenA
-  amountB: string;    // human-readable amount of tokenB
-  fee?: number;       // fee in hundredths of a bip (default 3000 = 0.30%)
-  tickSpacing?: number;
-  hooks?: Address;    // hook contract (default: zero address)
-  tickRange?: string; // "full" | "wide" | "narrow" | "tickLower,tickUpper"
+  amountA?: string;      // human-readable amount of tokenA (optional — computed from amountB if omitted)
+  amountB?: string;      // human-readable amount of tokenB (optional — computed from amountA if omitted)
+                         // At least one of amountA or amountB must be provided.
+  fee: number;           // fee in hundredths of a bip — e.g. 100, 500, 3000, 6000, 10000
+                         // REQUIRED: Uniswap v4 has infinite fee tiers; must match the pool exactly.
+  tickSpacing?: number;  // only needed for non-standard pools (auto-derived from fee otherwise)
+  hooks?: Address;       // hook contract (default: zero address = no hook)
+  tickRange?: string;    // "full" | "wide" | "narrow" | "tickLower,tickUpper"
 }
 
 /**
  * Build unsigned vault tx for adding liquidity to a Uniswap v4 pool.
  *
- * Action sequence: MINT_POSITION → SETTLE_PAIR → TAKE_PAIR
- *   1. MINT_POSITION creates the position (records token debt)
- *   2. SETTLE_PAIR pays the debt from the vault's tokens
- *   3. TAKE_PAIR refunds any excess back to the vault
+ * Uses the official @uniswap/v4-sdk to encode calldata:
+ *   1. Read pool state from chain (sqrtPriceX96, tick, liquidity)
+ *   2. Create SDK Pool + Position.fromAmounts (handles liquidity math)
+ *   3. V4PositionManager.addCallParameters encodes modifyLiquidities calldata
+ *   4. The calldata targets PositionManager but the vault adapter uses the same
+ *      function signature — so we send it to the vault address directly.
  */
 export async function buildAddLiquidityTx(
   env: Env,
@@ -347,8 +343,12 @@ export async function buildAddLiquidityTx(
   const isALower = addrA.toLowerCase() < addrB.toLowerCase();
   const currency0 = (isALower ? addrA : addrB) as Address;
   const currency1 = (isALower ? addrB : addrA) as Address;
-  const raw0 = isALower ? params.amountA : params.amountB;
-  const raw1 = isALower ? params.amountB : params.amountA;
+  const raw0Input: string | undefined = isALower ? params.amountA : params.amountB;
+  const raw1Input: string | undefined = isALower ? params.amountB : params.amountA;
+
+  if (raw0Input === undefined && raw1Input === undefined) {
+    throw new Error("At least one of amountA or amountB must be provided.");
+  }
 
   // 2. Get token decimals on-chain
   const [dec0, dec1] = await Promise.all([
@@ -356,54 +356,119 @@ export async function buildAddLiquidityTx(
     getTokenDecimals(chainId, currency1, env.ALCHEMY_API_KEY),
   ]);
 
-  const amount0 = parseUnits(raw0, dec0);
-  const amount1 = parseUnits(raw1, dec1);
-
-  // 3. Build PoolKey
-  const fee = params.fee ?? 3000;
+  // 3. Build pool key and SDK Token/Currency objects
+  const fee = params.fee;
   const tickSpacing = params.tickSpacing ?? defaultTickSpacing(fee);
-  const hooks = params.hooks ?? ("0x0000000000000000000000000000000000000000" as Address);
+  const hooks = params.hooks ?? ZERO_ADDRESS;
+
   const poolKey: PoolKey = { currency0, currency1, fee, tickSpacing, hooks };
   const poolId = computePoolId(poolKey);
 
-  // 4. Read current pool state (sqrtPriceX96, tick)
-  const poolState = await readPoolSlot0(poolId, chainId, env.ALCHEMY_API_KEY);
+  const sdkToken0 = toCurrency(chainId, currency0, dec0);
+  const sdkToken1 = toCurrency(chainId, currency1, dec1);
+
+  // 4. Read current pool state (validates the pool exists on this chain)
+  let poolState: PoolState;
+  try {
+    poolState = await readPoolState(poolId, chainId, env.ALCHEMY_API_KEY);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `Pool not found on chain ${chainId} with fee=${fee / 10000}%, tickSpacing=${tickSpacing}, hooks=${hooks}. ` +
+      `Uniswap v4 requires an exact pool key match. ` +
+      `Use get_pool_info with the pool ID to discover the correct fee and tickSpacing. ` +
+      `(${msg})`
+    );
+  }
 
   // 5. Resolve tick range
   const range = params.tickRange ?? "full";
   const { tickLower, tickUpper } = resolveTickRange(range, poolState.tick, tickSpacing);
 
-  // 6. Compute liquidity from amounts + current price
-  const sqrtA = getSqrtRatioAtTick(tickLower);
-  const sqrtB = getSqrtRatioAtTick(tickUpper);
-  const liquidity = getLiquidityForAmounts(poolState.sqrtPriceX96, sqrtA, sqrtB, amount0, amount1);
+  // 6. Create SDK Pool object from on-chain state
+  const pool = new Pool(
+    sdkToken0, sdkToken1,
+    fee, tickSpacing, hooks,
+    poolState.sqrtPriceX96.toString(),
+    poolState.liquidity.toString(),
+    poolState.tick,
+  );
 
-  if (liquidity === 0n) {
+  // 7. Create Position — use the correct SDK method based on which amounts are provided.
+  //    Position.fromAmounts takes min(liq_from_amount0, liq_from_amount1), so passing 0
+  //    for one side when the tick is in range always yields zero liquidity.
+  //    Instead, use fromAmount0 or fromAmount1 for single-sided input.
+  const amount0 = raw0Input !== undefined ? parseUnits(raw0Input, dec0) : 0n;
+  const amount1 = raw1Input !== undefined ? parseUnits(raw1Input, dec1) : 0n;
+
+  let position: Position;
+  if (raw0Input !== undefined && raw1Input !== undefined) {
+    // Both amounts provided — use fromAmounts (takes min liquidity of both)
+    position = Position.fromAmounts({
+      pool, tickLower, tickUpper,
+      amount0: amount0.toString(),
+      amount1: amount1.toString(),
+      useFullPrecision: true,
+    });
+  } else if (raw1Input !== undefined) {
+    // Only amount1 provided — derive position from amount1, SDK computes amount0
+    position = Position.fromAmount1({
+      pool, tickLower, tickUpper,
+      amount1: amount1.toString(),
+    });
+  } else {
+    // Only amount0 provided — derive position from amount0, SDK computes amount1
+    position = Position.fromAmount0({
+      pool, tickLower, tickUpper,
+      amount0: amount0.toString(),
+      useFullPrecision: true,
+    });
+  }
+
+  if (position.liquidity.toString() === "0") {
     throw new Error("Computed liquidity is zero — check that amounts and tick range are valid for the current pool price.");
   }
 
-  // 7. Slippage: allow 1% more than requested amounts
-  const amount0Max = amount0 + amount0 / 100n;
-  const amount1Max = amount1 + amount1 / 100n;
+  // 8. Check for an existing position with the same pool key and tick range.
+  //    If one exists, increase it instead of minting a new position (avoids duplicate NFTs).
+  let existingTokenId: bigint | undefined;
+  try {
+    const existing = await getVaultLPPositions(chainId, vaultAddress, env.ALCHEMY_API_KEY);
+    const match = existing.find(p =>
+      p.currency0.toLowerCase() === currency0.toLowerCase() &&
+      p.currency1.toLowerCase() === currency1.toLowerCase() &&
+      p.fee === fee &&
+      p.tickSpacing === tickSpacing &&
+      p.hooks.toLowerCase() === hooks.toLowerCase() &&
+      p.tickLower === tickLower &&
+      p.tickUpper === tickUpper &&
+      p.liquidity !== "0",
+    );
+    if (match) {
+      existingTokenId = BigInt(match.tokenId);
+      console.log(`[buildAddLiquidityTx] Reusing existing position #${match.tokenId} (same pool + tick range) — increasing instead of minting`);
+    }
+  } catch {
+    // If position lookup fails, fall through to minting a new position
+  }
 
-  // 8. Encode: MINT_POSITION + SETTLE_PAIR + TAKE_PAIR
-  const unlockData = buildUnlockData(
-    [Actions.MINT_POSITION, Actions.SETTLE_PAIR, Actions.TAKE_PAIR],
-    [
-      encodeMintParams(poolKey, tickLower, tickUpper, liquidity, amount0Max, amount1Max, vaultAddress),
-      encodeSettlePairParams(currency0, currency1),
-      encodeTakePairParams(currency0, currency1, vaultAddress),
-    ],
-  );
-
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 1800); // 30 min
-  const calldata = encodeVaultModifyLiquidities(unlockData, deadline);
+  // 9. Encode calldata via SDK — produces modifyLiquidities(unlockData, deadline)
+  //    The vault adapter has the same function signature, so the calldata works as-is.
+  //    Pass tokenId for INCREASE_LIQUIDITY, or recipient for MINT_POSITION.
+  const deadline = Math.floor(Date.now() / 1000) + 1800; // 30 min
+  const addOptions = existingTokenId !== undefined
+    ? { tokenId: existingTokenId.toString(), slippageTolerance: new Percent(1, 100), deadline }
+    : { recipient: vaultAddress, slippageTolerance: new Percent(1, 100), deadline };
+  const { calldata: sdkCalldata } = V4PositionManager.addCallParameters(position, addOptions);
 
   const sym0 = isALower ? params.tokenA : params.tokenB;
   const sym1 = isALower ? params.tokenB : params.tokenA;
-  const description = `[Uniswap v4] Add liquidity: ${raw0} ${sym0} + ${raw1} ${sym1} (${range} range, fee ${fee / 10000}%)`;
+  const raw0 = raw0Input ?? formatUnits(BigInt(position.amount0.quotient.toString()), dec0);
+  const raw1 = raw1Input ?? formatUnits(BigInt(position.amount1.quotient.toString()), dec1);
+  const action = existingTokenId !== undefined ? `Increase position #${existingTokenId}` : "Add liquidity";
+  const description = `[Uniswap v4] ${action}: ${raw0} ${sym0} + ${raw1} ${sym1} (${range} range, fee ${fee / 10000}%)`;
 
-  return { calldata, description, poolId, tickLower, tickUpper };
+  return { calldata: sdkCalldata as Hex, description, poolId, tickLower, tickUpper };
 }
 
 export interface RemoveLiquidityParams {
@@ -436,7 +501,9 @@ export async function buildRemoveLiquidityTx(
 
   const tokenId = BigInt(params.tokenId);
   const liquidity = BigInt(params.liquidityAmount);
-  const shouldBurn = params.burn !== false;
+  // Default: do NOT burn the NFT — leave it as a closed (0-liquidity) position
+  // that can be reused or explicitly cleaned up with burn_position later.
+  const shouldBurn = params.burn === true;
 
   const actions: number[] = [Actions.DECREASE_LIQUIDITY, Actions.TAKE_PAIR];
   const actionParams: Hex[] = [
@@ -506,7 +573,130 @@ const POSITION_MANAGER_ABI = [
     inputs: [{ name: "tokenId", type: "uint256" as const }],
     outputs: [{ name: "liquidity", type: "uint128" as const }],
   },
+  // ownerOf(uint256 tokenId) → address (ERC-721)
+  {
+    name: "ownerOf",
+    type: "function" as const,
+    stateMutability: "view" as const,
+    inputs: [{ name: "tokenId", type: "uint256" as const }],
+    outputs: [{ name: "owner", type: "address" as const }],
+  },
 ] as const;
+
+// ── Pool Info Lookup ───────────────────────────────────────────────────
+
+/** Uniswap v4 PoolManager Initialize event ABI fragment (for getLogs). */
+const INITIALIZE_EVENT_ABI = [{
+  type: "event" as const,
+  name: "Initialize",
+  inputs: [
+    { name: "id",          type: "bytes32"  as const, indexed: true  },
+    { name: "currency0",   type: "address"  as const, indexed: true  },
+    { name: "currency1",   type: "address"  as const, indexed: true  },
+    { name: "fee",         type: "uint24"   as const, indexed: false },
+    { name: "tickSpacing", type: "int24"    as const, indexed: false },
+    { name: "hooks",       type: "address"  as const, indexed: false },
+    { name: "sqrtPriceX96",type: "uint160"  as const, indexed: false },
+    { name: "tick",        type: "int24"    as const, indexed: false },
+  ],
+}] as const;
+
+export interface PoolInfo {
+  /** The keccak256(abi.encode(PoolKey)) pool ID. */
+  poolId: Hex;
+  initialized: boolean;
+  /** Fee tier in hundredths of a bip (e.g. 6000 = 0.60%). */
+  fee: number;
+  /** Tick spacing — always exact (from Initialize event or provided). */
+  tickSpacing: number;
+  /** Hook contract address (zero = no hook). */
+  hooks: Address;
+  currency0: Address;
+  currency1: Address;
+  sqrtPriceX96: string;
+  currentTick: number;
+}
+
+/**
+ * Look up full pool key details for a Uniswap v4 pool by its pool ID.
+ *
+ * Reads slot0 (sqrtPriceX96, tick, lpFee) via StateView.getSlot0(), then
+ * fetches the PoolManager Initialize event to recover tickSpacing and hooks.
+ *
+ * All together the returned PoolInfo contains everything required to call
+ * add_liquidity on that pool.
+ */
+export async function getPoolInfoById(
+  poolId: Hex,
+  chainId: number,
+  alchemyApiKey: string,
+): Promise<PoolInfo> {
+  const stateView = STATE_VIEW[chainId];
+  if (!stateView) {
+    throw new Error(`Uniswap v4 StateView not available on chain ${chainId}.`);
+  }
+  const poolManager = POOL_MANAGER[chainId];
+  if (!poolManager) {
+    throw new Error(`Uniswap v4 PoolManager not available on chain ${chainId}.`);
+  }
+
+  const client = getClient(chainId, alchemyApiKey);
+
+  // 1. Read slot0 via StateView
+  const slot0Result = await client.readContract({
+    address: stateView,
+    abi: STATEVIEW_ABI,
+    functionName: "getSlot0",
+    args: [poolId],
+  });
+
+  const sqrtPriceX96 = slot0Result[0];
+  const tick = slot0Result[1];
+  const lpFee = slot0Result[3];
+
+  if (sqrtPriceX96 === 0n) {
+    throw new Error(`Pool ${poolId} not found or not initialized on chain ${chainId}.`);
+  }
+
+  // 2. Fetch Initialize event to recover tickSpacing, hooks, and token addresses
+  let fee: number = lpFee;
+  let tickSpacing: number = defaultTickSpacing(lpFee);
+  let hooks: Address = "0x0000000000000000000000000000000000000000" as Address;
+  let currency0: Address = "0x0000000000000000000000000000000000000000" as Address;
+  let currency1: Address = "0x0000000000000000000000000000000000000000" as Address;
+
+  try {
+    const logs = await client.getLogs({
+      address: poolManager,
+      event: INITIALIZE_EVENT_ABI[0],
+      args: { id: poolId },
+      fromBlock: 0n,
+      toBlock: "latest",
+    });
+    if (logs.length > 0 && logs[0].args) {
+      const e = logs[0].args;
+      fee         = Number(e.fee ?? lpFee);
+      tickSpacing = Number(e.tickSpacing ?? defaultTickSpacing(lpFee));
+      hooks       = (e.hooks ?? "0x0000000000000000000000000000000000000000") as Address;
+      currency0   = (e.currency0 ?? currency0) as Address;
+      currency1   = (e.currency1 ?? currency1) as Address;
+    }
+  } catch {
+    // Initialize event lookup failed (node limitation) — fee from slot0, ts estimated
+  }
+
+  return {
+    poolId,
+    initialized: true,
+    fee,
+    tickSpacing,
+    hooks,
+    currency0,
+    currency1,
+    sqrtPriceX96: sqrtPriceX96.toString(),
+    currentTick: tick,
+  };
+}
 
 // ── LP Position Reading ────────────────────────────────────────────────
 
@@ -526,6 +716,8 @@ export interface LPPosition {
   amount1: string;    // human-readable formatted amount
   decimals0: number;
   decimals1: number;
+  /** "active" = non-zero liquidity; "closed" = 0 liquidity, NFT still exists in POSM */
+  status?: "active" | "closed";
 }
 
 /**
@@ -566,8 +758,8 @@ export async function getVaultLPPositions(
 ): Promise<LPPosition[]> {
   const posm = POSITION_MANAGER[chainId];
   if (!posm) throw new Error(`Uniswap v4 PositionManager not available on chain ${chainId}. Supported chains: ${Object.keys(POSITION_MANAGER).join(", ")}.`);
-  const poolManager = POOL_MANAGER[chainId];
-  if (!poolManager) throw new Error(`Uniswap v4 PoolManager not available on chain ${chainId}.`);
+  const stateView = STATE_VIEW[chainId];
+  if (!stateView) throw new Error(`Uniswap v4 StateView not available on chain ${chainId}.`);
 
   const client = getClient(chainId, alchemyApiKey);
 
@@ -645,24 +837,35 @@ export async function getVaultLPPositions(
     }
   }
 
-  if (rawPositions.length === 0) return [];
+  if (rawPositions.length === 0) {
+    // If the vault returned token IDs but all POSM calls failed, that is a data
+    // error (wrong POSM address, RPC issue, ABI mismatch) — not "no positions".
+    // Throw so the caller can surface a real error instead of silently returning [].
+    if (tokenIds.length > 0) {
+      const failures = tokenIds.map((id, i) => {
+        const info = posmResults[i * 2];
+        const liq = posmResults[i * 2 + 1];
+        return `#${id}: info=${info.status}, liq=${liq.status}`;
+      }).join("; ");
+      throw new Error(
+        `Vault has ${tokenIds.length} position ID(s) but all PositionManager queries failed. ` +
+        `This is likely an RPC issue. Details: ${failures}`,
+      );
+    }
+    return [];
+  }
 
-  // 4. Build batch calls: pool prices (extsload) + token symbol/decimals
+  // 4. Build batch calls: pool prices (StateView) + token symbol/decimals
   const tokenList = [...uniqueTokens];
   const poolList = [...uniquePoolIds.values()];
 
-  // Pool price slots
-  const poolSlots = poolList.map(({ poolId }) =>
-    keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "uint256" }], [poolId, POOLS_SLOT])),
-  );
-
   const enrichCalls = [
-    // Pool sqrtPriceX96 via extsload
-    ...poolSlots.map((slot) => ({
-      address: poolManager,
-      abi: EXTSLOAD_ABI,
-      functionName: "extsload" as const,
-      args: [slot] as const,
+    // Pool sqrtPriceX96 via StateView.getSlot0
+    ...poolList.map(({ poolId }) => ({
+      address: stateView!,
+      abi: STATEVIEW_ABI,
+      functionName: "getSlot0" as const,
+      args: [poolId] as const,
     })),
     // Token symbols
     ...tokenList.map((addr) => ({
@@ -687,8 +890,7 @@ export async function getVaultLPPositions(
   for (let i = 0; i < poolList.length; i++) {
     const result = enrichResults[i];
     if (result.status === "success" && result.result) {
-      const raw = BigInt(result.result as string);
-      const sqrtPriceX96 = raw & ((1n << 160n) - 1n);
+      const [sqrtPriceX96] = result.result as [bigint, number, number, number];
       poolPrices.set(poolList[i].poolId, sqrtPriceX96);
     }
   }
@@ -758,10 +960,75 @@ export async function getVaultLPPositions(
       amount1: amount1Str,
       decimals0: dec0,
       decimals1: dec1,
+      // Positions with 0 liquidity are closed (fees may still be claimable)
+      status: rp.liquidity > 0n ? "active" as const : "closed" as const,
     });
   }
 
   return positions;
+}
+
+// ── Single-position POSM query (for burn fallback) ─────────────────────
+
+/**
+ * Directly query the POSM for a single position's pool key and liquidity.
+ * This is a lightweight fallback for `burn_position` when `getVaultLPPositions`
+ * drops the position (e.g. transient RPC failure in the batch multicall).
+ *
+ * Returns null if the NFT has already been burned in the POSM (position info
+ * zeroed out).
+ */
+export async function getPositionDirect(
+  chainId: number,
+  tokenId: string,
+  alchemyApiKey: string,
+): Promise<{ currency0: Address; currency1: Address; liquidity: bigint } | null> {
+  const posm = POSITION_MANAGER[chainId];
+  if (!posm) return null;
+
+  const client = getClient(chainId, alchemyApiKey);
+  const tokenIdBn = BigInt(tokenId);
+
+  const results = await client.multicall({
+    contracts: [
+      {
+        address: posm,
+        abi: POSITION_MANAGER_ABI,
+        functionName: "getPoolAndPositionInfo" as const,
+        args: [tokenIdBn] as const,
+      },
+      {
+        address: posm,
+        abi: POSITION_MANAGER_ABI,
+        functionName: "getPositionLiquidity" as const,
+        args: [tokenIdBn] as const,
+      },
+    ],
+  });
+
+  const infoResult = results[0];
+  const liqResult = results[1];
+
+  if (infoResult.status !== "success" || !infoResult.result) return null;
+
+  const [poolKey, _packedInfo] = infoResult.result as [
+    { currency0: Address; currency1: Address; fee: number; tickSpacing: number; hooks: Address },
+    bigint,
+  ];
+
+  // If the pool key is all zeros, the position info was deleted (NFT burned in POSM)
+  if (poolKey.currency0 === "0x0000000000000000000000000000000000000000" &&
+      poolKey.currency1 === "0x0000000000000000000000000000000000000000") {
+    return null;
+  }
+
+  const liquidity = liqResult.status === "success" ? (liqResult.result as bigint) : 0n;
+
+  return {
+    currency0: poolKey.currency0,
+    currency1: poolKey.currency1,
+    liquidity,
+  };
 }
 
 // ── Fee Collection ─────────────────────────────────────────────────────
@@ -794,5 +1061,52 @@ export function buildCollectFeesTx(
   const calldata = encodeVaultModifyLiquidities(unlockData, deadline);
 
   const description = `[Uniswap v4] Collect fees from position #${tokenId}`;
+  return { calldata, description };
+}
+
+// ── Position Burn ──────────────────────────────────────────────────────
+
+/**
+ * Build unsigned vault tx to burn a closed (0-liquidity) Uniswap v4 LP position NFT.
+ *
+ * Action sequence: DECREASE_LIQUIDITY(0) → TAKE_PAIR → BURN_POSITION
+ *
+ * Even when liquidity is already 0, the PositionManager requires DECREASE_LIQUIDITY
+ * to flush any residual fee accounting, TAKE_PAIR to settle balances back to the
+ * vault, and BURN_POSITION to delete the NFT. Using BURN_POSITION alone reverts.
+ * This matches the `0x011103` action sequence observed in confirmed burn transactions.
+ *
+ * Pre-conditions (caller must verify before calling this):
+ *   1. Position liquidity == 0 (confirmed by get_lp_positions showing Status: Closed)
+ *   2. Fees should be collected first (collect_lp_fees) — any residual settled to vault
+ *
+ * @param tokenId    ERC-721 position token ID to burn
+ * @param currency0  Sorted lower token address of the pool pair
+ * @param currency1  Sorted higher token address of the pool pair
+ * @param vaultAddress  The vault that owns the position NFT
+ */
+export function buildBurnPositionTx(
+  tokenId: string,
+  currency0: Address,
+  currency1: Address,
+  vaultAddress: Address,
+): { calldata: Hex; description: string } {
+  const tokenIdBn = BigInt(tokenId);
+
+  // Must be DECREASE_LIQUIDITY(0) + TAKE_PAIR + BURN_POSITION — not just BURN_POSITION alone.
+  // POSM requires the full sequence to flush fee accounting even when liquidity is 0.
+  const unlockData = buildUnlockData(
+    [Actions.DECREASE_LIQUIDITY, Actions.TAKE_PAIR, Actions.BURN_POSITION],
+    [
+      encodeDecreaseParams(tokenIdBn, 0n, 0n, 0n),
+      encodeTakePairParams(currency0, currency1, vaultAddress),
+      encodeBurnParams(tokenIdBn, 0n, 0n),
+    ],
+  );
+
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 1800);
+  const calldata = encodeVaultModifyLiquidities(unlockData, deadline);
+
+  const description = `[Uniswap v4] Burn position NFT #${tokenId} (permanent)`;
   return { calldata, description };
 }

@@ -34,14 +34,32 @@ if (fs.existsSync(sodiumNative)) {
 // sodium-universal is CJS (module.exports = require('sodium-native'))
 // but WDK does `import { sodium_memzero } from 'sodium-universal'` (ESM named import).
 // Node.js can't destructure CJS as ESM named imports. Fix: re-export directly.
+// Also add extension_pbkdf2_sha512_async polyfill for wdk-secret-manager's
+// bip39-mnemonic dependency (which uses a sodium-native-only extension).
 const sodiumUniversal = path.join(__dirname, '..', 'node_modules', 'sodium-universal', 'index.js');
 if (fs.existsSync(sodiumUniversal)) {
   fs.writeFileSync(
     sodiumUniversal,
     "// Patched for Workers + Node.js ESM compat: re-export sodium-javascript directly\n" +
-    "module.exports = require('sodium-javascript');\n"
+    "const sodium = require('sodium-javascript');\n" +
+    "// Polyfill: sodium-native extension_pbkdf2_sha512_async (used by bip39-mnemonic)\n" +
+    "// Falls back to node:crypto pbkdf2 which Workers support via nodejs_compat.\n" +
+    "// Lazy require to avoid breaking browser bundles (which don't call this function).\n" +
+    "if (!sodium.extension_pbkdf2_sha512_async) {\n" +
+    "  sodium.extension_pbkdf2_sha512_async = function (output, password, salt, iterations, keyLength) {\n" +
+    "    var pbkdf2 = require('node:crypto').pbkdf2;\n" +
+    "    return new Promise(function (resolve, reject) {\n" +
+    "      pbkdf2(password, salt, iterations, keyLength, 'sha512', function (err, derived) {\n" +
+    "        if (err) return reject(err);\n" +
+    "        output.set(derived);\n" +
+    "        resolve();\n" +
+    "      });\n" +
+    "    });\n" +
+    "  };\n" +
+    "}\n" +
+    "module.exports = sodium;\n"
   );
-  console.log('✓ Patched sodium-universal → sodium-javascript (ESM interop fix)');
+  console.log('✓ Patched sodium-universal → sodium-javascript + pbkdf2 polyfill');
 } else {
   console.log('⚠ sodium-universal not found — skip patch');
 }

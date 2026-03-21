@@ -555,11 +555,11 @@ export async function buildRebalancePlan(params: {
  */
 const AINTENTS_GAS_OVERHEAD_USD: Record<number, number> = {
   1:     2.00,   // Ethereum mainnet — ~300-500k gas at low gwei
-  56:    0.15,   // BSC
+  56:    0.3,   // BSC
   137:   0.15,   // Polygon
-  10:    0.05,   // Optimism
-  8453:  0.05,   // Base
-  42161: 0.05,   // Arbitrum
+  10:    0.1,   // Optimism
+  8453:  0.1,   // Base
+  42161: 0.1,   // Arbitrum
   130:   0.05,   // Unichain
 };
 

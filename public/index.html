@@ -22,46 +22,60 @@
 
     /* ── Header ─────────────────────────────────────────── */
     header {
-      padding: 16px 32px; border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      padding: 10px 24px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 12px; flex-wrap: nowrap;
     }
-    header h1 { font-size: 26px; font-weight: 600; white-space: nowrap; }
-    .header-actions { margin-left: auto; display: flex; align-items: center; gap: 13px; flex-wrap: wrap; }
+    header h1 { font-size: 18px; font-weight: 600; white-space: nowrap; }
+    .header-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; }
     .btn-sm {
-      font-size: 19px; padding: 10px 19px; border-radius: 8px;
+      font-size: 13px; padding: 7px 14px; border-radius: 6px;
       border: 1px solid var(--border); background: var(--surface);
       color: var(--text); cursor: pointer; font-weight: 500;
       transition: background 0.15s, border-color 0.15s;
     }
     .btn-sm:hover { border-color: var(--accent); }
     .btn-sm.active { border-color: var(--success); color: var(--success); }
-    .addr { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 18px; color: var(--muted); }
-
-    /* ── Setup bar ──────────────────────────────────────── */
-    #setup-bar {
-      padding: 13px 26px; border-bottom: 1px solid var(--border);
-      background: var(--surface); display: flex; gap: 13px; align-items: center; flex-wrap: wrap;
+    .btn-icon {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      padding: 6px; border-radius: 6px; display: flex; align-items: center;
+      transition: color 0.15s;
     }
-    #setup-bar label { font-size: 15px; color: var(--muted); white-space: nowrap; }
-    #setup-bar input {
-      background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
-      color: var(--text); padding: 8px 13px; font-size: 17px; outline: none;
+    .btn-icon:hover { color: var(--text); }
+    .addr { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; color: var(--muted); }
+
+    /* ── Settings modal sections ─────────────────────── */
+    .settings-section {
+      padding: 16px 0; border-bottom: 1px solid var(--border);
+    }
+    .settings-section:last-child { border-bottom: none; }
+    .settings-section h4 {
+      font-size: 13px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.5px; margin-bottom: 12px;
+    }
+    .settings-row {
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    }
+    .settings-row label { font-size: 13px; color: var(--muted); white-space: nowrap; }
+    .settings-row input {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+      color: var(--text); padding: 6px 10px; font-size: 13px; outline: none;
       font-family: 'SF Mono', 'Fira Code', monospace;
     }
-    #setup-bar input:focus { border-color: var(--accent); }
-    #vault-input { width: 384px; max-width: 100%; }
+    .settings-row input:focus { border-color: var(--accent); }
+    #vault-input { width: 100%; max-width: 100%; box-sizing: border-box; }
     .chain-badge {
-      display: inline-flex; align-items: center; font-size: 15px;
-      padding: 6px 15px; border-radius: 7px;
+      display: inline-flex; align-items: center; font-size: 12px;
+      padding: 4px 10px; border-radius: 5px;
       background: rgba(88, 166, 255, 0.1); color: var(--accent);
       font-family: 'SF Mono', 'Fira Code', monospace;
       border: 1px solid rgba(88, 166, 255, 0.2);
     }
     .vault-info-badge {
-      font-size: 14px; padding: 4px 10px; border-radius: 5px;
+      font-size: 11px; padding: 3px 8px; border-radius: 4px;
       background: rgba(63,185,80,0.1); color: var(--success);
       font-family: 'SF Mono', 'Fira Code', monospace;
     }
+    .vault-info-badge:empty { display: none; }
     .vault-info-badge.error { background: rgba(248,81,73,0.1); color: var(--error); }
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinner {
@@ -99,24 +113,24 @@
 
     /* ── Chat ───────────────────────────────────────────── */
     #chat {
-      flex: 1; overflow-y: auto; padding: 32px;
-      display: flex; flex-direction: column; gap: 22px;
+      flex: 1; overflow-y: auto; padding: 20px 24px;
+      display: flex; flex-direction: column; gap: 14px;
     }
     .msg {
-      max-width: 960px; padding: 19px 26px; border-radius: 13px;
-      line-height: 1.5; font-size: 22px; white-space: pre-wrap; word-break: break-word;
+      max-width: 1200px; padding: 12px 18px; border-radius: 10px;
+      line-height: 1.5; font-size: 15px; white-space: pre-wrap; word-break: break-word;
     }
-    .msg.user { align-self: flex-end; background: var(--accent-dim); border-bottom-right-radius: 5px; }
-    .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 5px; }
-    .msg.compact { width: fit-content; min-width: 288px; max-width: 480px; white-space: normal; box-sizing: border-box; }
-    .msg.system { align-self: center; color: var(--muted); font-size: 19px; background: none; padding: 3px 0; white-space: normal; }
+    .msg.user { align-self: flex-end; background: var(--accent-dim); border-bottom-right-radius: 4px; }
+    .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+    .msg.compact { width: fit-content; min-width: 240px; max-width: 480px; white-space: normal; box-sizing: border-box; }
+    .msg.system { align-self: center; color: var(--muted); font-size: 13px; background: none; padding: 2px 0; white-space: normal; }
     .msg .tool-call {
-      margin-top: 13px; padding: 13px 19px; background: rgba(0,0,0,0.3); border-radius: 8px;
-      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 19px; color: var(--warn);
+      margin-top: 8px; padding: 8px 14px; background: rgba(0,0,0,0.3); border-radius: 6px;
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; color: var(--warn);
     }
     .msg .tool-result {
-      margin-top: 13px; padding: 13px 19px; background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.3);
-      border-radius: 8px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 19px; color: var(--success);
+      margin-top: 8px; padding: 8px 14px; background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.3);
+      border-radius: 6px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; color: var(--success);
     }
     .msg .error-result { background: rgba(248,81,73,0.1); border-color: rgba(248,81,73,0.3); color: var(--error); }
     .typing .msg-content { color: var(--muted); font-style: italic; }
@@ -129,26 +143,26 @@
     }
     .msg.assistant .msg-content a:hover { text-decoration: underline; }
     .msg.assistant .msg-content table {
-      border-collapse: collapse; margin: 13px 0; font-size: 21px; width: 100%;
+      border-collapse: collapse; margin: 8px 0; font-size: 14px; width: 100%;
       white-space: nowrap;
     }
     .msg.assistant .msg-content th,
     .msg.assistant .msg-content td {
-      padding: 6px 16px; border: 1px solid var(--border); text-align: left;
+      padding: 4px 12px; border: 1px solid var(--border); text-align: left;
     }
     .msg.assistant .msg-content th {
-      background: var(--bg); font-weight: 600; font-size: 19px; color: var(--muted);
+      background: var(--bg); font-weight: 600; font-size: 13px; color: var(--muted);
     }
-    .msg.assistant .msg-content td { font-size: 19px; }
+    .msg.assistant .msg-content td { font-size: 13px; }
     .msg.assistant .msg-content { overflow-x: auto; }
 
     /* ── Suggestion chips ───────────────────────────────── */
     .suggestions {
-      display: flex; flex-wrap: wrap; gap: 13px; margin-top: 16px; padding-top: 13px;
+      display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding-top: 8px;
       border-top: 1px solid var(--border);
     }
     .suggestion-chip {
-      font-size: 19px; padding: 10px 22px; border-radius: 19px;
+      font-size: 13px; padding: 6px 14px; border-radius: 14px;
       border: 1px solid var(--accent-dim); background: rgba(31, 111, 235, 0.08);
       color: var(--accent); cursor: pointer; font-weight: 500;
       transition: background 0.15s, border-color 0.15s;
@@ -158,19 +172,24 @@
     }
 
     /* ── Input ──────────────────────────────────────────── */
-    #input-area { padding: 22px 32px; border-top: 1px solid var(--border); display: flex; gap: 19px; }
+    #input-area { padding: 12px 24px 20px; }
+    #input-wrapper { position: relative; }
     #input-area textarea {
-      flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-      color: var(--text); padding: 16px 22px; font-size: 22px; font-family: inherit;
-      resize: none; outline: none; min-height: 64px; max-height: 160px;
+      width: 100%; box-sizing: border-box;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--text); padding: 12px 50px 12px 16px; font-size: 15px; font-family: inherit;
+      resize: none; outline: none; min-height: 100px; max-height: 200px;
     }
     #input-area textarea:focus { border-color: var(--accent); }
-    #input-area button {
-      background: var(--accent-dim); color: #fff; border: none; border-radius: 10px;
-      padding: 0 29px; font-size: 22px; font-weight: 600; cursor: pointer;
+    #send {
+      position: absolute; bottom: 12px; right: 12px;
+      width: 40px; height: 40px; border-radius: 50%;
+      background: var(--accent); border: none; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s;
     }
-    #input-area button:hover { background: var(--accent); }
-    #input-area button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #send:hover { background: #1a7aff; }
+    #send:disabled { opacity: 0.4; cursor: not-allowed; }
 
     /* ── Transaction confirm modal ──────────────────────── */
     .modal-overlay {
@@ -184,25 +203,25 @@
       max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px);
       overflow-y: auto;
     }
-    .modal-content h3 { font-size: 26px; margin-bottom: 19px; }
-    .modal-close { float: right; background: none; border: none; color: var(--muted); font-size: 26px; cursor: pointer; }
+    .modal-content h3 { font-size: 18px; margin-bottom: 14px; }
+    .modal-close { float: right; background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; }
     .modal-close:hover { color: var(--text); }
     .tx-detail {
-      padding: 19px; background: var(--bg); border-radius: 10px; border: 1px solid var(--border);
-      font-size: 21px; margin-bottom: 19px;
+      padding: 14px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border);
+      font-size: 14px; margin-bottom: 14px;
     }
-    .tx-detail .row { display: flex; justify-content: space-between; padding: 6px 0; }
+    .tx-detail .row { display: flex; justify-content: space-between; padding: 4px 0; }
     .tx-detail .label { color: var(--muted); }
-    .tx-detail .value { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 19px; text-align: right; max-width: 336px; word-break: break-all; }
-    .tx-actions { display: flex; gap: 19px; }
+    .tx-detail .value { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; text-align: right; max-width: 336px; word-break: break-all; }
+    .tx-actions { display: flex; gap: 14px; }
     .tx-actions .btn-confirm {
-      flex: 1; background: var(--success); color: #000; border: none; border-radius: 10px;
-      padding: 16px; font-size: 22px; font-weight: 600; cursor: pointer;
+      flex: 1; background: var(--success); color: #000; border: none; border-radius: 8px;
+      padding: 12px; font-size: 15px; font-weight: 600; cursor: pointer;
     }
     .tx-actions .btn-confirm:hover { opacity: 0.9; }
     .tx-actions .btn-cancel {
       flex: 1; background: transparent; color: var(--error); border: 1px solid var(--error);
-      border-radius: 10px; padding: 16px; font-size: 22px; cursor: pointer;
+      border-radius: 8px; padding: 12px; font-size: 15px; cursor: pointer;
     }
 
     /* ── Wallet picker modal ────────────────────────────── */
@@ -212,9 +231,9 @@
     }
     .wallet-option:hover { border-color: var(--accent); }
     .wallet-option img { width: 38px; height: 38px; border-radius: 8px; }
-    .wallet-option .wallet-name { font-weight: 500; font-size: 22px; }
-    .wallet-option .wallet-rdns { font-size: 18px; color: var(--muted); }
-    .no-wallets { color: var(--muted); font-size: 21px; padding: 19px 0; }
+    .wallet-option .wallet-name { font-weight: 500; font-size: 15px; }
+    .wallet-option .wallet-rdns { font-size: 13px; color: var(--muted); }
+    .no-wallets { color: var(--muted); font-size: 14px; padding: 14px 0; }
 
     /* ── Saved vaults dropdown ──────────────────────────── */
     #saved-vaults-dropdown {
@@ -225,16 +244,16 @@
     }
     #saved-vaults-dropdown.visible { display: block; }
     .saved-vault-item {
-      padding: 11px; border-radius: 6px; cursor: pointer; font-size: 19px;
+      padding: 8px; border-radius: 5px; cursor: pointer; font-size: 13px;
       font-family: 'SF Mono', 'Fira Code', monospace;
       display: flex; justify-content: space-between; align-items: center;
     }
     .saved-vault-item:hover { background: var(--bg); }
     .saved-vault-item .vault-label { color: var(--text); }
-    .saved-vault-item .vault-chain { color: var(--muted); font-size: 18px; }
+    .saved-vault-item .vault-chain { color: var(--muted); font-size: 12px; }
     .saved-vault-item .remove-vault {
-      color: var(--error); cursor: pointer; padding: 3px 10px; border: none; background: none;
-      font-size: 22px; opacity: 0.6;
+      color: var(--error); cursor: pointer; padding: 3px 8px; border: none; background: none;
+      font-size: 15px; opacity: 0.6;
     }
     .saved-vault-item .remove-vault:hover { opacity: 1; }
 
@@ -244,12 +263,7 @@
       header h1 { font-size: 13px; }
       header svg { width: 20px; height: 20px; }
       .header-actions { gap: 6px; }
-      #setup-bar { padding: 8px 12px; gap: 6px; }
-      #vault-input { width: 100%; min-width: 0; font-size: 16px; padding: 8px 10px; }
-      #setup-bar label { font-size: 11px; }
-      #setup-bar input { font-size: 16px; }
       .chain-badge { font-size: 11px; padding: 3px 8px; }
-      .saved-vaults-btn { font-size: 10px; }
       #chat { padding: 10px; gap: 10px; }
       .msg { max-width: 100%; padding: 8px 10px; font-size: 13px; }
       .msg .tool-result { font-size: 11px; padding: 6px 8px; }
@@ -257,9 +271,10 @@
       .msg.assistant .msg-content th,
       .msg.assistant .msg-content td { padding: 3px 6px; font-size: 11px; }
       .suggestion-chip { font-size: 11px; padding: 5px 10px; }
-      #input-area { padding: 8px 10px; gap: 8px; }
-      #input-area textarea { padding: 10px 12px; font-size: 16px; min-height: 44px; }
-      #input-area button { padding: 0 14px; font-size: 14px; min-height: 44px; }
+      #input-area { padding: 8px 10px; }
+      #input-area textarea { padding: 10px 48px 10px 12px; font-size: 16px; min-height: 44px; }
+      #send { width: 32px; height: 32px; bottom: 8px; right: 8px; }
+      #send svg { width: 18px; height: 18px; }
       .modal-content { padding: 16px; border-radius: 10px; }
       .modal-content h3 { font-size: 15px; margin-bottom: 12px; }
       .tx-detail { padding: 8px; font-size: 12px; margin-bottom: 12px; }
@@ -273,8 +288,6 @@
       .wallet-option { padding: 10px; gap: 10px; }
       .wallet-option img { width: 28px; height: 28px; }
       .wallet-option .wallet-name { font-size: 13px; }
-      #delegation-panel { padding: 8px 12px; gap: 8px; font-size: 11px; }
-      .delegation-status { font-size: 10px; padding: 3px 8px; }
       .delegated-confirm .row { flex-direction: column; gap: 4px; }
       .delegated-confirm .confirm-btn, .delegated-confirm .reject-btn { padding: 10px; font-size: 13px; }
     }
@@ -285,15 +298,21 @@
       .msg { padding: 6px 8px; font-size: 12px; }
       .suggestion-chip { font-size: 10px; padding: 4px 8px; }
       #input-area textarea { font-size: 16px; padding: 8px 10px; }
-      #delegation-panel { padding: 6px 10px; flex-direction: column; align-items: flex-start; }
     }
-    /* ── Delegation panel ────────────────────────────── */
+
+    /* ── Desktop: narrow centered chat ───────────────── */
+    @media (min-width: 1200px) {
+      body {
+        width: 55%; max-width: 800px; margin: 0 auto;
+        border-left: 1px solid var(--border); border-right: 1px solid var(--border);
+      }
+    }
+
+    /* ── Delegation panel (inside settings modal) ──── */
     #delegation-panel {
-      padding: 11px 26px; border-bottom: 1px solid var(--border);
-      background: var(--surface); gap: 13px; align-items: center; flex-wrap: wrap;
-      font-size: 15px;
+      gap: 10px; align-items: center; flex-wrap: wrap;
+      font-size: 14px;
     }
-    #delegation-panel.visible { display: flex; }
     .delegation-status {
       display: inline-flex; align-items: center; gap: 6px;
       padding: 5px 13px; border-radius: 6px; font-size: 14px;
@@ -405,23 +424,23 @@
 
     /* ── Delegated execution confirmation (in-chat) ────── */
     .delegated-confirm {
-      padding: 16px 19px; background: rgba(31,111,235,0.06);
-      border: 1px solid rgba(31,111,235,0.15); border-radius: 10px;
+      padding: 12px 14px; background: rgba(31,111,235,0.06);
+      border: 1px solid rgba(31,111,235,0.15); border-radius: 8px;
       white-space: normal; word-break: break-word; box-sizing: border-box;
     }
     .delegated-confirm .trade-pair {
-      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-      font-size: 21px; font-weight: 600;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      font-size: 14px; font-weight: 600;
     }
-    .delegated-confirm .trade-arrow { color: var(--muted); font-size: 19px; }
+    .delegated-confirm .trade-arrow { color: var(--muted); font-size: 13px; }
     .delegated-confirm .trade-amount.sell { color: var(--text); }
     .delegated-confirm .trade-amount.buy { color: var(--success); }
     .delegated-confirm .trade-meta {
-      font-size: 18px; color: var(--muted); margin: 6px 0 13px;
+      font-size: 12px; color: var(--muted); margin: 4px 0 10px;
     }
-    .delegated-confirm .confirm-actions { display: flex; gap: 10px; }
+    .delegated-confirm .confirm-actions { display: flex; gap: 8px; }
     .delegated-confirm .btn-agent-exec {
-      font-size: 18px; padding: 8px 19px; border-radius: 8px;
+      font-size: 13px; padding: 6px 14px; border-radius: 6px;
       border: none; cursor: pointer; font-weight: 500;
     }
     .delegated-confirm .btn-agent-exec.approve {
@@ -431,15 +450,15 @@
       background: transparent; color: var(--muted); border: 1px solid var(--border);
     }
     .delegated-confirm .exec-status {
-      font-size: 18px; margin-top: 8px; white-space: normal;
+      font-size: 13px; margin-top: 6px; white-space: normal;
       word-break: break-word; overflow-wrap: anywhere;
     }
     .delegated-confirm .multi-tx-header {
-      font-size: 18px; color: var(--muted); margin-bottom: 8px; font-weight: 600;
+      font-size: 13px; color: var(--muted); margin-bottom: 6px; font-weight: 600;
     }
     .multi-trade-row {
-      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-      font-size: 21px; font-weight: 600; padding: 6px 0;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      font-size: 14px; font-weight: 600; padding: 4px 0;
       border-bottom: 1px solid rgba(255,255,255,0.05);
     }
     .multi-trade-row:last-of-type { border-bottom: none; margin-bottom: 13px; }
@@ -506,11 +525,46 @@
       font-size: 16px; color: var(--muted); margin-top: 5px;
     }
 
-    @media (max-width: 640px) {
-      #delegation-panel { padding: 8px 12px; }
-      .delegation-status { font-size: 10px; }
-      .btn-delegation { font-size: 10px; padding: 4px 8px; }
+    /* ── WDK Wallet ──────────────────────────────────── */
+    .wdk-section { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+    .wdk-option {
+      padding: 12px 16px; border-radius: 10px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--text); font-size: 15px;
+      cursor: pointer; text-align: left; transition: background 0.15s;
     }
+    .wdk-option:hover { background: rgba(255,255,255,0.08); }
+    .wdk-option.primary {
+      background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600;
+    }
+    .wdk-option.primary:hover { opacity: 0.9; }
+    .wdk-option .wallet-name { font-weight: 600; font-size: 16px; }
+    .wdk-option .wallet-rdns { font-size: 13px; opacity: 0.7; margin-top: 2px; }
+    .wallet-divider {
+      display: flex; align-items: center; gap: 12px;
+      margin: 12px 0; color: var(--muted); font-size: 13px;
+    }
+    .wallet-divider::before, .wallet-divider::after {
+      content: ''; flex: 1; height: 1px; background: var(--border);
+    }
+    .seed-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0;
+    }
+    .seed-word {
+      padding: 8px 12px; background: var(--surface); border-radius: 8px;
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px;
+    }
+    .seed-num { color: var(--muted); font-size: 11px; margin-right: 6px; }
+    .seed-warning {
+      background: rgba(240,180,40,0.1); border: 1px solid rgba(240,180,40,0.3);
+      border-radius: 8px; padding: 12px 16px; margin-bottom: 16px;
+      font-size: 14px; color: #f0b428; line-height: 1.4;
+    }
+    .seed-confirm-row {
+      display: flex; align-items: center; gap: 8px; margin: 16px 0 12px;
+      font-size: 14px; cursor: pointer;
+    }
+    .seed-confirm-row input { width: 18px; height: 18px; cursor: pointer; }
+
     @media (max-width: 400px) {
       header h1 { display: none; }
     }
@@ -518,77 +572,193 @@
 </head>
 <body>
   <header>
-    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
     </svg>
-    <h1>Rigoblock Vault Operator</h1>
+    <h1>Trader</h1>
+    <span id="vault-status" class="vault-info-badge"></span>
+    <span id="chain-display" class="chain-badge">Ethereum</span>
     <div class="header-actions">
-      <button class="btn-sm" id="ai-settings-toggle" onclick="toggleAiSettings()" title="Configure AI model">⚙ AI Model</button>
-      <label class="testnet-toggle" title="Switch between mainnet and testnet chains">
-        <input type="checkbox" id="testnet-toggle" onchange="toggleTestnet()" />
-        <span class="toggle-track"></span>
-        <span id="network-mode-label">Mainnet</span>
-      </label>
       <span id="wallet-addr" class="addr"></span>
       <button id="connect-btn" class="btn-sm" onclick="openWalletPicker()">Connect Wallet</button>
+      <button class="btn-icon" onclick="openSettings()" title="Settings">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+      </button>
     </div>
   </header>
 
-  <!-- Setup bar: vault address + chain -->
-  <div id="setup-bar">
-    <label>Vault</label>
-    <div style="position: relative;">
-      <input id="vault-input" placeholder="Paste vault address (0x…)" spellcheck="false" />
-      <div id="saved-vaults-dropdown"></div>
+  <!-- Settings modal (vault, network, AI, delegation) -->
+  <div id="settings-modal" class="modal-overlay" onclick="if(event.target===this)closeModal('settings-modal')">
+    <div class="modal-content" style="max-width: 480px;">
+      <button class="modal-close" onclick="closeModal('settings-modal')">&times;</button>
+      <h3>Settings</h3>
+
+      <!-- Vault section -->
+      <div class="settings-section">
+        <h4>Vault</h4>
+        <div class="settings-row">
+          <div style="position: relative; flex: 1;">
+            <input id="vault-input" placeholder="Paste vault address (0x…)" spellcheck="false" />
+            <div id="saved-vaults-dropdown"></div>
+          </div>
+          <button class="saved-vaults-btn" onclick="toggleSavedVaults()">Saved ▾</button>
+        </div>
+      </div>
+
+      <!-- Network section -->
+      <div class="settings-section">
+        <h4>Network</h4>
+        <div class="settings-row">
+          <label class="testnet-toggle" title="Switch between mainnet and testnet chains">
+            <input type="checkbox" id="testnet-toggle" onchange="toggleTestnet()" />
+            <span class="toggle-track"></span>
+            <span id="network-mode-label">Mainnet</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- AI Model section -->
+      <div class="settings-section">
+        <h4>AI Model</h4>
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+        <div>
+          <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Provider</label>
+          <select id="ai-provider" onchange="onAiProviderChange()" style="width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;">
+            <option value="server">Llama 4 (default)</option>
+            <option value="openrouter">OpenRouter (100+ models)</option>
+            <option value="anthropic">Anthropic (direct)</option>
+            <option value="openai">OpenAI (direct)</option>
+          </select>
+        </div>
+        <div id="ai-key-row" style="display: none;">
+          <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">API Key</label>
+          <input id="ai-api-key" type="password" placeholder="sk-or-…" autocomplete="off" style="width: 100%; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; font-family: 'SF Mono', 'Fira Code', monospace; outline: none;" />
+        </div>
+        <div id="ai-model-row" style="display: none;">
+          <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Model</label>
+          <select id="ai-model" style="width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;">
+          </select>
+        </div>
+        <span id="ai-status" style="font-size: 14px; color: var(--muted);"></span>
+        </div>
+      </div>
+
+      <!-- Delegation section -->
+      <div class="settings-section">
+        <h4>Delegation</h4>
+        <div id="delegation-panel" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+          <span id="delegation-status-badge" class="delegation-status inactive">
+            <span class="dot"></span>
+            <span id="delegation-status-text">Not set up</span>
+          </span>
+          <span id="agent-addr" class="addr copyable-addr" style="display:none;" title="Click to copy full address"></span>
+          <span id="agent-balance-display" class="agent-balance" style="display:none;"></span>
+          <label id="sponsor-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, gas fees are sponsored (no agent funding needed). When disabled, the agent pays gas from its own ETH balance.">
+            <input type="checkbox" id="sponsor-toggle" onchange="toggleSponsoredGas(this.checked)" />
+            <span>Sponsored gas</span>
+          </label>
+          <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
+          <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
+          <button id="telegram-pair-btn" class="btn-delegation telegram" onclick="openTelegramPairing()" style="display:none;" title="Control this pool from Telegram">⬡ Telegram</button>
+        </div>
+      </div>
     </div>
-    <button class="saved-vaults-btn" onclick="toggleSavedVaults()">Saved ▾</button>
-    <span id="vault-status"></span>
-    <label>Chain</label>
-    <span id="chain-display" class="chain-badge">Ethereum</span>
   </div>
 
-  <!-- AI Settings bar (collapsed by default) -->
-  <div id="ai-settings-bar" style="display:none; padding: 11px 26px; border-bottom: 1px solid var(--border); background: var(--surface); gap: 13px; align-items: center; flex-wrap: wrap;">
-    <label style="font-size: 15px; color: var(--muted);">Provider</label>
-    <select id="ai-provider" onchange="onAiProviderChange()" style="background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 6px 10px; font-size: 15px; outline: none;">
-      <option value="server">Workers AI — Llama 4 (default, free)</option>
-      <option value="openrouter">OpenRouter (100+ models)</option>
-      <option value="anthropic">Anthropic (direct)</option>
-      <option value="openai">OpenAI (direct)</option>
-    </select>
-    <label id="ai-key-label" style="font-size: 15px; color: var(--muted); display: none;">API Key</label>
-    <input id="ai-api-key" type="password" placeholder="sk-or-…" autocomplete="off" style="display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 6px 10px; font-size: 15px; font-family: 'SF Mono', 'Fira Code', monospace; width: 256px; outline: none;" />
-    <label id="ai-model-label" style="font-size: 15px; color: var(--muted); display: none;">Model</label>
-    <select id="ai-model" style="display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 6px 10px; font-size: 15px; outline: none; max-width: 256px;">
-    </select>
-    <span id="ai-status" style="font-size: 14px; color: var(--muted);"></span>
-  </div>
-
-  <!-- Wallet picker modal (EIP-6963) -->
+  <!-- Wallet picker modal (WDK + EIP-6963) -->
   <div id="wallet-modal" class="modal-overlay">
     <div class="modal-content">
       <button class="modal-close" onclick="closeModal('wallet-modal')">&times;</button>
       <h3>Connect Wallet</h3>
-      <div id="wallet-list"><div class="no-wallets">Detecting wallets…</div></div>
+      <!-- Existing WDK wallet reconnect option (injected by openWalletPicker when keystore is present) -->
+      <div id="wdk-reconnect-section" style="display:none">
+        <div class="wdk-option primary" id="wdk-reconnect-btn" onclick="reconnectWdkWallet()">
+          <div class="wallet-name" id="wdk-reconnect-label">🔓 Unlock My Wallet</div>
+          <div class="wallet-rdns">Reconnect your encrypted wallet</div>
+        </div>
+        <div style="text-align:center;font-size:12px;color:var(--muted);margin:4px 0 8px;">— or —</div>
+      </div>
+      <div class="wdk-section">
+        <div class="wdk-option" onclick="showCreatePasswordModal()">
+          <div class="wallet-name">Create New Wallet</div>
+          <div class="wallet-rdns">Tether WDK · BIP-39 · Self-Custodial · Gas Sponsored</div>
+        </div>
+        <div class="wdk-option" onclick="showImportSeedModal()">
+          <div class="wallet-name">Import Seed Phrase</div>
+          <div class="wallet-rdns">Restore from 12-word mnemonic</div>
+        </div>
+      </div>
+      <div class="wallet-divider" id="wallet-divider"><span>or connect external wallet</span></div>
+      <div id="wallet-list"><div class="no-wallets">No browser wallets detected</div></div>
     </div>
   </div>
 
-  <!-- Delegation panel (always visible) -->
-  <div id="delegation-panel" style="display: flex;">
-    <span id="delegation-status-badge" class="delegation-status inactive">
-      <span class="dot"></span>
-      <span id="delegation-status-text">Not set up</span>
-    </span>
-    <span id="agent-addr" class="addr copyable-addr" style="display:none;" title="Click to copy full address"></span>
-    <span id="agent-balance-display" class="agent-balance" style="display:none;"></span>
-    <label id="sponsor-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, gas fees are sponsored (no agent funding needed). When disabled, the agent pays gas from its own ETH balance.">
-      <input type="checkbox" id="sponsor-toggle" onchange="toggleSponsoredGas(this.checked)" />
-      <span>Sponsored gas</span>
-    </label>
+  <!-- Create wallet: password modal -->
+  <div id="create-password-modal" class="modal-overlay" onclick="if(event.target===this)closeModal('create-password-modal')">
+    <div class="modal-content" style="max-width: 440px;">
+      <button class="modal-close" onclick="closeModal('create-password-modal')">&times;</button>
+      <h3>Choose a Password</h3>
+      <p style="font-size: 14px; color: var(--muted); margin-bottom: 12px;">Your wallet will be encrypted with this password. You'll need it to sign transactions. The password never leaves your browser.</p>
+      <input type="password" id="create-password-input" placeholder="Password (min 8 characters)"
+        oninput="updatePasswordConfirmStatus()"
+        style="width:100%;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;font-size:14px;" />
+      <input type="password" id="create-password-confirm" placeholder="Confirm password"
+        oninput="updatePasswordConfirmStatus()"
+        style="width:100%;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;font-size:14px;margin-top:8px;" />
+      <div id="create-password-status" style="font-size:13px;margin:6px 0;min-height:18px;"></div>
+      <div class="tx-actions">
+        <button class="btn-cancel" onclick="closeModal('create-password-modal')">Cancel</button>
+        <button class="btn-confirm" id="btn-create-wallet" onclick="createWdkWallet()" disabled>Create Wallet</button>
+      </div>
+    </div>
+  </div>
 
-    <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
-    <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
-    <button id="telegram-pair-btn" class="btn-delegation telegram" onclick="openTelegramPairing()" style="display:none;" title="Control this pool from Telegram">⬡ Telegram</button>
+  <!-- Seed phrase backup modal -->
+  <div id="seed-modal" class="modal-overlay">
+    <div class="modal-content" style="max-width: 440px;">
+      <h3>Save Your Seed Phrase</h3>
+      <div class="seed-warning">Write down these 12 words in order. This is the ONLY way to recover your wallet. Never share them.</div>
+      <div id="seed-words" class="seed-grid"></div>
+      <label class="seed-confirm-row" onclick="document.getElementById('seed-continue-btn').disabled = !document.getElementById('seed-backup-confirm').checked">
+        <input type="checkbox" id="seed-backup-confirm" />
+        I have saved my seed phrase securely
+      </label>
+      <button class="btn-confirm" id="seed-continue-btn" disabled onclick="confirmSeedBackup()" style="width:100%;">Continue</button>
+    </div>
+  </div>
+
+  <!-- Import seed phrase modal -->
+  <div id="import-seed-modal" class="modal-overlay" onclick="if(event.target===this)closeModal('import-seed-modal')">
+    <div class="modal-content" style="max-width: 440px;">
+      <button class="modal-close" onclick="closeModal('import-seed-modal')">&times;</button>
+      <h3>Import Wallet</h3>
+      <p style="font-size: 14px; color: var(--muted); margin-bottom: 12px;">Enter your 12-word BIP-39 seed phrase and choose a password to encrypt it.</p>
+      <textarea id="import-seed-input" rows="3" placeholder="word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12" style="width:100%;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;font-size:14px;font-family:'SF Mono','Fira Code',monospace;resize:vertical;"></textarea>
+      <input type="password" id="import-password-input" placeholder="Password to encrypt wallet" style="width:100%;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;font-size:14px;margin-top:8px;" />
+      <div id="import-seed-status" style="font-size:14px;margin:8px 0;min-height:20px;"></div>
+      <div class="tx-actions">
+        <button class="btn-cancel" onclick="closeModal('import-seed-modal')">Cancel</button>
+        <button class="btn-confirm" onclick="importWdkWallet()">Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Unlock wallet: password modal -->
+  <div id="unlock-password-modal" class="modal-overlay" onclick="if(event.target===this)closeModal('unlock-password-modal')">
+    <div class="modal-content" style="max-width: 400px;">
+      <button class="modal-close" onclick="rejectUnlockPrompt()">&times;</button>
+      <h3>Unlock Wallet</h3>
+      <p style="font-size: 14px; color: var(--muted); margin-bottom: 12px;">Enter your password to sign this transaction.</p>
+      <input type="password" id="unlock-password-input" placeholder="Wallet password" style="width:100%;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;font-size:14px;" onkeydown="if(event.key==='Enter')resolveUnlockPrompt()" />
+      <div id="unlock-password-status" style="font-size:14px;margin:8px 0;min-height:20px;color:var(--error);"></div>
+      <div class="tx-actions">
+        <button class="btn-cancel" onclick="rejectUnlockPrompt()">Cancel</button>
+        <button class="btn-confirm" onclick="resolveUnlockPrompt()">Unlock</button>
+      </div>
+    </div>
   </div>
 
   <!-- Delegation setup modal -->
@@ -722,8 +892,14 @@
   </div>
 
   <div id="input-area">
-    <textarea id="input" placeholder="e.g. Swap 0.5 ETH for USDC" rows="1"></textarea>
-    <button id="send" onclick="sendMessage()">Send</button>
+    <div id="input-wrapper">
+      <textarea id="input" placeholder="Ask anything, e.g. Swap 0.5 ETH for USDT" rows="1"></textarea>
+      <button id="send" onclick="sendMessage()" title="Send">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 19V5M5 12l7-7 7 7" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
   </div>
 
   <script>
@@ -746,6 +922,19 @@
     let providerListenersAttached = false; // prevent duplicate event listeners
     let strategyPollTimer = null; // strategy events polling interval
     let lastEventTimestamp = 0;  // last seen strategy event timestamp
+
+    // ── WDK wallet state (self-custodial — encrypted keystore model) ──
+    let wdkWalletAddress = null;
+    let wdkKeystore = null;    // encrypted keystore object (persisted in localStorage)
+    let wdkSeedPhrase = null;  // decrypted seed (in sessionStorage for reload, cleared on tab close)
+    let wdkAccount = null;     // WDK WalletAccountEvm instance (cached after unlock — session-level)
+    const WDK_SESSION_KEY = 'rigoblock_wdk_seed'; // sessionStorage — cleared on tab close
+    let WdkModule = null;      // lazily loaded WDK wallet browser module
+    let WdkSmModule = null;    // lazily loaded WDK secret manager browser module
+
+    // ── Unlock password promise pattern ──
+    let unlockResolve = null;
+    let unlockReject = null;
 
     // ── Chat persistence (sessionStorage — survives refresh, clears on tab close) ──
     const CHAT_STORAGE_KEY = 'rigoblock_chat_history';
@@ -814,18 +1003,17 @@
     function saveAiSettings() {
       localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(aiSettings));
     }
-    function toggleAiSettings() {
-      const bar = document.getElementById('ai-settings-bar');
-      bar.style.display = bar.style.display === 'none' ? 'flex' : 'none';
+    function openSettings() {
+      const modal = document.getElementById('settings-modal');
+      modal.classList.toggle('visible');
     }
+    function toggleAiSettings() { openSettings(); }
     function onAiProviderChange() {
       const provider = document.getElementById('ai-provider').value;
       aiSettings.provider = provider;
       const showCustom = provider !== 'server';
-      document.getElementById('ai-key-label').style.display = showCustom ? '' : 'none';
-      document.getElementById('ai-api-key').style.display = showCustom ? '' : 'none';
-      document.getElementById('ai-model-label').style.display = showCustom ? '' : 'none';
-      document.getElementById('ai-model').style.display = showCustom ? '' : 'none';
+      document.getElementById('ai-key-row').style.display = showCustom ? '' : 'none';
+      document.getElementById('ai-model-row').style.display = showCustom ? '' : 'none';
       if (showCustom) {
         const modelSelect = document.getElementById('ai-model');
         modelSelect.innerHTML = '';
@@ -1091,9 +1279,10 @@
           const owner = data.owner.toLowerCase();
           if (owner !== connectedAddress.toLowerCase()) {
             status.className = 'vault-info-badge error';
-            status.textContent = `${name} — not owner (owner: ${owner.slice(0,6)}…)`;
+            status.textContent = name || 'valid';
           } else {
-            status.textContent = `${name} — you are the owner ✓` + chainLabel;
+            status.className = 'vault-info-badge';
+            status.textContent = (name || 'valid') + ' (owned)';
           }
         }
 
@@ -1310,16 +1499,22 @@
       historyDraft = '';
 
       const vault = vaultInput.value.trim();
+      // Allow empty vault — zero address means no pool yet (for deploy_smart_pool flow)
+      const effectiveVault = (vault && vault.length === 42) ? vault : '0x0000000000000000000000000000000000000000';
       const chainId = currentChainId;
-      if (!vault || vault.length !== 42) {
-        appendMessage('system', 'Please enter a valid vault address first.');
-        return;
-      }
       if (!connectedAddress) {
+        appendMessage('system', '👛 Please connect your wallet first to use the chat.');
         openWalletPicker();
         return;
       }
-      if (!authSignature) {
+
+      // Check if user is the vault owner — requires valid vault address and explicit '(owned)' status.
+      // Non-owners and no-vault users chat in read-only/deploy mode without auth signing.
+      const statusEl = document.getElementById('vault-status');
+      const isOwner = !!(vault && vault.length === 42)
+        && !!(statusEl && statusEl.textContent.includes('(owned)') && !statusEl.className.includes('error'));
+
+      if (isOwner && !authSignature) {
         appendMessage('system', 'Signing authentication…');
         await signAuthMessage();
         if (!authSignature) {
@@ -1358,20 +1553,29 @@
       const timeoutId = setTimeout(() => controller.abort(), 50000);
 
       try {
+        const chatBody = {
+          messages: conversationHistory,
+          vaultAddress: effectiveVault,
+          chainId,
+          ...getAiRequestParams(),
+        };
+        // Always send operatorAddress when connected — needed for calldata building
+        // (pool deployment, swaps, etc.) regardless of vault ownership.
+        if (connectedAddress) {
+          chatBody.operatorAddress = connectedAddress;
+        }
+        // Only include auth credentials when user is the vault owner
+        if (isOwner && authSignature) {
+          chatBody.authSignature = authSignature;
+          chatBody.authTimestamp = authTimestamp;
+          chatBody.executionMode = executionMode;
+        }
+
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: controller.signal,
-          body: JSON.stringify({
-            messages: conversationHistory,
-            vaultAddress: vault,
-            chainId,
-            operatorAddress: connectedAddress,
-            authSignature,
-            authTimestamp,
-            executionMode,
-            ...getAiRequestParams(),
-          }),
+          body: JSON.stringify(chatBody),
         });
 
         if (!res.ok) {
@@ -1391,7 +1595,7 @@
                 signal: controller.signal,
                 body: JSON.stringify({
                   messages: conversationHistory,
-                  vaultAddress: vault,
+                  vaultAddress: effectiveVault,
                   chainId,
                   operatorAddress: connectedAddress,
                   authSignature,
@@ -1553,7 +1757,14 @@
       document.getElementById('tx-status').textContent = '';
       const confirmBtn = document.getElementById('tx-confirm-btn');
       confirmBtn.disabled = false;
-      confirmBtn.textContent = 'Swap';
+      // Set button label based on transaction type
+      const desc = (tx.description || '').toLowerCase();
+      confirmBtn.textContent = desc.includes('deploy') ? 'Deploy Pool'
+        : desc.includes('liquidity') ? 'Add Liquidity'
+        : desc.includes('bridge') || desc.includes('transfer') ? 'Transfer'
+        : desc.includes('stake') || desc.includes('unstake') ? 'Confirm'
+        : desc.includes('delegation') || desc.includes('delegate') ? 'Delegate'
+        : 'Confirm Swap';
       confirmBtn.style.display = '';
       document.getElementById('tx-modal').classList.add('visible');
     }
@@ -1565,9 +1776,9 @@
       const cancelBtn = document.querySelector('#tx-modal .btn-cancel');
 
       confirmBtn.disabled = true;
-      confirmBtn.textContent = 'Confirming…';
+      confirmBtn.textContent = wdkAccount ? 'Broadcasting…' : 'Confirming…';
       statusEl.style.color = 'var(--accent)';
-      statusEl.textContent = 'Waiting for wallet…';
+      statusEl.textContent = wdkAccount ? 'Signing and broadcasting…' : 'Waiting for wallet…';
 
       try {
         // Ensure correct chain
@@ -1581,7 +1792,7 @@
           });
         }
 
-        statusEl.textContent = 'Confirm in your wallet…';
+        statusEl.textContent = wdkAccount ? 'Signing and broadcasting…' : 'Confirm in your wallet…';
 
         const txHash = await activeProvider.request({
           method: 'eth_sendTransaction',
@@ -1609,7 +1820,7 @@
         statusEl.style.color = 'var(--error)';
         statusEl.textContent = `Error: ${err.message || 'User rejected'}`;
         confirmBtn.disabled = false;
-        confirmBtn.textContent = 'Swap';
+        confirmBtn.textContent = 'Confirm';
         confirmBtn.style.display = '';
       }
     }
@@ -1650,7 +1861,10 @@
               // Refresh delegation status (handles chat-based delegation setup)
               refreshDelegationStatus();
               // Auto-progress to next strategy step if agent is leading a multi-step flow
-              setTimeout(() => autoProgressAfterTx(chatMsg), 4500);
+              // Note: we do NOT repeat the buy/sell amounts here (those came from the swap
+              // result — already in conversation history). Including them as a new user
+              // message causes the LLM to echo them as "new balance", which is wrong.
+              setTimeout(() => autoProgressAfterTx(null), 4500);
             } else {
               statusEl.style.color = 'var(--error)';
               statusEl.textContent = '✗ Transaction reverted';
@@ -1663,7 +1877,7 @@
               const cancelBtn = document.querySelector('#tx-modal .btn-cancel');
               const confirmBtn = document.getElementById('tx-confirm-btn');
               if (cancelBtn) cancelBtn.style.display = '';
-              if (confirmBtn) { confirmBtn.style.display = ''; confirmBtn.textContent = 'Swap'; confirmBtn.disabled = false; }
+              if (confirmBtn) { confirmBtn.style.display = ''; confirmBtn.textContent = 'Confirm'; confirmBtn.disabled = false; }
             }, 4000);
             return;
           }
@@ -1680,7 +1894,7 @@
         const cancelBtn = document.querySelector('#tx-modal .btn-cancel');
         const confirmBtn = document.getElementById('tx-confirm-btn');
         if (cancelBtn) cancelBtn.style.display = '';
-        if (confirmBtn) { confirmBtn.style.display = ''; confirmBtn.textContent = 'Swap'; confirmBtn.disabled = false; }
+        if (confirmBtn) { confirmBtn.style.display = ''; confirmBtn.textContent = 'Confirm'; confirmBtn.disabled = false; }
       }, 5000);
     }
 
@@ -1744,7 +1958,7 @@
           });
         }
 
-        statusEl.textContent = 'Confirm in your wallet…';
+        statusEl.textContent = wdkAccount ? 'Signing and broadcasting…' : 'Confirm in your wallet…';
         const txHash = await activeProvider.request({
           method: 'eth_sendTransaction',
           params: [{
@@ -1788,10 +2002,13 @@
             if (success) {
               // Refresh delegation status (handles chat-based delegation setup)
               refreshDelegationStatus();
-              // Auto-progress to next strategy step
+              // Auto-progress to next strategy step.
+              // NOTE: for non-swap txs (bridges, delegation, etc.), pass null rather than
+              // tx.description — bridge descriptions contain receive amounts (e.g.
+              // "receive ~39.827602 USDT") that the LLM would incorrectly use as swap inputs.
               const desc = meta
                 ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
-                : tx.description || 'transaction';
+                : null;
               setTimeout(() => autoProgressAfterTx(desc), 2000);
             }
             return;
@@ -1923,10 +2140,13 @@
           if (!r.confirmed && !r.reverted) {
             pollPendingTx(r, tx.swapMeta);
           } else if (r.confirmed) {
-            // Auto-progress to next strategy step
+            // Auto-progress to next strategy step.
+            // NOTE: for non-swap txs (bridges, delegation, etc.), pass null rather than
+            // tx.description — bridge descriptions contain receive amounts that the LLM
+            // would incorrectly use as swap inputs instead of calling get_token_balance.
             const desc = tx.swapMeta
               ? `${tx.swapMeta.sellAmount} ${tx.swapMeta.sellToken} → ${tx.swapMeta.buyAmount} ${tx.swapMeta.buyToken}`
-              : tx.description || 'transaction';
+              : null;
             setTimeout(() => autoProgressAfterTx(desc), 2000);
           }
 
@@ -2182,6 +2402,439 @@
     }
 
     /* ================================================================
+       WDK Wallet (encrypted self-custodial, gas-sponsored)
+       ================================================================ */
+
+    // ── WDK Secret Manager encryption (XSalsa20-Poly1305 via libsodium) ──
+    // Key derivation: Web Crypto PBKDF2-SHA256 100k iterations — bypasses bare-crypto
+    // Encryption: WdkSecretManager with pre-derived key — XSalsa20-Poly1305
+
+    /** Lazily load the WDK secret manager browser bundle */
+    async function loadWdkSm() {
+      if (WdkSmModule) return WdkSmModule;
+      // wdk-secret-manager is bundled as CJS→ESM by esbuild, so the exports
+      // are on the `default` property. Unwrap so callers can destructure directly.
+      const mod = await import('/wdk-secret-manager.js');
+      WdkSmModule = mod.default ?? mod;
+      return WdkSmModule;
+    }
+
+    /** Hex encoding helpers for storing Buffers in JSON */
+    const bufToHex = (buf) => Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
+    const hexToBuf = (hex) => new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+
+    /**
+     * Derive a 32-byte cryptographic key from a password + salt using Web Crypto PBKDF2.
+     * This produces the same key WdkSecretManager would derive internally via bare-crypto,
+     * but uses the browser's native SubtleCrypto so bare-crypto is never called.
+     * @param {string} password
+     * @param {Uint8Array} salt - 16-byte salt
+     * @returns {Promise<Uint8Array>} 32-byte derived key
+     */
+    async function deriveWdkKey(password, salt) {
+      const enc = new TextEncoder();
+      const keyMaterial = await crypto.subtle.importKey(
+        'raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']
+      );
+      const keyBits = await crypto.subtle.deriveBits(
+        { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+        keyMaterial, 256
+      );
+      return new Uint8Array(keyBits); // 32 bytes
+    }
+
+    // v1 keystore decrypt (AES-256-GCM — backward compat for existing wallets)
+    async function decryptKeystoreV1(keystore, password) {
+      const enc = new TextEncoder();
+      const b64d = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+      const salt = b64d(keystore.salt);
+      const iv = b64d(keystore.iv);
+      const ciphertext = b64d(keystore.ciphertext);
+      const keyMaterial = await crypto.subtle.importKey(
+        'raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']
+      );
+      const key = await crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt, iterations: 310000, hash: 'SHA-256' },
+        keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
+      );
+      const plaintext = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv }, key, ciphertext
+      );
+      return new TextDecoder().decode(plaintext);
+    }
+
+    // ── Password prompt (returns Promise<string>) ──
+
+    function requestWalletPassword() {
+      return new Promise((resolve, reject) => {
+        unlockResolve = resolve;
+        unlockReject = reject;
+        document.getElementById('unlock-password-input').value = '';
+        document.getElementById('unlock-password-status').textContent = '';
+        document.getElementById('unlock-password-modal').classList.add('visible');
+        document.getElementById('unlock-password-input').focus();
+      });
+    }
+
+    function resolveUnlockPrompt() {
+      const password = document.getElementById('unlock-password-input').value;
+      if (!password) {
+        document.getElementById('unlock-password-status').textContent = 'Enter your password.';
+        return;
+      }
+      if (unlockResolve) { unlockResolve(password); unlockResolve = null; unlockReject = null; }
+      closeModal('unlock-password-modal');
+    }
+
+    function rejectUnlockPrompt() {
+      if (unlockReject) { unlockReject(new Error('User cancelled')); unlockResolve = null; unlockReject = null; }
+      closeModal('unlock-password-modal');
+    }
+
+    /** Lazily load the WDK browser bundle (built from @tetherto/wdk-wallet-evm via esbuild) */
+    async function loadWdk() {
+      if (WdkModule) return WdkModule;
+      WdkModule = await import('/wdk-evm.js');
+      return WdkModule;
+    }
+
+    /** Ensure WDK account is unlocked (prompt password on first use, then cached for session) */
+    async function ensureWdkUnlocked() {
+      if (wdkAccount) return wdkAccount;
+      // Try to restore from sessionStorage before prompting for password
+      if (!wdkSeedPhrase) {
+        const sessionSeed = sessionStorage.getItem(WDK_SESSION_KEY);
+        if (sessionSeed) {
+          wdkSeedPhrase = sessionSeed;
+          const wdk = await loadWdk();
+          wdkAccount = wdk.WalletAccountEvm.fromSeed(wdkSeedPhrase, "0'/0/0");
+          return wdkAccount;
+        }
+      }
+      if (!wdkSeedPhrase) {
+        if (!wdkKeystore) {
+          const stored = localStorage.getItem('rigoblock_wdk_keystore');
+          if (stored) wdkKeystore = JSON.parse(stored);
+        }
+        if (!wdkKeystore) throw new Error('No encrypted wallet found — reconnect your wallet');
+        const password = await requestWalletPassword();
+        try {
+          if (wdkKeystore.version === 2) {
+            // v2: WdkSecretManager (XSalsa20-Poly1305)
+            const sm = await loadWdkSm();
+            const salt = hexToBuf(wdkKeystore.salt);
+            const derivedKey = await deriveWdkKey(password, salt);
+            const encryptedEntropy = hexToBuf(wdkKeystore.encryptedEntropy);
+            const secretMgr = new sm.WdkSecretManager(password, Buffer.from(salt));
+            const entropy = secretMgr.decrypt(Buffer.from(encryptedEntropy), Buffer.from(derivedKey));
+            wdkSeedPhrase = secretMgr.entropyToMnemonic(entropy);
+            secretMgr.dispose();
+          } else {
+            // v1: AES-256-GCM (backward compat)
+            wdkSeedPhrase = await decryptKeystoreV1(wdkKeystore, password);
+          }
+        } catch {
+          wdkSeedPhrase = null;
+          throw new Error('Incorrect password');
+        }
+        // Cache seed in sessionStorage — survives page refresh, cleared on tab close
+        sessionStorage.setItem(WDK_SESSION_KEY, wdkSeedPhrase);
+      }
+      const wdk = await loadWdk();
+      wdkAccount = wdk.WalletAccountEvm.fromSeed(wdkSeedPhrase, "0'/0/0");
+      return wdkAccount;
+    }
+
+    /** Create a WDK pseudo-provider that mimics EIP-1193 interface.
+     *  Signs locally using Tether WDK — private key never leaves the browser. */
+    function createWdkProvider(address) {
+      /** Proxy RPC calls through server */
+      const rpcCall = async (method, params) => {
+        const res = await fetch('/api/wallet/rpc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chainId: currentChainId, method, params: params || [] }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || `RPC ${method} failed`);
+        return data.result;
+      };
+
+      return {
+        request: async ({ method, params }) => {
+          switch (method) {
+            case 'eth_requestAccounts':
+            case 'eth_accounts':
+              return [address];
+            case 'eth_chainId':
+              return '0x' + currentChainId.toString(16);
+            case 'wallet_switchEthereumChain': {
+              const chainIdHex = params?.[0]?.chainId;
+              if (chainIdHex) {
+                const newChainId = parseInt(chainIdHex, 16);
+                if (CHAIN_NAMES[newChainId]) {
+                  currentChainId = newChainId;
+                  updateChainDisplay();
+                }
+              }
+              return null;
+            }
+            case 'personal_sign': {
+              const account = await ensureWdkUnlocked();
+              const hexMsg = params[0];
+              const hexStr = hexMsg.startsWith('0x') ? hexMsg.slice(2) : hexMsg;
+              const bytes = new Uint8Array(hexStr.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+              const decoded = new TextDecoder().decode(bytes);
+              return await account.sign(decoded);
+            }
+            case 'eth_sendTransaction': {
+              const account = await ensureWdkUnlocked();
+              const tx = params[0];
+              // Fetch gas price + nonce in parallel
+              const [rawGasPrice, nonce] = await Promise.all([
+                rpcCall('eth_gasPrice', []),
+                rpcCall('eth_getTransactionCount', [address, 'pending']),
+              ]);
+              // Apply 20% buffer to gasPrice to prevent race with rising baseFee.
+              // Without a buffer, if baseFee ticks up between estimation and broadcast,
+              // the transaction fails with "max fee per gas less than block base fee".
+              const gasPriceBuffered = '0x' + Math.ceil(parseInt(rawGasPrice, 16) * 1.2).toString(16);
+              const unsignedTx = {
+                to: tx.to,
+                data: tx.data || '0x',
+                value: tx.value || '0x0',
+                gasLimit: tx.gas || '0x100000',
+                gasPrice: gasPriceBuffered,
+                nonce: parseInt(nonce, 16),
+                chainId: currentChainId,
+                type: 0,
+              };
+              // Sign with WDK signer and broadcast
+              const signed = await account._signer.signTransaction(unsignedTx);
+              return await rpcCall('eth_sendRawTransaction', [signed]);
+            }
+            case 'eth_estimateGas':
+            case 'eth_getTransactionReceipt':
+            case 'eth_call':
+            case 'eth_getBalance':
+            case 'eth_blockNumber':
+              return await rpcCall(method, params || []);
+            default:
+              console.warn('[WDK] Unsupported method:', method);
+              throw new Error(`Method ${method} not supported by WDK wallet`);
+          }
+        },
+        on: () => {},
+        removeListener: () => {},
+      };
+    }
+
+    // ── Wallet creation / import / backup ──
+
+    /** Real-time password match validation — updates status indicator and enables Create button */
+    function updatePasswordConfirmStatus() {
+      const pw = document.getElementById('create-password-input').value;
+      const confirm = document.getElementById('create-password-confirm').value;
+      const statusEl = document.getElementById('create-password-status');
+      const btn = document.getElementById('btn-create-wallet');
+
+      if (!pw) {
+        statusEl.textContent = '';
+        btn.disabled = true;
+        return;
+      }
+      if (pw.length < 8) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = 'Password must be at least 8 characters.';
+        btn.disabled = true;
+        return;
+      }
+      if (!confirm) {
+        statusEl.textContent = '';
+        btn.disabled = true;
+        return;
+      }
+      if (pw !== confirm) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = '✗ Passwords do not match';
+        btn.disabled = true;
+      } else {
+        statusEl.style.color = 'var(--success, #22c55e)';
+        statusEl.textContent = '✓ Passwords match';
+        btn.disabled = false;
+      }
+    }
+
+    function showCreatePasswordModal() {
+      closeModal('wallet-modal');
+      document.getElementById('create-password-input').value = '';
+      document.getElementById('create-password-confirm').value = '';
+      document.getElementById('create-password-status').textContent = '';
+      document.getElementById('btn-create-wallet').disabled = true;
+      document.getElementById('create-password-modal').classList.add('visible');
+      document.getElementById('create-password-input').focus();
+    }
+
+    async function createWdkWallet() {
+      const password = document.getElementById('create-password-input').value;
+      const confirm = document.getElementById('create-password-confirm').value;
+      const statusEl = document.getElementById('create-password-status');
+
+      if (!password || password.length < 8) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = 'Password must be at least 8 characters.';
+        return;
+      }
+      if (password !== confirm) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = 'Passwords do not match.';
+        return;
+      }
+
+      closeModal('create-password-modal');
+      try {
+        appendMessage('system', 'Creating wallet…');
+
+        // Everything happens in the browser — seed never leaves this tab
+        const [wdk, sm] = await Promise.all([loadWdk(), loadWdkSm()]);
+        const { WalletAccountEvm } = wdk;
+        const { WdkSecretManager, wdkSaltGenerator } = sm;
+
+        // 1. Generate 16-byte salt + derive key via Web Crypto PBKDF2
+        const salt = wdkSaltGenerator.generate();
+        const derivedKey = await deriveWdkKey(password, salt);
+
+        // 2. Generate random entropy, encrypt with WdkSecretManager (XSalsa20-Poly1305)
+        const secretMgr = new WdkSecretManager(password, Buffer.from(salt));
+        const { encryptedEntropy } = await secretMgr.generateAndEncrypt(null, Buffer.from(derivedKey));
+
+        // 3. Decrypt entropy to get seed phrase (for address derivation + backup)
+        const entropy = secretMgr.decrypt(Buffer.from(encryptedEntropy), Buffer.from(derivedKey));
+        const seedPhrase = secretMgr.entropyToMnemonic(entropy);
+        secretMgr.dispose();
+
+        // 4. Derive address via WDK
+        const account = WalletAccountEvm.fromSeed(seedPhrase, "0'/0/0");
+        const address = await account.getAddress();
+
+        // 5. Build v2 keystore and persist to localStorage (seed never stored)
+        const keystore = {
+          version: 2,
+          address,
+          salt: bufToHex(salt),
+          encryptedEntropy: bufToHex(encryptedEntropy),
+        };
+        localStorage.setItem('rigoblock_wdk_keystore', JSON.stringify(keystore));
+
+        // 6. Cache WDK account for this session (unlock-once model)
+        wdkAccount = account;
+        wdkWalletAddress = address;
+        wdkKeystore = keystore;
+        wdkSeedPhrase = seedPhrase; // cache for seed backup display
+        sessionStorage.setItem(WDK_SESSION_KEY, seedPhrase); // persist across reloads (cleared on tab close)
+
+        // 7. Show seed phrase for one-time backup
+        const words = seedPhrase.split(' ');
+        const grid = document.getElementById('seed-words');
+        grid.innerHTML = words.map((w, i) =>
+          `<div class="seed-word"><span class="seed-num">${i + 1}</span>${w}</div>`
+        ).join('');
+        document.getElementById('seed-backup-confirm').checked = false;
+        document.getElementById('seed-continue-btn').disabled = true;
+        document.getElementById('seed-modal').classList.add('visible');
+      } catch (err) {
+        appendMessage('system', `Wallet creation failed: ${err.message}`);
+      }
+    }
+
+    function confirmSeedBackup() {
+      closeModal('seed-modal');
+      finishWdkConnect();
+    }
+
+    function showImportSeedModal() {
+      closeModal('wallet-modal');
+      document.getElementById('import-seed-input').value = '';
+      document.getElementById('import-password-input').value = '';
+      document.getElementById('import-seed-status').textContent = '';
+      document.getElementById('import-seed-modal').classList.add('visible');
+    }
+
+    async function importWdkWallet() {
+      const seedPhrase = document.getElementById('import-seed-input').value.trim();
+      const password = document.getElementById('import-password-input').value;
+      const statusEl = document.getElementById('import-seed-status');
+      if (!seedPhrase) { statusEl.textContent = 'Enter your seed phrase.'; return; }
+      if (!password || password.length < 8) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = 'Password must be at least 8 characters.';
+        return;
+      }
+
+      try {
+        statusEl.style.color = 'var(--accent)';
+        statusEl.textContent = 'Encrypting wallet locally…';
+
+        const [wdk, sm] = await Promise.all([loadWdk(), loadWdkSm()]);
+        const { WdkSecretManager, wdkSaltGenerator } = sm;
+
+        // 1. Derive address locally with WDK — seed never leaves the browser
+        const imported = wdk.WalletAccountEvm.fromSeed(seedPhrase, "0'/0/0");
+        const address = await imported.getAddress();
+
+        // 2. Convert mnemonic → entropy → encrypt with WdkSecretManager (XSalsa20-Poly1305)
+        const salt = wdkSaltGenerator.generate();
+        const derivedKey = await deriveWdkKey(password, salt);
+        const secretMgr = new WdkSecretManager(password, Buffer.from(salt));
+        const entropy = secretMgr.mnemonicToEntropy(seedPhrase);
+        const { encryptedEntropy } = await secretMgr.generateAndEncrypt(entropy, Buffer.from(derivedKey));
+        secretMgr.dispose();
+
+        // 3. Build v2 keystore
+        const keystore = {
+          version: 2,
+          address,
+          salt: bufToHex(salt),
+          encryptedEntropy: bufToHex(encryptedEntropy),
+        };
+
+        wdkWalletAddress = address;
+        wdkKeystore = keystore;
+        wdkSeedPhrase = seedPhrase;
+        wdkAccount = imported;  // keep WDK account for session — no re-unlock needed
+        sessionStorage.setItem(WDK_SESSION_KEY, seedPhrase); // persist across reloads (cleared on tab close)
+        closeModal('import-seed-modal');
+        finishWdkConnect();
+      } catch (err) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = `Error: ${err.message}`;
+      }
+    }
+
+    /** Complete WDK wallet connection — sets up pseudo-provider and signs auth */
+    function finishWdkConnect() {
+      activeProvider = createWdkProvider(wdkWalletAddress);
+      connectedAddress = wdkWalletAddress;
+
+      document.getElementById('wallet-addr').textContent =
+        connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
+      document.getElementById('connect-btn').textContent = 'Disconnect';
+      document.getElementById('connect-btn').classList.add('active');
+
+      // Persist encrypted keystore + address (never store plaintext seed in localStorage)
+      localStorage.setItem('rigoblock_wdk_keystore', JSON.stringify(wdkKeystore));
+      localStorage.setItem('rigoblock_wdk_address', wdkWalletAddress);
+      localStorage.setItem('rigoblock_last_provider', 'wdk');
+
+      appendMessage('system', `Connected via WDK: ${connectedAddress}`);
+
+      // Sign auth message (prompts for password if seed not cached)
+      signAuthMessage();
+
+      if (vaultInput.value.trim().length === 42) validateVault();
+    }
+
+    /* ================================================================
        EIP-6963 Multi-Wallet Discovery
        ================================================================ */
     window.addEventListener('eip6963:announceProvider', (event) => {
@@ -2195,10 +2848,14 @@
 
     function renderWalletList() {
       const list = document.getElementById('wallet-list');
+      const divider = document.getElementById('wallet-divider');
       if (discoveredProviders.length === 0) {
-        list.innerHTML = '<div class="no-wallets">No wallets detected. Install MetaMask or Rabby.</div>';
+        list.style.display = 'none';
+        if (divider) divider.style.display = 'none';
         return;
       }
+      list.style.display = '';
+      if (divider) divider.style.display = '';
       list.innerHTML = '';
       for (const { info, provider } of discoveredProviders) {
         const el = document.createElement('div');
@@ -2217,13 +2874,32 @@
 
     function openWalletPicker() {
       if (connectedAddress) { disconnectWallet(); return; }
-      // Always show the picker so user can choose their preferred wallet
-      if (discoveredProviders.length === 0 && window.ethereum) {
-        // Only one legacy provider — connect directly
-        connectWithProvider(window.ethereum, 'Browser Wallet');
-        return;
+      // Show reconnect option if the user has a stored WDK keystore
+      const storedAddr = localStorage.getItem('rigoblock_wdk_address');
+      const storedKeystore = localStorage.getItem('rigoblock_wdk_keystore');
+      const reconnectSection = document.getElementById('wdk-reconnect-section');
+      if (storedAddr && storedKeystore) {
+        document.getElementById('wdk-reconnect-label').textContent =
+          `🔓 Unlock ${storedAddr.slice(0, 6)}…${storedAddr.slice(-4)}`;
+        reconnectSection.style.display = '';
+      } else {
+        reconnectSection.style.display = 'none';
       }
       document.getElementById('wallet-modal').classList.add('visible');
+    }
+
+    /** Reconnect an existing WDK wallet from stored keystore (no re-import needed). */
+    function reconnectWdkWallet() {
+      const storedAddr = localStorage.getItem('rigoblock_wdk_address');
+      const storedKeystoreStr = localStorage.getItem('rigoblock_wdk_keystore');
+      if (!storedAddr || !storedKeystoreStr) {
+        appendMessage('system', 'No stored wallet found. Please create or import one.');
+        return;
+      }
+      wdkKeystore = JSON.parse(storedKeystoreStr);
+      wdkWalletAddress = storedAddr;
+      closeModal('wallet-modal');
+      finishWdkConnect();
     }
 
     async function connectWithProvider(provider, name) {
@@ -2374,8 +3050,17 @@
       authSignature = null;
       authTimestamp = null;
       providerListenersAttached = false;
+      wdkWalletAddress = null;
+      wdkKeystore = null;
+      wdkSeedPhrase = null;
+      sessionStorage.removeItem(WDK_SESSION_KEY);
+      if (wdkAccount) { try { wdkAccount.dispose(); } catch {} }
+      wdkAccount = null;
       localStorage.removeItem(AUTH_STORAGE_KEY);
       localStorage.removeItem('rigoblock_last_provider');
+      // Note: we intentionally keep rigoblock_wdk_keystore and rigoblock_wdk_address
+      // so the user can reconnect with password without re-importing.
+      // The keystore is encrypted — it is safe to leave in localStorage.
       document.getElementById('wallet-addr').textContent = '';
       document.getElementById('connect-btn').textContent = 'Connect Wallet';
       document.getElementById('connect-btn').classList.remove('active');
@@ -2403,15 +3088,48 @@
       // ── Auto-reconnect: silently restore previous session on page reload ──
       const savedRdns = localStorage.getItem('rigoblock_last_provider');
       const savedAuth = localStorage.getItem(AUTH_STORAGE_KEY);
-      if (savedRdns && savedAuth && !connectedAddress) {
+      if (savedRdns && !connectedAddress) {
         try {
+          // ── WDK wallet auto-reconnect ──
+          if (savedRdns === 'wdk') {
+            const savedKeystoreStr = localStorage.getItem('rigoblock_wdk_keystore');
+            const savedAddr = localStorage.getItem('rigoblock_wdk_address');
+            if (savedKeystoreStr && savedAddr) {
+              wdkKeystore = JSON.parse(savedKeystoreStr);
+              wdkWalletAddress = savedAddr;
+              // Restore seed from sessionStorage if available (survives refresh, not tab close)
+              const sessionSeed = sessionStorage.getItem(WDK_SESSION_KEY);
+              if (sessionSeed) wdkSeedPhrase = sessionSeed;
+              activeProvider = createWdkProvider(savedAddr);
+              connectedAddress = savedAddr;
+              // Restore cached auth if still valid
+              if (savedAuth) {
+                const cached = JSON.parse(savedAuth);
+                if (cached && cached.address?.toLowerCase() === savedAddr.toLowerCase()
+                    && Date.now() - cached.timestamp < 23 * 60 * 60 * 1000) {
+                  authSignature = cached.signature;
+                  authTimestamp = cached.timestamp;
+                }
+              }
+              document.getElementById('wallet-addr').textContent =
+                savedAddr.slice(0, 6) + '…' + savedAddr.slice(-4);
+              document.getElementById('connect-btn').textContent = 'Disconnect';
+              document.getElementById('connect-btn').classList.add('active');
+              appendMessage('system', `Reconnected: ${savedAddr.slice(0, 6)}…${savedAddr.slice(-4)} ✓`);
+              if (!authSignature) signAuthMessage();
+              if (vaultInput.value.trim().length === 42) validateVault();
+              if (executionMode === 'delegated') refreshDelegationStatus();
+            }
+            return;
+          }
+
+          // ── External wallet (MetaMask etc.) auto-reconnect ──
+          if (!savedAuth) return;
           const cached = JSON.parse(savedAuth);
           if (!cached || Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return;
-          // Find the previously-used provider
           const match = discoveredProviders.find(p => p.info.rdns === savedRdns);
           const provider = match ? match.provider : (savedRdns === 'injected' ? window.ethereum : null);
           if (!provider) return;
-          // Silently request accounts (MetaMask auto-approves if already connected)
           const accounts = await provider.request({ method: 'eth_accounts' });
           if (accounts.length > 0 && accounts[0].toLowerCase() === cached.address?.toLowerCase()) {
             activeProvider = provider;
@@ -2425,7 +3143,6 @@
             appendMessage('system', `Reconnected: ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)} ✓`);
             if (vaultInput.value.trim().length === 42) validateVault();
             if (executionMode === 'delegated') refreshDelegationStatus();
-            // Listen for account changes
             attachProviderListeners(provider);
           }
         } catch { /* silent — auto-reconnect is best-effort */ }
@@ -2537,12 +3254,13 @@
         const isOnChain = state.isActiveOnChain != null ? state.isActiveOnChain : (state.isActiveInKV || false);
         badge.className = `delegation-status ${isOnChain ? 'active' : 'stale'}`;
 
+        let missingCount = 0;
         if (isOnChain) {
           // Check if some selectors are missing (partial delegation)
           const onChain = state.onChainStatus;
-          const missing = onChain?.undelegatedSelectors?.length || 0;
-          if (missing > 0) {
-            statusText.textContent = `Active (${missing} selector${missing > 1 ? 's' : ''} missing)`;
+          missingCount = onChain?.undelegatedSelectors?.length || 0;
+          if (missingCount > 0) {
+            statusText.textContent = `Active (${missingCount} selector${missingCount > 1 ? 's' : ''} missing)`;
             badge.className = 'delegation-status stale';
           } else {
             statusText.textContent = 'Active';
@@ -2552,10 +3270,19 @@
           statusText.textContent = 'Not set up on this chain';
         }
 
-        // Show setup when not active, revoke when active
-        setupBtn.style.display = isOnChain ? 'none' : '';
-        setupBtn.textContent = 'Set Up on This Chain';
-        setupBtn.onclick = () => openDelegationSetup();
+        // Show setup when not active, OR when selectors are missing (additive update)
+        if (!isOnChain) {
+          setupBtn.style.display = '';
+          setupBtn.textContent = 'Set Up on This Chain';
+          setupBtn.onclick = () => openDelegationSetup();
+        } else if (missingCount > 0) {
+          setupBtn.style.display = '';
+          setupBtn.textContent = `Update (${missingCount} new)`;
+          setupBtn.title = `${missingCount} new function selector${missingCount > 1 ? 's are' : ' is'} available — click to add them to your delegation without revoking`;
+          setupBtn.onclick = () => openDelegationSetup();
+        } else {
+          setupBtn.style.display = 'none';
+        }
         revokeBtn.style.display = isOnChain ? '' : 'none';
         if (telegramBtn) telegramBtn.style.display = isOnChain ? '' : 'none';
 
@@ -2577,9 +3304,12 @@
 
 
         if (state.agentAddress) {
-          agentAddr.textContent = `Agent: ${state.agentAddress}`;
-          agentAddr.dataset.address = state.agentAddress;
-          agentAddr.onclick = () => copyToClipboard(state.agentAddress);
+          const addr = state.agentAddress;
+          const short = addr.slice(0, 6) + '\u2026' + addr.slice(-4);
+          agentAddr.textContent = `Agent: ${short}`;
+          agentAddr.title = `${addr} — click to copy`;
+          agentAddr.dataset.address = addr;
+          agentAddr.onclick = () => copyToClipboard(addr);
           agentAddr.style.display = '';
         }
       }
@@ -2798,8 +3528,9 @@
         }
 
         // ── Step 3: Send the updateDelegation() transaction ──
-        statusEl.textContent = 'Approve delegation transaction in your wallet…';
-        confirmBtn.textContent = 'Waiting for wallet…';
+        const isWdk = !!wdkAccount;
+        statusEl.textContent = isWdk ? 'Signing and broadcasting…' : 'Approve delegation transaction in your wallet…';
+        confirmBtn.textContent = isWdk ? 'Broadcasting…' : 'Waiting for wallet…';
 
         const tx = setupData.transaction;
         let txHash;
@@ -3018,7 +3749,7 @@
       // Only load delegation data when the connected wallet IS the vault owner.
       // Otherwise clear the panel so stale agent info doesn't persist.
       const statusEl = document.getElementById('vault-status');
-      const isNonOwner = statusEl && (statusEl.textContent.includes('not owner') || statusEl.className.includes('error'));
+      const isNonOwner = statusEl && statusEl.className.includes('error');
       if (isNonOwner) {
         delegationState = null;
         executionMode = 'manual';
@@ -3165,7 +3896,7 @@
         const selector = '0x1d7d13cc';
         const data = selector + encodeCreatePoolArgs(name, symbol, baseToken);
 
-        statusEl.textContent = 'Please confirm in your wallet…';
+        statusEl.textContent = wdkAccount ? 'Deploying pool…' : 'Please confirm in your wallet…';
         const txHash = await activeProvider.request({
           method: 'eth_sendTransaction',
           params: [{

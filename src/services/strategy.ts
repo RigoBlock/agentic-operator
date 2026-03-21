@@ -450,7 +450,14 @@ export async function runDueStrategies(
         strategy.lastRun = now;
         strategy.consecutiveFailures = 0;
         strategy.lastError = undefined;
-        strategy.lastRecommendation = result.reply?.slice(0, 2000) || undefined;
+        // For autonomous strategies that executed transactions, save the execution
+        // summary as the recommendation context — not the post-execution "NO ACTION"
+        // cleanup reply the LLM produces after being asked to summarize final state.
+        // That cleanup reply ("NO ACTION: strategy completed for this run") would
+        // mislead the next cron run into thinking no action is needed.
+        strategy.lastRecommendation = (strategy.autoExecute && executionSummary)
+          ? executionSummary.slice(0, 2000)
+          : result.reply?.slice(0, 2000) || undefined;
         changed = true;
 
         // Track executions for maxExecutions support (one-shot strategies)
@@ -500,8 +507,21 @@ export async function runDueStrategies(
                 `<i>${escapeHtml(strategy.instruction)}</i>`,
                 ``,
                 escapeHtml(executionSummary),
-                result.reply ? `\n${escapeHtml(result.reply)}` : ``,
                 completedNote,
+              ].join("\n");
+              await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
+            } else if (strategy.autoExecute && result.reply) {
+              // Autonomous mode, no action taken this run — plain notification, no buttons.
+              // Never show Act/Skip buttons for autonomous strategies.
+              const isNoAction = /^NO ACTION:/i.test(result.reply.trim());
+              const displayText = isNoAction
+                ? result.reply.replace(/^NO ACTION:\s*/i, "")
+                : result.reply;
+              const text = [
+                `<b>⏰ Strategy #${strategy.id} — evaluated, no action</b>`,
+                `<i>${escapeHtml(strategy.instruction)}</i>`,
+                ``,
+                escapeHtml(displayText),
               ].join("\n");
               await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
             } else if (result.reply) {

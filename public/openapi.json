@@ -185,6 +185,149 @@
           }
         ]
       }
+    },
+    "/api/wallet/create": {
+      "post": {
+        "operationId": "createWallet",
+        "summary": "Create encrypted self-custodial wallet",
+        "description": "Generates a BIP-39 wallet via Tether WDK, encrypts the seed with the user's password (PBKDF2 310k + AES-256-GCM), and returns the encrypted keystore. The seed phrase is returned once for backup — the server wipes it from memory after the response. Not x402-gated.",
+        "tags": ["Wallet"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["password"],
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "minLength": 8,
+                    "description": "Password to encrypt the wallet (min 8 chars). Never stored on server."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Encrypted keystore + one-time seed phrase backup",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "keystore": {
+                      "type": "object",
+                      "description": "Encrypted keystore (safe to store in localStorage)",
+                      "properties": {
+                        "version": { "type": "integer", "example": 1 },
+                        "address": { "type": "string", "example": "0x1234...abcd" },
+                        "salt": { "type": "string", "description": "Base64-encoded 32-byte salt" },
+                        "iv": { "type": "string", "description": "Base64-encoded 12-byte IV" },
+                        "ciphertext": { "type": "string", "description": "Base64-encoded encrypted seed" }
+                      }
+                    },
+                    "seedPhrase": {
+                      "type": "string",
+                      "description": "12-word BIP-39 seed phrase (shown once for backup)"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/wallet/prepare-tx": {
+      "post": {
+        "operationId": "prepareTransaction",
+        "summary": "Prepare gas-sponsored UserOp (EIP-7702)",
+        "description": "Prepares a gas-sponsored UserOperation for client signing. The server calls Alchemy's prepareCalls() — no private key needed. Returns the prepared UserOp data that the browser must sign locally.",
+        "tags": ["Wallet"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["address", "chainId", "calls"],
+                "properties": {
+                  "address": { "type": "string", "description": "User's wallet address" },
+                  "chainId": { "type": "integer", "description": "Target chain ID", "example": 8453 },
+                  "calls": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "to": { "type": "string" },
+                        "data": { "type": "string" },
+                        "value": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Prepared UserOp data for client-side signing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "preparedCalls": { "type": "object", "description": "Serialized prepared calls to sign" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/wallet/submit-signed": {
+      "post": {
+        "operationId": "submitSignedTransaction",
+        "summary": "Submit client-signed UserOp",
+        "description": "Submits a UserOp that was signed client-side to the Alchemy bundler. No private key involved server-side.",
+        "tags": ["Wallet"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["chainId", "signedCalls"],
+                "properties": {
+                  "chainId": { "type": "integer", "example": 8453 },
+                  "signedCalls": { "type": "object", "description": "Signed UserOp data from client" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transaction submitted and confirmed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "txHash": { "type": "string" },
+                    "status": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -438,7 +581,9 @@
     },
     {
       "name": "Agent",
-      "description": "AI-powered DeFi agent interface \u2014 natural language to calldata"
-    }
+      "description": "AI-powered DeFi agent interface \u2014 natural language to calldata"    },
+    {
+      "name": "Wallet",
+      "description": "Self-custodial encrypted wallet — create, prepare gas-sponsored transactions, submit signed UserOps"    }
   ]
 }

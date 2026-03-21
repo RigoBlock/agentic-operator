@@ -83,56 +83,82 @@ gasPolicy.post("/", async (c) => {
     const sender = userOp.sender.toLowerCase() as Address;
     console.log(`[GasPolicy] sender=${sender} policyId=${policyId} chainId=${chainId}`);
 
-    // ── 1. Verify the sender is a registered agent wallet ──
+    // ── 1. Check if sender is a registered agent wallet ──
     const vaultAddress = await resolveAgentToVault(c.env.KV, sender);
-    if (!vaultAddress) {
-      console.warn(`[GasPolicy] ✗ REJECTED: sender ${sender} is NOT a registered agent wallet`);
-      return c.json({ approved: false }, 200);
-    }
-    console.log(`[GasPolicy] sender maps to vault=${vaultAddress}`);
 
-    // ── 2. Verify delegation is active ──
-    const config = await getDelegationConfig(c.env.KV, vaultAddress);
-    if (!config || !config.enabled) {
-      console.warn(`[GasPolicy] ✗ REJECTED: delegation not active for vault ${vaultAddress}`);
-      return c.json({ approved: false }, 200);
-    }
+    if (vaultAddress) {
+      // ── Agent wallet path: full delegation checks ──
+      console.log(`[GasPolicy] sender maps to vault=${vaultAddress}`);
 
-    // ── 3. Verify the agent address matches delegation config ──
-    if (config.agentAddress.toLowerCase() !== sender) {
-      console.warn(
-        `[GasPolicy] ✗ REJECTED: agent mismatch sender=${sender} vs config=${config.agentAddress}`,
+      // ── 2. Verify delegation is active ──
+      const config = await getDelegationConfig(c.env.KV, vaultAddress);
+      if (!config || !config.enabled) {
+        console.warn(`[GasPolicy] ✗ REJECTED: delegation not active for vault ${vaultAddress}`);
+        return c.json({ approved: false }, 200);
+      }
+
+      // ── 3. Verify the agent address matches delegation config ──
+      if (config.agentAddress.toLowerCase() !== sender) {
+        console.warn(
+          `[GasPolicy] ✗ REJECTED: agent mismatch sender=${sender} vs config=${config.agentAddress}`,
+        );
+        return c.json({ approved: false }, 200);
+      }
+
+      // ── 4. Decode callData to verify target is the vault ──
+      const callData = userOp.callData;
+      if (callData && callData.length >= 10) {
+        const innerTarget = tryExtractTarget(callData);
+        if (innerTarget) {
+          const isVault = innerTarget.toLowerCase() === vaultAddress.toLowerCase();
+          console.log(`[GasPolicy] Inner target=${innerTarget} isVault=${isVault}`);
+          if (!isVault) {
+            console.warn(
+              `[GasPolicy] ✗ REJECTED: inner target ${innerTarget} is not vault ${vaultAddress}`,
+            );
+            return c.json({ approved: false }, 200);
+          }
+        } else {
+          console.log("[GasPolicy] Could not decode inner target — approving (on-chain caveats enforce)");
+        }
+      }
+
+      // ── 5. Approved (agent wallet) ──
+      console.log(
+        `[GasPolicy] ✓ APPROVED (agent): agent=${sender.slice(0, 10)}… vault=${vaultAddress.slice(0, 10)}… ` +
+        `chain=${chainId} policy=${policyId}`,
       );
-      return c.json({ approved: false }, 200);
+      return c.json({ approved: true }, 200);
     }
 
-    // ── 4. Decode callData to verify target is the vault ──
-    // The userOp callData wraps our vault call via the 7702 account's execute().
-    // We attempt to extract the inner target address. If we can't decode, approve
-    // (on-chain caveats enforce vault-only targeting anyway).
+    // ── User wallet path: sponsor vault interactions ──
+    // If the sender is NOT a registered agent wallet, check if their
+    // transaction targets a known vault. This sponsors user setup
+    // transactions (pool deployment, delegation setup, funding).
     const callData = userOp.callData;
     if (callData && callData.length >= 10) {
       const innerTarget = tryExtractTarget(callData);
       if (innerTarget) {
-        const isVault = innerTarget.toLowerCase() === vaultAddress.toLowerCase();
-        console.log(`[GasPolicy] Inner target=${innerTarget} isVault=${isVault}`);
-        if (!isVault) {
-          console.warn(
-            `[GasPolicy] ✗ REJECTED: inner target ${innerTarget} is not vault ${vaultAddress}`,
+        // Check if the target is a vault with an agent wallet configured
+        const targetConfig = await getDelegationConfig(
+          c.env.KV,
+          innerTarget.toLowerCase(),
+        );
+        // Also check if there's any agent wallet registered for this vault
+        const agentWalletInfo = await c.env.KV.get(`agent-wallet:${innerTarget.toLowerCase()}`);
+
+        if (targetConfig || agentWalletInfo) {
+          console.log(
+            `[GasPolicy] ✓ APPROVED (user): sender=${sender.slice(0, 10)}… ` +
+            `target vault=${innerTarget.slice(0, 10)}… chain=${chainId}`,
           );
-          return c.json({ approved: false }, 200);
+          return c.json({ approved: true }, 200);
         }
-      } else {
-        console.log("[GasPolicy] Could not decode inner target — approving (on-chain caveats enforce)");
       }
     }
 
-    // ── 5. Approved ──
-    console.log(
-      `[GasPolicy] ✓ APPROVED: agent=${sender.slice(0, 10)}… vault=${vaultAddress.slice(0, 10)}… ` +
-      `chain=${chainId} policy=${policyId}`,
-    );
-    return c.json({ approved: true }, 200);
+    console.warn(`[GasPolicy] ✗ REJECTED: sender ${sender} is not an agent wallet and target is not a known vault`);
+    return c.json({ approved: false }, 200);
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

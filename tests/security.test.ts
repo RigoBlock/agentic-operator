@@ -123,7 +123,10 @@ describe("execution validation invariants", () => {
     const knownFunctions: Record<string, string> = {
       "0x3593564c": "execute(bytes,bytes[],uint256)",         // Uniswap UniversalRouter
       "0x24856bc3": "execute(bytes,bytes[])",                  // Uniswap UniversalRouter (no deadline)
-      "0xee3e8b0e": "modifyLiquidities(bytes,uint256)",        // Uniswap v4 LP
+      "0xdd46508f": "modifyLiquidities(bytes,uint256)",        // Uniswap v4 LP
+      "0xac9650d8": "multicall(bytes[])",                        // Vault multicall
+      "0x5ae401dc": "multicall(uint256,bytes[])",                // Vault multicall (deadline)
+      "0x1f0464d1": "multicall(bytes32,bytes[])",                // Vault multicall (hash)
       "0x2213bc0b": "execute(address,address,uint256,address,bytes)", // 0x AllowanceHolder
       "0x7489ec23": "cancelOrder(bytes32)",                    // GMX
       "0xe9249b57": "claimCollateral(address[],address[],uint256[],address[])", // GMX

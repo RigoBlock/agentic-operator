@@ -54,7 +54,7 @@ import {
 import { CROSSCHAIN_TOKENS, getSupportedDestinations, findBridgeableToken } from "../services/crosschainConfig.js";
 import { addStrategy, removeStrategy, removeAllStrategies, getStrategies, MIN_INTERVAL_MINUTES, MAX_STRATEGIES_PER_VAULT } from "../services/strategy.js";
 import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
-import { buildAddLiquidityTx, buildRemoveLiquidityTx, getVaultLPPositions, buildCollectFeesTx } from "../services/uniswapLP.js";
+import { buildAddLiquidityTx, buildRemoveLiquidityTx, getVaultLPPositions, buildCollectFeesTx, buildBurnPositionTx, getPoolInfoById, getPositionDirect } from "../services/uniswapLP.js";
 import {
   buildStakeCalldata,
   buildUndelegateStakeCalldata,
@@ -62,6 +62,45 @@ import {
   buildEndEpochCalldata,
   buildWithdrawDelegatorRewardsCalldata,
 } from "../services/grgStaking.js";
+import { checkNavImpact } from "../services/navGuard.js";
+
+/**
+ * Translate raw error messages into user-friendly language.
+ * Hides contract revert details, RPC errors, and stack traces.
+ */
+function friendlyError(raw: string): string {
+  // Gas-sponsored execution failures
+  if (/Invalid parameters.*RPC method/i.test(raw)) {
+    return "Gas-sponsored execution failed due to an RPC configuration issue. Try again or contact support.";
+  }
+  // Effective supply too low (bridge cap)
+  const supplyMatch = raw.match(/EffectiveSupplyTooLow/i);
+  if (supplyMatch) {
+    return "Cannot bridge this amount — it would leave the source pool below minimum supply. The backend will automatically cap the amount to the safe maximum (87.5% of balance).";
+  }
+  // Unknown tool
+  const unknownTool = raw.match(/Unknown tool:\s*(\S+)/);
+  if (unknownTool) {
+    return `Tool "${unknownTool[1]}" does not exist. This is a system error — please try again.`;
+  }
+  // Pool not initialized
+  if (/pool not initialized/i.test(raw) || /pool not found/i.test(raw) || /exact pool key/i.test(raw)) {
+    return "Uniswap v4 pool not found with the given fee and tickSpacing on this chain. " +
+      "Uniswap v4 supports infinite fee tiers — the fee and tickSpacing must match the pool exactly. " +
+      "Call get_pool_info with the pool ID to discover the correct fee, tickSpacing, and hooks address.";
+  }
+  // Simulation failed
+  if (/simulation failed/i.test(raw) || /would revert on-chain/i.test(raw)) {
+    const onChainErr = raw.match(/On-chain error:\s*([^.]+)/i);
+    return onChainErr
+      ? `Transaction would fail on-chain: ${onChainErr[1].trim()}.`
+      : "Transaction simulation failed — it would revert on-chain. Check parameters and try again.";
+  }
+  // Keep it if already short
+  if (raw.length < 150) return raw;
+  // Truncate long errors
+  return raw.slice(0, 150).replace(/\s+\S*$/, "") + "…";
+}
 
 /**
  * Adapter: calls Workers AI via the binding and wraps the response in
@@ -80,7 +119,7 @@ async function callWorkersAI(
 
   let hasToolCalls = Array.isArray(result.tool_calls) && result.tool_calls.length > 0;
   let toolCalls = hasToolCalls ? result.tool_calls : undefined;
-  let textContent: string | null = result.response || null;
+  let textContent: string | null = typeof result.response === 'string' ? result.response : null;
 
   // Workers AI sometimes embeds tool calls as JSON text instead of structured
   // tool_calls. Detect and extract them so they get executed properly.
@@ -210,10 +249,17 @@ export async function processChat(
     ? "The operator has enabled DELEGATED mode. After you build a transaction, the agent wallet will execute it automatically once the operator confirms the trade details. The operator does NOT need to sign the transaction manually."
     : "The operator will sign and broadcast transactions from their own wallet.\nYou build the transaction; they approve it.";
 
+  const ZERO_VAULT = "0x0000000000000000000000000000000000000000";
+  const hasVault = ctx.vaultAddress !== ZERO_VAULT;
+  const vaultLine = hasVault
+    ? `- Vault address: ${ctx.vaultAddress}`
+    : `- Vault address: none (no smart pool deployed yet)
+- The user has not set a vault address yet. Ask them: "Do you have an existing pool address to paste, or would you like to deploy a new smart pool? I can help with either." Do NOT automatically call deploy_smart_pool — wait for the user to explicitly say they want to create a new pool and provide a name and symbol.`;
+
   const contextualPrompt = `${SYSTEM_PROMPT}
 
 CURRENT SESSION CONTEXT:
-- Vault address: ${ctx.vaultAddress}
+${vaultLine}
 - Chain ID: ${ctx.chainId}
 - Operator wallet: ${ctx.operatorAddress || "not connected"}
 - Execution mode: ${ctx.executionMode || "manual"}
@@ -248,8 +294,8 @@ ${executionModeNote}`;
     }
   }
 
-  // Try swap fast-path
-  const fastSwap = tryFastPathSwap(lastUserMsg);
+  // Try swap fast-path (skip if no vault configured)
+  const fastSwap = hasVault ? tryFastPathSwap(lastUserMsg) : null;
   if (fastSwap) {
     console.log(`[LLM] Fast-path swap: ${fastSwap.name}(${JSON.stringify(fastSwap.args)})`);
     try {
@@ -266,8 +312,8 @@ ${executionModeNote}`;
     }
   }
 
-  // Try GMX fast-path
-  const fastPath = tryFastPathGmx(lastUserMsg);
+  // Try GMX fast-path (skip if no vault configured)
+  const fastPath = hasVault ? tryFastPathGmx(lastUserMsg) : null;
   if (fastPath) {
     console.log(`[LLM] Fast-path GMX: ${fastPath.name}(${JSON.stringify(fastPath.args)})`);
     try {
@@ -287,11 +333,32 @@ ${executionModeNote}`;
 
   // ── Strategy keyword detection: inject a focused hint for the LLM ──
   const strategyPattern = /\b(carry\s*trade|xaut\s*(strategy|lp|carry|liquidity)|lp\s*\+?\s*hedge|hedge.*xaut|provide\s*liquidity.*xaut|gold\s*strategy|set\s*up\s*(the\s*)?strategy|implement.*strategy|fund.*strategy)\b/i;
+  // isStrategyCall prevents get_aggregated_nav from short-circuiting the conversation —
+  // in strategy mode the LLM must continue past the NAV result to take the next step.
+  let isStrategyCall = false;
   if (strategyPattern.test(lastUserMsg)) {
+    isStrategyCall = true;
     console.log("[LLM] Strategy keywords detected — injecting carry trade hint");
+
+    // If NAV data is already in the conversation, skip re-fetching and go straight to execution.
+    const hasNavInHistory = messages.some(
+      m => m.role === "assistant" && (m.content || "").includes("Aggregated NAV"),
+    );
+
+    const strategyHint = hasNavInHistory
+      ? "NAV data is already in this conversation — DO NOT call get_aggregated_nav again. " +
+        "Read the existing NAV data: if Arbitrum has USDT, IMMEDIATELY call build_vault_swap " +
+        "to swap ~40% USDT → XAUT on Arbitrum (Step 3 of the carry trade). " +
+        "Skip the bridge step — funds are already on Arbitrum. " +
+        "State the plan briefly, then call the build_vault_swap tool NOW."
+      : "Call get_aggregated_nav ONCE. After seeing the result, IMMEDIATELY decide and execute: " +
+        "if Arbitrum already has USDT → SKIP the bridge, call build_vault_swap (USDT→XAUT) NOW. " +
+        "If only BSC/Optimism have USDT → bridge that chain's balance to Arbitrum first. " +
+        "DO NOT stop after get_aggregated_nav. DO NOT wait for user confirmation. EXECUTE THE NEXT STEP.";
+
     fullMessages.splice(fullMessages.length - 1, 0, {
       role: "system" as const,
-      content: "IMPORTANT: The user is asking for the XAUT carry trade strategy. Follow the STRATEGY KNOWLEDGE section in your instructions. Start by calling get_aggregated_nav to discover where funds are, then execute the multi-step entry sequence (bridge → swap → LP → swap → hedge). Do NOT stop after get_aggregated_nav — proceed with the full plan.",
+      content: `IMPORTANT: The user is asking for the XAUT carry trade strategy. Follow the STRATEGY KNOWLEDGE section. ${strategyHint}`,
     });
   }
 
@@ -342,6 +409,13 @@ ${executionModeNote}`;
         result = toolResult.message;
         console.log(`[LLM] Tool ${name} succeeded, result length: ${result.length}`);
         if (toolResult.transaction) {
+          // ── NAV shield pre-check (universal hook) ──
+          // Runs before ANY transaction is returned to the caller, regardless
+          // of execution mode (manual or delegated). Blocks trades that would
+          // drop vault NAV > 10%. Only checks transactions targeting the vault.
+          if (toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress.toLowerCase()) {
+            await preCheckNavImpact(env, ctx, toolResult.transaction);
+          }
           pendingTransactions.push(toolResult.transaction);
         }
         if (toolResult.chainSwitch) {
@@ -350,10 +424,18 @@ ${executionModeNote}`;
           ctx.chainId = toolResult.chainSwitch;
         }
         if (toolResult.suggestions?.length) {
-          pendingSuggestions = toolResult.suggestions;
+          // In strategy mode, don't short-circuit on suggestions from get_aggregated_nav —
+          // the LLM must continue to the next execution step.
+          if (!(isStrategyCall && name === "get_aggregated_nav")) {
+            pendingSuggestions = toolResult.suggestions;
+          }
         }
         if (toolResult.selfContained) {
-          pendingSelfContained = true;
+          // In strategy mode, don't short-circuit on selfContained from get_aggregated_nav —
+          // the LLM must see the NAV data and then call the next tool (swap/bridge).
+          if (!(isStrategyCall && name === "get_aggregated_nav")) {
+            pendingSelfContained = true;
+          }
         }
         // Detect DEX/protocol from tool call
         if ((name === "get_swap_quote" || name === "build_vault_swap") && args.dex) {
@@ -365,7 +447,7 @@ ${executionModeNote}`;
           detectedDex = "GMX";
         }
       } catch (err) {
-        result = `Error: ${sanitizeError(err instanceof Error ? err.message : String(err))}`;
+        result = `Error: ${friendlyError(sanitizeError(err instanceof Error ? err.message : String(err)))}`;
         isError = true;
       }
 
@@ -391,13 +473,10 @@ ${executionModeNote}`;
     // This saves ~1-2 seconds of latency and avoids Cloudflare timeout for multi-swap.
     if (pendingTransactions.length > 0) {
       console.log(`[processChat] Skipping follow-up LLM call — ${pendingTransactions.length} transaction(s) ready`);
-      // Surface errors from failed tool calls so the user sees them prominently
-      const failedCalls = toolCallResults.filter(tc => tc.error);
-      const errorReply = failedCalls.length > 0
-        ? failedCalls.map(e => `⚠️ ${e.result}`).join('\n')
-        : "";
+      // Do NOT surface errors from earlier failed attempts: the transaction card is
+      // sufficient — showing old errors alongside a working transaction is confusing.
       return {
-        reply: errorReply,
+        reply: "",
         toolCalls: toolCallResults,
         transaction: pendingTransactions[pendingTransactions.length - 1],
         transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
@@ -474,15 +553,22 @@ ${executionModeNote}`;
         try {
           const toolResult = await executeToolCall(env, ctx, name, args);
           result = toolResult.message;
-          if (toolResult.transaction) pendingTransactions.push(toolResult.transaction);
+          if (toolResult.transaction) {
+            // ── NAV shield pre-check (universal hook) ──
+            if (toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress.toLowerCase()) {
+              await preCheckNavImpact(env, ctx, toolResult.transaction);
+            }
+            pendingTransactions.push(toolResult.transaction);
+          }
           if (toolResult.chainSwitch) {
             pendingChainSwitch = toolResult.chainSwitch;
             ctx.chainId = toolResult.chainSwitch;
           }
           if (toolResult.selfContained) {
-            pendingSelfContained = true;
+            if (!(isStrategyCall && name === "get_aggregated_nav")) {
+              pendingSelfContained = true;
+            }
           }
-          // Detect DEX from chained tool call args
           if ((name === "get_swap_quote" || name === "build_vault_swap") && args.dex) {
             const dexArg = (args.dex as string).toLowerCase();
             detectedDex = (dexArg === "uniswap") ? "Uniswap" : "0x";
@@ -492,7 +578,7 @@ ${executionModeNote}`;
             detectedDex = "GMX";
           }
         } catch (err) {
-          result = `Error: ${sanitizeError(err instanceof Error ? err.message : String(err))}`;
+          result = `Error: ${friendlyError(sanitizeError(err instanceof Error ? err.message : String(err)))}`;
           isError = true;
         }
         toolCallResults.push({ name, arguments: args, result, error: isError });
@@ -567,6 +653,8 @@ const DEFAULT_GAS: Record<string, bigint> = {
   delegation: 250_000n,
   deploy:     600_000n,
   swap:     1_000_000n,
+  lp:       1_500_000n,
+  staking:    600_000n,
   gmx:      1_500_000n,
   bridge:   1_500_000n,
   default:  1_000_000n,
@@ -625,6 +713,70 @@ interface ToolResult {
   suggestions?: string[];
   /** When true, the message is a complete report — skip the follow-up LLM call */
   selfContained?: boolean;
+}
+
+/**
+ * NAV shield pre-check — runs BEFORE returning unsigned calldata to the caller.
+ *
+ * This ensures the NAV shield protects ALL transactions, not just delegated ones.
+ * If the simulated post-trade NAV drops > 10%, the calldata is never returned —
+ * the user never gets a toxic transaction to sign.
+ *
+ * For delegated mode, the execution engine runs the NAV shield again at broadcast
+ * time (belt-and-suspenders — market conditions could change between building
+ * and broadcasting). For manual mode, this is the ONLY NAV shield checkpoint.
+ */
+async function preCheckNavImpact(
+  env: Env,
+  ctx: RequestContext,
+  tx: UnsignedTransaction,
+): Promise<void> {
+  if (!ctx.operatorAddress) return; // Can't simulate without caller address
+
+  try {
+    const result = await checkNavImpact(
+      ctx.vaultAddress as Address,
+      tx.data as Hex,
+      BigInt(tx.value || "0x0"),
+      tx.chainId,
+      env.ALCHEMY_API_KEY,
+      ctx.operatorAddress as Address,
+      env.KV,
+    );
+
+    if (!result.allowed) {
+      const reason = result.code === "TRADE_REVERTS"
+        ? `Transaction simulation failed — the swap would revert on-chain. ${result.reason || ""}`
+        : `NAV shield blocked: this trade would reduce vault unit value by ${result.dropPct}% ` +
+          `(max allowed: 10%). ${result.reason || ""}`;
+      throw new Error(reason.trim());
+    }
+
+    if (result.verified) {
+      console.log(
+        `[NavShield pre-check] ✓ Passed: NAV drop ${result.dropPct}% (chain ${tx.chainId})`,
+      );
+    } else {
+      console.warn(
+        `[NavShield pre-check] ⚠ Unverified: NAV impact could not be measured (chain ${tx.chainId})`,
+      );
+    }
+  } catch (err) {
+    // Re-throw NAV shield blocks and simulation failures
+    if (err instanceof Error && (
+      err.message.includes("NAV shield blocked") ||
+      err.message.includes("simulation failed")
+    )) {
+      throw err;
+    }
+    // Swallow infrastructure errors (RPC timeouts, etc.) — don't block the
+    // calldata for transient failures. The delegated path has a second check.
+    console.warn(
+      `[NavShield pre-check] Infrastructure error (non-blocking): ${
+        err instanceof Error ? err.message.slice(0, 200) : String(err)
+      }`,
+    );
+  }
 }
 
 /**
@@ -844,6 +996,31 @@ async function executeToolCall(
 
       // 2. Get quote from Uniswap Trading API
       const quote = await getUniswapQuote(env, intent, ctx.chainId, ctx.vaultAddress);
+
+      // ── Balance pre-check for exact-output swaps ──
+      // For exact-output, we only know required input after the quote. Check here
+      // before calling the heavier swapCalldata endpoint to give a clear error.
+      if (intent.amountOut && quote.quote.input?.amount) {
+        try {
+          const sellAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn);
+          const { balance, symbol } = await getVaultTokenBalance(
+            ctx.chainId, ctx.vaultAddress as Address, sellAddr as Address, env.ALCHEMY_API_KEY,
+          );
+          const requiredIn = BigInt(quote.quote.input.amount);
+          if (requiredIn > balance) {
+            const available = formatUnits(balance, quote.decimalsIn);
+            const needed = formatUnits(requiredIn, quote.decimalsIn);
+            throw new Error(
+              `Insufficient ${symbol} balance. ` +
+              `Need ~${needed} ${symbol} to buy ${intent.amountOut} ${intent.tokenOut}, ` +
+              `but vault only has ${available} ${symbol} on ${chainName}. ` +
+              `Use a smaller amount or bridge more ${symbol} to this chain first.`,
+            );
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message.includes("Insufficient")) throw err;
+        }
+      }
 
       // 3. Get executable swap calldata from Uniswap Trading API
       const swapTx = await getUniswapSwapCalldata(env, quote._raw);
@@ -1125,23 +1302,122 @@ async function executeToolCall(
         throw new Error("Please specify either collateralAmount or notionalUsd for the position.");
       }
 
-      // Balance pre-check: verify vault holds enough collateral
+      // ── Pre-checks ────────────────────────────────────────────────────
+
+      // 1. Check vault native ETH balance for GMX keeper fee.
+      //    AGmxV2._ensureWeth() wraps vault ETH → WETH to pay the GMX
+      //    execution fee before creating the order. Without ETH the tx reverts.
+      //    Instead of throwing an error, build a stablecoin→ETH swap and return
+      //    it so the user signs one transaction and then retries.
+      //    We check USDC and USDT balances first to pick the token actually in
+      //    the vault (avoids NAV shield simulation failure from missing balance).
+      const NATIVE_ZERO = "0x0000000000000000000000000000000000000000" as Address;
+      const MIN_KEEPER_ETH = 1_000_000_000_000_000n; // 0.001 ETH
+      // Arbitrum stablecoin addresses — used only for balance disambiguation
+      const USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address;
+      const USDT_ARBITRUM = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9" as Address;
+      try {
+        const { balance: ethBal } = await getVaultTokenBalance(
+          ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, NATIVE_ZERO, env.ALCHEMY_API_KEY,
+        );
+        if (ethBal < MIN_KEEPER_ETH) {
+          const ethBalFmt = formatUnits(ethBal, 18);
+          console.log(`[gmx_open_position] Vault has ${ethBalFmt} ETH — below keeper minimum. Building ETH swap.`);
+
+          // Find the stablecoin with the largest balance that can fund the swap.
+          // USDC is preferred (primary carry-trade token on Arbitrum).
+          const [usdcBal, usdtBal] = await Promise.all([
+            getVaultTokenBalance(ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, USDC_ARBITRUM, env.ALCHEMY_API_KEY)
+              .catch(() => ({ balance: 0n })),
+            getVaultTokenBalance(ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, USDT_ARBITRUM, env.ALCHEMY_API_KEY)
+              .catch(() => ({ balance: 0n })),
+          ]);
+
+          // Pick the stablecoin with more balance (USDC wins ties)
+          const stableIn = usdcBal.balance >= usdtBal.balance && usdcBal.balance > 0n
+            ? "USDC"
+            : usdtBal.balance > 0n ? "USDT" : null;
+
+          if (!stableIn) {
+            throw new Error(
+              `The vault needs ETH to pay the GMX keeper execution fee ` +
+              `(current: ${ethBalFmt} ETH) but has no USDC or USDT to swap for ETH. ` +
+              `Send at least 0.005 ETH to the vault (${ctx.vaultAddress}) and retry.`,
+            );
+          }
+
+          console.log(`[gmx_open_position] Building ${stableIn}→ETH swap (vault stableBalance: USDC=${usdcBal.balance}, USDT=${usdtBal.balance})`);
+          try {
+            const savedChainId = ctx.chainId;
+            ctx.chainId = ARBITRUM_CHAIN_ID;
+            const ethSwapResult = await executeToolCall(env, ctx, "build_vault_swap", {
+              tokenIn: stableIn,
+              tokenOut: "ETH",
+              amountOut: "0.002",   // 0.002 ETH ≈ ~$4 at current price — minimal to cover keeper fee
+              chain: "arbitrum",
+            });
+            ctx.chainId = savedChainId;
+            return {
+              message:
+                `⚠️ **ETH required for GMX keeper fee**\n` +
+                `Vault ETH balance: ${ethBalFmt} ETH (need ≥ 0.001 ETH)\n\n` +
+                `Sign the swap below to get 0.002 ETH, then resubmit your GMX position.\n\n` +
+                ethSwapResult.message,
+              transaction: ethSwapResult.transaction,
+              chainSwitch: ARBITRUM_CHAIN_ID !== savedChainId ? ARBITRUM_CHAIN_ID : undefined,
+            };
+          } catch (swapErr) {
+            // Swap build failed — give a clear manual instruction
+            throw new Error(
+              `The vault needs ETH to pay the GMX keeper execution fee. ` +
+              `Current balance: ${ethBalFmt} ETH. ` +
+              `Swap ${stableIn} → ETH first: build_vault_swap(tokenIn="${stableIn}", tokenOut="ETH", amountOut="0.002", chain="arbitrum"), ` +
+              `then retry the GMX position.`,
+            );
+          }
+        }
+      } catch (err) {
+        // Re-throw errors we generated above; swallow RPC failures (simulation will catch)
+        if (err instanceof Error && (
+          err.message.includes("keeper execution fee") ||
+          err.message.includes("ETH required")
+        )) throw err;
+      }
+
+      // 2. Balance pre-check: cap collateral to available vault balance.
+      //    Rather than throwing and forcing the LLM to retry with random guesses,
+      //    auto-scale both collateral and notional to what the vault actually holds.
+      let cappedNote = "";
       try {
         const { balance: colBal } = await getVaultTokenBalance(
           ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, collateralAddr, env.ALCHEMY_API_KEY,
         );
         const requestedRaw = parseUnits(collateralAmount, collateralDecimals);
         if (requestedRaw > colBal) {
-          const available = formatUnits(colBal, collateralDecimals);
-          throw new Error(
-            `Insufficient ${collateralSymbol} balance for GMX collateral. ` +
-            `Requested: ${collateralAmount} ${collateralSymbol}, ` +
-            `Available: ${available} ${collateralSymbol} on Arbitrum. ` +
-            `Use a smaller collateral amount or swap more ${collateralSymbol} first.`,
-          );
+          const availableNum = parseFloat(formatUnits(colBal, collateralDecimals));
+          if (availableNum < 0.5) {
+            // Not enough for even a minimum GMX position (~$1 collateral)
+            throw new Error(
+              `Insufficient ${collateralSymbol} balance for GMX collateral. ` +
+              `Requested: ${collateralAmount} ${collateralSymbol}, ` +
+              `Available: ${availableNum.toFixed(6)} ${collateralSymbol} on Arbitrum. ` +
+              `Swap more ${collateralSymbol} first.`,
+            );
+          }
+          // Scale down: maintain same leverage, use all available collateral.
+          const prevCollateral = parseFloat(collateralAmount);
+          const scaleFactor = availableNum / prevCollateral;
+          collateralAmount = availableNum.toFixed(collateralDecimals <= 8 ? collateralDecimals : 6);
+          sizeDeltaUsd = (parseFloat(sizeDeltaUsd) * scaleFactor).toFixed(2);
+          cappedNote = `\n⚠️ Collateral capped to available balance: ${collateralAmount} ${collateralSymbol} (position size scaled proportionally to $${sizeDeltaUsd})`;
+          console.log(`[gmx_open_position] Collateral auto-capped from ${prevCollateral} to ${collateralAmount} ${collateralSymbol}, notional → $${sizeDeltaUsd}`);
         }
       } catch (err) {
-        if (err instanceof Error && err.message.includes("Insufficient")) throw err;
+        if (err instanceof Error && (
+          err.message.includes("Insufficient") ||
+          err.message.includes("keeper")
+        )) throw err;
+        // RPC failure — proceed, on-chain execution will validate
       }
 
       const calldata = buildCreateIncreaseOrderCalldata({
@@ -1182,6 +1458,7 @@ async function executeToolCall(
         `Chain: Arbitrum`,
         ``,
         `💡 Collateral is the amount deposited into the position. Size is the leveraged notional exposure.`,
+        ...(cappedNote ? [cappedNote] : []),
       ].join("\n");
 
       return { message, transaction, chainSwitch: chainSwitched };
@@ -1492,12 +1769,22 @@ async function executeToolCall(
       }
 
       const chainName = resolveChainName(ctx.chainId);
+
+      // Check if delegation already exists — if so, this is an "update" (add missing selectors)
+      const existingConfig = await getDelegationConfig(env.KV, ctx.vaultAddress as string);
+      const isUpdate = existingConfig?.enabled && !!existingConfig.chains?.[String(ctx.chainId)];
+      const existingSelectors = existingConfig?.chains?.[String(ctx.chainId)]?.delegatedSelectors || [];
+
       const result = await prepareDelegation(
         env,
         ctx.operatorAddress,
         ctx.vaultAddress as Address,
         ctx.chainId,
       );
+
+      // Compute which selectors are new vs already delegated
+      const existingSet = new Set(existingSelectors.map(s => s.toLowerCase()));
+      const newSelectors = result.selectors.filter(s => !existingSet.has(s.toLowerCase()));
 
       const gas = await estimateGas(
         ctx.chainId, ctx.vaultAddress as Address,
@@ -1515,15 +1802,26 @@ async function executeToolCall(
         operatorOnly: true,
       };
 
-      const message = [
-        "✅ Delegation setup ready",
-        `Agent wallet: ${result.agentAddress}`,
-        `Selectors: ${result.selectors.length} vault functions`,
-        `Chain: ${chainName}`,
-        "",
-        "Sign this transaction to grant the agent permission to execute trades on your vault.",
-        "Note: Delegation is per-chain. You'll need to set it up separately on each chain you want to use.",
-      ].join("\n");
+      const message = isUpdate
+        ? [
+            "🔄 Delegation update ready",
+            `Agent wallet: ${result.agentAddress}`,
+            `New selectors: ${newSelectors.length} (total: ${result.selectors.length})`,
+            `Chain: ${chainName}`,
+            "",
+            newSelectors.length > 0
+              ? "Sign this transaction to add the missing selectors. No need to revoke first — this is additive."
+              : "All selectors are already delegated. Sign to confirm the current state on-chain.",
+          ].join("\n")
+        : [
+            "✅ Delegation setup ready",
+            `Agent wallet: ${result.agentAddress}`,
+            `Selectors: ${result.selectors.length} vault functions`,
+            `Chain: ${chainName}`,
+            "",
+            "Sign this transaction to grant the agent permission to execute trades on your vault.",
+            "Note: Delegation is per-chain. You'll need to set it up separately on each chain you want to use.",
+          ].join("\n");
 
       return { message, transaction, chainSwitch: chainSwitched };
     }
@@ -2313,7 +2611,169 @@ async function executeToolCall(
       };
     }
 
+    // ── Carry Trade Planner ────────────────────────────────────────────
+
+    case "plan_carry_trade": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      // 1. Get USDT balance on Arbitrum
+      const arbChainId = 42161;
+      const usdtArbitrum = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9" as Address;
+      const usdcArbitrum = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address;
+      const xautArbitrum = "0x40461291347e1eCbb09499F3371D3f17f10d7159" as Address;
+
+      const { balance: usdtBalance, decimals: usdtDec } = await getVaultTokenBalance(
+        arbChainId, ctx.vaultAddress as Address, usdtArbitrum, env.ALCHEMY_API_KEY,
+      );
+
+      const usdtAvailable = parseFloat(formatUnits(usdtBalance, usdtDec));
+      if (usdtAvailable < 0.01) {
+        // Check other chains for USDT
+        let otherChainFunds = "";
+        try {
+          const navData = await getAggregatedNav(ctx.vaultAddress as Address, env.ALCHEMY_API_KEY, env.KV);
+          const chains = navData.chains.filter(c => c.tokenBalances.length > 0);
+          if (chains.length > 0) {
+            otherChainFunds = chains.map(c =>
+              `${c.chainName}: ${c.tokenBalances.map(tb => `${tb.balanceFormatted} ${tb.token.symbol}`).join(", ")}`
+            ).join("\n");
+          }
+        } catch { /* ignore */ }
+        return {
+          message:
+            `No USDT available on Arbitrum (balance: ${usdtAvailable.toFixed(2)} USDT). ` +
+            `The carry trade requires USDT on Arbitrum.\n\n` +
+            (otherChainFunds
+              ? `Here are your balances across chains:\n${otherChainFunds}\n\n` +
+                `If you have USDT on another chain, I can bridge it to Arbitrum first.`
+              : `Deposit USDT to your vault, or bridge existing funds to Arbitrum.`),
+          suggestions: ["Bridge USDT to Arbitrum", "Get aggregated NAV"],
+        };
+      }
+
+      // 2. Get XAUT/USDT price via 0x quote (small probe)
+      let xautPriceUsdt: number;
+      try {
+        const probeQuote = await getZeroXQuote(env, {
+          tokenIn: "USDT",
+          tokenOut: "XAUT",
+          amountIn: "100",
+          slippageBps: 100,
+        }, arbChainId, ctx.vaultAddress);
+        const buyAmount = parseFloat(formatUnits(BigInt(probeQuote.buyAmount), probeQuote.decimalsOut));
+        xautPriceUsdt = buyAmount > 0 ? 100 / buyAmount : 0;
+      } catch {
+        // Fallback: use a rough estimate based on gold price
+        xautPriceUsdt = 3100;
+      }
+
+      if (xautPriceUsdt <= 0) xautPriceUsdt = 3100;
+
+      // 3. Check vault ETH balance — needed for GMX keeper fee
+      const NATIVE_ADDR = "0x0000000000000000000000000000000000000000" as Address;
+      let ethBalEth = 0;
+      try {
+        const { balance: ethBal } = await getVaultTokenBalance(
+          arbChainId, ctx.vaultAddress as Address, NATIVE_ADDR, env.ALCHEMY_API_KEY,
+        );
+        ethBalEth = parseFloat(formatUnits(ethBal, 18));
+      } catch { /* ignore */ }
+      const ETH_NEEDED = 0.001;
+      const needsEth = ethBalEth < ETH_NEEDED;
+
+      // 4. Compute allocation (80% LP, 15% GMX collateral, 5% buffer)
+      // Leave 1% of USDT to cover ETH swap if needed (small amount)
+      const ethSwapReserve = needsEth ? usdtAvailable * 0.01 : 0;
+      const capitalForStrategy = usdtAvailable - ethSwapReserve;
+      const lpAllocation = capitalForStrategy * 0.80;    // 80% for LP
+      const gmxAllocation = capitalForStrategy * 0.15;   // 15% for GMX short collateral
+      const buffer = capitalForStrategy * 0.05;          // 5% buffer
+
+      // LP split: half as XAUT, half stays as USDT
+      const lpUsdtForXaut = lpAllocation / 2;        // Swap this to XAUT
+      const lpUsdtKeep = lpAllocation / 2;            // Keep as USDT for LP pair
+      const xautAmount = lpUsdtForXaut / xautPriceUsdt;
+
+      // GMX hedge: short XAUT with USDC collateral at 10x leverage
+      const xautExposureUsd = xautAmount * xautPriceUsdt; // = lpUsdtForXaut
+      const gmxShortSize = xautExposureUsd;                // Match LP exposure
+      // At 10x leverage, collateral needed = shortSize / 10
+      const gmxCollateralNeeded = gmxShortSize / 10;
+
+      // Format amounts
+      const fmt = (n: number, d: number) => n.toFixed(d);
+
+      // Build step list — insert ETH swap step when vault lacks ETH for keeper fee
+      const ethSwapAmount = needsEth ? fmt(ethSwapReserve, 6) : "";
+      let stepNum = 1;
+      const steps: string[] = [];
+      if (needsEth) {
+        steps.push(
+          `  Step ${stepNum++}: ⚠️ Swap ~${ethSwapAmount} USDT → ETH (vault needs ETH for GMX keeper fee; current: ${fmt(ethBalEth, 6)} ETH, need ≥ ${ETH_NEEDED})`,
+        );
+      }
+      steps.push(`  Step ${stepNum++}: Swap ${fmt(lpUsdtForXaut, 6)} USDT → ~${fmt(xautAmount, 6)} XAUT`);
+      steps.push(`  Step ${stepNum++}: Add LP: ${fmt(xautAmount, 6)} XAUT + ${fmt(lpUsdtKeep, 6)} USDT (full range, fee 6000 = 0.60%, tickSpacing 120)`);
+      steps.push(`  Step ${stepNum++}: Swap ${fmt(gmxAllocation, 6)} USDT → USDC (for GMX collateral)`);
+      steps.push(`  Step ${stepNum++}: Open GMX short XAUT: collateral ${fmt(gmxCollateralNeeded, 2)} USDC, size ~$${fmt(gmxShortSize, 2)}, leverage 10x`);
+
+      const ethWarning = needsEth
+        ? `\n⚠️ **ETH required for GMX**: vault has ${fmt(ethBalEth, 6)} ETH (need ≥ ${ETH_NEEDED}). Step 0 swaps ~${ethSwapAmount} USDT → ETH first.`
+        : "";
+
+      const plan = [
+        `**XAUT/USDT Carry Trade Plan** (Arbitrum)`,
+        ``,
+        `Available: ${fmt(usdtAvailable, 2)} USDT on Arbitrum`,
+        `XAUT price: ~${fmt(xautPriceUsdt, 2)} USDT`,
+        ethWarning,
+        ``,
+        `**Allocation (of ${fmt(capitalForStrategy, 2)} USDT strategy capital${needsEth ? `, ${ethSwapAmount} reserved for ETH` : ""}):**`,
+        `  LP position: ${fmt(lpAllocation, 2)} USDT (${fmt(lpAllocation / capitalForStrategy * 100, 0)}%)`,
+        `  GMX collateral: ${fmt(gmxAllocation, 2)} USDT → USDC (${fmt(gmxAllocation / capitalForStrategy * 100, 0)}%)`,
+        `  Buffer: ${fmt(buffer, 2)} USDT (${fmt(buffer / capitalForStrategy * 100, 0)}%)`,
+        ``,
+        `**Execution steps:**`,
+        ...steps,
+        ``,
+        `Ready to execute? I'll start with Step 1.`,
+      ].filter(Boolean).join("\n");
+
+      return {
+        message: plan,
+        suggestions: ["Execute step 1", "Adjust allocation", "Cancel"],
+      };
+    }
+
     // ── Uniswap v4 LP ──────────────────────────────────────────────────
+
+    case "get_pool_info": {
+      let chainId = ctx.chainId;
+      if (args.chain) {
+        chainId = resolveChainArg((args.chain as string).trim()).id;
+      }
+
+      const poolId = (args.poolId as string).trim() as `0x${string}`;
+      const info = await getPoolInfoById(poolId, chainId, env.ALCHEMY_API_KEY);
+
+      const message = [
+        `ℹ️ Uniswap v4 Pool Info`,
+        `Pool ID: ${info.poolId}`,
+        `Initialized: ${info.initialized ? "Yes" : "No"}`,
+        `Fee: ${info.fee} (${info.fee / 10000}%)`,
+        `Tick Spacing: ${info.tickSpacing}`,
+        `Hooks: ${info.hooks}`,
+        `Currency 0: ${info.currency0}`,
+        `Currency 1: ${info.currency1}`,
+        `Current Tick: ${info.currentTick}`,
+        ``,
+        `To add liquidity: use fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`,
+      ].join("\n");
+
+      return { message };
+    }
 
     case "add_liquidity": {
       if (!ctx.operatorAddress) {
@@ -2332,20 +2792,26 @@ async function executeToolCall(
       const result = await buildAddLiquidityTx(env, {
         tokenA: args.tokenA as string,
         tokenB: args.tokenB as string,
-        amountA: args.amountA as string,
-        amountB: args.amountB as string,
-        fee: args.fee as number | undefined,
+        amountA: args.amountA as string | undefined,
+        amountB: args.amountB as string | undefined,
+        fee: args.fee as number,
         tickSpacing: args.tickSpacing as number | undefined,
         tickRange: (args.tickRange as string) || "full",
         hooks: args.hooks as Address | undefined,
       }, ctx.chainId, ctx.vaultAddress as Address);
+
+      const gas = await estimateGas(
+        ctx.chainId, ctx.vaultAddress as Address,
+        result.calldata, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "lp",
+      );
 
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: result.calldata,
         value: "0x0",
         chainId: ctx.chainId,
-        gas: "0x7A120",  // 500k gas estimate — wallet re-estimates on sign
+        gas,
         description: result.description,
       };
 
@@ -2354,10 +2820,7 @@ async function executeToolCall(
         `✅ Add Liquidity ready`,
         `${result.description}`,
         `Tick range: [${result.tickLower}, ${result.tickUpper}]`,
-        `Pool ID: \`${result.poolId}\``,
         `Chain: ${chainName}`,
-        ``,
-        `💡 The vault must hold sufficient balances of both tokens. Review and sign to create the LP position.`,
       ].join("\n");
 
       return { message, transaction, chainSwitch: chainSwitched };
@@ -2377,26 +2840,50 @@ async function executeToolCall(
         }
       }
 
+      // Auto-fetch liquidityAmount if not provided or non-numeric (e.g. LLM passes "all", "100%").
+      // The LLM knows the tokenId but not raw liquidity units, so we resolve it here.
+      let liquidityAmount = args.liquidityAmount as string | undefined;
+      const tokenId = args.tokenId as string;
+      if ((!liquidityAmount || !/^\d+$/.test(liquidityAmount.trim())) && tokenId) {
+        const positions = await getVaultLPPositions(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+        const pos = positions.find(p => p.tokenId === tokenId);
+        if (!pos) throw new Error(`LP position #${tokenId} not found. Use get_lp_positions to list your current positions.`);
+        if (pos.liquidity === "0") throw new Error(`Position #${tokenId} has zero liquidity — it may already be closed.`);
+        liquidityAmount = pos.liquidity;
+      }
+      if (!liquidityAmount) throw new Error("liquidityAmount is required when position cannot be looked up.");
+
       const result = await buildRemoveLiquidityTx(env, {
         tokenA: args.tokenA as string,
         tokenB: args.tokenB as string,
-        tokenId: args.tokenId as string,
-        liquidityAmount: args.liquidityAmount as string,
+        tokenId,
+        liquidityAmount,
         burn: args.burn as boolean | undefined,
       }, ctx.chainId, ctx.vaultAddress as Address);
+
+      const gas = await estimateGas(
+        ctx.chainId, ctx.vaultAddress as Address,
+        result.calldata, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "lp",
+      );
 
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: result.calldata,
         value: "0x0",
         chainId: ctx.chainId,
-        gas: "0x7A120",  // 500k gas estimate — wallet re-estimates on sign
+        gas,
         description: result.description,
       };
 
       const chainName = resolveChainName(ctx.chainId);
+      const wasBurned = (args.burn as boolean | undefined) === true;
+      const burnNote = wasBurned
+        ? `ℹ️ The position NFT #${tokenId} was burned (permanent). If fees remain uncollected they were forfeited.`
+        : `ℹ️ Position NFT #${tokenId} persists with 0 liquidity. ` +
+          `Use collect_lp_fees to harvest any accrued fees, then burn_position to permanently delete it.`;
       return {
-        message: `✅ Remove Liquidity ready\n${result.description}\nChain: ${chainName}\n\n💡 Review and sign to remove the LP position.`,
+        message: `✅ Remove Liquidity ready\n${result.description}\nChain: ${chainName}\n\n💡 Review and sign to remove the LP position.\n${burnNote}`,
         transaction,
         chainSwitch: chainSwitched,
       };
@@ -2419,8 +2906,9 @@ async function executeToolCall(
 
       if (positions.length === 0) {
         return {
-          message: `No active Uniswap v4 LP positions found for this vault on ${chainName}.`,
+          message: `No Uniswap v4 LP positions found for this vault on ${chainName} (0 token IDs returned by vault).\nIf you believe positions exist, verify the vault address and chain, then try again.`,
           chainSwitch: chainSwitched,
+          selfContained: true,
         };
       }
 
@@ -2506,18 +2994,115 @@ async function executeToolCall(
 
       const result = buildCollectFeesTx(tokenId, currency0, currency1, ctx.vaultAddress as Address);
 
+      const gas = await estimateGas(
+        ctx.chainId, ctx.vaultAddress as Address,
+        result.calldata, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "lp",
+      );
+
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: result.calldata,
         value: "0x0",
         chainId: ctx.chainId,
-        gas: "0x7A120",
+        gas,
         description: result.description,
       };
 
       const chainName = resolveChainName(ctx.chainId);
       return {
         message: `✅ Fee Collection ready\n${result.description}\nChain: ${chainName}\n\n💡 Sign to collect accrued trading fees from this LP position.`,
+        transaction,
+        chainSwitch: chainSwitched,
+      };
+    }
+
+    case "burn_position": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const tokenId = args.tokenId as string;
+
+      // The vault's getUniV4TokenIds() tracks ALL positions (active and closed) until
+      // explicitly burned. A closed position appears in getVaultLPPositions() with
+      // liquidity = "0" and status = "closed". Use it to validate and get pool key.
+      const positions = await getVaultLPPositions(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+      let pos = positions.find(p => p.tokenId === tokenId);
+
+      // Fallback: if getVaultLPPositions didn't return this position (e.g. transient
+      // RPC failure in the batch multicall), query the POSM directly for just this one.
+      let currency0: Address;
+      let currency1: Address;
+
+      if (pos) {
+        if (pos.liquidity !== "0") {
+          throw new Error(
+            `Position #${tokenId} still has ${pos.liquidity} liquidity units. ` +
+            `Remove liquidity first using remove_liquidity, then collect any remaining fees with collect_lp_fees before burning.`,
+          );
+        }
+        // Sort currency0 < currency1 — required for TAKE_PAIR
+        const isC0Lower = pos.currency0.toLowerCase() < pos.currency1.toLowerCase();
+        currency0 = (isC0Lower ? pos.currency0 : pos.currency1) as Address;
+        currency1 = (isC0Lower ? pos.currency1 : pos.currency0) as Address;
+      } else {
+        // Position not in batch results — query POSM directly
+        const directPos = await getPositionDirect(ctx.chainId, tokenId, env.ALCHEMY_API_KEY);
+        if (!directPos) {
+          throw new Error(
+            `Position #${tokenId} not found — the NFT has already been burned in the PositionManager. ` +
+            `If the vault's getUniV4TokenIds() still lists it, the tracking array is stale.`,
+          );
+        }
+        if (directPos.liquidity > 0n) {
+          throw new Error(
+            `Position #${tokenId} still has ${directPos.liquidity} liquidity units. ` +
+            `Remove liquidity first using remove_liquidity, then collect any remaining fees with collect_lp_fees before burning.`,
+          );
+        }
+        const isC0Lower = directPos.currency0.toLowerCase() < directPos.currency1.toLowerCase();
+        currency0 = (isC0Lower ? directPos.currency0 : directPos.currency1) as Address;
+        currency1 = (isC0Lower ? directPos.currency1 : directPos.currency0) as Address;
+      }
+
+      const result = buildBurnPositionTx(tokenId, currency0, currency1, ctx.vaultAddress as Address);
+
+      const gas = await estimateGas(
+        ctx.chainId, ctx.vaultAddress as Address,
+        result.calldata, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "lp",
+      );
+
+      const transaction: UnsignedTransaction = {
+        to: ctx.vaultAddress as Address,
+        data: result.calldata,
+        value: "0x0",
+        chainId: ctx.chainId,
+        gas,
+        description: result.description,
+      };
+
+      const chainName = resolveChainName(ctx.chainId);
+      return {
+        message: [
+          `✅ Burn Position ready`,
+          result.description,
+          `Chain: ${chainName}`,
+          ``,
+          `⚠️ This is PERMANENT and IRREVERSIBLE. The position NFT #${tokenId} will be deleted.`,
+          `Make sure you have collected all fees first (collect_lp_fees) — uncollected fees will be lost.`,
+          `Sign to confirm.`,
+        ].join("\n"),
         transaction,
         chainSwitch: chainSwitched,
       };
@@ -2540,12 +3125,18 @@ async function executeToolCall(
       const amount = args.amount as string;
       const calldata = buildStakeCalldata(amount);
 
+      const gas = await estimateGas(
+        1, ctx.vaultAddress as Address,
+        calldata, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "staking",
+      );
+
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: calldata,
         value: "0x0",
         chainId: 1,
-        gas: "0x493E0",  // 300k gas
+        gas,
         description: `[GRG Staking] Stake ${amount} GRG`,
       };
 
@@ -2570,12 +3161,18 @@ async function executeToolCall(
       const amount = args.amount as string;
       const calldata = buildUnstakeCalldata(amount);
 
+      const gas = await estimateGas(
+        1, ctx.vaultAddress as Address,
+        calldata, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "staking",
+      );
+
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: calldata,
         value: "0x0",
         chainId: 1,
-        gas: "0x493E0",
+        gas,
         description: `[GRG Staking] Unstake ${amount} GRG`,
       };
 
@@ -2600,12 +3197,18 @@ async function executeToolCall(
       const amount = args.amount as string;
       const calldata = buildUndelegateStakeCalldata(amount);
 
+      const gas = await estimateGas(
+        1, ctx.vaultAddress as Address,
+        calldata, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "staking",
+      );
+
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: calldata,
         value: "0x0",
         chainId: 1,
-        gas: "0x493E0",  // 300k gas
+        gas,
         description: `[GRG Staking] Undelegate ${amount} GRG`,
       };
 
@@ -2634,12 +3237,18 @@ async function executeToolCall(
 
       const calldata = buildEndEpochCalldata();
 
+      const gas = await estimateGas(
+        1, stakingProxy,
+        calldata, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "staking",
+      );
+
       const transaction: UnsignedTransaction = {
         to: stakingProxy,
         data: calldata,
         value: "0x0",
         chainId: 1,
-        gas: "0x7A120",  // 500k — epoch finalization can be gas-intensive
+        gas,
         description: `[GRG Staking] Finalize epoch on staking proxy`,
       };
 
@@ -2663,12 +3272,18 @@ async function executeToolCall(
 
       const calldata = buildWithdrawDelegatorRewardsCalldata();
 
+      const gas = await estimateGas(
+        1, ctx.vaultAddress as Address,
+        calldata, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "staking",
+      );
+
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: calldata,
         value: "0x0",
         chainId: 1,
-        gas: "0x493E0",
+        gas,
         description: `[GRG Staking] Claim delegator rewards`,
       };
 

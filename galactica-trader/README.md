@@ -5,11 +5,14 @@
 > wallet, and start trading — no API key needed. Uses Cloudflare Workers AI
 > (Llama 4 Scout) by default, with optional premium model override.
 
-**Built on Tether WDK.** The backend creates and manages agent wallets using
-three Tether technologies:
+**Built on Tether WDK.** The backend uses three Tether technologies:
 - **`@tetherto/wdk-wallet-evm`** — BIP-39 seed generation, BIP-44 key derivation, transaction signing
 - **`@tetherto/wdk-secret-manager`** — seed encryption at rest (PBKDF2 + XSalsa20-Poly1305)
 - **USDT0** — x402 payments on Plasma for external agent API access
+
+**Two wallet modes:**
+- **Built-in self-custodial wallet** — encrypted keystore (PBKDF2 310k + AES-256-GCM), EIP-7702 gas sponsorship, browser-local signing. No MetaMask, no ETH for gas.
+- **External wallet** — MetaMask, WalletConnect, etc. via EIP-6963 discovery.
 
 **Zero-friction AI.** Uses Cloudflare Workers AI (Llama 4 Scout) by default —
 no API key required. Power users can optionally add their own OpenRouter or
@@ -92,11 +95,13 @@ agentic-operator/
 ### Browser (recommended)
 
 1. Open [trader.rigoblock.com](https://trader.rigoblock.com)
-2. Connect your wallet (MetaMask, WalletConnect, etc.)
-3. Start chatting: *"Show vault info on Arbitrum"*
-4. (Optional) Click **⚙ AI Model** → add your own OpenRouter or OpenAI key for premium models
+2. **Create New Wallet** (built-in, no MetaMask needed) — or connect an external wallet
+3. Choose a password to encrypt your wallet (AES-256-GCM, browser-only)
+4. Save your seed phrase backup
+5. Start chatting: *"Show vault info on Arbitrum"*
+6. (Optional) Click **⚙ AI Model** → add your own OpenRouter or OpenAI key for premium models
 
-No install, no terminal, no local dependencies, no API key.
+No install, no terminal, no ETH for gas (EIP-7702 sponsored).
 
 ### From source
 
@@ -120,9 +125,12 @@ npx ts-node test/test-secure-wallet.ts  # runs WDK E2E test
 ## Quick Start for Judges
 
 1. Open [trader.rigoblock.com](https://trader.rigoblock.com) in your browser
-2. Connect wallet (MetaMask, WalletConnect, etc.)
-3. Ask: *"Show vault info on Arbitrum"*  (uses Workers AI — no API key needed)
-4. (Optional) Click **⚙ AI Model** → add OpenRouter or OpenAI key for premium models
+2. Click **Create New Wallet** — choose a password (encrypted locally, gas-sponsored)
+3. Save your 12-word seed phrase backup
+4. Ask: *"Show vault info on Arbitrum"*  (uses Workers AI — no API key needed)
+5. (Optional) Click **⚙ AI Model** → add OpenRouter or OpenAI key for premium models
+
+**Security model:** Your wallet seed is encrypted with PBKDF2-SHA256 (310k iterations) + AES-256-GCM using your password. The encrypted keystore is stored in browser localStorage. The server never stores your seed or password. All transaction signing happens locally in the browser. Transactions are gas-sponsored via EIP-7702 (Alchemy) — no ETH needed.
 
 To verify the WDK integration independently:
 
