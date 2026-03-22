@@ -66,6 +66,30 @@ This enables judges, evaluators, and new users to start trading immediately with
 - **Gas caps**: Per-chain hard limits on gas spending
 - **Slippage protection**: Default 1% (100 bps), enforced in swap calldata
 
+## Getting Started — User Journey
+
+The typical flow for a new operator using the web interface:
+
+1. **Connect or create a wallet** — Open [trader.rigoblock.com](https://trader.rigoblock.com) and either create a built-in WDK wallet directly in the browser or connect an existing wallet (MetaMask / WalletConnect). No seed phrase is stored on the server; the encrypted keystore lives in your browser's localStorage.
+
+2. **Fund your wallet with native currency** — If you are using a wallet without AA, send a small amount of the chain's native token to cover gas.
+
+3. **Create a Rigoblock smart pool** — Ask the agent to help you deploy one. You only need to provide a name, symbol, and base token. Example: _"Create a smart pool called MyFund with symbol MF using USDT as the base token on Arbitrum."_
+
+4. **Mint smart pool tokens** — Fund the pool by minting tokens from your wallet (or any wallet) against the base token balance. Example: _"Mint 1000 pool tokens by depositing 100 USDT into my vault."_ The agent will build and return the transaction for you to sign.
+
+5. **Get an agent wallet** — Ask the agent: _"get yourself an agentic wallet"_ This generates a dedicated encrypted EOA for your vault that the system uses to execute delegated trades.
+
+6. **Configure delegation** — In the app settings, enable delegation on each chain where you want the agent to act. Delegation is **per-chain** — enabling it on Bsc does not enable it on Arbitrum. You choose which vault functions to delegate (e.g. swaps, LP, staking).
+
+7. **Start operating** — The agent is now ready. Ask it to trade, provide liquidity, stake, bridge, or analyse your positions. By default the agent **asks for your confirmation** before executing any transaction.
+
+8. **Optional — automated strategies** — You can create cron-based strategies (minimum 5-minute intervals) that run automatically. By default these are **manual** (the agent sends a Telegram message and waits for your approval). You can explicitly opt into **autonomous mode** per strategy, which lets the agent execute immediately — all safety layers (NAV shield, delegation checks, selector whitelist) still apply.
+
+> **Gas sponsorship note:** The default agent wallet uses Alchemy EIP-7702 gas sponsorship. You do not need to fund the agent wallet with ETH. If sponsorship is not configured for your deployment, the agent wallet address shown in the delegation setup screen will need a small ETH balance for gas.
+
+---
+
 ## Supported Chains
 
 | Chain | ID | DEX Sources |
@@ -220,6 +244,21 @@ npx wrangler secret put CDP_API_KEY_SECRET         # for x402 facilitator
 ```bash
 npm run deploy
 ```
+
+## Known Limitations
+
+> **Alpha software — use with caution.** This project is in early development. The following limitations are known and will be addressed in future releases.
+
+### AI / LLM Behaviour
+- **The agent can hallucinate.** Like any LLM-based system, the agent may produce incorrect token addresses, amounts, or transaction descriptions.
+- **Different AI models give different results.** The default model is Meta Llama 4 Scout (Workers AI). Switching to GPT-5, Claude Sonnet, or other models via `aiApiKey` / `aiModel` in the API request will change the agent's behaviour, tool-calling accuracy, and output quality. Some models are more reliable than others for structured DeFi workflows.
+- **No multi-step orchestration in a single message.** The `/api/chat` endpoint handles one atomic operation per request. Complex strategies (bridge + swap + LP) require separate messages or an orchestrator agent on your side.
+
+### Execution & Safety
+- **Autonomous strategies are experimental.** Autonomous mode executes trades without manual confirmation. The on-chain safety layers (NAV shield, selector whitelist) still apply, but strategy logic is LLM-generated and may misfire on unusual market conditions. Start with manual mode.
+- **Delegation is per-chain and per-selector.** Enabling delegation on one chain has no effect on other chains. Each chain requires its own on-chain setup transaction.
+
+---
 
 ## Links
 
