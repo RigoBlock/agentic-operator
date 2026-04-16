@@ -1,84 +1,37 @@
 ---
-name: galactica-trader
-description: Trade DeFi on Rigoblock vaults via autonomous AI execution. Uses Tether WDK for wallet creation, signing, and x402 USDT0 payments. Supports spot swaps (Uniswap, 0x), Uniswap v4 LP, GMX V2 perpetuals, cross-chain bridging (Across), and vault management across 7 EVM chains. Primary strategy: XAUT/USDT LP with impermanent loss hedge via GMX perps and cross-chain NAV sync.
+name: rigoblock-trader
+description: Trade DeFi on Rigoblock vaults via autonomous AI execution. Supports spot swaps (Uniswap, 0x), Uniswap v4 LP, GMX V2 perpetuals, cross-chain bridging (Across), and vault management across 7 EVM chains. x402 USDC payments on Base. STAR automated safety layer protects every transaction.
 metadata: {"homepage":"https://trader.rigoblock.com"}
 ---
 
 # Rigoblock DeFi Operator
 
 You have access to DeFi trading on Rigoblock smart pool vaults via two HTTP
-endpoints at `https://trader.rigoblock.com`. All calls are paid with USDT0
-via the x402 protocol using a WDK wallet.
+endpoints at `https://trader.rigoblock.com`. All calls are paid with USDC
+on Base via the x402 protocol.
 
 This skill is **language-agnostic**: every operation is a plain HTTP request.
 Use `curl`, `fetch`, `requests`, or any HTTP client your runtime provides.
 
-## Wallet Setup (WDK)
+## Wallet Requirements
 
-The wallet is created, encrypted, and managed entirely by Tether's **WDK**:
-- **`@tetherto/wdk-wallet-evm`** — wallet creation, BIP-39 seed, BIP-44 key derivation, signing
-- **`@tetherto/wdk-secret-manager`** — seed encryption at rest (PBKDF2-SHA256 + XSalsa20-Poly1305)
+You need **your own wallet** — any EVM wallet that can:
+1. Hold USDC on Base (for x402 API payments — $0.002–$0.01 per call)
+2. Sign EIP-191 messages (for operator authentication in delegated mode)
 
-### How It Works
+Use whatever wallet SDK you prefer: viem, ethers.js, CDP, web3.py, etc.
+The Rigoblock API does NOT create wallets for you.
 
-**First run (agent auto-creates wallet):**
-1. WDK generates a 12-word BIP-39 seed phrase (`getRandomSeedPhrase()`)
-2. WDK Secret Manager encrypts the seed with a human-set passkey
-3. Encrypted blob saved to `~/.rigoblock/wallet.enc.json` (mode 0600)
-4. Seed phrase shown ONCE for offline backup — then discarded from memory
-5. Wallet loaded in memory via `SecureWalletSession` (ES private field `#wallet`)
-6. The agent can sign (x402, auth, transactions) but **cannot read the private key**
+### Agent Wallet vs Operator Wallet
 
-**Subsequent runs (auto-unlock):**
-1. `WALLET_PASSKEY` env var → WDK Secret Manager decrypts → wallet loaded
-2. Agent runs 24/7 autonomously — no human interaction needed
-3. If passkey is removed from env → agent can't start (human kill switch)
+| Wallet | Purpose | Who creates it |
+|--------|---------|----------------|
+| **Your wallet** (x402 payer) | Pays API fees in USDC on Base | You (the agent) |
+| **Operator wallet** (vault owner) | Signs auth messages, owns the vault on-chain | You or a human operator |
+| **Server-side agent wallet** | Executes delegated trades on the vault | Created automatically by CDP Server Wallet |
 
-**Returning agent (restore from seed backup):**
-- Provide the saved seed phrase → WDK recreates the same wallet deterministically
-
-### Security Model
-
-| Layer | Protection |
-|-------|------------|
-| At rest | WDK Secret Manager: PBKDF2 (100k iterations) + XSalsa20-Poly1305 |
-| In memory | ES private class field (`#wallet`) — inaccessible from outside `SecureWalletSession` |
-| LLM boundary | Tool functions return only signatures/addresses — never keys or seeds |
-| Human control | Remove `WALLET_PASSKEY` env var, or revoke on-chain delegation |
-
-### TypeScript SDK (Optional — for local wallet management)
-
-The SDK provides convenient WDK wallet management but is **not required**.
-External agents can call the HTTP API directly with any HTTP client.
-The SDK is useful when you want WDK wallet creation, encrypted storage,
-and x402 payment wired up automatically.
-
-```typescript
-import { setupSecureClient } from "@rigoblock/defi-sdk";
-import path from "path";
-import os from "os";
-
-const result = await setupSecureClient({
-  passkey: process.env.WALLET_PASSKEY!,  // human sets this once
-  walletStorePath: path.join(os.homedir(), ".rigoblock", "wallet.enc.json"),
-  vaultAddress: process.env.RIGOBLOCK_VAULT_ADDRESS || "0x",
-  chainId: 42161,
-  executionMode: "delegated",
-});
-
-if (result.isNewWallet) {
-  console.log("⚠️  BACKUP THIS SEED PHRASE:", result.seedPhraseBackup);
-  console.log("Fund this address:", result.session.address);
-}
-
-// result.session.signOperatorAuth() → {signature, address, timestamp}
-// result.client.chat(...) → x402 payment + API call, all automatic
-```
-
-**Funding (before the agent can operate):**
-- USDT0 on Plasma → x402 API payment ($0.01/call)
-- ETH on Ethereum (~$5) → gas for vault deploy + delegation tx + LP operations
-- ETH on Arbitrum (~$1) → gas for hedge vault deploy + delegation tx
+Your wallet and the operator wallet can be the same address.
+The server-side agent wallet is created automatically when delegation is set up.
 
 ## Agent Bootstrap Flow (No Vault Yet)
 
@@ -86,10 +39,7 @@ If `RIGOBLOCK_VAULT_ADDRESS` is not set, the agent must bootstrap itself.
 
 ### Single-Chain Bootstrap
 
-1. **Generate wallet** — WDK creates the wallet automatically on first run:
-   - TypeScript: `setupSecureClient({ passkey, walletStorePath, ... })` creates + encrypts
-   - Python: `Account.create_with_mnemonic(num_words=12)` (WDK-compatible BIP-39/BIP-44)
-   - Store the seed phrase securely — WDK Secret Manager encrypts it at rest.
+1. **Use your wallet** — any EVM wallet with USDC on Base (for x402 payments).
 2. **Deploy vault** — send: `"deploy a smart pool named 'AgentVault' with symbol 'AV' on Arbitrum"`
    The API returns an unsigned `createPool()` transaction. Sign and broadcast it.
    The new vault address is in the transaction receipt logs.
@@ -105,8 +55,8 @@ If `RIGOBLOCK_VAULT_ADDRESS` is not set, the agent must bootstrap itself.
 
 For the LP + Hedge strategy (LP + hedge both on Arbitrum, capital raised on BSC/Optimism):
 
-1. **Generate ONE wallet** — the same address is the operator everywhere.
-2. **Fund wallet** — ETH on Arbitrum (~$1 for gas) + BNB on BSC (~$1) + USDT0 on Plasma.
+1. **Use your wallet** — the same address is the operator everywhere.
+2. **Fund wallet** — USDC on Base (x402 payments) + ETH on Arbitrum (~$1 for gas) + BNB on BSC (~$1).
 3. **Deploy vault on BSC** — `"deploy a smart pool named 'AgentVault' with symbol 'AV' on BSC"`
    → sign and broadcast → save vault address.
 4. **Deploy vault on Optimism** — `"deploy a smart pool named 'AgentVault' with symbol 'AV' on Optimism"`
@@ -129,54 +79,39 @@ Track per-chain: `{chainId: vaultAddress}`.
 - `get_aggregated_nav` — shows vault NAV and balances on ALL chains at once
 - `get_rebalance_plan` — computes optimal bridge ops to rebalance across chains
 
-Using the TypeScript SDK (optional — secure encrypted wallet):
+Using the TypeScript SDK (optional — typed API client):
 ```typescript
-import { setupSecureClient } from "@rigoblock/defi-sdk";
-import path from "path";
-import os from "os";
+import { RigoblockClient } from "@rigoblock/defi-sdk";
 
-// Auto-creates on first run, auto-unlocks on subsequent runs
-const { client, session, isNewWallet, seedPhraseBackup } = await setupSecureClient({
-  passkey: process.env.WALLET_PASSKEY!,
-  walletStorePath: path.join(os.homedir(), ".rigoblock", "wallet.enc.json"),
+const client = new RigoblockClient({
+  baseUrl: "https://trader.rigoblock.com",
   vaultAddress: "0xYourVault",
   chainId: 42161,
   executionMode: "delegated",
-});
-if (isNewWallet) console.log("BACKUP:", seedPhraseBackup);
-```
+  operatorAddress: "0xYourWallet",
+  authSignature: "0x...",         // sign AUTH_MESSAGE with your wallet
+  authTimestamp: Date.now(),
+}, fetchWithX402Payment);           // your x402-wrapped fetch
 
-Using the TypeScript SDK (optional — plaintext seed, simpler):
-```typescript
-import { setupRigoblockClient } from "@rigoblock/defi-sdk";
-
-const { client, wallet, walletInfo } = await setupRigoblockClient({
-  vaultAddress: "0xYourVault",
-  chainId: 42161,
-  executionMode: "delegated",
-});
-if (walletInfo) console.log("Save seed:", walletInfo.seedPhrase);
+const result = await client.swap("USDT", "XAUT", "1000", "arbitrum");
 ```
 
 Using plain HTTP (no SDK required — recommended for external agents):
 ```typescript
-import WalletManagerEvm from "@tetherto/wdk-wallet-evm";
-import { SeedSignerEvm } from "@tetherto/wdk-wallet-evm/signers";
+import { createWalletClient, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { base } from "viem/chains";
+
+// 1. Create your wallet (any method — private key, seed, CDP, etc.)
+const account = privateKeyToAccount("0x...");
+
+// 2. Wire up x402 payment (USDC on Base)
 import { x402Client, wrapFetchWithPayment } from "@x402/fetch";
 import { registerExactEvmScheme } from "@x402/evm/exact/client";
 
-// 1. Create or load WDK wallet
-const seedPhrase = WalletManagerEvm.getRandomSeedPhrase();
-const signer = new SeedSignerEvm(seedPhrase, {
-  provider: "https://rpc.plasma.to",
-});
-const account = await new WalletManagerEvm(signer, {
-  provider: "https://rpc.plasma.to",
-}).getAccount();
-
-// 2. Wire up x402 payment (USDT0 on Plasma)
+const walletClient = createWalletClient({ account, chain: base, transport: http() });
 const x402 = new x402Client();
-registerExactEvmScheme(x402, { signer: account });
+registerExactEvmScheme(x402, { signer: walletClient });
 const fetchWithPayment = wrapFetchWithPayment(fetch, x402);
 
 // 3. Call the API — x402 handles payment automatically
@@ -189,14 +124,10 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 import requests, json, time
 
-# 1. Agent creates its own wallet (WDK-compatible BIP-39/BIP-44)
-account, mnemonic = Account.create_with_mnemonic(num_words=12)
-# SAVE mnemonic — same seed works in WDK (@tetherto/wdk-wallet-evm)
+# 1. Create your own wallet (any method you prefer)
+account = Account.create()
+# Or from existing: account = Account.from_key("0x...")
 print(f"Address: {account.address}")
-print(f"Seed phrase: {mnemonic}")  # save securely for future sessions
-
-# To restore in a future session:
-# account = Account.from_mnemonic(mnemonic)
 
 # 2. Sign operator auth for delegated mode
 AUTH_MESSAGE = (
@@ -231,12 +162,12 @@ The system enforces a clean separation between three layers:
 | Layer | Responsibility | Technology |
 |-------|---------------|------------|
 | **Agent reasoning** | Strategy selection, market analysis, sequencing | Browser chat / Gumloop / any LLM agent |
-| **Wallet execution** | Key creation, seed encryption, signing, x402 payment | Tether WDK (`wdk-wallet-evm` + `wdk-secret-manager`) |
+| **Wallet execution** | Key management, signing, x402 payment | Agent's own wallet (viem, ethers, CDP, web3.py, etc.) |
 | **DeFi execution** | Trading, NAV shield, delegation, on-chain ops | Rigoblock API (`trader.rigoblock.com`) |
 
-The agent decides *what* to do. WDK manages *who* signs. The API ensures *safe execution*.
+The agent decides *what* to do. Your wallet manages *who* signs. The API ensures *safe execution*.
 
-- The agent **never** touches private keys directly — WDK creates and manages them
+- The agent **never** touches the server-side agent wallet keys — CDP manages them
 - The API **never** has the operator's private key — it verifies signatures
 - The NAV shield **cannot** be bypassed by the agent — it runs server-side
 
@@ -245,8 +176,6 @@ The agent decides *what* to do. WDK manages *who* signs. The API ensures *safe e
 - `RIGOBLOCK_VAULT_ADDRESS` — *(optional)* The vault contract address. If not set,
   the agent should deploy a new vault using the bootstrap flow above. For
   multi-chain, the agent tracks a separate vault address per chain.
-- `SEED_PHRASE` — *(optional)* Existing WDK seed phrase. If not provided,
-  a new wallet is created in-app on first use.
 
 The agent specifies `chainId` per request — there is no default chain. Every
 `/api/chat` call includes the target chain explicitly.
@@ -273,7 +202,7 @@ X-PAYMENT: <x402-payment-header>
 | `amount` | Yes | Human-readable amount (e.g. "1" for 1 ETH) |
 | `chain` | No | Chain name or ID: `base`, `arbitrum`, `ethereum`, `8453`, etc. |
 
-Cost: **$0.002** per call (USDT0 on Plasma or USDC on Base).
+Cost: **$0.002** per call (USDC on Base).
 
 ### 2. `POST /api/chat` — All Vault Operations
 
@@ -324,21 +253,18 @@ X-PAYMENT: <x402-payment-header>
 → { "reply": "Executed: swapped ...", "executionResult": { "txHash": "0x...", "confirmed": true } }
 ```
 
-Cost: **$0.01** per call (USDT0 on Plasma or USDC on Base).
+Cost: **$0.01** per call (USDC on Base).
 
-### x402 Payment (USDT0 via WDK)
+### x402 Payment (USDC on Base)
 
 Every request that hits these endpoints without a valid `X-PAYMENT` header
-returns `402 Payment Required` with a payment challenge. Your WDK wallet
-signs a USDT0 payment on Plasma (or USDC on Base) and the x402 client
-retries with the signed header automatically.
-
-The WDK `WalletAccountEvm` satisfies the x402 `ClientEvmSigner` interface
-directly — no adapter needed. See the Wallet Setup section above for code.
+returns `402 Payment Required` with a payment challenge. Your wallet
+signs a USDC payment on Base and the x402 client retries with the signed
+header automatically.
 
 If you're using JavaScript/TypeScript, the
 [GitHub repo](https://github.com/RigoBlock/agentic-operator) includes an `sdk/`
-folder with a ready-made client (WDK wallet + x402 already wired together).
+folder with a typed HTTP client (x402 payment wiring is your responsibility).
 
 ### Operator Authentication
 
@@ -486,14 +412,13 @@ The same API powers a **web chat** at `https://trader.rigoblock.com` with
 additional UX benefits:
 
 - **No local install** — works from any browser
-- **Built-in encrypted wallet** — create wallet with just a password (no MetaMask needed)
-- **Gas-sponsored** — EIP-7702 via Alchemy, no ETH needed
-- **Self-custodial** — encrypted keystore in browser localStorage, server never stores seed
+- **Connect any wallet** — MetaMask, WalletConnect, or any EIP-6963 wallet
+- **Gas-sponsored** — EIP-7702 via Alchemy, no ETH needed for agent wallet
 - **Agent always on** — no need to keep a terminal open
 - **Telegram integration** — receive strategy notifications and confirmations
-- **Operator auth built-in** — sign once (browser-local with WDK)
+- **Operator auth built-in** — sign once (browser-local)
 
-For hackathon evaluation, the web chat provides the fastest path to see the
+The web chat provides the fastest path to see the
 system in action without installing anything locally.
 
 ## Reference Files
@@ -503,5 +428,5 @@ system in action without installing anything locally.
 - `{baseDir}/references/SAFETY.md` — Full safety model and what agents cannot do
 - `{baseDir}/references/API.md` — HTTP API specification with request/response examples
 
-For the optional TypeScript SDK with WDK wallet integration, see the `sdk/`
+For the optional TypeScript SDK, see the `sdk/`
 directory in the [GitHub repo](https://github.com/RigoBlock/agentic-operator).

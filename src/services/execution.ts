@@ -29,7 +29,7 @@ import {
   type TransactionReceipt,
   type PublicClient,
 } from "viem";
-import type { PrivateKeyAccount } from "viem/accounts";
+import type { LocalAccount } from "viem/accounts";
 import type { Env, UnsignedTransaction, ExecutionResult } from "../types.js";
 import { getChain, getRpcUrl, sanitizeError } from "../config.js";
 import { loadAgentWalletAccount } from "./agentWallet.js";
@@ -360,7 +360,7 @@ export async function executeViaDelegation(
   const agentAccount = await loadAgentWalletAccount(
     env.KV,
     vaultAddress,
-    env.AGENT_WALLET_SECRET,
+    env,
   );
   if (!agentAccount) {
     throw new ExecutionError(
@@ -561,7 +561,7 @@ export async function executeViaDelegation(
  *   6. Wait for confirmation with automatic resubmission
  */
 async function broadcastAgentTransaction(
-  agentAccount: PrivateKeyAccount,
+  agentAccount: LocalAccount,
   tx: UnsignedTransaction,
   chainId: number,
   alchemyKey?: string,
@@ -793,7 +793,7 @@ async function broadcastAgentTransaction(
  *   3. Map the result to ExecutionResult
  */
 async function sponsoredAgentTransaction(
-  agentAccount: PrivateKeyAccount,
+  agentAccount: LocalAccount,
   tx: UnsignedTransaction,
   chainId: number,
   alchemyKey: string,
@@ -929,7 +929,7 @@ async function sponsoredAgentTransaction(
  * no reason to revoke — it does not limit the agent in any way.
  */
 export async function revoke7702Authorization(
-  agentAccount: PrivateKeyAccount,
+  agentAccount: LocalAccount,
   chainId: number,
   alchemyKey: string,
   kv: KVNamespace,
@@ -977,7 +977,7 @@ export async function checkAgentBalance(
   const agentAccount = await loadAgentWalletAccount(
     env.KV,
     vaultAddress,
-    env.AGENT_WALLET_SECRET,
+    env,
   );
   if (!agentAccount) {
     throw new ExecutionError("Agent wallet not found", "AGENT_WALLET_NOT_FOUND");

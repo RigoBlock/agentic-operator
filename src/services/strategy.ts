@@ -87,10 +87,12 @@ export interface Strategy {
   autoExecute?: boolean;
   /** LLM recommendation from the last run (carried forward as context for the next run) */
   lastRecommendation?: string;
-  /** Max number of successful executions before auto-removal. undefined = unlimited (recurring). */
+  /** Max number of cron runs before auto-removal. undefined = unlimited (recurring). */
   maxExecutions?: number;
-  /** Number of successful executions so far (for maxExecutions tracking). */
+  /** Number of cron runs so far (incremented on every run, not just when transactions execute). */
   executionCount?: number;
+  /** Set when the LLM signals "STRATEGY COMPLETE:" — strategy goal reached, auto-remove. */
+  completedAt?: number;
 }
 
 /** A compact event record for strategy runs, stored in KV for web polling. */
@@ -162,7 +164,7 @@ export async function addStrategy(
     active: true,
     createdAt: Date.now(),
     consecutiveFailures: 0,
-    autoExecute: strategy.autoExecute || false,
+    autoExecute: strategy.autoExecute ?? true,
     maxExecutions: strategy.maxExecutions,
     executionCount: 0,
   };
@@ -342,7 +344,10 @@ export async function runDueStrategies(
         const executionInstruction = strategy.autoExecute
           ? `Execute the recommended actions immediately if they are safe and beneficial. ` +
             `Follow the instruction EXACTLY — use the exact token amounts, thresholds, and conditions specified. ` +
-            `Do NOT change amounts, invent conditions, or deviate from what the instruction says.`
+            `Do NOT change amounts, invent conditions, or deviate from what the instruction says. ` +
+            `If the strategy goal is fully achieved this run (e.g. accumulated the target total balance, ` +
+            `reached a buy/sell target, or the task is permanently done), start your reply with ` +
+            `"STRATEGY COMPLETE: [reason]" so the engine auto-removes the strategy.`
           : `Do NOT execute any transactions — only recommend what should be done. ` +
             `Be CONCISE: state what action to take and why in 2-3 short sentences. ` +
             `Do NOT show your reasoning process, analysis steps, or tool call plans. ` +
@@ -460,14 +465,22 @@ export async function runDueStrategies(
           : result.reply?.slice(0, 2000) || undefined;
         changed = true;
 
-        // Track executions for maxExecutions support (one-shot strategies)
-        if (allOutcomes.length > 0) {
-          strategy.executionCount = (strategy.executionCount || 0) + 1;
-        }
+        // Increment executionCount on every successful cron run (not just when transactions
+        // executed). This ensures time-bounded strategies ("buy every 5 min for 20 min"
+        // → maxExecutions=4) stop correctly even when a run produces no transactions.
+        strategy.executionCount = (strategy.executionCount || 0) + 1;
 
         // Auto-remove if maxExecutions reached
-        if (strategy.maxExecutions && (strategy.executionCount || 0) >= strategy.maxExecutions) {
+        if (strategy.maxExecutions && strategy.executionCount >= strategy.maxExecutions) {
           strategy.active = false;
+        }
+
+        // Detect "STRATEGY COMPLETE:" signal — LLM indicates the goal is fully achieved
+        // (e.g. target balance reached, DCA amount accumulated). Auto-remove the strategy.
+        const replyText = result.reply || "";
+        if (/STRATEGY COMPLETE:/i.test(replyText)) {
+          strategy.active = false;
+          strategy.completedAt = now;
         }
 
         // Record event for web polling
@@ -499,9 +512,11 @@ export async function runDueStrategies(
           if (telegramUserId) {
             if (strategy.autoExecute && executionSummary) {
               // Autonomous mode: notify AFTER execution with results
-              const completedNote = (!strategy.active && strategy.maxExecutions)
-                ? `\n\n✅ Strategy completed (${strategy.executionCount}/${strategy.maxExecutions} executions) — auto-removed.`
-                : "";
+              const completedNote = strategy.completedAt
+                ? `\n\n✅ Strategy completed — goal reached, auto-removed.`
+                : (!strategy.active && strategy.maxExecutions)
+                  ? `\n\n✅ Strategy completed (${strategy.executionCount}/${strategy.maxExecutions} runs) — auto-removed.`
+                  : "";
               const text = [
                 `<b>⚡ Strategy #${strategy.id} — auto-executed</b>`,
                 `<i>${escapeHtml(strategy.instruction)}</i>`,
@@ -648,8 +663,10 @@ export async function runDueStrategies(
           return updated || fresh;
         })
         .filter((s) => {
-          // Remove completed one-shot strategies
+          // Remove strategies that have hit their run limit
           if (s.maxExecutions && (s.executionCount || 0) >= s.maxExecutions) return false;
+          // Remove strategies the LLM signalled as goal-complete ("STRATEGY COMPLETE:")
+          if (s.completedAt) return false;
           return true;
         });
 

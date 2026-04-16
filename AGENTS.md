@@ -136,8 +136,10 @@ The signature is valid for 24 hours from `authTimestamp`.
 
 ## AI Model Selection
 
-By default, the service uses **Workers AI (Meta Llama 4 Scout)** — zero-config,
-no API key needed, included in the x402 price. Agents can bring their own LLM
+By default, the service uses **Workers AI (DeepSeek R1 + Llama 3.3 70B)** — zero-config,
+no API key needed, included in the x402 price. DeepSeek R1 handles reasoning and
+decision-making; Llama 3.3 70B handles fast follow-up responses after tool execution.
+Agents can bring their own LLM
 provider by including these optional fields in the `/api/chat` request body:
 
 | Field | Type | Description |
@@ -148,7 +150,7 @@ provider by including these optional fields in the `/api/chat` request body:
 
 **Resolution priority:**
 1. **User-provided key** (`aiApiKey` + `aiModel` + `aiBaseUrl`) — agent's own provider
-2. **Workers AI binding** — Meta Llama 4 Scout (default)
+2. **Workers AI binding** — DeepSeek R1 reasoning + Llama 3.3 70B fast (default)
 3. **Server OpenAI key** — server fallback
 
 This is like MetaMask's default RPC: it works out of the box, but you can bring

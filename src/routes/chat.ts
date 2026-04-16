@@ -104,6 +104,8 @@ chat.post("/", async (c) => {
       aiApiKey: body.aiApiKey,
       aiModel: body.aiModel,
       aiBaseUrl: body.aiBaseUrl,
+      routingMode: body.routingMode,
+      contextDocs: body.contextDocs,
     };
 
     const response: ChatResponse = await processChat(c.env, messages, ctx);

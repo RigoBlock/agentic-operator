@@ -21,7 +21,7 @@ import {
   type Hex,
   type Chain,
 } from "viem";
-import type { PrivateKeyAccount } from "viem/accounts";
+import type { LocalAccount } from "viem/accounts";
 import { LocalAccountSigner } from "@aa-sdk/core";
 import { createSmartWalletClient } from "@account-kit/wallet-client";
 import {
@@ -95,7 +95,7 @@ export interface SponsoredCallsResult {
  *   6. waitForCallsStatus()  — poll for confirmation
  */
 export async function executeSponsoredCalls(
-  agentAccount: PrivateKeyAccount,
+  agentAccount: LocalAccount,
   chainId: number,
   alchemyKey: string,
   policyId: string,

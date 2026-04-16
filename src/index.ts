@@ -20,7 +20,6 @@ import { quote } from "./routes/quote.js";
 import { delegation } from "./routes/delegation.js";
 import { gasPolicy } from "./routes/gasPolicy.js";
 import { telegram } from "./routes/telegram.js";
-import { wallet } from "./routes/wallet.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
@@ -28,6 +27,7 @@ import { createX402Middleware } from "./middleware/x402.js";
 import { runDueStrategies } from "./services/strategy.js";
 import { getStrategyEvents } from "./services/strategy.js";
 import { processChat } from "./llm/client.js";
+import { ensureWebhookRegistered, deriveWebhookSecret } from "./services/telegram.js";
 import type { Address } from "viem";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -51,7 +51,6 @@ app.route("/api/quote", quote);
 app.route("/api/delegation", delegation);
 app.route("/api/gas-policy", gasPolicy);
 app.route("/api/telegram", telegram);
-app.route("/api/wallet", wallet);
 
 // ── Vault info (no auth, no LLM — simple on-chain read) ──────────────
 // Tries the requested chain first, then all other supported chains.
@@ -132,11 +131,6 @@ app.get("/api/health", (c) =>
           token: "USDC",
           facilitator: "https://api.cdp.coinbase.com/platform/v2/x402",
         },
-        {
-          network: "eip155:9745",
-          token: "USDT0",
-          facilitator: "semantic (Plasma)",
-        },
       ],
       payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
       paidRoutes: {
@@ -154,6 +148,21 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ) {
-    ctx.waitUntil(runDueStrategies(env, processChat));
+    // Re-register the Telegram webhook every cron run so it stays in sync with
+    // the current CDP_WALLET_SECRET. This self-heals broken webhook registrations
+    // without any manual operator action.
+    const telegramRefresh = env.TELEGRAM_BOT_TOKEN
+      ? (async () => {
+          const secret = env.CDP_WALLET_SECRET
+            ? await deriveWebhookSecret(env.CDP_WALLET_SECRET)
+            : undefined;
+          return ensureWebhookRegistered(env.TELEGRAM_BOT_TOKEN!, env.KV, secret);
+        })().catch(err => console.warn("[cron] Telegram webhook refresh failed:", err))
+      : Promise.resolve();
+
+    ctx.waitUntil(Promise.all([
+      runDueStrategies(env, processChat),
+      telegramRefresh,
+    ]));
   },
 };

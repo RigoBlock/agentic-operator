@@ -30,9 +30,8 @@ import {
   checkDelegationOnChain,
   isDelegationActive,
   prepareRevocation,
-  prepareSelectiveRevocation,
 } from "../services/delegation.js";
-import { getAgentWalletInfo, deleteAgentWallet } from "../services/agentWallet.js";
+import { getAgentWalletInfo, syncAgentWallet, deleteAgentWallet } from "../services/agentWallet.js";
 import { checkAgentBalance, checkPendingTxStatus, executeViaDelegation, ExecutionError } from "../services/execution.js";
 import { sanitizeError } from "../config.js";
 import type { Address, Hex } from "viem";
@@ -74,11 +73,20 @@ delegation.post("/setup", async (c) => {
       body.chainId,
     );
 
+    const message = result.walletChanged
+      ? `⚠️ Agent wallet changed: ${result.previousAgentAddress} → ${result.agentAddress}. ` +
+        `Send the REVOCATION transaction first to remove the old agent, then send the new DELEGATION transaction.`
+      : `Agent wallet ${result.agentAddress} ready. Send the delegation transaction to your vault to grant the agent permission to execute trades.`;
+
     return c.json({
       agentAddress: result.agentAddress,
       transaction: result.transaction,
       selectors: result.selectors,
-      message: `Agent wallet ${result.agentAddress} ready. Send the delegation transaction to your vault to grant the agent permission to execute trades.`,
+      // Wallet-change fields — present only when CDP credentials rotated
+      walletChanged: result.walletChanged,
+      previousAgentAddress: result.previousAgentAddress ?? null,
+      revocationTransaction: result.revocationTransaction ?? null,
+      message,
     });
   } catch (err) {
     if (err instanceof AuthError) {
@@ -235,11 +243,26 @@ delegation.get("/status", async (c) => {
   }
 
   const config = await getDelegationConfig(c.env.KV, vaultAddress);
-  const walletInfo = await getAgentWalletInfo(c.env.KV, vaultAddress);
+
+  // When verify=true, sync the agent wallet address with CDP to detect credential
+  // rotation early — the status page is the first place the user notices a mismatch.
+  // Falls back to KV-only read if CDP is unreachable.
+  const syncResult = verifyOnChain
+    ? await syncAgentWallet(c.env.KV, vaultAddress, c.env)
+    : await getAgentWalletInfo(c.env.KV, vaultAddress);
+
+  const walletInfo = syncResult
+    ? { address: syncResult.address, delegatedChains: syncResult.delegatedChains }
+    : null;
+  const walletChanged = syncResult && "walletChanged" in syncResult ? syncResult.walletChanged : false;
+  const previousAgentAddress = syncResult && "previousAddress" in syncResult
+    ? (syncResult as any).previousAddress as Address | undefined
+    : undefined;
+
   const activeChains = config ? getActiveChains(config) : [];
   const chainDelegation = chainId ? config?.chains?.[String(chainId)] : undefined;
 
-  // Optional on-chain verification
+  // Optional on-chain verification (uses the now-synced wallet address)
   let onChainStatus = null;
   if (verifyOnChain && walletInfo?.address && chainId && vaultAddress) {
     try {
@@ -276,6 +299,9 @@ delegation.get("/status", async (c) => {
           delegateTxHash: chainDelegation.delegateTxHash,
         }
       : null,
+    // Wallet change fields — non-null only when CDP credential rotation detected
+    walletChanged: walletChanged || false,
+    previousAgentAddress: previousAgentAddress ?? null,
   });
 });
 

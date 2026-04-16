@@ -18,10 +18,11 @@
  *
  * ## Decimals
  * Token decimals vary across chains (BSC USDC/USDT are 18 vs 6 elsewhere).
- * Amounts are sent to the Across API in the input token's native decimals
- * with `allowUnmatchedDecimals=true` for cross-decimal routes. The Across
- * API returns outputAmount in output token decimals. The on-chain AIntents
- * adapter handles rebasing internally (CrosschainLib._rebaseOutputAmount).
+ * Amounts are sent to the Across API in the input token's native decimals.
+ * The Across API returns outputAmount in the OUTPUT token's native decimals
+ * (what the solver delivers on the destination chain). We pass this directly
+ * to the contract — the on-chain AIntents adapter normalises via
+ * CrosschainLib.applyBscDecimalConversion for its sanity checks.
  *
  * @see https://github.com/RigoBlock/v3-contracts/blob/master/contracts/protocol/extensions/adapters/AIntents.sol
  */
@@ -555,7 +556,7 @@ export async function buildRebalancePlan(params: {
  */
 const AINTENTS_GAS_OVERHEAD_USD: Record<number, number> = {
   1:     2.00,   // Ethereum mainnet — ~300-500k gas at low gwei
-  56:    0.3,   // BSC
+  56:    0.60,   // BSC — ~500k gas at ~0.05 gwei, BNB ~$600 → ~$0.015 gas + solver margin
   137:   0.15,   // Polygon
   10:    0.1,   // Optimism
   8453:  0.1,   // Base
@@ -610,8 +611,6 @@ export async function getAcrossSuggestedFees(
   inputToken: Address,
   outputToken: Address,
   amount: bigint,
-  inputDecimals: number,
-  outputDecimals: number,
 ): Promise<AcrossFeeQuote> {
   const url = new URL(ACROSS_API);
   url.searchParams.set("inputToken", inputToken);
@@ -620,12 +619,7 @@ export async function getAcrossSuggestedFees(
   url.searchParams.set("destinationChainId", dstChainId.toString());
   url.searchParams.set("amount", amount.toString());
   url.searchParams.set("skipAmountLimit", "true");
-
-  // BSC USDC/USDT are 18 decimals while other chains use 6.
-  // The Across API requires this flag for cross-decimal routes.
-  if (inputDecimals !== outputDecimals) {
-    url.searchParams.set("allowUnmatchedDecimals", "true");
-  }
+  url.searchParams.set("allowUnmatchedDecimals", "true");
 
   const resp = await fetch(url.toString());
   if (!resp.ok) {
@@ -665,12 +659,8 @@ export async function getAcrossSuggestedFees(
  * Build a complete cross-chain quote (fee estimation, input/output amounts).
  *
  * The Across API expects amounts in the input token's native decimals and
- * returns outputAmount in the output token's native decimals. For BSC
- * USDC/USDT (18 decimals vs 6 on other chains), the `allowUnmatchedDecimals`
- * flag is required.
- *
- * The on-chain AIntents adapter handles decimal rebasing internally
- * (CrosschainLib._rebaseOutputAmount) — we pass amounts as-is.
+ * returns outputAmount in the OUTPUT token's native decimals (what the solver
+ * delivers on destination). We pass this to the contract as-is.
  *
  * A fixed USD-equivalent is deducted from the Across outputAmount to cover
  * the AIntents handleV3AcrossMessage overhead on the destination chain
@@ -711,8 +701,6 @@ export async function getCrosschainQuote(
       inputToken.address,
       outputToken.address,
       inputAmountRaw,
-      inputToken.decimals,
-      outputToken.decimals,
     ),
     fetchTokenPriceUsd(outputToken.type),
   ]);
@@ -735,12 +723,14 @@ export async function getCrosschainQuote(
     );
   }
 
-  // Across API returns outputAmount in output token's native decimals.
+  // Across API returns outputAmount in OUTPUT token's native decimals
+  // (what the solver must deliver on destination). Pass as-is to the contract.
+  let outputAmountRaw = fee.outputAmountRaw;
+
   // Deduct the AIntents gas overhead (handleV3AcrossMessage: NAV calc + donate)
   // that the solver must pay on the destination chain. Across doesn't model
   // the AIntents adapter, so without this the outputAmount is too high and
   // solvers won't fill profitably.
-  let outputAmountRaw = fee.outputAmountRaw;
   const overheadUsd = AINTENTS_GAS_OVERHEAD_USD[dstChainId] ?? 0.05;
   const overheadInToken = overheadUsd / tokenPrice;
   const overheadRaw = parseUnits(

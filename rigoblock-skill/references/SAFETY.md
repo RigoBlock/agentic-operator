@@ -80,29 +80,12 @@ dangerous operation before it reaches the blockchain. However:
 - **Don't retry blocked transactions** — the market conditions need to change
 - **Manual mode is always safe** — unsigned tx data can't harm the vault
 
-## User Wallet Security (Self-Custodial)
+## Agent Wallet Security (CDP Server Wallet)
 
-The built-in wallet uses an encrypted keystore model:
+Agent wallets (for delegated execution) are managed by CDP Server Wallet:
 
-1. **Key derivation**: PBKDF2-SHA256 with 310,000 iterations (OWASP 2023) + random 32-byte salt
-2. **Encryption**: AES-256-GCM with 12-byte IV
-3. **Storage**: Encrypted keystore in browser `localStorage` — server never stores seed or password
-4. **Signing**: Browser decrypts keystore with user's password → signs locally → wipes key from memory
-5. **Import**: Uses Web Crypto API entirely client-side — imported seed phrases never touch the server
-6. **Gas sponsorship**: EIP-7702 via Alchemy — split-signing (server prepares UserOp, browser signs, server submits)
-
-**Threat model:**
-- Server compromise → attacker cannot decrypt keystores (no passwords or seeds on server)
-- localStorage compromise → attacker gets encrypted blob, needs password to decrypt
-- Network interception → only encrypted keystore transits after creation (HTTPS + AES-256-GCM)
-- New wallet creation → seed transits over HTTPS from WDK generation (server wipes immediately)
-
-## Agent Wallet Security (Delegation)
-
-Agent wallets (for delegated execution) are encrypted server-side:
-
-1. **Per-vault key derivation**: `HKDF(AGENT_WALLET_SECRET, salt=vaultAddress)` → unique AES key per vault
-2. **Encryption**: AES-256-GCM — encrypted mnemonic stored in Cloudflare KV
-3. **Access control**: `AGENT_WALLET_SECRET` is a Cloudflare secret (encrypted at rest)
-4. **Compromise scenario**: `AGENT_WALLET_SECRET` + KV read access = all agent keys exposed
-5. **Mitigation**: Key rotation available via `rotateAgentWalletKey()`, delegation revocable on-chain
+1. **Per-vault isolation**: Each vault gets a unique agent EOA via `getOrCreateAccount({ name: "vault:{address}" })`
+2. **Key storage**: Private keys generated and stored by CDP in AWS Nitro Enclaves — keys never leave CDP
+3. **Access control**: `CDP_WALLET_SECRET` authenticates with CDP (Cloudflare secret, encrypted at rest)
+4. **Compromise scenario**: CDP credentials exposed = attacker can sign as agent wallets
+5. **Mitigation**: Vault owner can revoke delegation on-chain at any time; agent can only call whitelisted selectors

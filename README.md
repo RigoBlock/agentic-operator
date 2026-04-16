@@ -4,8 +4,6 @@ A Cloudflare Worker that gives AI agents and human operators safe access to DeFi
 
 Three access interfaces: **Web chat**, **Telegram bot**, and **x402-gated API** for external AI agents.
 
-**Built-in self-custodial wallet** with encrypted keystore (PBKDF2 + AES-256-GCM) and EIP-7702 gas sponsorship — users can trade without MetaMask or ETH for gas.
-
 ## Architecture
 
 ```
@@ -20,12 +18,12 @@ External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     �
                                   │  │   ├── get_swap_quote    │             │
                                   │  │   ├── build_vault_swap  │             │
                                   │  │   ├── get_positions     │             │
-                                  │  │   └── … (15+ tools)     │             │
+                                  │  │   └── … (55+ tools)     │             │
+                                  │  ├── 0x Aggregator (default)│             │
                                   │  ├── Uniswap Trading API   │───execute()─►│
-                                  │  ├── 0x Aggregator         │             │
                                   │  ├── GMX V2 (Arbitrum)     │             │
                                   │  ├── NAV Shield (10% max)  │             │
-                                  │  └── Agent Wallet (AES-256)│             │
+                                  │  └── Agent Wallet (CDP)    │             │
                                   └───────────────────────────┘
 ```
 
@@ -35,26 +33,13 @@ External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     �
 
 **Manual mode** — The agent builds unsigned transaction calldata. The operator signs and broadcasts from their wallet (browser or any external agent).
 
-**Delegated mode** — The vault owner sets up on-chain delegation to an encrypted agent wallet. The agent executes trades directly, gated by a 7-point validation and NAV shield.
-
-### Self-Custodial Wallet (Built-in)
-
-The web UI includes a zero-dependency encrypted wallet:
-
-1. User chooses a password → server generates BIP-39 seed via Tether WDK
-2. Seed is encrypted with PBKDF2-SHA256 (310k iterations) + AES-256-GCM
-3. Encrypted keystore stored in browser localStorage — server never stores seed or password
-4. User enters password to unlock → browser decrypts → signs transactions locally
-5. Import flow uses client-side Web Crypto — imported seed phrases never touch the server
-6. Transactions gas-sponsored via EIP-7702 (Alchemy) — no ETH needed
-
-This enables judges, evaluators, and new users to start trading immediately with zero on-chain setup.
+**Delegated mode** — The vault owner sets up on-chain delegation to a CDP-managed agent wallet. The agent executes trades directly, gated by a 7-point validation and NAV shield.
 
 ### Delegation Flow
 
 1. Operator connects wallet at `trader.rigoblock.com` and signs EIP-191 auth
 2. Operator activates delegation per-chain — grants the agent wallet permission to call specific vault functions (`execute()`, `modifyLiquidities()`)
-3. Agent wallet is generated per-vault using Tether WDK (`@tetherto/wdk-wallet-evm`) — BIP-39 seed phrase, BIP-44 HD derivation, encrypted with AES-256-GCM (key derived via HKDF from `AGENT_WALLET_SECRET`)
+3. Agent wallet is generated per-vault using **CDP Server Wallet** (Coinbase Developer Platform) — keys are generated and stored by CDP in a TEE, never exist in our code or KV
 4. On each trade: 7-point validation → NAV shield simulation → broadcast
 5. Operator can revoke delegation at any time via `revokeAllDelegations()`
 
@@ -70,23 +55,23 @@ This enables judges, evaluators, and new users to start trading immediately with
 
 The typical flow for a new operator using the web interface:
 
-1. **Connect or create a wallet** — Open [trader.rigoblock.com](https://trader.rigoblock.com) and either create a built-in WDK wallet directly in the browser or connect an existing wallet (MetaMask / WalletConnect). No seed phrase is stored on the server; the encrypted keystore lives in your browser's localStorage.
+1. **Connect a wallet** — Open [trader.rigoblock.com](https://trader.rigoblock.com) and connect an existing wallet (MetaMask / WalletConnect).
 
-2. **Fund your wallet with native currency** — If you are using a wallet without AA, send a small amount of the chain's native token to cover gas.
+2. **Fund your wallet with native currency** — Send a small amount of the chain's native token to cover gas.
 
 3. **Create a Rigoblock smart pool** — Ask the agent to help you deploy one. You only need to provide a name, symbol, and base token. Example: _"Create a smart pool called MyFund with symbol MF using USDT as the base token on Arbitrum."_
 
-4. **Mint smart pool tokens** — Fund the pool by minting tokens from your wallet (or any wallet) against the base token balance. Example: _"Mint 1000 pool tokens by depositing 100 USDT into my vault."_ The agent will build and return the transaction for you to sign.
+4. **Mint smart pool tokens** — Fund the pool by minting tokens from your wallet against the base token balance. Example: _"Mint 1000 pool tokens by depositing 100 USDT into my vault."_ The agent will build and return the transaction for you to sign.
 
-5. **Get an agent wallet** — Ask the agent: _"get yourself an agentic wallet"_ This generates a dedicated encrypted EOA for your vault that the system uses to execute delegated trades.
+5. **Get an agent wallet** — Ask the agent: _"get yourself an agentic wallet"_. This provisions a dedicated CDP Server Wallet EOA for your vault — keys are stored in a hardware enclave by Coinbase and never leave CDP's infrastructure.
 
-6. **Configure delegation** — In the app settings, enable delegation on each chain where you want the agent to act. Delegation is **per-chain** — enabling it on Bsc does not enable it on Arbitrum. You choose which vault functions to delegate (e.g. swaps, LP, staking).
+6. **Configure delegation** — In the app settings, enable delegation on each chain where you want the agent to act. Delegation is **per-chain** — enabling it on BSC does not enable it on Arbitrum. You choose which vault functions to delegate (e.g. swaps, LP, staking).
 
 7. **Start operating** — The agent is now ready. Ask it to trade, provide liquidity, stake, bridge, or analyse your positions. By default the agent **asks for your confirmation** before executing any transaction.
 
-8. **Optional — automated strategies** — You can create cron-based strategies (minimum 5-minute intervals) that run automatically. By default these are **manual** (the agent sends a Telegram message and waits for your approval). You can explicitly opt into **autonomous mode** per strategy, which lets the agent execute immediately — all safety layers (NAV shield, delegation checks, selector whitelist) still apply.
+8. **Optional — automated strategies** — You can create cron-based strategies (minimum 5-minute intervals) that run automatically. Strategies are **autonomous by default** (the agent executes immediately and notifies you via Telegram afterwards). You can set `autoExecute=false` per strategy if you want Telegram confirmation before each execution. All safety layers (NAV shield, delegation checks, selector whitelist) always apply.
 
-> **Gas sponsorship note:** The default agent wallet uses Alchemy EIP-7702 gas sponsorship. You do not need to fund the agent wallet with ETH. If sponsorship is not configured for your deployment, the agent wallet address shown in the delegation setup screen will need a small ETH balance for gas.
+> **Gas sponsorship note:** Agent wallets use Alchemy EIP-7702 gas sponsorship by default. You do not need to fund the agent wallet with ETH. If sponsorship is not configured for your deployment, the agent wallet address shown in the delegation setup screen will need a small ETH balance for gas.
 
 ---
 
@@ -94,17 +79,21 @@ The typical flow for a new operator using the web interface:
 
 | Chain | ID | DEX Sources |
 |-------|----|-------------|
-| Ethereum | 1 | Uniswap V2/V3/V4, 0x |
-| Base | 8453 | Uniswap V2/V3/V4, 0x |
-| Arbitrum | 42161 | Uniswap V2/V3/V4, 0x, GMX V2 |
-| Optimism | 10 | Uniswap V2/V3/V4, 0x |
-| Polygon | 137 | Uniswap V2/V3/V4, 0x |
-| BNB Chain | 56 | Uniswap V2/V3/V4, 0x |
+| Ethereum | 1 | 0x, Uniswap V2/V3/V4 |
+| Base | 8453 | 0x, Uniswap V2/V3/V4 |
+| Arbitrum | 42161 | 0x, Uniswap V2/V3/V4, GMX V2 |
+| Optimism | 10 | 0x, Uniswap V2/V3/V4 |
+| Polygon | 137 | 0x, Uniswap V2/V3/V4 |
+| BNB Chain | 56 | 0x, Uniswap V2/V3/V4 |
 | Unichain | 130 | Uniswap V2/V3/V4 |
 
 ## DEX Integrations
 
-### Uniswap (Primary)
+### 0x Aggregator (Default)
+
+Uses the [0x Swap API v2](https://0x.org) as the default DEX — aggregates 150+ liquidity sources for best price across all supported chains.
+
+### Uniswap
 
 Two-step flow via the [Uniswap Trading API](https://trade-api.gateway.uniswap.org/v1):
 
@@ -115,12 +104,7 @@ Features:
 - Routing types: CLASSIC, DUTCH_V2, PRIORITY, WRAP/UNWRAP, CHAINED
 - Both exact-input and exact-output supported
 - Native ETH pools (V4-native, distinct from WETH)
-- Vault adapter adds ~200k gas overhead for execute() wrapping
 - Uses `x-universal-router-version: 2.0` header
-
-### 0x Aggregator (Alternative)
-
-Uses the [0x Swap API v2](https://0x.org) for additional liquidity sources and cross-DEX aggregation.
 
 ### GMX V2 (Perpetuals)
 
@@ -153,8 +137,8 @@ src/
 │   ├── poolFactory.ts       #   RigoblockPoolProxyFactory
 │   └── aIntents.ts          #   AIntents adapter
 ├── llm/
-│   ├── client.ts            # OpenAI chat + tool execution loop
-│   └── tools.ts             # Tool definitions + system prompt
+│   ├── client.ts            # LLM provider routing + tool execution loop
+│   └── tools.ts             # Tool definitions (55+) + system prompt
 ├── middleware/
 │   └── x402.ts              # x402 payment gate + settlement
 ├── routes/
@@ -162,11 +146,9 @@ src/
 │   ├── quote.ts             # GET  /api/quote (stateless pricing)
 │   ├── delegation.ts        # Delegation management + execute
 │   ├── gasPolicy.ts         # Gas sponsorship policy (Alchemy)
-│   ├── wallet.ts            # Self-custodial wallet (create, prepare-tx, submit-signed)
 │   └── telegram.ts          # Telegram bot webhook + commands
 └── services/
-    ├── agentWallet.ts       # Agent wallet gen (BIP-39/BIP-44) + encrypt (AES-256-GCM)
-    ├── userWallet.ts        # User wallet gen + encrypted keystore (PBKDF2+AES-256-GCM)
+    ├── agentWallet.ts       # CDP Server Wallet (per-vault agent EOA via Coinbase)
     ├── auth.ts              # EIP-191 signature + vault ownership
     ├── bundler.ts           # ERC-4337 bundler (gas sponsorship)
     ├── crosschain.ts        # Cross-chain bridging
@@ -175,7 +157,7 @@ src/
     ├── gmxTrading.ts        # GMX V2 perpetuals
     ├── gmxPositions.ts      # GMX position queries
     ├── navGuard.ts          # NAV shield simulation (10% threshold)
-    ├── strategy.ts          # Cron strategies (manual-only)
+    ├── strategy.ts          # Cron strategies (autonomous by default)
     ├── telegram.ts          # Telegram Bot API helpers
     ├── telegramPairing.ts   # Telegram ↔ wallet pairing
     ├── tokenResolver.ts     # Dynamic token address resolution
@@ -195,16 +177,15 @@ public/
 | `GET` | `/api/quote` | x402 | DEX price quote |
 | `GET` | `/api/vault` | — | Vault info (on-chain read) |
 | `GET` | `/api/chains` | — | Supported chains list |
-| `GET` | `/api/health` | — | Health check |
-| `POST` | `/api/delegation/setup` | operator auth | Initialize delegation |
+| `GET` | `/api/health` | — | Health check + x402 pricing |
+| `GET` | `/api/strategy-events` | — | Strategy run events (web polling) |
+| `POST` | `/api/delegation/setup` | operator auth | Initialize delegation + provision CDP wallet |
 | `GET` | `/api/delegation/status` | — | Delegation status |
 | `POST` | `/api/delegation/execute` | operator auth | Execute via agent wallet |
-| `POST` | `/api/wallet/create` | — | Create encrypted WDK wallet |
-| `POST` | `/api/wallet/derive-address` | — | Derive address from seed |
-| `POST` | `/api/wallet/prepare-tx` | — | Prepare gas-sponsored UserOp (EIP-7702) |
-| `POST` | `/api/wallet/submit-signed` | — | Submit client-signed UserOp |
-| `POST` | `/api/wallet/rpc` | — | Alchemy RPC proxy (whitelisted methods) |
+| `GET` | `/api/gas-policy` | webhook | Gas sponsorship policy (Alchemy) |
 | `POST` | `/api/telegram/webhook` | webhook secret | Telegram updates |
+| `POST` | `/api/telegram/pair` | — | Generate Telegram pairing code |
+| `POST` | `/api/telegram/setup` | — | Register Telegram webhook |
 
 ## Setup
 
@@ -213,9 +194,9 @@ public/
 - [Node.js](https://nodejs.org/) 18+
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/)
 - Cloudflare account
-- OpenAI API key
 - [Uniswap API key](https://developers.uniswap.org)
 - [Alchemy API key](https://www.alchemy.com/)
+- [CDP API credentials](https://portal.cdp.coinbase.com/) — for agent wallet generation
 
 ### Install & Run
 
@@ -228,16 +209,17 @@ npm run dev                      # → http://localhost:8787
 ### Secrets (production)
 
 ```bash
-npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put UNISWAP_API_KEY
 npx wrangler secret put ALCHEMY_API_KEY
-npx wrangler secret put AGENT_WALLET_SECRET      # 32+ char random string
 npx wrangler secret put ZEROX_API_KEY             # optional
 npx wrangler secret put ALCHEMY_GAS_POLICY_ID     # optional, for gas sponsorship
-npx wrangler secret put TELEGRAM_BOT_TOKEN         # optional, for Telegram bot
-npx wrangler secret put CDP_API_KEY_ID             # for x402 facilitator
-npx wrangler secret put CDP_API_KEY_SECRET         # for x402 facilitator
+npx wrangler secret put TELEGRAM_BOT_TOKEN        # optional, for Telegram bot
+npx wrangler secret put CDP_API_KEY_ID            # CDP Server Wallet
+npx wrangler secret put CDP_API_KEY_SECRET        # CDP Server Wallet
+npx wrangler secret put CDP_WALLET_SECRET         # CDP Server Wallet signing
 ```
+
+> **Note:** `OPENAI_API_KEY` is optional — the default LLM is Workers AI (Llama 4 Scout / DeepSeek R1). Set `aiApiKey` + `aiModel` per-request to use OpenAI, Anthropic, or any OpenAI-compatible provider.
 
 ### Deploy
 
@@ -251,11 +233,11 @@ npm run deploy
 
 ### AI / LLM Behaviour
 - **The agent can hallucinate.** Like any LLM-based system, the agent may produce incorrect token addresses, amounts, or transaction descriptions.
-- **Different AI models give different results.** The default model is Meta Llama 4 Scout (Workers AI). Switching to GPT-5, Claude Sonnet, or other models via `aiApiKey` / `aiModel` in the API request will change the agent's behaviour, tool-calling accuracy, and output quality. Some models are more reliable than others for structured DeFi workflows.
+- **Different AI models give different results.** The default model is Workers AI (Llama 4 Scout fast path, DeepSeek R1 for reasoning). Switching to GPT-4, Claude Sonnet, or other models via `aiApiKey` / `aiModel` in the API request will change the agent's behaviour, tool-calling accuracy, and output quality.
 - **No multi-step orchestration in a single message.** The `/api/chat` endpoint handles one atomic operation per request. Complex strategies (bridge + swap + LP) require separate messages or an orchestrator agent on your side.
 
 ### Execution & Safety
-- **Autonomous strategies are experimental.** Autonomous mode executes trades without manual confirmation. The on-chain safety layers (NAV shield, selector whitelist) still apply, but strategy logic is LLM-generated and may misfire on unusual market conditions. Start with manual mode.
+- **Autonomous strategies are experimental.** Autonomous mode executes trades without manual confirmation. The on-chain safety layers (NAV shield, selector whitelist) still apply, but strategy logic is LLM-generated and may misfire on unusual market conditions. Monitor your first few autonomous runs.
 - **Delegation is per-chain and per-selector.** Enabling delegation on one chain has no effect on other chains. Each chain requires its own on-chain setup transaction.
 
 ---

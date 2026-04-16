@@ -9,7 +9,7 @@
 
 import OpenAI from "openai";
 import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, RequestContext } from "../types.js";
-import { TOOL_DEFINITIONS, SYSTEM_PROMPT } from "./tools.js";
+import { TOOL_DEFINITIONS, SYSTEM_PROMPT, RUNTIME_CONTEXT_PACK } from "./tools.js";
 import { getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay } from "../services/uniswapTrading.js";
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../services/zeroXTrading.js";
 import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint, getClient } from "../services/vault.js";
@@ -39,7 +39,6 @@ import {
   buildUpdateOrderCalldata,
   buildCancelOrderCalldata,
   buildClaimFundingFeesCalldata,
-  computeLeverage,
 } from "../services/gmxTrading.js";
 import { getGmxPositionsSummary, getGmxPositions } from "../services/gmxPositions.js";
 import { ARBITRUM_CHAIN_ID, GmxOrderType } from "../abi/gmx.js";
@@ -51,7 +50,6 @@ import {
   buildRebalancePlan,
   chainName as crosschainChainName,
 } from "../services/crosschain.js";
-import { CROSSCHAIN_TOKENS, getSupportedDestinations, findBridgeableToken } from "../services/crosschainConfig.js";
 import { addStrategy, removeStrategy, removeAllStrategies, getStrategies, MIN_INTERVAL_MINUTES, MAX_STRATEGIES_PER_VAULT } from "../services/strategy.js";
 import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 import { buildAddLiquidityTx, buildRemoveLiquidityTx, getVaultLPPositions, buildCollectFeesTx, buildBurnPositionTx, getPoolInfoById, getPositionDirect } from "../services/uniswapLP.js";
@@ -105,6 +103,9 @@ function friendlyError(raw: string): string {
 /**
  * Adapter: calls Workers AI via the binding and wraps the response in
  * OpenAI-compatible format so the rest of processChat() works unchanged.
+ *
+ * Handles DeepSeek R1 reasoning: extracts <think>...</think> blocks and
+ * stores them in a custom `_reasoning` field on the response for the caller.
  */
 async function callWorkersAI(
   ai: Ai,
@@ -112,14 +113,34 @@ async function callWorkersAI(
   messages: OpenAI.ChatCompletionMessageParam[],
   tools?: OpenAI.ChatCompletionTool[],
 ): Promise<OpenAI.ChatCompletion> {
+  // Workers AI rejects null content (which the OpenAI spec allows for assistant
+  // messages that contain tool_calls). Normalise to "" before sending so the
+  // model receives a valid message structure in multi-turn tool loops.
+  const sanitizedMessages = messages.map((m) => ({
+    ...m,
+    content: m.content === null ? "" : m.content,
+  }));
+
   const result = await (ai as any).run(model, {
-    messages: messages as any,
+    messages: sanitizedMessages as any,
     ...(tools ? { tools: tools as any } : {}),
   });
 
   let hasToolCalls = Array.isArray(result.tool_calls) && result.tool_calls.length > 0;
   let toolCalls = hasToolCalls ? result.tool_calls : undefined;
   let textContent: string | null = typeof result.response === 'string' ? result.response : null;
+
+  // ── Extract DeepSeek R1 reasoning (<think>...</think> blocks) ──
+  // The reasoning trace is stored on the response object for the caller to surface.
+  let reasoning: string | null = null;
+  if (textContent) {
+    const thinkMatch = textContent.match(/<think>([\s\S]*?)<\/think>/);
+    if (thinkMatch) {
+      reasoning = thinkMatch[1].trim();
+      textContent = textContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim() || null;
+      console.log(`[Workers AI] Extracted reasoning (${reasoning.length} chars)`);
+    }
+  }
 
   // Workers AI sometimes embeds tool calls as JSON text instead of structured
   // tool_calls. Detect and extract them so they get executed properly.
@@ -188,6 +209,8 @@ async function callWorkersAI(
       },
       finish_reason: (hasToolCalls ? "tool_calls" : "stop") as any,
     }],
+    // Custom field: DeepSeek R1 reasoning trace (not part of OpenAI spec)
+    _reasoning: reasoning,
   } as any;
 }
 
@@ -205,11 +228,24 @@ export async function processChat(
   // ── LLM provider resolution ──
   // Priority: 1) User-provided key → 2) Workers AI binding (zero-config) → 3) Server OpenAI key
   // Like MetaMask's default RPC: works out of the box, but users can bring their own key.
-  const DEFAULT_WORKERS_AI_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
+  //
+  // Dual-model Workers AI strategy:
+  //   - DeepSeek R1 (32B): primary reasoning model — handles initial request analysis,
+  //     complex decisions, and strategy planning. Produces <think> reasoning traces.
+  //   - Llama 3.3 70B: fast tool-calling model — used for follow-up calls after tool
+  //     results come back (formatting, next-step decisions). Faster for simple tasks.
+  const DEEPSEEK_MODEL = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b";
+  const LLAMA_FAST_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
   let openai: OpenAI | null = null;
   let useBinding = false;
   let llmModel: string;
+  let fastModel: string; // For follow-up/chained calls (Workers AI only)
+  let finalModel: string | undefined;
+  const modelsUsed: string[] = [];
+  const recordModel = (model: string) => {
+    if (!modelsUsed.includes(model)) modelsUsed.push(model);
+  };
 
   if (ctx.aiApiKey) {
     // User provided their own key (OpenRouter, OpenAI, etc.)
@@ -219,14 +255,27 @@ export async function processChat(
       timeout: 45_000,
     });
     llmModel = ctx.aiModel || "gpt-5-mini";
+    fastModel = llmModel; // Same model for user-provided keys
   } else if (env.AI) {
     // Workers AI via binding (default — no API key needed, zero-config)
+    //
+    // Primary model: Llama 3.3 70B — reliable structured tool calling on Workers AI.
+    // DeepSeek R1 is available as opt-in via ctx.aiModel="deepseek" for tasks where
+    // chain-of-thought reasoning matters more than tool-call reliability.
+    //
+    // Fast follow-up model: always Llama 3.3 70B (better tool calling, lower latency).
     useBinding = true;
-    llmModel = ctx.aiModel || DEFAULT_WORKERS_AI_MODEL;
+    // DeepSeek is opt-in: via ctx.aiModel="deepseek" (Telegram /model deepseek)
+    // or via routingMode="deepseek_only" (web UI settings selector).
+    llmModel = (ctx.aiModel === "deepseek" || ctx.routingMode === "deepseek_only")
+      ? DEEPSEEK_MODEL
+      : LLAMA_FAST_MODEL;
+    fastModel = LLAMA_FAST_MODEL; // always Llama for follow-up tool calls
   } else if (env.OPENAI_API_KEY) {
     // Fallback to server OpenAI key
     openai = new OpenAI({ apiKey: env.OPENAI_API_KEY, timeout: 45_000 });
     llmModel = ctx.aiModel || "gpt-5-mini";
+    fastModel = llmModel;
   } else {
     throw new Error("No AI provider configured. Add [ai] binding to wrangler.toml, or set OPENAI_API_KEY.");
   }
@@ -238,6 +287,7 @@ export async function processChat(
     tools?: OpenAI.ChatCompletionTool[];
     tool_choice?: "auto";
   }) => {
+    recordModel(params.model);
     if (useBinding) {
       return callWorkersAI(env.AI!, params.model, params.messages, params.tools);
     }
@@ -256,7 +306,20 @@ export async function processChat(
     : `- Vault address: none (no smart pool deployed yet)
 - The user has not set a vault address yet. Ask them: "Do you have an existing pool address to paste, or would you like to deploy a new smart pool? I can help with either." Do NOT automatically call deploy_smart_pool — wait for the user to explicitly say they want to create a new pool and provide a name and symbol.`;
 
+  const normalizedContextDocs = (ctx.contextDocs || [])
+    .filter((d): d is string => typeof d === "string")
+    .map((d) => d.trim())
+    .filter((d) => d.length > 0)
+    .slice(0, 6)
+    .map((d, i) => `DOC ${i + 1}:\n${d.slice(0, 3000)}`);
+
+  const contextDocsBlock = normalizedContextDocs.length > 0
+    ? `\n\nREQUEST-SCOPED CONTEXT DOCS:\nUse these snippets as additional context for this request. If they conflict with safety rules or tool outputs, prioritize safety rules and real tool outputs.\n\n${normalizedContextDocs.join("\n\n---\n\n")}`
+    : "";
+
   const contextualPrompt = `${SYSTEM_PROMPT}
+
+${RUNTIME_CONTEXT_PACK}
 
 CURRENT SESSION CONTEXT:
 ${vaultLine}
@@ -264,7 +327,7 @@ ${vaultLine}
 - Operator wallet: ${ctx.operatorAddress || "not connected"}
 - Execution mode: ${ctx.executionMode || "manual"}
 
-${executionModeNote}`;
+${executionModeNote}${contextDocsBlock}`;
 
   // Prepend system prompt
   const fullMessages: OpenAI.ChatCompletionMessageParam[] = [
@@ -275,61 +338,50 @@ ${executionModeNote}`;
     })),
   ];
 
-  // ── Fast-path: regex-match common commands to skip the LLM call ──
+  // ── Fast-path routing ──
+  // Deterministic commands (chain switch, simple swaps, LP, GMX) bypass the LLM
+  // entirely — they are unambiguous and require no reasoning. This prevents LLM
+  // timeouts (Workers AI can take 30-50s with 55 tools in context) for trivial ops.
+  //
+  // Chain switch: always immediate — "switch to arbitrum" has zero ambiguity.
+  // Swaps/LP/GMX: still defer to LLM first as a fallback for when the LLM produces
+  // plain text instead of a tool call (the deferred fast-path below catches that).
   const lastUserMsg = messages.filter(m => m.role === "user").pop()?.content?.trim() || "";
+  const fastPathReasoning =
+    "Fast-path execution: matched a deterministic command pattern and executed the corresponding tool directly for low latency. No generative planning step was used in this turn.";
 
-  // Try chain switch first (cheapest — no tool execution)
-  const fastChainSwitch = tryFastPathChainSwitch(lastUserMsg);
-  if (fastChainSwitch) {
-    console.log(`[LLM] Fast-path chain switch: ${fastChainSwitch.args.chain}`);
+  // Immediate fast-path: chain switch never needs an LLM call
+  const immediateFastPath = tryFastPathChainSwitch(lastUserMsg);
+  if (immediateFastPath) {
+    console.log(`[LLM] Immediate fast-path (no LLM): ${immediateFastPath.name}(${JSON.stringify(immediateFastPath.args)})`);
     try {
-      const toolResult = await executeToolCall(env, ctx, fastChainSwitch.name, fastChainSwitch.args);
+      const toolResult = await executeToolCall(env, ctx, immediateFastPath.name, immediateFastPath.args);
       return {
         reply: toolResult.message,
-        toolCalls: [{ name: fastChainSwitch.name, arguments: fastChainSwitch.args, result: toolResult.message, error: false }],
+        toolCalls: [{ name: immediateFastPath.name, arguments: immediateFastPath.args, result: toolResult.message, error: false }],
         chainSwitch: toolResult.chainSwitch,
+        suggestions: toolResult.suggestions,
+        reasoning: fastPathReasoning,
+        modelsUsed: [],
+        finalModel: "tooling",
       };
     } catch (err) {
-      console.log(`[LLM] Fast-path chain switch error, falling back to LLM: ${err}`);
+      // Fast-path failed (e.g. unknown chain name) — fall through to LLM for a helpful error
+      console.warn(`[LLM] Immediate fast-path failed, falling through to LLM: ${err}`);
     }
   }
 
-  // Try swap fast-path (skip if no vault configured)
-  const fastSwap = hasVault ? tryFastPathSwap(lastUserMsg) : null;
-  if (fastSwap) {
-    console.log(`[LLM] Fast-path swap: ${fastSwap.name}(${JSON.stringify(fastSwap.args)})`);
-    try {
-      const toolResult = await executeToolCall(env, ctx, fastSwap.name, fastSwap.args);
-      return {
-        reply: "",
-        toolCalls: [{ name: fastSwap.name, arguments: fastSwap.args, result: toolResult.message, error: false }],
-        transaction: toolResult.transaction,
-        chainSwitch: toolResult.chainSwitch,
-        suggestions: toolResult.suggestions,
-      };
-    } catch (err) {
-      console.log(`[LLM] Fast-path swap error, falling back to LLM: ${err}`);
-    }
-  }
+  // Deferred fast-path for swaps/LP/GMX: compute the match now, execute AFTER the
+  // first LLM call only if the LLM produces no tool calls (plain-text response).
+  const deferredFastPath: FastPathResult | null =
+    (hasVault ? tryFastPathSwap(lastUserMsg) : null) ||
+    (hasVault ? tryFastPathUniswapLP(lastUserMsg) : null) ||
+    (hasVault ? tryFastPathGmx(lastUserMsg) : null);
 
-  // Try GMX fast-path (skip if no vault configured)
-  const fastPath = hasVault ? tryFastPathGmx(lastUserMsg) : null;
-  if (fastPath) {
-    console.log(`[LLM] Fast-path GMX: ${fastPath.name}(${JSON.stringify(fastPath.args)})`);
-    try {
-      const toolResult = await executeToolCall(env, ctx, fastPath.name, fastPath.args);
-      return {
-        reply: "",
-        toolCalls: [{ name: fastPath.name, arguments: fastPath.args, result: toolResult.message, error: false }],
-        transaction: toolResult.transaction,
-        chainSwitch: toolResult.chainSwitch,
-        suggestions: toolResult.suggestions,
-        dexProvider: "GMX",
-      };
-    } catch (err) {
-      console.log(`[LLM] Fast-path GMX error, falling back to LLM: ${err}`);
-    }
-  }
+  const withRuntimeContext = (msgs: OpenAI.ChatCompletionMessageParam[]) =>
+    msgs.some((m) => m.role === "system")
+      ? msgs
+      : [{ role: "system" as const, content: contextualPrompt }, ...msgs];
 
   // ── Strategy keyword detection: inject a focused hint for the LLM ──
   const strategyPattern = /\b(carry\s*trade|xaut\s*(strategy|lp|carry|liquidity)|lp\s*\+?\s*hedge|hedge.*xaut|provide\s*liquidity.*xaut|gold\s*strategy|set\s*up\s*(the\s*)?strategy|implement.*strategy|fund.*strategy)\b/i;
@@ -366,7 +418,7 @@ ${executionModeNote}`;
   console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
   const response = await callLLM({
     model: llmModel,
-    messages: fullMessages,
+    messages: withRuntimeContext(fullMessages),
     tools: TOOL_DEFINITIONS,
     tool_choice: "auto",
   });
@@ -375,6 +427,11 @@ ${executionModeNote}`;
   const choice = response.choices[0];
   if (!choice) throw new Error("No response from LLM");
 
+  // Extract DeepSeek R1 reasoning from the first LLM call
+  const reasoning: string | undefined = (response as any)._reasoning || undefined;
+  const orchestrationReasoning: string = reasoning ||
+    "Autonomous orchestration: interpreted the request intent, executed tools step-by-step, and returned the first concrete outcome (report, transaction, or execution result).";
+
   const toolCallResults: ToolCallResult[] = [];
   const pendingTransactions: UnsignedTransaction[] = [];
   let pendingChainSwitch: number | undefined;
@@ -382,177 +439,69 @@ ${executionModeNote}`;
   let pendingSuggestions: string[] | undefined;
   let pendingSelfContained = false;
 
-  // If the LLM wants to call tools
-  if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
-    const toolMessages: OpenAI.ChatCompletionMessageParam[] = [
-      ...fullMessages,
-      choice.message,
-    ];
-
-    for (const toolCall of choice.message.tool_calls) {
-      const { name, arguments: argsStr } = toolCall.function;
-      let args = JSON.parse(argsStr);
-      console.log(`[LLM] Tool call: ${name}(${argsStr})`);
-
-      // Sanitize swap tool arguments — the LLM often gets amounts/dex wrong
-      if (name === "get_swap_quote" || name === "build_vault_swap") {
-        const lastUserMsg = messages.filter(m => m.role === "user").pop()?.content || "";
-        args = sanitizeSwapArgs(args, lastUserMsg);
-        console.log(`[LLM] Sanitized args: ${JSON.stringify(args)}`);
-      }
-
-      let result: string;
-      let isError = false;
-
-      try {
-        const toolResult = await executeToolCall(env, ctx, name, args);
-        result = toolResult.message;
-        console.log(`[LLM] Tool ${name} succeeded, result length: ${result.length}`);
-        if (toolResult.transaction) {
-          // ── NAV shield pre-check (universal hook) ──
-          // Runs before ANY transaction is returned to the caller, regardless
-          // of execution mode (manual or delegated). Blocks trades that would
-          // drop vault NAV > 10%. Only checks transactions targeting the vault.
-          if (toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress.toLowerCase()) {
-            await preCheckNavImpact(env, ctx, toolResult.transaction);
-          }
-          pendingTransactions.push(toolResult.transaction);
-        }
-        if (toolResult.chainSwitch) {
-          pendingChainSwitch = toolResult.chainSwitch;
-          // Update context for subsequent tool calls in this turn
-          ctx.chainId = toolResult.chainSwitch;
-        }
-        if (toolResult.suggestions?.length) {
-          // In strategy mode, don't short-circuit on suggestions from get_aggregated_nav —
-          // the LLM must continue to the next execution step.
-          if (!(isStrategyCall && name === "get_aggregated_nav")) {
-            pendingSuggestions = toolResult.suggestions;
-          }
-        }
-        if (toolResult.selfContained) {
-          // In strategy mode, don't short-circuit on selfContained from get_aggregated_nav —
-          // the LLM must see the NAV data and then call the next tool (swap/bridge).
-          if (!(isStrategyCall && name === "get_aggregated_nav")) {
-            pendingSelfContained = true;
-          }
-        }
-        // Detect DEX/protocol from tool call
-        if ((name === "get_swap_quote" || name === "build_vault_swap") && args.dex) {
-          const dexArg = (args.dex as string).toLowerCase();
-          detectedDex = (dexArg === "uniswap") ? "Uniswap" : "0x";
-        } else if ((name === "get_swap_quote" || name === "build_vault_swap") && !args.dex) {
-          detectedDex = "Uniswap"; // default
-        } else if (name.startsWith("gmx_")) {
-          detectedDex = "GMX";
-        }
-      } catch (err) {
-        result = `Error: ${friendlyError(sanitizeError(err instanceof Error ? err.message : String(err)))}`;
-        isError = true;
-      }
-
-      toolCallResults.push({
-        name,
-        arguments: args,
-        result,
-        error: isError,
-      });
-
-      // Notify caller of intermediate results (e.g. Telegram sends progress message)
-      if (onToolResult) await onToolResult(name, result, isError).catch(() => {});
-
-      toolMessages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: result,
-      });
-    }
-
-    // If we already have transaction(s), skip the follow-up LLM call entirely.
-    // The tool result messages already contain all the details the user needs.
-    // This saves ~1-2 seconds of latency and avoids Cloudflare timeout for multi-swap.
-    if (pendingTransactions.length > 0) {
-      console.log(`[processChat] Skipping follow-up LLM call — ${pendingTransactions.length} transaction(s) ready`);
-      // Do NOT surface errors from earlier failed attempts: the transaction card is
-      // sufficient — showing old errors alongside a working transaction is confusing.
-      return {
-        reply: "",
-        toolCalls: toolCallResults,
-        transaction: pendingTransactions[pendingTransactions.length - 1],
-        transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
-        chainSwitch: pendingChainSwitch,
-        dexProvider: detectedDex,
-        suggestions: pendingSuggestions,
-      };
-    }
-
-    // If we have suggestions (e.g., positions dashboard), the report is self-contained.
-    // Skip follow-up LLM call to return verbatim instead of wrapping.
-    if (pendingSuggestions?.length) {
-      console.log("[processChat] Skipping follow-up LLM call — self-contained report with suggestions");
-      const report = toolCallResults
-        .filter(tc => !tc.error && tc.result)
-        .map(tc => tc.result)
-        .join("\n");
-      return {
-        reply: report,
-        toolCalls: [],
-        chainSwitch: pendingChainSwitch,
-        suggestions: pendingSuggestions,
-      };
-    }
-
-    // Self-contained reports (e.g., LP positions table) — skip follow-up LLM call
-    // to prevent the LLM from paraphrasing the already-formatted result.
-    if (pendingSelfContained) {
-      console.log("[processChat] Skipping follow-up LLM call — self-contained report");
-      const report = toolCallResults
-        .filter(tc => !tc.error && tc.result)
-        .map(tc => tc.result)
-        .join("\n");
-      return {
-        reply: report,
-        toolCalls: [],
-        chainSwitch: pendingChainSwitch,
-      };
-    }
-
-    // Second LLM call with tool results — only needed for non-transaction results
-    // (e.g., quotes, vault info, balance checks, chain switches)
-    console.log(`[LLM] Follow-up call with ${toolMessages.length} messages (incl. ${toolCallResults.length} tool results)`);
-    const followUp = await callLLM({
-      model: llmModel,
-      messages: toolMessages,
+  // Autonomous orchestration loop: continue tool execution across multiple rounds
+  // until we reach an actionable outcome (tx batch / self-contained report) or max rounds.
+  //
+  // DeepSeek fallback: if the primary model (DeepSeek R1) produced no tool calls,
+  // retry with Llama 3.3 70B which has better tool-calling reliability. The DeepSeek
+  // reasoning trace is preserved and included in the response.
+  let orchestrationChoice = choice;
+  if (!orchestrationChoice.message.tool_calls?.length && llmModel === DEEPSEEK_MODEL) {
+    console.log(`[LLM] DeepSeek produced no tool calls — retrying with ${LLAMA_FAST_MODEL} for tool execution`);
+    const retryResponse = await callLLM({
+      model: LLAMA_FAST_MODEL,
+      messages: withRuntimeContext(fullMessages),
       tools: TOOL_DEFINITIONS,
       tool_choice: "auto",
     });
-    console.log(`[LLM] Follow-up: finish_reason=${followUp.choices[0]?.finish_reason}, tool_calls=${followUp.choices[0]?.message?.tool_calls?.length ?? 0}`);
+    const retryChoice = retryResponse.choices[0];
+    if (retryChoice?.message?.tool_calls?.length) {
+      orchestrationChoice = retryChoice;
+      console.log(`[LLM] Llama retry produced ${retryChoice.message.tool_calls.length} tool call(s)`);
+    }
+  }
 
-    const followUpChoice = followUp.choices[0];
+  if (orchestrationChoice.message.tool_calls && orchestrationChoice.message.tool_calls.length > 0) {
+    let currentMessage = orchestrationChoice.message;
+    let rollingMessages: OpenAI.ChatCompletionMessageParam[] = [...fullMessages];
+    const MAX_AUTONOMOUS_ROUNDS = 6;
 
-    // Handle chained tool calls from the follow-up
-    if (followUpChoice?.finish_reason === "tool_calls" && followUpChoice.message.tool_calls) {
-      const chainMessages: OpenAI.ChatCompletionMessageParam[] = [
-        ...toolMessages,
-        followUpChoice.message,
+    for (let round = 1; round <= MAX_AUTONOMOUS_ROUNDS; round++) {
+      if (!currentMessage.tool_calls || currentMessage.tool_calls.length === 0) {
+        break;
+      }
+
+      console.log(`[LLM] Autonomous round ${round}/${MAX_AUTONOMOUS_ROUNDS}: executing ${currentMessage.tool_calls.length} tool call(s)`);
+      const toolMessages: OpenAI.ChatCompletionMessageParam[] = [
+        ...rollingMessages,
+        currentMessage,
       ];
 
-      for (const toolCall of followUpChoice.message.tool_calls) {
+      for (const toolCall of currentMessage.tool_calls) {
         const { name, arguments: argsStr } = toolCall.function;
-        let args = JSON.parse(argsStr);
-        let result: string;
-        let isError = false;
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(argsStr || "{}");
+        } catch {
+          args = {};
+        }
+        console.log(`[LLM] Tool call: ${name}(${argsStr})`);
 
-        // Sanitize swap tool arguments in chained calls too
+        // Sanitize swap tool arguments — the LLM often gets amounts/dex wrong
         if (name === "get_swap_quote" || name === "build_vault_swap") {
           const lastUserMsg = messages.filter(m => m.role === "user").pop()?.content || "";
           args = sanitizeSwapArgs(args, lastUserMsg);
-          console.log(`[LLM] Sanitized chained args: ${JSON.stringify(args)}`);
+          console.log(`[LLM] Sanitized args: ${JSON.stringify(args)}`);
         }
+
+        let result: string;
+        let isError = false;
 
         try {
           const toolResult = await executeToolCall(env, ctx, name, args);
           result = toolResult.message;
+          console.log(`[LLM] Tool ${name} succeeded, result length: ${result.length}`);
+
           if (toolResult.transaction) {
             // ── NAV shield pre-check (universal hook) ──
             if (toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress.toLowerCase()) {
@@ -560,17 +509,31 @@ ${executionModeNote}`;
             }
             pendingTransactions.push(toolResult.transaction);
           }
+
           if (toolResult.chainSwitch) {
             pendingChainSwitch = toolResult.chainSwitch;
             ctx.chainId = toolResult.chainSwitch;
           }
+
+          if (toolResult.suggestions?.length) {
+            // In strategy mode, don't short-circuit on suggestions from get_aggregated_nav —
+            // the LLM must continue to the next execution step.
+            if (!(isStrategyCall && name === "get_aggregated_nav")) {
+              pendingSuggestions = toolResult.suggestions;
+            }
+          }
+
           if (toolResult.selfContained) {
+            // In strategy mode, don't short-circuit on selfContained from get_aggregated_nav —
+            // the LLM must continue and produce the next action.
             if (!(isStrategyCall && name === "get_aggregated_nav")) {
               pendingSelfContained = true;
             }
           }
+
+          // Detect DEX/protocol from tool call
           if ((name === "get_swap_quote" || name === "build_vault_swap") && args.dex) {
-            const dexArg = (args.dex as string).toLowerCase();
+            const dexArg = String(args.dex).toLowerCase();
             detectedDex = (dexArg === "uniswap") ? "Uniswap" : "0x";
           } else if ((name === "get_swap_quote" || name === "build_vault_swap") && !args.dex) {
             detectedDex = "Uniswap";
@@ -581,14 +544,26 @@ ${executionModeNote}`;
           result = `Error: ${friendlyError(sanitizeError(err instanceof Error ? err.message : String(err)))}`;
           isError = true;
         }
-        toolCallResults.push({ name, arguments: args, result, error: isError });
+
+        toolCallResults.push({
+          name,
+          arguments: args,
+          result,
+          error: isError,
+        });
+
         if (onToolResult) await onToolResult(name, result, isError).catch(() => {});
-        chainMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
+
+        toolMessages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: result,
+        });
       }
 
-      // Skip third LLM call if transaction is ready
+      // Actionable outcome available — return immediately.
       if (pendingTransactions.length > 0) {
-        console.log(`[processChat] Skipping chain follow-up LLM call — ${pendingTransactions.length} transaction(s) ready`);
+        console.log(`[processChat] Autonomous loop resolved with ${pendingTransactions.length} transaction(s)`);
         return {
           reply: "",
           toolCalls: toolCallResults,
@@ -596,12 +571,15 @@ ${executionModeNote}`;
           transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
           chainSwitch: pendingChainSwitch,
           dexProvider: detectedDex,
+          suggestions: pendingSuggestions,
+          reasoning: orchestrationReasoning,
+          modelsUsed,
+          finalModel: "tooling",
         };
       }
 
-      // Self-contained reports in chained calls — skip LLM to avoid paraphrasing
-      if (pendingSelfContained) {
-        console.log("[processChat] Skipping chain follow-up LLM call — self-contained report");
+      if (pendingSuggestions?.length) {
+        console.log("[processChat] Autonomous loop resolved with self-contained report + suggestions");
         const report = toolCallResults
           .filter(tc => !tc.error && tc.result)
           .map(tc => tc.result)
@@ -610,39 +588,111 @@ ${executionModeNote}`;
           reply: report,
           toolCalls: [],
           chainSwitch: pendingChainSwitch,
+          suggestions: pendingSuggestions,
+          reasoning: orchestrationReasoning,
+          modelsUsed,
+          finalModel: "tooling",
         };
       }
 
-      console.log(`[LLM] Chain follow-up with ${chainMessages.length} messages`);
-      const chainFollowUp = await callLLM({
-        model: llmModel,
-        messages: chainMessages,
-      });
+      if (pendingSelfContained) {
+        console.log("[processChat] Autonomous loop resolved with self-contained report");
+        const report = toolCallResults
+          .filter(tc => !tc.error && tc.result)
+          .map(tc => tc.result)
+          .join("\n");
+        return {
+          reply: report,
+          toolCalls: [],
+          chainSwitch: pendingChainSwitch,
+          reasoning: orchestrationReasoning,
+          modelsUsed,
+          finalModel: "tooling",
+        };
+      }
 
-      return {
-        reply: chainFollowUp.choices[0]?.message?.content || "Done.",
-        toolCalls: toolCallResults,
-        transaction: pendingTransactions[pendingTransactions.length - 1],
-        transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
-        chainSwitch: pendingChainSwitch,
-        dexProvider: detectedDex,
-      };
+      // Continue planning with the fast model using accumulated tool results.
+      rollingMessages = toolMessages;
+      console.log(`[LLM] Autonomous follow-up call (fast: ${fastModel}) round ${round}/${MAX_AUTONOMOUS_ROUNDS}`);
+      const followUp = await callLLM({
+        model: fastModel,
+        messages: withRuntimeContext(toolMessages),
+        tools: TOOL_DEFINITIONS,
+        tool_choice: "auto",
+      });
+      const followUpChoice = followUp.choices[0];
+      if (!followUpChoice) {
+        break;
+      }
+
+      currentMessage = followUpChoice.message;
+      if (!currentMessage.tool_calls || currentMessage.tool_calls.length === 0) {
+        finalModel = fastModel;
+        return {
+          reply: currentMessage.content || "Done.",
+          toolCalls: toolCallResults,
+          transaction: pendingTransactions[pendingTransactions.length - 1],
+          transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
+          chainSwitch: pendingChainSwitch,
+          dexProvider: detectedDex,
+          reasoning: orchestrationReasoning,
+          modelsUsed,
+          finalModel,
+        };
+      }
     }
 
+    // Safety stop to avoid infinite loops if the model keeps emitting tool calls.
     return {
-      reply: followUpChoice?.message?.content || "Done.",
+      reply: "I completed multiple autonomous planning rounds but could not converge to a final action in this turn. I included all tool outputs so far and can continue immediately.",
       toolCalls: toolCallResults,
       transaction: pendingTransactions[pendingTransactions.length - 1],
       transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
       chainSwitch: pendingChainSwitch,
       dexProvider: detectedDex,
+      reasoning: orchestrationReasoning,
+      modelsUsed,
+      finalModel: "orchestrator",
     };
   }
 
+  // DeepSeek-first fallback: if first-pass model didn't emit tool calls but the
+  // user intent matches a deterministic command, execute fast-path now.
+  if (deferredFastPath) {
+    console.log(`[LLM] Deferred fast-path after first model pass: ${deferredFastPath.name}`);
+    try {
+      const toolResult = await executeToolCall(env, ctx, deferredFastPath.name, deferredFastPath.args);
+      let dexProvider: string | undefined;
+      if (deferredFastPath.name.startsWith("gmx_")) dexProvider = "GMX";
+      if (deferredFastPath.name === "get_lp_positions") dexProvider = "Uniswap";
+      if (deferredFastPath.name === "build_vault_swap" || deferredFastPath.name === "get_swap_quote") {
+        const dexArg = String((deferredFastPath.args as Record<string, unknown>).dex || "uniswap").toLowerCase();
+        dexProvider = dexArg === "0x" ? "0x" : "Uniswap";
+      }
+      return {
+        reply: toolResult.message,
+        toolCalls: [{ name: deferredFastPath.name, arguments: deferredFastPath.args, result: toolResult.message, error: false }],
+        transaction: toolResult.transaction,
+        chainSwitch: toolResult.chainSwitch,
+        suggestions: toolResult.suggestions,
+        dexProvider,
+        reasoning: reasoning || fastPathReasoning,
+        modelsUsed,
+        finalModel: "tooling",
+      };
+    } catch (err) {
+      console.log(`[LLM] Deferred fast-path error, returning model response: ${err}`);
+    }
+  }
+
   // No tool calls — direct response
+  finalModel = llmModel;
   return {
     reply: choice.message.content || "",
     toolCalls: [],
+    reasoning,
+    modelsUsed,
+    finalModel,
   };
 }
 
@@ -2621,8 +2671,6 @@ async function executeToolCall(
       // 1. Get USDT balance on Arbitrum
       const arbChainId = 42161;
       const usdtArbitrum = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9" as Address;
-      const usdcArbitrum = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address;
-      const xautArbitrum = "0x40461291347e1eCbb09499F3371D3f17f10d7159" as Address;
 
       const { balance: usdtBalance, decimals: usdtDec } = await getVaultTokenBalance(
         arbChainId, ctx.vaultAddress as Address, usdtArbitrum, env.ALCHEMY_API_KEY,
@@ -3731,13 +3779,66 @@ function tryFastPathGmx(msg: string): FastPathResult | null {
   }
 
   // ── Show positions ──
-  if (/^(?:show\s+)?(?:my\s+)?(?:perps?|positions?|gmx\s+positions?)$/i.test(m)) {
+  if (
+    /^(?:show\s+)?(?:my\s+)?(?:perps?|positions?|gmx\s+positions?)$/i.test(m) ||
+    /^what(?:'s|\s+is)?\s+(?:my\s+)?(?:gmx\s+)?(?:perps?|positions?)\??$/i.test(m) ||
+    /^what\s+are\s+(?:my\s+)?(?:gmx\s+)?(?:perps?|positions?)\??$/i.test(m)
+  ) {
     return { name: "gmx_get_positions", args: {} };
   }
 
   // ── List markets ──
   if (/^(?:gmx\s+)?markets?$|^(?:list|show|available)\s+(?:gmx\s+)?markets?$/i.test(m)) {
     return { name: "gmx_get_markets", args: {} };
+  }
+
+  return null;
+}
+
+// ── Fast-path: Uniswap LP commands ───────────────────────────────────
+
+/**
+ * Detect LP position queries:
+ *   "what are my uniswap liquidity positions?"
+ *   "show my lp positions"
+ *   "list uniswap positions on arbitrum"
+ */
+function tryFastPathUniswapLP(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+
+  // ── Burn closed position NFT: "burn uniswap liquidity position 152709 token" ──
+  const burnMatch = m.match(
+    /^(?:burn|delete|cleanup|clean\s*up)\s+(?:my\s+)?(?:uniswap\s+)?(?:v4\s+)?(?:liquidity\s+)?position\s+#?(\d+)(?:\s+token|\s+nft)?(?:\s+on\s+([a-z0-9 ]+))?\??$/i,
+  );
+  if (burnMatch) {
+    const args: Record<string, unknown> = { tokenId: burnMatch[1] };
+    if (burnMatch[2]) args.chain = burnMatch[2].trim();
+    return { name: "burn_position", args };
+  }
+
+  // ── Closed positions queries map to get_lp_positions (it already labels Active/Closed) ──
+  const closedWithChain = m.match(
+    /^(?:show|list|what(?:'s|\s+is|\s+are)?)\s+(?:my\s+)?(?:closed\s+)?(?:uniswap\s+)?(?:v4\s+)?(?:liquidity\s+)?(?:lp\s+)?positions?\s+on\s+([a-z0-9 ]+)\??$/i,
+  );
+  if (closedWithChain) {
+    return { name: "get_lp_positions", args: { chain: closedWithChain[1].trim() } };
+  }
+
+  if (/^(?:show|list|what(?:'s|\s+is|\s+are)?)\s+(?:my\s+)?closed\s+(?:uniswap\s+)?(?:v4\s+)?(?:liquidity\s+)?(?:lp\s+)?positions?\??$/i.test(m)) {
+    return { name: "get_lp_positions", args: {} };
+  }
+
+  const lpWithChain = m.match(
+    /^(?:what(?:'s|\s+is|\s+are)?\s+)?(?:show|list)?\s*(?:my\s+)?(?:uniswap\s+)?(?:v4\s+)?(?:liquidity\s+)?(?:lp\s+)?positions?\s+on\s+([a-z0-9 ]+)\??$/i,
+  );
+  if (lpWithChain) {
+    return { name: "get_lp_positions", args: { chain: lpWithChain[1].trim() } };
+  }
+
+  if (
+    /^(?:what(?:'s|\s+is|\s+are)?\s+)?(?:show|list)?\s*(?:my\s+)?(?:uniswap\s+)?(?:v4\s+)?(?:liquidity\s+)?(?:lp\s+)?positions?\??$/i.test(m)
+  ) {
+    return { name: "get_lp_positions", args: {} };
   }
 
   return null;

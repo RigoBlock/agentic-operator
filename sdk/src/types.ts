@@ -18,6 +18,12 @@ export interface ChatResponse {
   reply: string;
   transaction?: TransactionData;
   executionResult?: ExecutionResult;
+  /** DeepSeek R1 reasoning trace (contents of <think>...</think> block) */
+  reasoning?: string;
+  /** Ordered list of models that produced this output */
+  modelsUsed?: string[];
+  /** Model that authored the final natural-language output (or 'tooling') */
+  finalModel?: string;
 }
 
 export interface TransactionData {
@@ -90,27 +96,6 @@ export interface VaultInfoParams {
   chain?: string;
 }
 
-// ─── Strategy Types ─────────────────────────────────────────────────────────
-
-export type StrategyName = "carry-trade" | "lp-hedge";
-
-export interface CarryTradeParams {
-  allocation: number; // % of USDT to deploy (0-1)
-  hedgeRatio: number; // target perp/spot ratio (default 1.0)
-  rebalanceThreshold: number; // drift % before rebalancing (default 0.02)
-  minFundingRate: number; // min hourly funding to stay (default 0.00005)
-  exitAfterNegativeHours: number; // hours of negative funding (default 6)
-}
-
-export interface LpHedgeParams {
-  xautAllocation: number; // % of deployed USDT → XAUT (default 0.4)
-  bridgeAllocation: number; // % bridged to Arbitrum (default 0.1)
-  lpRange: "wide" | "medium" | "narrow";
-  hedgeRatio: number; // target hedge coverage (default 1.0)
-  rebalanceThreshold: number; // hedge drift % (default 0.02)
-  maxHedgeCost: number; // max negative funding %/h (default -0.0001)
-}
-
 // ─── Client Config ──────────────────────────────────────────────────────────
 
 export interface RigoblockClientConfig {
@@ -121,4 +106,10 @@ export interface RigoblockClientConfig {
   authSignature?: string;
   authTimestamp?: number;
   executionMode: "manual" | "delegated";
+  routingMode?: "deepseek_only" | "hybrid_fast_followup";
+}
+
+export interface ChatOptions {
+  /** Optional per-request context snippets (e.g. markdown excerpts) injected server-side */
+  contextDocs?: string[];
 }

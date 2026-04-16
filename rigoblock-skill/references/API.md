@@ -2,7 +2,7 @@
 
 Base URL: `https://trader.rigoblock.com`
 
-All endpoints are gated by x402 payment (USDT0 on Plasma or USDC on Base).
+All endpoints are gated by x402 payment (USDC on Base).
 
 ---
 
@@ -32,7 +32,7 @@ Stateless price quote. No vault context needed.
 }
 ```
 
-**x402 Price:** $0.002 (USDT0 on Plasma or USDC on Base)
+**x402 Price:** $0.002 (USDC on Base)
 
 ---
 
@@ -92,7 +92,7 @@ message, invokes zero or one tool, and returns a result.
 }
 ```
 
-**x402 Price:** $0.01 (USDT0 on Plasma or USDC on Base)
+**x402 Price:** $0.01 (USDC on Base)
 
 ---
 

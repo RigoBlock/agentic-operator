@@ -6,9 +6,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/patch-wdk-for-worker.cjs && npm run build:wdk-browser && npm run build:wdk-secret-manager",
-    "build:wdk-browser": "esbuild --bundle --platform=browser --format=esm --outfile=public/wdk-evm.js --inject:scripts/wdk-buffer-shim.js --external:node:crypto --minify node_modules/@tetherto/wdk-wallet-evm/index.js",
-    "build:wdk-secret-manager": "esbuild --bundle --platform=browser --format=esm --outfile=public/wdk-secret-manager.js --inject:scripts/wdk-buffer-shim.js --alias:bare-crypto=scripts/bare-crypto-browser-shim.cjs --alias:sodium-universal=scripts/sodium-universal-browser-shim.cjs --external:node:crypto --minify node_modules/@tetherto/wdk-secret-manager/index.js",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "build": "tsc --noEmit",
@@ -23,17 +20,13 @@
     "@account-kit/wallet-client": "^4.84.1",
     "@coinbase/x402": "^2.1.0",
     "@metamask/smart-accounts-kit": "^0.4.0-beta.1",
-    "@tetherto/wdk-secret-manager": "^1.0.0-beta.3",
-    "@tetherto/wdk-wallet-evm": "^2.0.0-rc.1",
     "@uniswap/sdk-core": "^7.12.2",
     "@uniswap/v4-sdk": "^1.29.1",
     "@x402/core": "^2.6.0",
     "@x402/evm": "^2.6.0",
     "@x402/extensions": "^2.6.0",
-    "bip39": "^3.1.0",
     "hono": "^4.6.0",
     "openai": "^4.70.0",
-    "sodium-javascript": "^0.8.0",
     "viem": "^2.21.0"
   },
   "devDependencies": {

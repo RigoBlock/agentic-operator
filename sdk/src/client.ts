@@ -6,8 +6,8 @@
  * - Operator authentication (EIP-191 signature)
  * - Request/response serialization
  *
- * The client requires a WDK signer for x402 payments and optionally
- * operator credentials for delegated execution mode.
+ * The client accepts an x402-wrapped fetch function for automatic payment
+ * and optionally operator credentials for delegated execution mode.
  */
 
 import type {
@@ -15,6 +15,7 @@ import type {
   QuoteResponse,
   ChatResponse,
   QuoteParams,
+  ChatOptions,
 } from "./types.js";
 
 const AUTH_MESSAGE = `Welcome to Rigoblock Operator\n\nSign this message to verify your wallet and access your smart pool assistant.`;
@@ -57,7 +58,11 @@ export class RigoblockClient {
 
   // ─── Chat (POST /api/chat) ─────────────────────────────────────────────
 
-  async chat(message: string, overrides?: Partial<RigoblockClientConfig>): Promise<ChatResponse> {
+  async chat(
+    message: string,
+    overrides?: Partial<RigoblockClientConfig>,
+    options?: ChatOptions,
+  ): Promise<ChatResponse> {
     const cfg = { ...this.config, ...overrides };
 
     const body: Record<string, unknown> = {
@@ -65,6 +70,14 @@ export class RigoblockClient {
       vaultAddress: cfg.vaultAddress,
       chainId: cfg.chainId,
     };
+
+    if (cfg.routingMode) {
+      body.routingMode = cfg.routingMode;
+    }
+
+    if (options?.contextDocs && options.contextDocs.length > 0) {
+      body.contextDocs = options.contextDocs;
+    }
 
     // Add auth credentials for delegated mode
     if (cfg.executionMode === "delegated" && cfg.operatorAddress && cfg.authSignature) {

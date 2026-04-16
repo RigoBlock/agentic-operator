@@ -30,7 +30,7 @@ function makeKV(): KVNamespace {
 }
 
 // ── Mock agentWallet service ──────────────────────────────────────────
-// prepareDelegation calls createAgentWallet. We mock it to avoid real WDK calls.
+// prepareDelegation calls createAgentWallet. We mock it to avoid real CDP calls.
 // NOTE: vi.mock factories are hoisted — cannot reference module-level variables.
 // Use a literal address here and match it in tests.
 
@@ -50,7 +50,7 @@ const OPERATOR = "0xOperator0000000000000000000000000000000000" as `0x${string}`
 const CHAIN_ID = 42161;
 
 function makeEnv(kv: KVNamespace): any {
-  return { KV: kv, AGENT_WALLET_SECRET: "test-secret" };
+  return { KV: kv, CDP_WALLET_SECRET: "test-secret", CDP_API_KEY_ID: "test-id", CDP_API_KEY_SECRET: "test-key-secret" };
 }
 
 describe("ALLOWED_VAULT_SELECTORS", () => {

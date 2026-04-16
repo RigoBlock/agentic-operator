@@ -1,43 +1,25 @@
 /**
- * Agent Wallet Service — per-vault EOA wallet management with Tether WDK.
+ * Agent Wallet Service — per-vault EOA wallet management with Coinbase CDP.
  *
- * Uses Tether's WDK (`@tetherto/wdk-wallet-evm`) for BIP-39 seed phrase
- * generation and BIP-44 HD key derivation.
- *
- * Encryption at rest (v3, current):
- *   Uses Tether `@tetherto/wdk-secret-manager` (XSalsa20-Poly1305 via libsodium).
- *   Key: PBKDF2-SHA256(AGENT_WALLET_SECRET + vault-scoped salt, 100k iterations).
- *   The vault address is embedded as a prefix in the passkey so each vault's
- *   encryption key is cryptographically independent.
- *
- * Legacy support (v0–v2 wallets, AES-256-GCM via Web Crypto):
- *   Existing wallets continue working. Decrypted with AES-GCM, re-encrypted
- *   with WdkSecretManager on next rotation.
+ * Uses the Coinbase Developer Platform (CDP) Server Wallet API for key
+ * generation and signing. Private keys live in AWS Nitro Enclave TEE —
+ * they never leave CDP's infrastructure and cannot be extracted.
  *
  * Security model:
- *   - All key generation: WDK (BIP-39/BIP-44, memory-zeroed on dispose)
- *   - All new encryption: WdkSecretManager (XSalsa20-Poly1305)
- *   - Private keys never leave the Worker runtime unencrypted
+ *   - All key generation and signing: CDP Server Wallet (TEE-backed)
+ *   - No local encryption needed — keys are managed by CDP
  *   - Each vault has a unique agent wallet (no key reuse)
- *   - Per-vault passkey prefix isolates compromise blast radius
+ *   - Wallet name `vault:{address}` provides idempotent creation
  *   - The EIP-7702 delegation framework limits what the agent wallet can do
+ *   - CDP_WALLET_SECRET authenticates wallet operations (POST/DELETE)
  */
 
-import {
-  generatePrivateKey,
-  privateKeyToAccount,
-  type PrivateKeyAccount,
-} from "viem/accounts";
-import type { Address, Hex } from "viem";
+import { CdpClient } from "@coinbase/cdp-sdk";
+import { toAccount } from "viem/accounts";
+import type { LocalAccount } from "viem/accounts";
+import { parseSignature, type Address } from "viem";
+import { hashAuthorization } from "viem/utils";
 import type { AgentWalletInfo, Env } from "../types.js";
-// WDK: BIP-39 seed generation + BIP-44 HD key derivation
-import { SeedSignerEvm } from "@tetherto/wdk-wallet-evm/signers";
-import WalletManager from "@tetherto/wdk-wallet";
-// WDK: XSalsa20-Poly1305 encryption at rest
-import { WdkSecretManager, wdkSaltGenerator } from "@tetherto/wdk-secret-manager";
-
-/** Current encryption version — v3 = WdkSecretManager (XSalsa20-Poly1305) */
-const CURRENT_KEY_VERSION = 3;
 
 // ── KV key helpers ────────────────────────────────────────────────────
 
@@ -45,239 +27,39 @@ function walletInfoKey(vaultAddress: string): string {
   return `agent-wallet:${vaultAddress.toLowerCase()}`;
 }
 
-function walletKeyKey(vaultAddress: string): string {
-  return `agent-wallet-key:${vaultAddress.toLowerCase()}`;
-}
-
-// ── Encryption helpers (AES-256-GCM via Web Crypto) ───────────────────
-
 /**
- * Derive a per-vault 256-bit encryption key.
+ * CDP account name for a vault — deterministic and idempotent.
  *
- * Uses HKDF with the vault address as salt, so each vault gets a
- * cryptographically independent key from the same master secret.
- */
-async function deriveVaultKey(secret: string, vaultAddress: string, version: number = CURRENT_KEY_VERSION): Promise<CryptoKey> {
-  const encoder = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    "HKDF",
-    false,
-    ["deriveKey"],
-  );
-  return crypto.subtle.deriveKey(
-    {
-      name: "HKDF",
-      hash: "SHA-256",
-      // Salt is the vault address — makes each vault's key independent
-      salt: encoder.encode(`vault:${vaultAddress.toLowerCase()}`),
-      info: encoder.encode(`agentic-operator-wallet-v${version}`),
-    },
-    keyMaterial,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"],
-  );
-}
-
-/** Stored format: JSON { v: keyVersion, d: base64(data), t: type, s?: salt(hex) } */
-interface EncryptedKeyEnvelope {
-  v: number;
-  d: string;
-  /** Key type: "seed" (WDK BIP-39 mnemonic) or "privkey" (raw hex). Absent = privkey (legacy). */
-  t?: "seed" | "privkey";
-  /** WdkSecretManager salt (hex, 16 bytes) — only present in v3+ */
-  s?: string;
-}
-
-// ── WdkSecretManager helpers (v3 — XSalsa20-Poly1305) ─────────────────
-
-/**
- * Build a per-vault passkey for WdkSecretManager.
- * Embeds the vault address so each vault gets a distinct encryption context
- * even if the same master secret is used.
- */
-function vaultPasskey(masterSecret: string, vaultAddress: string): string {
-  return `${masterSecret}:${vaultAddress.toLowerCase()}`;
-}
-
-/**
- * Encrypt a BIP-39 seed phrase using WdkSecretManager (XSalsa20-Poly1305).
+ * CDP naming rules: alphanumeric + hyphens only, 2–36 chars.
+ * Format: "vault-" (6) + first 30 hex chars of the address without "0x" = 36 chars.
+ * Example: vault address 0xAbCd1234… → "vault-abcd1234..."
  *
- * Flow: mnemonic → 16-byte entropy → WdkSecretManager internal PBKDF2 + XSalsa20 →
- * encryptedEntropy buffer stored as hex. On decrypt: entropy → mnemonic.
- * This stays within WdkSecretManager's 64-byte payload limit (entropy is always 16 bytes).
+ * IMPORTANT: Do NOT change this format after wallets are created in production —
+ * the name is the only way to look up the same account across requests.
  */
-async function encryptWithWdk(
-  seedPhrase: string,
-  masterSecret: string,
-  vaultAddress: string,
-): Promise<string> {
-  const salt = wdkSaltGenerator.generate() as Buffer;
-  const passkey = vaultPasskey(masterSecret, vaultAddress);
-  const sm = new WdkSecretManager(passkey, salt);
-  // Convert 12-word mnemonic → 16-byte BIP-39 entropy
-  const entropy = sm.mnemonicToEntropy(seedPhrase) as Buffer;
-  // generateAndEncrypt encrypts the entropy with PBKDF2-derived key + XSalsa20-Poly1305
-  // (sodium_memzero zeroes out the entropy buffer after encrypting — intentional)
-  const { encryptedEntropy } = await sm.generateAndEncrypt(entropy);
-  const envelope: EncryptedKeyEnvelope = {
-    v: CURRENT_KEY_VERSION,
-    d: (encryptedEntropy as Buffer).toString("hex"),
-    t: "seed",
-    s: salt.toString("hex"),
-  };
-  return JSON.stringify(envelope);
+function cdpAccountName(vaultAddress: string): string {
+  // Strip "0x", lowercase, take first 30 hex chars → total name = 36 chars
+  return `vault-${vaultAddress.toLowerCase().slice(2, 32)}`;
 }
+
+// ── CDP client helper ─────────────────────────────────────────────────
 
 /**
- * Decrypt a v3 (WdkSecretManager) seed envelope.
- * Reverses encryptWithWdk: encryptedEntropy → 16-byte entropy → mnemonic.
+ * Create a CDP client from environment secrets.
+ * Called per-request (no module-level mutable state in Workers).
  */
-function decryptWithWdk(
-  envelope: EncryptedKeyEnvelope,
-  masterSecret: string,
-  vaultAddress: string,
-): string {
-  if (!envelope.s) throw new Error("Missing salt in v3 envelope");
-  const salt = Buffer.from(envelope.s, "hex");
-  const passkey = vaultPasskey(masterSecret, vaultAddress);
-  const sm = new WdkSecretManager(passkey, salt);
-  const encryptedEntropy = Buffer.from(envelope.d, "hex");
-  const entropy = sm.decrypt(encryptedEntropy) as Buffer;
-  return sm.entropyToMnemonic(entropy);
-}
-
-/**
- * Encrypt a seed or private key for storage.
- * v3 (current, seed only): WdkSecretManager — mnemonic → entropy → XSalsa20-Poly1305.
- * Fallback for "privkey" type: AES-256-GCM v2 (no new wallets use this path;
- * only reached during key rotation of old pre-WDK wallets).
- */
-async function encryptSecret(
-  secret: string,
-  masterSecret: string,
-  vaultAddress: string,
-  type: "seed" | "privkey",
-): Promise<string> {
-  if (type === "seed") {
-    return encryptWithWdk(secret, masterSecret, vaultAddress);
-  }
-  // Legacy AES-256-GCM path for raw private key wallets created before WDK integration.
-  // New wallets are always BIP-39 seeds; this branch is only reached during rotation.
-  const key = await deriveVaultKey(masterSecret, vaultAddress);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    key,
-    new TextEncoder().encode(secret),
-  );
-  const combined = new Uint8Array(12 + new Uint8Array(ciphertext).length);
-  combined.set(iv);
-  combined.set(new Uint8Array(ciphertext), 12);
-  const envelope: EncryptedKeyEnvelope = {
-    v: 2,
-    d: btoa(String.fromCharCode(...combined)),
-    t: "privkey",
-  };
-  return JSON.stringify(envelope);
-}
-
-/** Decrypt a secret from the envelope. Handles v0–v3. Returns { value, type }. */
-async function decryptSecret(
-  envelopeStr: string,
-  masterSecret: string,
-  vaultAddress: string,
-): Promise<{ value: string; type: "seed" | "privkey" }> {
-  let envelope: EncryptedKeyEnvelope;
-  try {
-    envelope = JSON.parse(envelopeStr);
-  } catch {
-    // Legacy format: raw base64 without version envelope
-    envelope = { v: 0, d: envelopeStr };
-  }
-
-  let value: string;
-
-  if (envelope.v >= 3) {
-    // v3: WdkSecretManager (XSalsa20-Poly1305)
-    value = decryptWithWdk(envelope, masterSecret, vaultAddress);
-  } else {
-    // v0–v2: AES-256-GCM via Web Crypto (legacy fallback)
-    const key = envelope.v >= 1
-      ? await deriveVaultKey(masterSecret, vaultAddress, envelope.v)
-      : await deriveLegacyKey(masterSecret);
-
-    const combined = Uint8Array.from(atob(envelope.d), (c) => c.charCodeAt(0));
-    const decrypted = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: combined.slice(0, 12) },
-      key,
-      combined.slice(12),
-    );
-    value = new TextDecoder().decode(decrypted);
-  }
-
-  const type = envelope.t === "seed" ? "seed" : "privkey";
-  return { value, type };
-}
-
-/** Legacy key derivation (v0) — global, not per-vault. For decrypting old wallets only. */
-async function deriveLegacyKey(secret: string): Promise<CryptoKey> {
-  const encoder = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    "HKDF",
-    false,
-    ["deriveKey"],
-  );
-  return crypto.subtle.deriveKey(
-    {
-      name: "HKDF",
-      hash: "SHA-256",
-      salt: encoder.encode("agentic-operator-wallet-v1"),
-      info: encoder.encode("agent-wallet-encryption"),
-    },
-    keyMaterial,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"],
-  );
-}
-
-
-// ── WDK helpers ───────────────────────────────────────────────────────
-
-/** BIP-44 derivation path for the first Ethereum account */
-const WDK_DERIVATION_PATH = "0'/0/0";
-
-/**
- * Derive a viem PrivateKeyAccount from a WDK BIP-39 seed phrase.
- * Uses WDK's SeedSignerEvm for BIP-44 HD derivation, then extracts the
- * raw private key to create a viem account (needed for tx signing in the Worker).
- */
-function seedToViemAccount(seedPhrase: string): { account: PrivateKeyAccount; signer: InstanceType<typeof SeedSignerEvm> } {
-  const rootSigner = new SeedSignerEvm(seedPhrase);
-  const childSigner = rootSigner.derive(WDK_DERIVATION_PATH);
-
-  // Extract raw private key from WDK's key pair
-  const keyPair = childSigner.keyPair;
-  if (!keyPair.privateKey) {
-    throw new Error("WDK signer did not produce a private key");
-  }
-
-  // Convert Uint8Array to hex string for viem
-  const hexKey = `0x${Array.from(keyPair.privateKey as Uint8Array).map((b: number) => b.toString(16).padStart(2, "0")).join("")}` as Hex;
-  const account = privateKeyToAccount(hexKey);
-
-  return { account, signer: rootSigner };
+function getCdpClient(env: Env): CdpClient {
+  return new CdpClient({
+    apiKeyId: env.CDP_API_KEY_ID,
+    apiKeySecret: env.CDP_API_KEY_SECRET,
+    walletSecret: env.CDP_WALLET_SECRET,
+  });
 }
 
 // ── Public API ────────────────────────────────────────────────────────
 
 /**
- * Get the agent wallet info for a vault (without the private key).
+ * Get the agent wallet info for a vault (without signing capability).
  * Returns null if no agent wallet exists yet.
  */
 export async function getAgentWalletInfo(
@@ -290,104 +72,164 @@ export async function getAgentWalletInfo(
 }
 
 /**
- * Create a new agent wallet for a vault using Tether WDK.
+ * Create or sync the agent wallet for a vault using CDP Server Wallet.
  *
- * Generates a BIP-39 seed phrase via WDK, derives the first Ethereum
- * account via BIP-44 (m/44'/60'/0'/0/0), encrypts the seed phrase with
- * a per-vault derived key, and stores both the wallet info and encrypted
- * seed in KV.
- *
- * If a wallet already exists for this vault (legacy or WDK), returns it.
+ * ALWAYS calls CDP to get the canonical current address — never trusts KV alone.
+ * Within the same CDP project, `getOrCreateAccount` is idempotent (same name →
+ * same address). If CDP credentials rotated to a new project the address will
+ * differ from what is cached in KV; this function detects that, updates KV,
+ * clears the stale `delegatedChains`, and returns `walletChanged: true` so the
+ * caller can warn the operator that re-delegation is required.
  */
 export async function createAgentWallet(
   kv: KVNamespace,
   vaultAddress: string,
-  secret: string,
-): Promise<AgentWalletInfo> {
-  // Check if one already exists (legacy or WDK — don't overwrite)
+  env: Env,
+): Promise<AgentWalletInfo & { walletChanged: boolean; previousAddress?: Address }> {
+  // Always ask CDP for the canonical address — never rely on KV as source of truth.
+  const cdp = getCdpClient(env);
+  const account = await cdp.evm.getOrCreateAccount({
+    name: cdpAccountName(vaultAddress),
+  });
+  const currentAddress = account.address as Address;
+
   const existing = await getAgentWalletInfo(kv, vaultAddress);
-  if (existing) return existing;
 
-  // Generate BIP-39 seed phrase via WDK
-  const seedPhrase = WalletManager.getRandomSeedPhrase();
+  // Address is unchanged — KV is still valid, nothing to do.
+  if (existing && existing.address.toLowerCase() === currentAddress.toLowerCase()) {
+    return { ...existing, walletChanged: false };
+  }
 
-  // Derive the first Ethereum account via WDK's BIP-44 HD derivation
-  const { account, signer } = seedToViemAccount(seedPhrase);
+  // Either first-time creation OR CDP credentials rotated → new address.
+  const walletChanged = existing !== null;
+  if (walletChanged) {
+    console.warn(
+      `[AgentWallet] CDP address changed for vault ${vaultAddress}: ` +
+      `${existing!.address} → ${currentAddress} — stale KV cleared, re-delegation required`,
+    );
+    // Remove stale reverse lookup so gas-policy webhook does not match old address.
+    await kv.delete(`agent-reverse:${existing!.address.toLowerCase()}`);
+  }
 
   const info: AgentWalletInfo = {
-    address: account.address,
+    address: currentAddress,
     vaultAddress: vaultAddress.toLowerCase() as Address,
+    // Reset delegatedChains — the on-chain delegation was for the OLD address.
+    // The operator must set up delegation again for the new address.
     delegatedChains: [],
-    createdAt: Date.now(),
+    createdAt: existing?.createdAt ?? Date.now(),
   };
 
-  // Encrypt the seed phrase (not the raw private key) with per-vault key
-  const encryptedSeed = await encryptSecret(seedPhrase, secret, vaultAddress, "seed");
   await Promise.all([
     kv.put(walletInfoKey(vaultAddress), JSON.stringify(info)),
-    kv.put(walletKeyKey(vaultAddress), encryptedSeed),
-    // Reverse lookup: agent address → vault address (used by gas-policy webhook)
-    kv.put(`agent-reverse:${account.address.toLowerCase()}`, vaultAddress.toLowerCase()),
+    kv.put(`agent-reverse:${currentAddress.toLowerCase()}`, vaultAddress.toLowerCase()),
   ]);
 
-  // Zero private key material from WDK signer memory
-  signer.dispose();
+  console.log(
+    `[AgentWallet] ${walletChanged ? "Updated" : "Created"} CDP wallet ` +
+    `${currentAddress} for vault ${vaultAddress}`,
+  );
 
-  console.log(`[AgentWallet] Created WDK wallet ${account.address} for vault ${vaultAddress} (BIP-44 m/44'/60'/0'/0/0)`);
-  return info;
+  return {
+    ...info,
+    walletChanged,
+    previousAddress: walletChanged ? existing!.address : undefined,
+  };
+}
+
+/**
+ * Sync the agent wallet address with CDP WITHOUT creating a new one.
+ *
+ * Called by the delegation status endpoint on every verified status check.
+ * Detects CDP credential rotation so the UI can surface a wallet-change warning
+ * without requiring the operator to open the delegation setup modal first.
+ *
+ * Returns null when no agent wallet exists in KV (no creation attempted).
+ * If CDP is unreachable, returns the existing KV data unchanged (graceful degradation).
+ */
+export async function syncAgentWallet(
+  kv: KVNamespace,
+  vaultAddress: string,
+  env: Env,
+): Promise<(AgentWalletInfo & { walletChanged: boolean; previousAddress?: Address }) | null> {
+  const existing = await getAgentWalletInfo(kv, vaultAddress);
+  if (!existing) return null;
+
+  try {
+    const cdp = getCdpClient(env);
+    const account = await cdp.evm.getOrCreateAccount({
+      name: cdpAccountName(vaultAddress),
+    });
+    const currentAddress = account.address as Address;
+
+    if (existing.address.toLowerCase() === currentAddress.toLowerCase()) {
+      return { ...existing, walletChanged: false };
+    }
+
+    // Address changed — update KV immediately so subsequent reads are correct.
+    console.warn(
+      `[AgentWallet] CDP address mismatch for vault ${vaultAddress}: ` +
+      `KV=${existing.address} CDP=${currentAddress} — syncing KV`,
+    );
+    await kv.delete(`agent-reverse:${existing.address.toLowerCase()}`);
+    const updated: AgentWalletInfo = {
+      address: currentAddress,
+      vaultAddress: vaultAddress.toLowerCase() as Address,
+      delegatedChains: [],   // delegation was for old address — must re-delegate
+      createdAt: existing.createdAt,
+    };
+    await Promise.all([
+      kv.put(walletInfoKey(vaultAddress), JSON.stringify(updated)),
+      kv.put(`agent-reverse:${currentAddress.toLowerCase()}`, vaultAddress.toLowerCase()),
+    ]);
+    return { ...updated, walletChanged: true, previousAddress: existing.address };
+  } catch (err) {
+    // CDP unreachable or credentials invalid — return cached data, don't break status page.
+    console.warn(`[AgentWallet] CDP sync skipped for vault ${vaultAddress}: ${err}`);
+    return { ...existing, walletChanged: false };
+  }
 }
 
 /**
  * Load the agent wallet account (with signing capability) for a vault.
- * Supports both WDK wallets (v2, seed phrase) and legacy wallets (v0–v1, raw private key).
- * Returns null if no agent wallet exists.
+ *
+ * Returns a viem-compatible LocalAccount backed by CDP Server Wallet signing.
+ * The account can be used directly with viem's `createWalletClient({ account })`.
+ *
+ * Returns null if no agent wallet exists in KV.
  */
 export async function loadAgentWalletAccount(
   kv: KVNamespace,
   vaultAddress: string,
-  secret: string,
-): Promise<PrivateKeyAccount | null> {
-  const encryptedKey = await kv.get(walletKeyKey(vaultAddress));
-  if (!encryptedKey) return null;
+  env: Env,
+): Promise<LocalAccount | null> {
+  const info = await getAgentWalletInfo(kv, vaultAddress);
+  if (!info) return null;
 
-  const { value, type } = await decryptSecret(encryptedKey, secret, vaultAddress);
+  // Load the CDP account (server-side, no key material transferred)
+  const cdp = getCdpClient(env);
+  const cdpAccount = await cdp.evm.getAccount({
+    address: info.address,
+  });
 
-  if (type === "seed") {
-    // WDK wallet: derive account from BIP-39 seed phrase
-    const { account, signer } = seedToViemAccount(value);
-    // Zero the root signer's key material after extraction
-    signer.dispose();
-    return account;
+  // Wrap CDP account in a viem-compatible LocalAccount.
+  // CDP's EvmServerAccount has sign, signMessage, signTransaction, signTypedData
+  // but NOT signAuthorization (EIP-7702). Patch it so Alchemy Smart Wallet's
+  // signPreparedCalls can sign the 7702 authorization tuple via CDP.
+  const account = toAccount(cdpAccount);
+  if (!account.signAuthorization) {
+    account.signAuthorization = async (authorization) => {
+      const hash = hashAuthorization(authorization);
+      const rawSig = await cdpAccount.sign({ hash });
+      const { r, s, yParity } = parseSignature(rawSig);
+      // Normalise: SignAuthorizationReturnType always requires `address` (not contractAddress).
+      const address = ("address" in authorization && authorization.address)
+        ? authorization.address
+        : (authorization as { contractAddress: Address }).contractAddress;
+      return { address, chainId: authorization.chainId, nonce: authorization.nonce, r, s, yParity };
+    };
   }
-
-  // Legacy wallet: raw private key
-  return privateKeyToAccount(value as Hex);
-}
-
-/**
- * Rotate the encryption key for a vault's agent wallet.
- *
- * Decrypts with the old secret, re-encrypts with the new secret.
- * Preserves the key type (seed or privkey) during rotation.
- * Call this for every vault when rotating AGENT_WALLET_SECRET.
- */
-export async function rotateAgentWalletKey(
-  kv: KVNamespace,
-  vaultAddress: string,
-  oldSecret: string,
-  newSecret: string,
-): Promise<void> {
-  const encryptedKey = await kv.get(walletKeyKey(vaultAddress));
-  if (!encryptedKey) throw new Error("No agent wallet key found for this vault");
-
-  // Decrypt with old secret (auto-detects seed vs privkey)
-  const { value, type } = await decryptSecret(encryptedKey, oldSecret, vaultAddress);
-
-  // Re-encrypt with new secret, preserving the original type
-  const newEncryptedKey = await encryptSecret(value, newSecret, vaultAddress, type);
-  await kv.put(walletKeyKey(vaultAddress), newEncryptedKey);
-
-  console.log(`[AgentWallet] Rotated key for vault ${vaultAddress} (type=${type})`);
+  return account;
 }
 
 /**
@@ -423,16 +265,16 @@ export async function isDelegatedOnChain(
 /**
  * Delete the agent wallet for a vault (revoke agent access).
  * The on-chain delegation should be revoked separately.
+ * Note: This only removes the KV reference. The CDP account still exists
+ * in CDP but cannot be used without the KV mapping.
  */
 export async function deleteAgentWallet(
   kv: KVNamespace,
   vaultAddress: string,
 ): Promise<void> {
-  // Clean up reverse lookup before deleting the wallet info
   const info = await getAgentWalletInfo(kv, vaultAddress);
   const deletions = [
     kv.delete(walletInfoKey(vaultAddress)),
-    kv.delete(walletKeyKey(vaultAddress)),
   ];
   if (info?.address) {
     deletions.push(kv.delete(`agent-reverse:${info.address.toLowerCase()}`));

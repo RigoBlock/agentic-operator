@@ -1,18 +1,17 @@
-# Galactica Trader
+# Rigoblock Trader
 
 > Browser-based autonomous DeFi agent for Rigoblock smart pool vaults.
 > Open [trader.rigoblock.com](https://trader.rigoblock.com), connect your
 > wallet, and start trading — no API key needed. Uses Cloudflare Workers AI
 > (Llama 4 Scout) by default, with optional premium model override.
 
-**Built on Tether WDK.** The backend uses three Tether technologies:
-- **`@tetherto/wdk-wallet-evm`** — BIP-39 seed generation, BIP-44 key derivation, transaction signing
-- **`@tetherto/wdk-secret-manager`** — seed encryption at rest (PBKDF2 + XSalsa20-Poly1305)
-- **USDT0** — x402 payments on Plasma for external agent API access
+**Built on Coinbase CDP.** The backend uses:
+- **Coinbase Developer Platform (CDP) Server Wallet** — per-vault agent wallets with keys in AWS Nitro Enclaves
+- **USDC on Base** — x402 payments for external agent API access
 
 **Two wallet modes:**
-- **Built-in self-custodial wallet** — encrypted keystore (PBKDF2 310k + AES-256-GCM), EIP-7702 gas sponsorship, browser-local signing. No MetaMask, no ETH for gas.
 - **External wallet** — MetaMask, WalletConnect, etc. via EIP-6963 discovery.
+- **Agent wallet** — CDP Server Wallet per-vault EOA (keys in AWS Nitro Enclaves, never extractable).
 
 **Zero-friction AI.** Uses Cloudflare Workers AI (Llama 4 Scout) by default —
 no API key required. Power users can optionally add their own OpenRouter or
@@ -20,7 +19,7 @@ OpenAI key for premium models, like MetaMask lets users customize RPC endpoints.
 
 **Also accessible via x402 API.** External AI agents can call the same
 backend via `GET /api/quote` and `POST /api/chat`, paying $0.01/call in
-USDT0. A TypeScript SDK with WDK wallet integration is included in `sdk/`.
+USDC on Base. A TypeScript SDK with a typed HTTP client is included in `sdk/`.
 
 ---
 
@@ -33,7 +32,7 @@ Browser Chat UI (trader.rigoblock.com)
 Cloudflare Worker Backend (trader.rigoblock.com/api)
     ↓ Workers AI reasoning (open-source LLMs) + tool execution
     ↓ tool execution (Uniswap, GMX, Across, vault management)
-    ↓ own agent wallet per vault (Tether WDK)
+    ↓ own agent wallet per vault (CDP Server Wallet)
     ↓ EIP-7702 gas-sponsored execution
     ↓ NAV shield (10% max loss) + 7-point validation + delegation check
 Rigoblock Vault (on-chain: Ethereum + Arbitrum + 5 more chains)
@@ -43,7 +42,7 @@ Rigoblock Vault (on-chain: Ethereum + Arbitrum + 5 more chains)
 **Two interfaces, one backend:**
 - **Browser chat** — operator opens the URL, connects wallet, and starts
   chatting immediately. No API key needed (Workers AI default).
-- **x402 API** — external AI agents pay $0.01/call in USDT0 to use the
+- **x402 API** — external AI agents pay $0.01/call in USDC on Base to use the
   same execution backend programmatically.
 
 ### What the Agent Does
@@ -62,7 +61,7 @@ operations, monitors positions, and decides when to rebalance.
 
 ```
 agentic-operator/
-├── galactica-trader/           ← Strategy docs + reference files
+├── rigoblock-skill/            ← Strategy docs + reference files
 │   ├── README.md               ← You're reading this
 │   └── references/
 │       ├── API.md              ← HTTP API spec with request/response examples
@@ -70,15 +69,11 @@ agentic-operator/
 │       ├── STRATEGIES.md       ← Strategy entry/exit/monitoring templates
 │       └── SAFETY.md           ← NAV shield + delegation security model
 ├── sdk/                        ← Optional TypeScript SDK for external agents
-│   ├── package.json            ← Deps: wdk-wallet-evm, wdk-secret-manager, viem
-│   ├── patches/
-│   │   └── patch-bare-crypto.cjs  ← Postinstall: makes wdk-secret-manager work in Node.js
-│   ├── test/
-│   │   └── test-secure-wallet.ts   ← E2E test: create → encrypt → unlock → sign
+│   ├── package.json            ← Typed HTTP client, no wallet dependencies
 │   └── src/
-│       ├── wallet.ts           ← WDK wallet: SecureWalletSession, encryption, x402
-│       ├── client.ts           ← x402 HTTP client wrapper
-│       └── ...                 ← tools, strategies, types
+│       ├── client.ts           ← x402-ready HTTP client wrapper
+│       ├── tools.ts            ← Individual tool functions for agent invocation
+│       └── types.ts            ← Request/response type definitions
 ├── src/                        ← Cloudflare Worker backend
 │   ├── llm/                    ← LLM client + tool definitions
 │   ├── routes/                 ← API routes (chat, quote, delegation)
@@ -95,13 +90,11 @@ agentic-operator/
 ### Browser (recommended)
 
 1. Open [trader.rigoblock.com](https://trader.rigoblock.com)
-2. **Create New Wallet** (built-in, no MetaMask needed) — or connect an external wallet
-3. Choose a password to encrypt your wallet (AES-256-GCM, browser-only)
-4. Save your seed phrase backup
-5. Start chatting: *"Show vault info on Arbitrum"*
-6. (Optional) Click **⚙ AI Model** → add your own OpenRouter or OpenAI key for premium models
+2. Connect your wallet (MetaMask / WalletConnect)
+3. Start chatting: *"Show vault info on Arbitrum"*
+4. (Optional) Click **⚙ AI Model** → add your own OpenRouter or OpenAI key for premium models
 
-No install, no terminal, no ETH for gas (EIP-7702 sponsored).
+No install, no terminal. Agent wallets use EIP-7702 gas sponsorship (no ETH needed).
 
 ### From source
 
@@ -112,12 +105,11 @@ cd agentic-operator && npm install && npx wrangler dev
 
 ### SDK for external agents
 
-The `sdk/` folder provides a TypeScript SDK with WDK wallet integration
+The `sdk/` folder provides a typed TypeScript HTTP client
 for developers who want programmatic access via x402:
 
 ```bash
-cd sdk && npm install  # includes WDK postinstall patch
-npx ts-node test/test-secure-wallet.ts  # runs WDK E2E test
+cd sdk && npm install
 ```
 
 ---
@@ -125,26 +117,26 @@ npx ts-node test/test-secure-wallet.ts  # runs WDK E2E test
 ## Quick Start for Judges
 
 1. Open [trader.rigoblock.com](https://trader.rigoblock.com) in your browser
-2. Click **Create New Wallet** — choose a password (encrypted locally, gas-sponsored)
-3. Save your 12-word seed phrase backup
-4. Ask: *"Show vault info on Arbitrum"*  (uses Workers AI — no API key needed)
-5. (Optional) Click **⚙ AI Model** → add OpenRouter or OpenAI key for premium models
+2. Connect your wallet (MetaMask, WalletConnect, etc.)
+3. Ask: *"Show vault info on Arbitrum"*  (uses Workers AI — no API key needed)
+4. (Optional) Click **⚙ AI Model** → add OpenRouter or OpenAI key for premium models
 
-**Security model:** Your wallet seed is encrypted with PBKDF2-SHA256 (310k iterations) + AES-256-GCM using your password. The encrypted keystore is stored in browser localStorage. The server never stores your seed or password. All transaction signing happens locally in the browser. Transactions are gas-sponsored via EIP-7702 (Alchemy) — no ETH needed.
+**Security model:** Agent wallets are managed by CDP Server Wallet — keys are generated and stored by Coinbase in AWS Nitro Enclaves (TEE). Private keys never leave CDP infrastructure and cannot be extracted. Each vault has a unique agent EOA. The vault owner can revoke delegation at any time. Transactions are gas-sponsored via EIP-7702 (Alchemy) — no ETH needed for the agent wallet.
 
-To verify the WDK integration independently:
+To verify the SDK independently:
 
 ```bash
 git clone https://github.com/RigoBlock/agentic-operator
 cd agentic-operator/sdk && npm install
-npx ts-node test/test-secure-wallet.ts
+npx tsc --noEmit  # type-check
 ```
 
-This runs the full Tether WDK integration test:
-- **`@tetherto/wdk-wallet-evm`** generates a BIP-39 seed and derives an EVM account
-- **`@tetherto/wdk-secret-manager`** encrypts the seed with a passkey (PBKDF2 + XSalsa20-Poly1305)
-- Encrypted store saved to disk, reloaded, and decrypted — proving round-trip key management
-- Operator auth signature (EIP-191) produced and verified
+The SDK is a pure typed HTTP wrapper. It provides:
+- `RigoblockClient` for x402-authenticated API calls
+- Individual tool functions for agent invocation
+- Full TypeScript type definitions for all request/response shapes
+
+Operator auth signature (EIP-191) is handled by the agent's own wallet.
 
 To try the full agent flow with the live API, open
 [trader.rigoblock.com](https://trader.rigoblock.com) and connect your wallet.
@@ -171,7 +163,7 @@ API's LLM backend routes to the right tool.
 ### x402 Payment
 
 Every request needs an `X-PAYMENT` header. Without it, the API returns `402`.
-The x402 protocol handles payment signing — your WDK wallet signs a micropayment
+The x402 protocol handles payment signing — your wallet signs a micropayment
 ($0.002 for quotes, $0.01 for operations) and includes it in the header.
 
 ### Operator Auth (for execution)
@@ -231,7 +223,7 @@ See [references/SAFETY.md](./references/SAFETY.md) for the full model.
 ## x402 API — For External AI Agents
 
 External agents can also use the same backend via `GET /api/quote` and
-`POST /api/chat`, paying $0.01/call in USDT0. See [AGENTS.md](../AGENTS.md)
+`POST /api/chat`, paying $0.01/call in USDC on Base. See [AGENTS.md](../AGENTS.md)
 for the full x402 integration guide, auth model, and safety guarantees.
 
 ---
@@ -251,12 +243,12 @@ creates it (because the agent can't fiat-on-ramp itself yet).
 
 ```
 1. Agent generates a wallet:
-     account, mnemonic = Account.create_with_mnemonic(num_words=12)
-   → WDK-compatible (same BIP-39/BIP-44 derivation as @tetherto/wdk-wallet-evm)
-   → Agent stores mnemonic + private key for future sessions
+     account = Account.create()
+   → Agent stores private key for future sessions
+   → Or use CDP Server Wallet for managed keys
 
 2. Agent outputs its address → operator funds it:
-     - USDT0 on Plasma  → x402 API payments ($0.01/call)
+     - USDC on Base        → x402 API payments ($0.01/call)
      - ETH on Ethereum   → vault deploy + delegation + LP gas (~$5)
      - ETH on Arbitrum   → vault deploy + delegation gas (~$1)
 
@@ -299,28 +291,26 @@ around our API with x402 payment built in).
      rigoblock_chat("sync NAV", ...)
 ```
 
-### Architecture (Hackathon Tracks)
+### Architecture
 
-This project demonstrates clear separation for both hackathon tracks:
+This project provides two core layers:
 
-**Track: Agent Wallets**
-- Agent creates its own wallet using Tether WDK (`@tetherto/wdk-wallet-evm`)
-- Seed encrypted at rest using Tether WDK (`@tetherto/wdk-secret-manager`)
-- Same seed phrase works interchangeably in Python via `eth_account`
-- Agent signs x402 USDT0 micropayments on Plasma
+**Wallet Layer (CDP Server Wallet)**
+- Coinbase CDP creates per-vault agent wallets (TEE-sealed, keys never extractable)
+- Agent signs x402 USDC micropayments on Base
 - Agent signs operator auth (EIP-191) for vault access
-- Agent holds and manages USDT + XAUT autonomously via vault
+- Agent holds and manages assets autonomously via vault
 
-**Track: Autonomous DeFi Agent**
-- Agent (Gumloop) decides strategy, timing, and allocation — fully autonomous
-- WDK-compatible wallet handles all signing (payments, auth, transactions)
+**Autonomous DeFi Agent**
+- Agent decides strategy, timing, and allocation — fully autonomous
+- CDP wallet handles all signing (payments, auth, transactions)
 - DeFi execution via Rigoblock API (Uniswap, GMX, Across bridge)
-- NAV shield (10% max loss) + slippage protection (1%) for risk management
+- STAR (Stupid Transaction Automated Rejector) protects every transaction
 - Agent bootstraps itself: creates wallet → deploys vaults → delegates → trades
 
 ```
 ┌─────────────────────────────────────────────┐
-│  Agent Layer (Gumloop / any framework)      │
+│  Agent Layer (any framework)                │
 │  • Reads STRATEGIES.md for strategy knowledge│
 │  • Decides when/what to trade               │
 │  • Sequences multi-step operations          │
@@ -328,16 +318,14 @@ This project demonstrates clear separation for both hackathon tracks:
 └──────────────────┬──────────────────────────┘
                    │ HTTP calls
 ┌──────────────────▼──────────────────────────┐
-│  Wallet Layer (Tether WDK)                  │
-│  • wdk-wallet-evm: BIP-39 seed + signing    │
-│  • wdk-secret-manager: seed encryption      │
-│  • Signs x402 USDT0 micropayments           │
+│  Wallet Layer (Coinbase CDP)                │
+│  • TEE-sealed keys (AWS Nitro Enclave)      │
+│  • Signs x402 USDC micropayments            │
 │  • Signs operator auth (EIP-191)            │
-│  • Python: eth_account (same BIP-39 seed)   │
 └──────────────────┬──────────────────────────┘
                    │ X-PAYMENT header + auth
 ┌──────────────────▼──────────────────────────┐
-│  Execution Layer (Rigoblock API)            │
+│  Execution Layer (Rigoblock API + STAR)     │
 │  • NAV shield: blocks >10% loss per trade   │
 │  • Delegation check: vault must authorize   │
 │  • 7-point validation before broadcast      │

@@ -87,13 +87,21 @@ export async function saveDelegationConfig(
 /**
  * Prepare the delegation setup.
  *
- * Creates the agent wallet (if needed) and returns an unsigned transaction
- * that calls vault.updateDelegation(delegations).
- * The operator must sign and send this transaction from their wallet.
+ * Syncs the agent wallet with CDP (detects credential rotation), then returns
+ * an unsigned `vault.updateDelegation(delegations)` transaction for the operator
+ * to sign and send from their wallet.
+ *
+ * When CDP credentials have rotated and the agent wallet address has changed,
+ * the response also includes:
+ *   - `walletChanged: true`
+ *   - `previousAgentAddress`: the old agent address that must be revoked
+ *   - `revocationTransaction`: unsigned `vault.revokeAllDelegations(oldAgent)` tx
+ *
+ * The operator should send the revocation tx FIRST, then the new delegation tx.
  */
 export async function prepareDelegation(
   env: Env,
-  operatorAddress: Address,
+  _operatorAddress: Address,
   vaultAddress: Address,
   chainId: number,
 ): Promise<{
@@ -107,41 +115,76 @@ export async function prepareDelegation(
     gas?: string;
     description: string;
   };
+  walletChanged: boolean;
+  previousAgentAddress?: Address;
+  revocationTransaction?: {
+    to: Address;
+    data: Hex;
+    value: string;
+    chainId: number;
+    description: string;
+  };
 }> {
-  // 1. Get or create agent wallet
-  const walletInfo = await createAgentWallet(
-    env.KV,
-    vaultAddress,
-    env.AGENT_WALLET_SECRET,
-  );
+  // 1. Sync agent wallet with CDP — always verifies the canonical address.
+  //    Returns walletChanged=true + previousAddress if credentials rotated.
+  const walletResult = await createAgentWallet(env.KV, vaultAddress, env);
+  const { walletChanged, previousAddress } = walletResult;
 
   // 2. Build selector list (all vault functions the agent can call)
   const selectors = buildDefaultSelectors();
 
-  // 3. Encode pool.updateDelegation(Delegation[]) call
-  //    Each Delegation = { delegated: address, selector: bytes4, isDelegated: bool }
+  // 3. Encode pool.updateDelegation(Delegation[]) for the NEW agent
   const delegations = selectors.map((selector) => ({
-    delegated: walletInfo.address,
+    delegated: walletResult.address,
     selector: selector as `0x${string}`,
     isDelegated: true,
   }));
 
-  const data = encodeFunctionData({
+  const delegateData = encodeFunctionData({
     abi: VAULT_DELEGATION_ABI,
     functionName: "updateDelegation",
     args: [delegations],
   });
 
+  // 4. If the agent wallet changed, also build a revocation tx for the OLD agent.
+  //    The operator must send this BEFORE the new delegation tx so the old agent
+  //    loses access immediately.
+  let revocationTransaction: {
+    to: Address; data: Hex; value: string; chainId: number; description: string;
+  } | undefined;
+
+  if (walletChanged && previousAddress) {
+    const revokeData = encodeFunctionData({
+      abi: VAULT_DELEGATION_ABI,
+      functionName: "revokeAllDelegations",
+      args: [previousAddress],
+    });
+    revocationTransaction = {
+      to: vaultAddress,
+      data: revokeData,
+      value: "0x0",
+      chainId,
+      description: `Revoke old agent ${previousAddress.slice(0, 6)}…${previousAddress.slice(-4)} (wallet changed — send this first)`,
+    };
+    console.warn(
+      `[Delegation] Wallet changed for vault ${vaultAddress} on chain ${chainId}: ` +
+      `old=${previousAddress} new=${walletResult.address} — revocation tx included`,
+    );
+  }
+
   return {
-    agentAddress: walletInfo.address,
+    agentAddress: walletResult.address,
     selectors,
     transaction: {
       to: vaultAddress,
-      data,
+      data: delegateData,
       value: "0x0",
       chainId,
-      description: `Delegate ${selectors.length} vault functions to agent ${walletInfo.address.slice(0, 6)}…${walletInfo.address.slice(-4)}`,
+      description: `Delegate ${selectors.length} vault functions to agent ${walletResult.address.slice(0, 6)}…${walletResult.address.slice(-4)}`,
     },
+    walletChanged,
+    previousAgentAddress: previousAddress,
+    revocationTransaction,
   };
 }
 
@@ -290,7 +333,7 @@ export async function prepareRevocation(
  * Useful when only certain selectors need to be revoked (vs. revokeAllDelegations for full removal).
  */
 export async function prepareSelectiveRevocation(
-  env: Env,
+  _env: Env,
   vaultAddress: Address,
   agentAddress: Address,
   selectors: Hex[],

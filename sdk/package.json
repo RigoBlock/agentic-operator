@@ -1,31 +1,13 @@
 {
   "name": "@rigoblock/defi-sdk",
-  "version": "0.2.0",
-  "description": "TypeScript SDK for DeFi trading on Rigoblock vaults — WDK wallet, XAUT strategies, GMX perps, Uniswap v4 LP, cross-chain bridging",
+  "version": "0.3.0",
+  "description": "TypeScript SDK for DeFi trading on Rigoblock vaults — typed HTTP client with x402 payment support",
   "license": "Apache-2.0",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
-    "postinstall": "node patches/patch-bare-crypto.cjs"
-  },
-  "dependencies": {
-    "@tetherto/wdk-secret-manager": "^1.0.0-beta.3",
-    "@tetherto/wdk-wallet-evm": "2.0.0-rc.1",
-    "viem": "^2.21.0"
-  },
-  "peerDependencies": {
-    "@x402/evm": "^2.6.0",
-    "@x402/fetch": "^2.6.0"
-  },
-  "peerDependenciesMeta": {
-    "@x402/fetch": {
-      "optional": true
-    },
-    "@x402/evm": {
-      "optional": true
-    }
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

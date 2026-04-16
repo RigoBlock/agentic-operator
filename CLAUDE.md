@@ -94,19 +94,21 @@ All three must pass for delegated execution. For manual mode, only the first
 | No (exempt) | None | — | 401 Rejected |
 | No | None | — | 402 Payment Required |
 
-### 4. Agent wallet secrets are the nuclear key
+### 4. Agent wallet keys are managed by CDP Server Wallet
 
 ```
-RULE: AGENT_WALLET_SECRET + KV read access = can decrypt ALL agent private keys.
-      Treat AGENT_WALLET_SECRET with the same gravity as a root CA private key.
+RULE: Agent wallets are managed by Coinbase Developer Platform (CDP) Server Wallet.
+      Private keys are generated and stored by CDP — they never exist in our code or KV.
+      CDP_WALLET_SECRET authenticates with CDP for signing operations.
+      Treat CDP_API_KEY_ID + CDP_API_KEY_SECRET + CDP_WALLET_SECRET as critical secrets.
 ```
 
-- Each vault has a unique agent EOA, encrypted with WdkSecretManager (XSalsa20-Poly1305, v3+)
-- Passkey = `${AGENT_WALLET_SECRET}:${vaultAddress.toLowerCase()}` — per-vault key isolation
-- Salt = 16-byte random (stored alongside ciphertext in KV); seed stored as 16-byte BIP-39 entropy
-- Legacy wallets (v0–v2) decryptable via AES-256-GCM fallback; new wallets always use v3
-- Compromising AGENT_WALLET_SECRET + KV = all agent wallets compromised
-- Rotation via `rotateAgentWalletKey()` — decrypt old (any version), re-encrypt new (v3)
+- Each vault has a unique agent EOA created via `cdp.evm.getOrCreateAccount({ name })`
+- CDP manages key generation, storage, and signing — keys never leave CDP infrastructure
+- KV stores only metadata: agent address, delegated chains, vault address, creation time
+- Signing happens via CDP's `EvmServerAccount` wrapped with viem's `toAccount()` for compatibility
+- No local encryption/decryption of private keys — CDP handles all cryptographic operations
+- CDP account names use format `vault:{vaultAddress}` for deterministic lookup
 
 ### 5. Strategy execution defaults to manual, supports autonomous
 
@@ -126,46 +128,6 @@ RULE: Cron-triggered strategies default to manual mode (notify via Telegram,
 - Auto-pause after 3 consecutive failures (both modes)
 - `lastRecommendation` carries context between runs (capped at 500 chars)
 
-### 6. User wallet is self-custodial — server never stores seed or password
-
-```
-RULE: The self-custodial wallet (browser UI) uses an encrypted keystore model.
-      The server generates the seed (via WDK) but NEVER stores it. The password
-      NEVER leaves the browser. Do NOT add code that persists plaintext seed
-      phrases or passwords on the server side.
-```
-
-- **Creation**: Done entirely in the browser — `wdkSaltGenerator.generate()` creates a
-  16-byte random salt → Web Crypto PBKDF2-SHA256 (100k iterations) derives a 32-byte key →
-  `WdkSecretManager.generateAndEncrypt(null, derivedKey)` generates random entropy and
-  encrypts it with XSalsa20-Poly1305 (libsodium) → address derived via
-  `WalletAccountEvm.fromSeed()` → v2 keystore `{ version: 2, address, salt (hex),
-  encryptedEntropy (hex) }` stored in `localStorage` → seed shown once for backup → cleared.
-  **No server call. Seed never leaves the browser tab.**
-- **Import**: Done entirely client-side — `sm.mnemonicToEntropy(seedPhrase)` converts
-  user's 12-word phrase to entropy → `generateAndEncrypt(entropy, derivedKey)` re-encrypts
-  with the user's new password. NEVER touches the server.
-- **Storage**: Encrypted keystore (v2) in browser `localStorage` — server has no copy.
-  v1 keystores (AES-256-GCM) are still decryptable for backward compat.
-- **Key derivation**: Uses Web Crypto `SubtleCrypto.deriveBits()` (PBKDF2-SHA256, 100k
-  iterations) in the browser to produce a 32-byte key, then passes it directly as `derivedKey`
-  to `WdkSecretManager`. This bypasses `bare-crypto.pbkdf2Sync` (unavailable in browser).
-- **Signing**: Browser decrypts with password → entropy → mnemonic → creates WDK
-  `WalletAccountEvm` (cached for session) → signs locally → private key never leaves browser.
-  Unlock once per session (like MetaMask).
-- **Browser WDK bundles**:
-  - `public/wdk-evm.js` — `@tetherto/wdk-wallet-evm` (wallet + signer). `npm run build:wdk-browser`.
-  - `public/wdk-secret-manager.js` — `@tetherto/wdk-secret-manager` (encryption).
-    `npm run build:wdk-secret-manager`. Uses `scripts/bare-crypto-browser-shim.cjs` as
-    a stub (never called — derivedKey is always passed pre-computed).
-  Both loaded lazily via dynamic `import()`.
-- **Gas sponsorship**: EIP-7702 split-signing — server calls `prepareCalls()` (no key needed)
-  → browser signs → server calls `sendPreparedCalls()` (no key needed)
-- **NEVER** add server-side storage of plaintext seeds, passwords, or decrypted keystores
-- **NEVER** add a code path where the server decrypts a user's keystore
-- **NEVER** add `pbkdf2Sync` to the browser environment — always use Web Crypto + pass
-  `derivedKey` to WdkSecretManager methods that accept it
-
 ---
 
 ## CODING RULES
@@ -182,8 +144,7 @@ These files contain security-critical logic. Changes require extra care:
 | `src/services/navGuard.ts` | NAV shield simulation and threshold check |
 | `src/services/auth.ts` | Signature verification, vault ownership |
 | `src/services/delegation.ts` | On-chain delegation state |
-| `src/services/agentWallet.ts` | WDK wallet gen (BIP-39/BIP-44), encryption, decryption |
-| `src/services/userWallet.ts` | Self-custodial wallet gen + encrypted keystore |
+| `src/services/agentWallet.ts` | CDP Server Wallet (per-vault agent EOA via Coinbase) |
 | `src/middleware/x402.ts` | Payment verification, exempt origins, settlement |
 | `src/services/strategy.ts` | Strategy execution controls |
 
@@ -278,10 +239,10 @@ External Agent                    Our Worker                     CDP Facilitator
    impact unknown). The 10% check is a safety net that only activates when
    multicall simulation is available.
 
-4. **Agent wallet key extraction:** Attacker with `AGENT_WALLET_SECRET` + KV read
-   can decrypt all agent keys. **Mitigated:** Cloudflare secrets encryption at rest,
-   KV access control. Key rotation available. Delegation is always revocable by
-   vault owner.
+4. **Agent wallet key compromise:** Attacker with CDP credentials could sign as
+   agent wallets. **Mitigated:** CDP manages keys server-side; credentials are
+   Cloudflare secrets (encrypted at rest). Delegation is always revocable by vault
+   owner. Agent can only call whitelisted selectors on the vault.
 
 5. **Strategy takeover:** If an attacker deploys malicious code to the Worker, they
    can modify strategies to execute harmful trades. **Mitigated:** Strategies default
@@ -309,7 +270,6 @@ src/
     chat.ts             ← Auth gate + execution mode (CRITICAL)
     quote.ts            ← Price quotes (safe — no vault mutation)
     delegation.ts       ← Delegation management endpoints
-    wallet.ts           ← Self-custodial wallet (create, prepare-tx, submit-signed)
     gasPolicy.ts        ← Gas sponsorship policy (Alchemy)
     telegram.ts         ← Telegram webhook handler
   services/
@@ -317,8 +277,7 @@ src/
     execution.ts        ← 7-point validation + NAV shield + broadcast
     navGuard.ts         ← NAV shield simulation (10% threshold)
     delegation.ts       ← Delegation state management
-    agentWallet.ts      ← WDK wallet gen (BIP-39/BIP-44), encrypt/decrypt
-    userWallet.ts       ← Self-custodial wallet gen + encrypted keystore (PBKDF2+AES-256-GCM)
+    agentWallet.ts      ← CDP Server Wallet (per-vault agent EOA via Coinbase)
     strategy.ts         ← Cron strategies (manual default, autonomous opt-in)
     uniswapTrading.ts   ← Uniswap quote/swap building
     zeroXTrading.ts     ← 0x aggregator integration
@@ -328,16 +287,11 @@ src/
     vault.ts            ← On-chain vault reads
     bundler.ts          ← ERC-4337 bundler (gas sponsorship)
   llm/
-    client.ts           ← LLM provider resolution (AI binding default → user key → OpenAI fallback)
+    client.ts           ← LLM provider resolution (DeepSeek R1 reasoning + Llama 3.3 fast → user key → OpenAI fallback)
     tools.ts            ← Tool definitions (55+) + system prompt
 public/
-  index.html            ← Chat UI + wallet connect (self-custodial WDK wallet)
-  wdk-evm.js            ← esbuild bundle of @tetherto/wdk-wallet-evm for browser
-  wdk-secret-manager.js ← esbuild bundle of @tetherto/wdk-secret-manager for browser
-scripts/
-  patch-wdk-for-worker.cjs      ← Postinstall: patches WDK deps for Cloudflare Workers
-  wdk-buffer-shim.js            ← Buffer polyfill for WDK browser bundles
-  bare-crypto-browser-shim.cjs  ← bare-crypto stub (pbkdf2Sync never called when derivedKey passed)
+  index.html            ← Chat UI + wallet connect
+  openapi.json          ← OpenAPI spec
 ```
 
 ---

@@ -30,6 +30,8 @@ import {
   sendChatAction,
   deleteMessage,
   setWebhook,
+  deriveWebhookSecret,
+  WEBHOOK_URL_KV_KEY,
   formatForTelegram,
   escapeHtml,
   type TgUpdate,
@@ -54,21 +56,6 @@ import type { TelegramVaultLink } from "../types.js";
 
 const telegram = new Hono<{ Bindings: Env }>();
 
-/**
- * Derive a deterministic webhook secret from AGENT_WALLET_SECRET.
- * This is sent to Telegram via setWebhook(secret_token) and verified
- * on every incoming request via X-Telegram-Bot-Api-Secret-Token header.
- * This way, even if the bot token leaks, attackers can't call our webhook.
- */
-async function deriveWebhookSecret(agentSecret: string): Promise<string> {
-  const data = new TextEncoder().encode(`tg-webhook-secret:${agentSecret}`);
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  // Telegram allows 1-256 chars, A-Za-z0-9_-
-  const bytes = new Uint8Array(hash);
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
-  return Array.from(bytes.slice(0, 32), (b) => chars[b % chars.length]).join("");
-}
-
 // ── Webhook: receives Telegram updates ────────────────────────────────
 
 telegram.post("/webhook", async (c) => {
@@ -78,12 +65,28 @@ telegram.post("/webhook", async (c) => {
   }
 
   // Verify the webhook secret (prevents forged requests even if bot token leaks)
-  if (c.env.AGENT_WALLET_SECRET) {
-    const expected = await deriveWebhookSecret(c.env.AGENT_WALLET_SECRET);
+  if (c.env.CDP_WALLET_SECRET) {
+    const expected = await deriveWebhookSecret(c.env.CDP_WALLET_SECRET);
     const received = c.req.header("x-telegram-bot-api-secret-token") || "";
     if (received !== expected) {
-      console.warn("[telegram] Webhook secret mismatch — rejecting request");
-      return c.json({ ok: true }); // silent ack to avoid Telegram retries
+      // Secret mismatch means the webhook was registered without a secret (or the
+      // secret rotated). Re-register with the correct secret in the background so
+      // Telegram's retry (triggered by our 503) arrives with a matching token.
+      const webhookUrl = `${new URL(c.req.url).origin}/api/telegram/webhook`;
+      console.warn(`[telegram] Webhook secret mismatch — re-registering ${webhookUrl} and returning 503 for Telegram retry`);
+      c.executionCtx.waitUntil(
+        Promise.all([
+          setWebhook(token, webhookUrl, expected)
+            .then(() => console.log("[telegram] Webhook re-registered after mismatch"))
+            .catch(err => console.warn("[telegram] Webhook re-registration failed:", err)),
+          c.env.KV.put(WEBHOOK_URL_KV_KEY, webhookUrl),
+        ]),
+      );
+      // Return 200 (not 503) so Telegram marks this update as delivered and doesn't
+      // retry-storm. The mismatch means our webhook registration is stale — re-register
+      // in the background so future updates arrive with the correct secret.
+      // The current update is dropped (security: reject mismatched requests).
+      return c.json({ ok: true });
     }
   }
 
@@ -179,6 +182,23 @@ telegram.post("/pair", async (c) => {
       body.chainId,
     );
 
+    // Auto-register the webhook with the correct secret and store the URL in KV
+    // so the cron trigger can keep it fresh even without user action.
+    if (c.env.TELEGRAM_BOT_TOKEN) {
+      try {
+        const webhookSecret = c.env.CDP_WALLET_SECRET
+          ? await deriveWebhookSecret(c.env.CDP_WALLET_SECRET)
+          : undefined;
+        const webhookUrl = `${new URL(c.req.url).origin}/api/telegram/webhook`;
+        await setWebhook(c.env.TELEGRAM_BOT_TOKEN, webhookUrl, webhookSecret);
+        await c.env.KV.put(WEBHOOK_URL_KV_KEY, webhookUrl);
+        console.log(`[telegram] Webhook registered on pair: ${webhookUrl}`);
+      } catch (err) {
+        // Don't fail the pairing — code is still valid even if webhook update fails
+        console.warn(`[telegram] Webhook registration failed on pair: ${err}`);
+      }
+    }
+
     return c.json({ code });
   } catch (err) {
     if (err instanceof AuthError) {
@@ -191,10 +211,10 @@ telegram.post("/pair", async (c) => {
 
 // ── Setup: register webhook URL with Telegram ─────────────────────────
 // Exposed as both GET and POST to avoid Cloudflare WAF blocking bare POSTs.
-// Protected: requires AGENT_WALLET_SECRET as query param or X-Admin-Secret header.
+// Protected: requires CDP_WALLET_SECRET as query param or X-Admin-Secret header.
 
 function verifyAdminSecret(c: Context<{ Bindings: Env }>): boolean {
-  const secret = c.env.AGENT_WALLET_SECRET;
+  const secret = c.env.CDP_WALLET_SECRET;
   if (!secret) return false;
   const provided = c.req.query("secret") || c.req.header("x-admin-secret") || "";
   return provided === secret;
@@ -217,11 +237,12 @@ const setupHandler = async (c: Context<{ Bindings: Env }>) => {
   const webhookUrl = `${host}/api/telegram/webhook`;
 
   // Derive a webhook secret so Telegram sends it with every update
-  const secret = c.env.AGENT_WALLET_SECRET
-    ? await deriveWebhookSecret(c.env.AGENT_WALLET_SECRET)
+  const secret = c.env.CDP_WALLET_SECRET
+    ? await deriveWebhookSecret(c.env.CDP_WALLET_SECRET)
     : undefined;
 
   await setWebhook(token, webhookUrl, secret);
+  await c.env.KV.put(WEBHOOK_URL_KV_KEY, webhookUrl);
   return c.json({ ok: true, webhookUrl });
 };
 
@@ -229,7 +250,7 @@ telegram.post("/setup", setupHandler);
 telegram.get("/setup", setupHandler);
 
 // ── Diagnostic: check webhook status from Telegram's side ─────────────
-// Protected: requires AGENT_WALLET_SECRET.
+// Protected: requires CDP_WALLET_SECRET.
 
 telegram.get("/debug", async (c) => {
   if (!verifyAdminSecret(c)) return c.json({ error: "Unauthorized" }, 401);
@@ -342,6 +363,35 @@ async function handleMessage(
         await clearConversation(env.KV, userId);
         await sendMessage(token, chatId, "Conversation cleared.");
         return;
+
+      case "/model": {
+        const pick = args[0]?.toLowerCase();
+        const modelKey = `tg-model:${userId}`;
+        if (!pick) {
+          const current = await env.KV.get(modelKey) || "llama";
+          const label = current === "deepseek"
+            ? "DeepSeek R1 (reasoning mode)"
+            : "Llama 3.3 70B (default)";
+          await sendMessage(token, chatId,
+            `Current model: <b>${label}</b>\n\nChange with:\n` +
+            `<code>/model llama</code> — Llama 3.3 70B (best tool calling)\n` +
+            `<code>/model deepseek</code> — DeepSeek R1 (chain-of-thought reasoning)`,
+          );
+          return;
+        }
+        if (pick === "llama" || pick === "llama3" || pick === "llama3.3") {
+          await env.KV.put(modelKey, "llama");
+          await sendMessage(token, chatId, "Switched to <b>Llama 3.3 70B</b> — fast, reliable tool calling.");
+        } else if (pick === "deepseek" || pick === "r1" || pick === "deepseek-r1") {
+          await env.KV.put(modelKey, "deepseek");
+          await sendMessage(token, chatId, "Switched to <b>DeepSeek R1</b> — reasoning mode with chain-of-thought traces.");
+        } else {
+          await sendMessage(token, chatId,
+            `Unknown model "<code>${escapeHtml(pick)}</code>".\nUse <code>/model llama</code> or <code>/model deepseek</code>.`,
+          );
+        }
+        return;
+      }
 
       case "/unpair": {
         const addr = args[0];
@@ -517,11 +567,16 @@ async function handleMessage(
   const delegationOnAnyChain = delegationOnCurrentChain || await isDelegationActiveAnyChain(env.KV, vault.address);
   const executionMode = delegationOnAnyChain ? "delegated" : "manual";
 
+  // Load per-user model preference (set via /model command).
+  // "deepseek" → DeepSeek R1 reasoning mode; anything else → Llama 3.3 70B (default).
+  const modelPref = await env.KV.get(`tg-model:${userId}`);
+
   const ctx: RequestContext = {
     vaultAddress: vault.address,
     chainId: vault.chainId,
     operatorAddress: vault.operatorAddress || user.operatorAddress,
     executionMode,
+    aiModel: modelPref === "deepseek" ? "deepseek" : undefined,
   };
 
   try {
@@ -573,6 +628,15 @@ async function handleMessage(
 
     // Build the Telegram reply
     let replyParts: string[] = [];
+
+    // DeepSeek reasoning trace (shown first, collapsed in a blockquote)
+    if (response.reasoning) {
+      // Trim to ~800 chars for Telegram (avoid hitting 4096 char limit)
+      const trimmed = response.reasoning.length > 800
+        ? response.reasoning.slice(0, 800).replace(/\s+\S*$/, "") + "…"
+        : response.reasoning;
+      replyParts.push(`💭 <b>Reasoning:</b>\n<blockquote>${escapeHtml(trimmed)}</blockquote>`);
+    }
 
     // Tool results
     if (response.toolCalls?.length) {
@@ -695,9 +759,22 @@ async function handleMessage(
       await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
     }
 
-    // Store assistant reply in conversation
-    if (response.reply) {
-      conv.messages.push({ role: "assistant", content: response.reply });
+    // Persist assistant turn — include tool results so the LLM has context on follow-ups.
+    // Tool results are normally ephemeral (not in ChatMessage history), so we inline a
+    // compact summary into the assistant message.  This avoids re-fetching balances,
+    // positions, or NAV data that was already retrieved in this turn.
+    {
+      const toolSummary = (response.toolCalls ?? [])
+        .filter(tc => !tc.error && tc.result)
+        .map(tc => `[${tc.name}]: ${tc.result!.slice(0, 500)}`)
+        .join("\n---\n");
+      const assistantContent = [
+        toolSummary,
+        response.reply,
+      ].filter(Boolean).join("\n\n");
+      if (assistantContent.trim()) {
+        conv.messages.push({ role: "assistant", content: assistantContent });
+      }
     }
     await saveConversation(env.KV, userId, conv);
 
@@ -807,13 +884,20 @@ async function handleCallbackQuery(
         const allSuccess = outcomes.every(o => o.result?.confirmed && !o.result?.reverted);
         const icon = allSuccess ? "✅" : "⚠️";
 
+        // Include reasoning if available
+        const reasoningPrefix = response.reasoning
+          ? `💭 <blockquote>${escapeHtml(response.reasoning.slice(0, 500))}${response.reasoning.length > 500 ? "…" : ""}</blockquote>\n\n`
+          : "";
         await editMessageText(token, chatId, messageId,
-          `${icon} Strategy #${rec.strategyId}\n\n${resultText}`);
+          `${icon} Strategy #${rec.strategyId}\n\n${reasoningPrefix}${resultText}`);
       } else {
         // LLM didn't produce transactions — show its analysis
+        const reasoningPrefix = response.reasoning
+          ? `💭 <blockquote>${escapeHtml(response.reasoning.slice(0, 500))}${response.reasoning.length > 500 ? "…" : ""}</blockquote>\n\n`
+          : "";
         const replyText = response.reply || "No action needed.";
         await editMessageText(token, chatId, messageId,
-          `📋 Strategy #${rec.strategyId}\n\n${escapeHtml(replyText.slice(0, 3900))}`);
+          `📋 Strategy #${rec.strategyId}\n\n${reasoningPrefix}${escapeHtml(replyText.slice(0, 3900))}`);
       }
     } catch (err) {
       const safeMsg = sanitizeError(err instanceof Error ? err.message : String(err));
@@ -982,6 +1066,7 @@ async function sendHelpMessage(token: string, chatId: number): Promise<void> {
     "/pools — list paired vaults",
     "/pool &lt;name&gt; — switch active vault",
     "/addpool &lt;0xAddr&gt; — add vault by address",
+    "/model [llama|deepseek] — view or change AI model",
     "/clear — reset conversation",
     "/unpair &lt;addr&gt; — unlink a vault",
     "/help — this message",

@@ -41,9 +41,6 @@ const PAY_TO = "0xA0F9C380ad1E1be09046319fd907335B2B452B37";
 /** Base mainnet — USDC payments (CAIP-2) */
 const BASE_NETWORK = "eip155:8453";
 
-/** Plasma mainnet — USDT0 payments (CAIP-2) */
-const PLASMA_NETWORK = "eip155:9745";
-
 // ── Exempt origins (our own frontends) ────────────────────────────────
 
 const EXEMPT_ORIGINS = new Set([
@@ -64,17 +61,11 @@ const PROTECTED_ROUTES: RoutesConfig = {
         price: "$0.01",
         network: BASE_NETWORK,
       },
-      {
-        scheme: "exact",
-        payTo: PAY_TO,
-        price: "$0.01",
-        network: PLASMA_NETWORK,
-      },
     ],
     description:
       "AI-powered trading assistant for Rigoblock vaults. Supports swaps (Uniswap, 0x), " +
       "perpetual positions (GMX), cross-chain bridging (Across), pool deployment, and " +
-      "delegated execution via EIP-7702.",
+      "delegated execution. Protected by STAR (Stupid Transaction Automated Rejector).",
     mimeType: "application/json",
     extensions: declareDiscoveryExtension({
       bodyType: "json",
@@ -107,12 +98,6 @@ const PROTECTED_ROUTES: RoutesConfig = {
         payTo: PAY_TO,
         price: "$0.002",
         network: BASE_NETWORK,
-      },
-      {
-        scheme: "exact",
-        payTo: PAY_TO,
-        price: "$0.002",
-        network: PLASMA_NETWORK,
       },
     ],
     description: "DEX price quotes from Uniswap and 0x aggregator across all supported chains.",
@@ -152,20 +137,8 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
   );
   const cdpFacilitator = new HTTPFacilitatorClient(facilitatorConfig);
 
-  // Collect all facilitators
-  const facilitators: HTTPFacilitatorClient[] = [cdpFacilitator];
-
-  // Semantic facilitator (Plasma — USDT0 payments, optional)
-  if (env.SEMANTIC_FACILITATOR_URL) {
-    const semanticFacilitator = new HTTPFacilitatorClient({
-      url: env.SEMANTIC_FACILITATOR_URL,
-    });
-    facilitators.push(semanticFacilitator);
-  }
-
-  const resourceServer = new x402ResourceServer(facilitators)
+  const resourceServer = new x402ResourceServer([cdpFacilitator])
     .register(BASE_NETWORK, new ExactEvmScheme())
-    .register(PLASMA_NETWORK, new ExactEvmScheme())
     .registerExtension(bazaarResourceServerExtension);
 
   const server = new x402HTTPResourceServer(resourceServer, PROTECTED_ROUTES);

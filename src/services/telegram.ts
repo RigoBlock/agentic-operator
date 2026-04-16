@@ -166,6 +166,41 @@ export async function setWebhook(
   });
 }
 
+// KV key for the registered webhook URL (used by cron re-registration)
+export const WEBHOOK_URL_KV_KEY = "tg-webhook-url";
+
+/**
+ * Derive a deterministic webhook secret from a base secret string.
+ * Telegram allows 1–256 chars, A-Za-z0-9_- only.
+ */
+export async function deriveWebhookSecret(secret: string): Promise<string> {
+  const data = new TextEncoder().encode(`tg-webhook-secret:${secret}`);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  const bytes = new Uint8Array(hash);
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+  return Array.from(bytes.slice(0, 32), (b) => chars[b % chars.length]).join("");
+}
+
+/**
+ * Re-register the webhook using a URL stored in KV.
+ * Called from the cron trigger to keep the webhook registration fresh.
+ * No-ops silently if no URL is stored yet (webhook not set up via /pair or /setup).
+ */
+export async function ensureWebhookRegistered(
+  token: string,
+  kv: KVNamespace,
+  secret?: string,
+): Promise<void> {
+  const storedUrl = await kv.get(WEBHOOK_URL_KV_KEY);
+  if (!storedUrl) return; // never set up — operator must generate a pairing code first
+  try {
+    await setWebhook(token, storedUrl, secret);
+    console.log(`[telegram] Webhook refreshed from cron: ${storedUrl}`);
+  } catch (err) {
+    console.warn(`[telegram] Cron webhook refresh failed: ${err}`);
+  }
+}
+
 /** Remove the webhook (for debugging / switching to polling). */
 export async function deleteWebhook(token: string): Promise<void> {
   await callTg(token, "deleteWebhook", { drop_pending_updates: true });

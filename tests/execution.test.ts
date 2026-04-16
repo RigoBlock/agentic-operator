@@ -115,7 +115,7 @@ describe("execution security invariants", () => {
   });
 });
 
-describe("WDK wallet gas price buffer", () => {
+describe("Agent wallet gas price buffer", () => {
   /**
    * Documents the race condition that causes revocation failures:
    *

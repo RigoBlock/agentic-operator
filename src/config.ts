@@ -132,7 +132,7 @@ export const TOKEN_MAP: Record<number, Record<string, `0x${string}`>> = {
     USDT: "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",
     DAI: "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",
     WBTC: "0x68f180fcCe6836688e9084f035309E29Bf0A2095",
-    GRG: "0xEcE4B2F94656e5104EAC8ECE9c0a8DEE57D1A54C",
+    GRG: "0xecf46257ed31c329f204eb43e254c609dee143b3",
   },
   56: {
     // BNB Chain (BSC)

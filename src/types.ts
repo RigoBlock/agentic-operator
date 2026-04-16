@@ -32,12 +32,11 @@ export interface Env {
   UNISWAP_API_KEY: string;  // Uniswap Trading API key (developers.uniswap.org)
   ZEROX_API_KEY: string;    // 0x Swap API key (dashboard.0x.org)
   ALCHEMY_API_KEY: string;  // Alchemy RPC key (avoids public RPC rate limits)
-  AGENT_WALLET_SECRET: string; // Encryption key for agent wallet private keys
   ALCHEMY_GAS_POLICY_ID?: string; // Alchemy Gas Manager policy ID (optional, enables sponsored gas)
   TELEGRAM_BOT_TOKEN?: string; // Telegram Bot API token (optional, enables Telegram control)
-  CDP_API_KEY_ID: string;      // Coinbase Developer Platform API key ID (x402 facilitator auth)
-  CDP_API_KEY_SECRET: string;  // Coinbase Developer Platform API key secret (x402 facilitator auth)
-  SEMANTIC_FACILITATOR_URL?: string; // Semantic x402 facilitator URL (enables USDT0 on Plasma payments)
+  CDP_API_KEY_ID: string;      // Coinbase Developer Platform API key ID
+  CDP_API_KEY_SECRET: string;  // Coinbase Developer Platform API key secret
+  CDP_WALLET_SECRET: string;   // Coinbase Developer Platform wallet secret (agent wallet signing)
 }
 
 // ── Telegram types ────────────────────────────────────────────────────
@@ -112,10 +111,14 @@ export interface ChatRequest {
   confirmExecution?: boolean;
   /** User-provided AI API key (OpenRouter, Anthropic, or OpenAI) */
   aiApiKey?: string;
-  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/meta/llama-4-scout-17b-16e-instruct") */
+  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b") */
   aiModel?: string;
   /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
   aiBaseUrl?: string;
+  /** Workers AI orchestration mode: DeepSeek-only (default) or DeepSeek + Llama fast follow-up */
+  routingMode?: "deepseek_only" | "hybrid_fast_followup";
+  /** Optional per-request context snippets (e.g. selected markdown excerpts) injected into runtime prompt */
+  contextDocs?: string[];
 }
 
 export interface ToolCallResult {
@@ -167,6 +170,12 @@ export interface ChatResponse {
   executionResult?: ExecutionResult;
   /** In delegated mode with multiple txs: results for each */
   executionResults?: ExecutionResult[];
+  /** DeepSeek R1 reasoning trace (contents of <think>...</think> block) */
+  reasoning?: string;
+  /** Ordered list of models that produced this output (for hallucination tracking) */
+  modelsUsed?: string[];
+  /** Model that authored the final natural-language output (or 'tooling' when output is tool-native) */
+  finalModel?: string;
 }
 
 // ── Agent Wallet ──────────────────────────────────────────────────────
@@ -266,6 +275,10 @@ export interface RequestContext {
   aiModel?: string;
   /** AI provider base URL */
   aiBaseUrl?: string;
+  /** Workers AI orchestration mode */
+  routingMode?: "deepseek_only" | "hybrid_fast_followup";
+  /** Optional per-request context snippets injected into runtime prompt */
+  contextDocs?: string[];
 }
 
 // ── Swap intent ───────────────────────────────────────────────────────
