@@ -12,7 +12,7 @@
  */
 
 import { Hono } from "hono";
-import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode } from "../types.js";
+import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode, StreamEvent } from "../types.js";
 import { processChat } from "../llm/client.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { sanitizeError } from "../config.js";
@@ -100,6 +100,7 @@ chat.post("/", async (c) => {
       vaultAddress: resolvedVaultAddress,
       chainId: body.chainId,
       operatorAddress: body.operatorAddress as Address | undefined,
+      operatorVerified,
       executionMode,
       aiApiKey: body.aiApiKey,
       aiModel: body.aiModel,
@@ -108,6 +109,78 @@ chat.post("/", async (c) => {
       contextDocs: body.contextDocs,
     };
 
+    // ── SSE streaming mode ──
+    if (body.stream) {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          const send = (event: StreamEvent) => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+            } catch { /* stream closed */ }
+          };
+
+          try {
+            send({ type: "status", message: "Processing..." });
+
+            const response = await processChat(
+              c.env, messages, ctx,
+              undefined, // onToolResult
+              send,      // onStreamEvent
+            );
+
+            // Delegated auto-execution (same logic as non-streaming path)
+            if (executionMode === "delegated" && body.confirmExecution) {
+              const txList = response.transactions?.length
+                ? response.transactions
+                : response.transaction ? [response.transaction] : [];
+              if (txList.length > 0) {
+                send({ type: "status", message: "Executing transactions..." });
+                const executableTxs = txList.filter(tx => !tx.operatorOnly);
+                const outcomes = executableTxs.length > 0
+                  ? await executeTxList(c.env, executableTxs, body.vaultAddress)
+                  : [];
+                const results = outcomes.filter(o => o.result).map(o => o.result!);
+                if (results.length === 1) {
+                  response.executionResult = results[0];
+                  if (!results[0].reverted) {
+                    response.transaction = undefined;
+                    response.transactions = undefined;
+                  }
+                } else if (results.length > 1) {
+                  response.executionResults = results;
+                  if (results.every(r => r.confirmed && !r.reverted)) {
+                    response.transaction = undefined;
+                    response.transactions = undefined;
+                  }
+                }
+                response.reply = formatOutcomesMarkdown(outcomes);
+              }
+            }
+
+            if (response.reply) {
+              send({ type: "text", content: response.reply });
+            }
+            send({ type: "done", response });
+          } catch (err) {
+            const message = sanitizeError(err instanceof Error ? err.message : "Internal error");
+            send({ type: "done", response: { reply: `Error: ${message}` } });
+          } finally {
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        },
+      });
+    }
+
+    // ── Standard JSON response ──
     const response: ChatResponse = await processChat(c.env, messages, ctx);
 
     // ── Delegated execution: auto-execute if confirmExecution is set ──

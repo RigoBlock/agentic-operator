@@ -133,11 +133,11 @@ function parseKnownError(errMsg: string): string | null {
  * @param callerAddress - Address that will execute the tx (agent wallet)
  * @param kv - KV namespace for baseline storage (optional)
  * @param maxDropPct - Maximum allowed NAV drop percentage (default 10).
- *   Swaps use the default 10%. Bridge transfers use a higher threshold
- *   (87%) because assets leave the source chain and arrive on the
- *   destination chain — the source chain NAV WILL drop by the transfer amount.
- *   The on-chain contract independently enforces its own navToleranceBps
- *   and MINIMUM_SUPPLY_RATIO (12.5% minimum effective supply).
+ *   The 10% threshold applies to ALL transaction types equally.
+ *   For Transfer opType bridges, NAV is NOT affected (assets remain in the
+ *   vault's cross-chain accounting), so the 10% check passes naturally.
+ *   For Sync opType, NAV may be affected — the 10% check applies.
+ *   Do NOT weaken the threshold for any transaction type.
  * @returns NavShieldResult with allowed=true/false
  */
 export async function checkNavImpact(

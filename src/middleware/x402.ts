@@ -122,6 +122,20 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     }),
   },
+  "POST /api/tools/*": {
+    accepts: [
+      {
+        scheme: "exact",
+        payTo: PAY_TO,
+        price: "$0.002",
+        network: BASE_NETWORK,
+      },
+    ],
+    description:
+      "Direct tool invocation without LLM. Call specific DeFi tools by name " +
+      "(get_swap_quote, build_vault_swap, get_vault_info, etc.).",
+    mimeType: "application/json",
+  },
 };
 
 // ── Build x402 v2 server (lazy-initialized) ───────────────────────────

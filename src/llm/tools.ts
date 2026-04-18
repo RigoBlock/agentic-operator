@@ -669,80 +669,10 @@ export const TOOL_DEFINITIONS = [
   {
     type: "function" as const,
     function: {
-      name: "create_strategy",
-      description:
-        "Create an automated strategy for this vault. The strategy runs on a timer (cron) and evaluates " +
-        "the instruction. Autonomous by default (autoExecute=true): executes trades immediately and notifies " +
-        "via Telegram after. Set autoExecute=false only when operator wants manual confirmation each run. " +
-        "ALWAYS set maxExecutions when the user specifies a duration or count ('every 5 min for 20 min' " +
-        "→ maxExecutions=4). For balance-based stopping, include the target in the instruction and the " +
-        "strategy engine will auto-remove when the LLM emits 'STRATEGY COMPLETE: [reason]'. " +
-        "Up to 3 strategies per vault. Requires Telegram to be paired.",
-      parameters: {
-        type: "object",
-        properties: {
-          instruction: {
-            type: "string",
-            description:
-              "Natural language instruction for the strategy, e.g. " +
-              "'Rebalance all tokens to Base, keeping NAV impact below 10%', " +
-              "'Buy 100 GRG with ETH if GRG/ETH price is below 0.001', " +
-              "'Check if any chain has more than 50% of total NAV and suggest rebalancing'",
-          },
-          intervalMinutes: {
-            type: "number",
-            description:
-              "How often to check, in minutes. Minimum 5. Examples: 5 (every 5 min), " +
-              "60 (hourly), 480 (every 8 hours), 1440 (daily). Default: 480.",
-          },
-          autoExecute: {
-            type: "boolean",
-            description:
-              "When true (default), the agent executes trades immediately without waiting for operator confirmation. " +
-              "The NAV shield (10% max loss) and on-chain vault protections remain active. " +
-              "Set to false only if the operator explicitly wants to review each run before execution.",
-          },
-          maxExecutions: {
-            type: "number",
-            description:
-              "Maximum number of cron runs before the strategy auto-removes itself. " +
-              "ALWAYS compute this from the user's stated duration: " +
-              "  'every 5 min for 20 min' → maxExecutions=4 (20÷5). " +
-              "  'every 10 min for 1 hour' → maxExecutions=6 (60÷10). " +
-              "  'buy X in 10 minutes' (one-shot) → maxExecutions=1. " +
-              "Omit for open-ended recurring strategies that run indefinitely.",
-          },
-        },
-        required: ["instruction"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "remove_strategy",
-      description:
-        "Remove an automated strategy by ID. Use list_strategies to see IDs. " +
-        "Pass id=0 to remove ALL strategies for this vault.",
-      parameters: {
-        type: "object",
-        properties: {
-          id: {
-            type: "number",
-            description: "Strategy ID to remove (from list_strategies), or 0 to remove all.",
-          },
-        },
-        required: ["id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
       name: "list_strategies",
       description:
-        "List all automated strategies for the current vault, showing their ID, instruction, " +
-        "interval, status (active/paused), last run time, and error count.",
+        "List active TWAP strategies for the current vault. " +
+        "Returns order ID, side, tokens, total amount, progress, interval, and DEX.",
       parameters: {
         type: "object",
         properties: {},
@@ -750,6 +680,9 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  // ── Strategy Skills (TWAP, etc.) — injected from skill registry at runtime ──
+  // See src/skills/ for tool definitions. Merged in getToolDefinitions().
+
   // ── Uniswap v4 LP Tools ──────────────────────────────────────────────
   {
     type: "function" as const,
@@ -1117,24 +1050,6 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
-  // ── Carry Trade Planner ──────────────────────────────────────────────
-  {
-    type: "function" as const,
-    function: {
-      name: "plan_carry_trade",
-      description:
-        "Plan the XAUT/USDT carry trade strategy. Takes the available USDT on Arbitrum, " +
-        "fetches the current XAUT/USDT price, and computes exact amounts for each step: " +
-        "USDT→XAUT swap, LP deposit, USDT→USDC swap for GMX collateral, and GMX short size. " +
-        "Call this FIRST when setting up the carry trade — it gives you the exact plan with amounts. " +
-        "Then execute each step using the returned amounts.",
-      parameters: {
-        type: "object",
-        properties: {},
-        required: [],
-      },
-    },
-  },
 ];
 
 /**
@@ -1354,7 +1269,7 @@ RULES:
 - STRICT DOMAIN SEPARATION: Uniswap LP intents (positions, remove, collect, burn, closed positions) MUST use Uniswap LP tools only (get_lp_positions, remove_liquidity, collect_lp_fees, burn_position). GMX tools are for perps only. Never answer LP requests with GMX guidance.
 - CLOSED LP POSITIONS: Closed Uniswap positions are still visible via get_lp_positions with Status = Closed until burned. If user asks about closed positions, call get_lp_positions and explain that closed NFTs persist until burn_position is executed.
 - ALWAYS use actual tool calls, never write tool names or JSON as text. If you want to call a tool, USE THE TOOL. Do NOT write {"name": "...", "parameters": {...}} in your text response — that will be shown as garbage to the user. NEVER output raw JSON tool call syntax in your text.
-- YOUR TOOLS ARE NAMED EXACTLY: get_swap_quote, build_vault_swap, get_vault_info, get_token_balance, switch_chain, setup_delegation, revoke_delegation, check_delegation_status, deploy_smart_pool, fund_pool, crosschain_transfer, crosschain_sync, get_crosschain_quote, get_aggregated_nav, get_rebalance_plan, verify_bridge_arrival, get_pool_info, add_liquidity, remove_liquidity, get_lp_positions, collect_lp_fees, burn_position, gmx_open_position, gmx_close_position, gmx_increase_position, gmx_get_positions, gmx_cancel_order, gmx_update_order, gmx_claim_funding_fees, gmx_get_markets, grg_stake, grg_undelegate_stake, grg_unstake, grg_end_epoch, grg_claim_rewards, create_strategy, remove_strategy, list_strategies, revoke_selectors, plan_carry_trade. There is NO tool called "add_liquidity_v4", "remove_liquidity_v4", "deploy_pool", or any other variant. Use ONLY exact tool names from this list.
+- YOUR TOOLS ARE NAMED EXACTLY: get_swap_quote, build_vault_swap, get_vault_info, get_token_balance, switch_chain, setup_delegation, revoke_delegation, check_delegation_status, deploy_smart_pool, fund_pool, crosschain_transfer, crosschain_sync, get_crosschain_quote, get_aggregated_nav, get_rebalance_plan, verify_bridge_arrival, get_pool_info, add_liquidity, remove_liquidity, get_lp_positions, collect_lp_fees, burn_position, gmx_open_position, gmx_close_position, gmx_increase_position, gmx_get_positions, gmx_cancel_order, gmx_update_order, gmx_claim_funding_fees, gmx_get_markets, grg_stake, grg_undelegate_stake, grg_unstake, grg_end_epoch, grg_claim_rewards, list_strategies, create_twap_order, cancel_twap_order, list_twap_orders, revoke_selectors. There is NO tool called "add_liquidity_v4", "remove_liquidity_v4", "deploy_pool", or any other variant. Use ONLY exact tool names from this list.
 - NEVER fabricate, invent, or hallucinate tool results. If you need to create a wallet, switch chains, check balances, or perform ANY action — call the actual tool. Do NOT describe the result as if you called it. Every address, balance, hash, or status MUST come from a real tool call.
 - NEVER reply with generic custody disclaimers like "I don't have access to your account" for vault operations. In this system you CAN access vault data through tools. For requests like "what are my GMX positions", "my balances", or "vault status", call the relevant tool immediately (gmx_get_positions, get_token_balance, get_vault_info, get_aggregated_nav) and return the real result.
 - CRITICAL: If a tool returns an error, STOP that step and report the exact error to the user. Do NOT generate a fake success result and continue to the next step. "LP Token ID: 1234567890" or fake tx hashes are hallucinations — never generate them.
@@ -1438,6 +1353,9 @@ CROSS-CHAIN (AINTENTS + ACROSS PROTOCOL):
   cross-chain bridge (crosschain_transfer), NOT a swap. "ETH" in bridge context means WETH (the bridgeable token).
   Set token="WETH" and useNativeEth=true (the vault wraps native ETH→WETH automatically).
   NEVER route bridge/transfer requests to build_vault_swap or get_swap_quote.
+- CRITICAL: "sync NAV from X to Y" means crosschain_sync (NAV/message sync), NOT crosschain_transfer.
+- Use real chain names/IDs in tool args. NEVER pass placeholders like "first chain" or "second chain".
+- If the user says "sync between X and Y", run one direction first (X → Y), then prepare Y → X when requested.
 - Bridgeable tokens: USDC, USDT, WETH, WBTC (not all tokens available on all chains).
 - Supported chains: Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Unichain.
 - The vault must hold the bridged token on the source chain, OR for WETH bridges with useNativeEth=true,
@@ -1521,54 +1439,12 @@ For strategies in manual mode, the agent sends a recommendation to Telegram and 
 the operator's confirmation before executing. This is ideal when the operator wants to
 review each decision while away from the desk.
 
-AUTO-REBALANCE STRATEGY:
-- Use create_strategy to set up any automated check: rebalancing, DCA, limit buys, etc.
-- Use remove_strategy to delete a strategy by ID (or 0 for all). Use list_strategies to show them.
-- Each strategy is a natural language instruction evaluated by the LLM on a cron timer.
-- Two modes: autonomous (default, autoExecute=true) and manual (autoExecute=false).
-  - Autonomous (default): the agent executes trades immediately — notifications are sent AFTER execution.
-    The NAV shield (10% max loss) and on-chain vault protections remain active.
-  - Manual: the cron sends recommendations via Telegram — the operator confirms before each execution.
-    Use only when the operator explicitly asks for confirmation before every run.
-- The previous recommendation is carried forward as context, so the LLM can assess whether
-  market conditions have changed since its last evaluation.
-- Up to 3 strategies per vault. Minimum interval: 5 minutes. Default: 8 hours (480 min).
-- Strategies auto-pause after 3 consecutive failures and notify the operator.
-- Requires Telegram pairing. If not paired, tell the user to pair first.
-- Keywords: automate, auto-rebalance, DCA, recurring, schedule, timer, every X hours.
-
-STRATEGY STOPPING CONDITIONS — CRITICAL:
-- TIME-BOUNDED: When user says "every 5 min for 20 min", ALWAYS compute maxExecutions = total_duration / interval.
-  Examples:
-    "every 5 min for 20 min" → maxExecutions=4 (20÷5), intervalMinutes=5
-    "every 10 min for 1 hour" → maxExecutions=6 (60÷10), intervalMinutes=10
-    "3 times, every 15 min" → maxExecutions=3, intervalMinutes=15
-  Never omit maxExecutions when the user has specified a total duration or iteration count.
-- BALANCE-BASED: When user says "buy X of token until I've accumulated Y total", include the stopping
-  condition in the instruction text AND add a rule: when your evaluation decides the goal is fully reached,
-  start your reply with "STRATEGY COMPLETE: [reason]" (e.g. "STRATEGY COMPLETE: accumulated 100 USDC of GRG,
-  target reached"). The strategy engine will auto-remove the strategy when it sees this signal.
-- OPEN-ENDED: Omit maxExecutions for strategies that should run indefinitely until manually removed.
-
-STRATEGY vs DELAYED TRADE — CRITICAL DISTINCTION:
-- A strategy is a RECURRING automated check (e.g., "every 10 minutes, check balance and buy/sell accordingly").
-- A DELAYED ONE-TIME TRADE (e.g., "buy 50 GRG in ten minutes") CAN be implemented as a one-shot strategy:
-  use create_strategy with maxExecutions=1, autoExecute=true, and intervalMinutes matching the delay.
-  Example: "buy 50 GRG in 10 minutes" → create_strategy(instruction="Buy 50 GRG with ETH on Arbitrum",
-  intervalMinutes=10, autoExecute=true, maxExecutions=1). The strategy fires once after 10 minutes and auto-removes.
-  You can also execute the trade immediately if the user prefers — offer both options.
-- Recurring strategies run indefinitely until removed. One-shot strategies (maxExecutions=1) auto-remove
-  after the run limit is hit.
-- STRATEGY INSTRUCTION FIDELITY: The instruction you pass to create_strategy should be a DIRECT transcription
-  of what the user asked. Do NOT add conditions, price thresholds, or logic the user didn't request.
-  If the user says "buy 10 GRG with ETH", the instruction is "Buy 10 GRG with ETH on Arbitrum" — NOT
-  "Buy 10 GRG with ETH if GRG/ETH price is below 0.001" (invented threshold).
-- If the user asks about price-based conditions, you CAN include them — but only if the user specified them.
-- STRATEGY UPDATES: There is no update_strategy tool. To modify a strategy, remove the old one first
-  (remove_strategy) and then create a new one. NEVER say "Strategy updated!" unless you actually called
-  remove_strategy first. Be explicit: "I'll remove the old strategy and create an updated one."
-- Strategies are generic — the LLM evaluates the instruction using available tools at each interval.
-  Any action the LLM can perform via tools can be a strategy instruction.
+TWAP STRATEGY MODE:
+- The only supported automated strategy type is deterministic TWAP.
+- Use create_twap_order to schedule a TWAP execution plan.
+- Use list_twap_orders (or list_strategies alias) to review active TWAP orders.
+- Use cancel_twap_order to stop an active TWAP order.
+- Do not mention or attempt generic free-form LLM strategies.
 
 UNISWAP V4 LP WORKFLOW:
 When a user asks to "add liquidity" to a Uniswap v4 pool:
@@ -1640,93 +1516,6 @@ NO TEXT CONFIRMATION BEFORE TOOL CALLS:
   confirmation. Call the tool directly and present the signed transaction for review.
 - The user triggers these operations by clear intent (e.g., "remove my LP", "close position",
   "burn my NFT"), not by confirming a text prompt.
-
-STRATEGY KNOWLEDGE — XAUT/USDT LP + PERMANENT HEDGE:
-When the user asks to "set up a strategy", "run the XAUT strategy", "set up an XAUT carry trade",
-"LP + hedge", "implement the strategy", "provide liquidity to XAUT", "hedge XAUT exposure",
-"XAUT LP", "XAUT/USDT liquidity", "use my balance to fund a strategy", "LP and hedge",
-"add liquidity and hedge", "set up the gold strategy", "carry trade", or similar,
-THIS IS THE XAUT CARRY TRADE STRATEGY.
-
-STEP 1 — ALWAYS call plan_carry_trade FIRST. This tool:
-  - Checks USDT balance on Arbitrum
-  - Gets the live XAUT/USDT price
-  - Computes exact amounts for every step (swap, LP, GMX collateral, GMX short)
-  - If no USDT on Arbitrum, checks other chains and suggests bridging
-  - Returns a structured plan with precise numbers
-
-DO NOT call get_aggregated_nav as the first step. DO NOT try to calculate amounts yourself.
-The plan_carry_trade tool does all the math. Just call it and present the result.
-
-If plan_carry_trade says USDT is needed on Arbitrum (funds on other chains):
-  - Bridge from the source chain: crosschain_transfer USDT from that chain to Arbitrum
-  - Wait: verify_bridge_arrival(token: "USDT", chain: "arbitrum", minAmount: ...)
-  - Then call plan_carry_trade AGAIN to get updated amounts with the new balance
-
-STEP 2 — Execute the plan step by step using the EXACT amounts from plan_carry_trade:
-  ⚠️ ETH CHECK: If plan_carry_trade includes a warning that the vault needs ETH (for GMX keeper fee),
-  the plan will list an ETH swap as Step 1. Execute it FIRST before any other steps:
-    build_vault_swap(tokenIn="USDT", tokenOut="ETH", amountOut="0.005", chain="arbitrum")
-  This is mandatory — without ETH in the vault, GMX createIncreaseOrder reverts.
-
-  Step 2a: build_vault_swap — swap the plan's USDT→XAUT amount
-XAUT/USDT POOL ON ARBITRUM (the carry trade LP pool):
-  Pool ID:     0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34
-  fee:         6000  (0.60% — NOT 3000)
-  tickSpacing: 120   (NOT 60)
-  hooks:       0x0000000000000000000000000000000000000000  (no hook)
-  currency0:   0x40461291347e1eCbb09499F3371D3f17f10d7159  (XAUT)
-  currency1:   0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9  (USDT)
-  Call add_liquidity with EXACTLY these parameters — any mismatch targets the wrong pool.
-
-  Step 2b: add_liquidity — use the plan's XAUT and USDT amounts (fee=6000, tickSpacing=120, hooks=0x0000000000000000000000000000000000000000, full range, chain=arbitrum)
-
-  Step 2b.5 — AFTER LP confirmation: call get_lp_positions(chain="arbitrum") to read the
-  ACTUAL XAUT deposited into the position. Use this as the basis for the hedge, NOT the
-  pre-calculated plan estimate (pool price impact may cause a small difference).
-    → xautInLP = amount0 or amount1 in the XAUT/USDT position (XAUT is currency0)
-    → xautExposureUsd = xautInLP × current XAUT price (use the GMX ticker price)
-    The GMX short notional MUST equal this exposure. Example:
-      LP holds 0.012 XAUT at $3150/XAUT → notionalUsd = 37.80 → collateral = 3.78 USDC at 10x
-
-  Step 2c: build_vault_swap — swap the plan's USDT→USDC amount (for GMX collateral)
-
-  Step 2d: gmx_open_position — hedge the actual XAUT LP exposure:
-    market="XAUT", isLong=false (short to hedge long LP exposure)
-    notionalUsd = xautExposureUsd from Step 2b.5 (the XAUT amount in LP × price)
-    leverage = "10"
-    The tool computes collateral automatically: collateral = notionalUsd / leverage / collateralPrice
-    collateral="USDC" (always USDC for XAUT short on GMX)
-    The collateral auto-cap handles any USDC shortfall — the position will scale proportionally.
-
-Core principle: The GMX short is the hedge for the LP's XAUT exposure. The hedge is ALWAYS ON.
-GMX XAUT market uses USDC as short collateral. Always use USDC, not USDT, for GMX.
-
-MULTI-CHAIN VAULT AWARENESS:
-- The same vault address may be deployed on multiple chains (BSC, Optimism, Arbitrum, etc.).
-- Capital may arrive on ANY chain — the plan_carry_trade tool detects this and suggests bridging.
-- BRIDGE AMOUNT: Use the exact per-chain balance, never the cross-chain total.
-
-MULTI-STEP EXECUTION PATTERN:
-- Present the plan from plan_carry_trade, then execute step by step.
-- When the user says "done", "confirmed", "next" → IMMEDIATELY call the next tool.
-- Every step MUST produce a tool call. Text-only descriptions are FORBIDDEN.
-- If a step fails, STOP and explain the error.
-- Track progress: "Step 2/5: Adding liquidity..."
-
-AMOUNT RULE: After each swap confirmation, use the RECEIVED amount for the next step.
-  After Step 2a (USDT→XAUT swap): use the confirmed XAUT amount for LP tokenA.
-  After Step 2b (LP added): call get_lp_positions to get actual XAUT in position → use as hedge notional.
-  After Step 2c (USDT→USDC swap): use the confirmed USDC amount for GMX collateral check.
-  After Step 2d (GMX short): confirm hedge size equals LP XAUT exposure in USD.
-
-NOTIONAL vs COLLATERAL (important for all GMX interactions):
-  notionalUsd  = total position size in USD (= XAUT_amount × XAUT_price for the hedge)
-  collateralUsd = funds deposited as margin = notionalUsd / leverage
-  Example: hedge 0.012 XAUT at $3150 → notionalUsd=37.80 → at 10x, collateral=3.78 USDC
-  Users requesting "10x trade on $X" → notionalUsd=$X, leverage=10
-  Users requesting "open with $Y collateral at Nx" → collateralAmount=$Y, leverage=N
-  For the carry trade hedge: ALWAYS use notionalUsd = LP XAUT exposure in USD, leverage=10.
 
 HEDGE SIZING:
   The GMX short notional = XAUT amount in LP × current XAUT price in USD.

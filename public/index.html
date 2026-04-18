@@ -380,6 +380,10 @@
       border-color: #229ED9; background: rgba(34,158,217,0.08); color: #229ED9;
     }
     .btn-delegation.telegram:hover { background: rgba(34,158,217,0.18); }
+    .btn-delegation.danger {
+      border-color: #e74c3c; background: rgba(231,76,60,0.08); color: #e74c3c;
+    }
+    .btn-delegation.danger:hover { background: rgba(231,76,60,0.18); }
     .sponsor-toggle {
       display: inline-flex; align-items: center; gap: 5px;
       font-size: 14px; color: var(--muted); cursor: pointer;
@@ -667,6 +671,7 @@
           <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
           <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
           <button id="telegram-pair-btn" class="btn-delegation telegram" onclick="openTelegramPairing()" style="display:none;" title="Control this pool from Telegram">⬡ Telegram</button>
+          <button id="telegram-reset-btn" class="btn-delegation danger" onclick="resetTelegramPairing()" style="display:none;" title="Reset Telegram pairing and conversation state">↻ Reset</button>
         </div>
       </div>
     </div>
@@ -812,6 +817,12 @@
   </div>
 
   <div id="input-area">
+    <div id="chat-mode-bar" style="display:none; padding: 0 0 6px; align-items: center; gap: 8px; font-size: 12px; color: var(--dimmed);">
+      <label class="sponsor-toggle" title="When ON, the agent executes trades immediately. When OFF, you confirm each trade." style="margin:0;">
+        <input type="checkbox" id="chat-mode-checkbox" onchange="toggleExecMode(this.checked)" />
+        <span id="chat-mode-label">🔔 Confirm trades</span>
+      </label>
+    </div>
     <div id="input-wrapper">
       <textarea id="input" placeholder="Ask anything, e.g. Swap 0.5 ETH for USDT" rows="1"></textarea>
       <button id="send" onclick="sendMessage()" title="Send">
@@ -842,6 +853,7 @@
     let providerListenersAttached = false; // prevent duplicate event listeners
     let strategyPollTimer = null; // strategy events polling interval
     let lastEventTimestamp = 0;  // last seen strategy event timestamp
+    let multiStepActive = false; // true when agent response indicates a multi-step plan
 
     // ── Chat persistence (sessionStorage — survives refresh, clears on tab close) ──
     const CHAT_STORAGE_KEY = 'rigoblock_chat_history';
@@ -1136,6 +1148,11 @@
         if (!events || events.length === 0) return;
         for (const ev of events) {
           if (ev.timestamp > lastEventTimestamp) lastEventTimestamp = ev.timestamp;
+          if (ev.type === 'twap') {
+            const twapIcon = ev.success ? '⚡' : '⚠️';
+            appendMessage('system', `${twapIcon} TWAP #${ev.twapOrderId}: ${ev.summary}`);
+            continue;
+          }
           const icon = ev.success ? (ev.autoExecute ? '⚡' : '🔔') : '⚠️';
           const label = ev.autoExecute ? 'Auto-executed' : 'Recommendation';
           appendMessage('system', `${icon} Strategy #${ev.strategyId} — ${label}: ${ev.summary}`);
@@ -1270,6 +1287,8 @@
      * and sent silently.
      */
     function autoProgressAfterTx(description) {
+      // Only auto-progress when we're in a multi-step flow
+      if (!multiStepActive) return;
       const followUp = description
         ? `Transaction confirmed: ${description}. Continue to the next step.`
         : `Transaction confirmed. Continue to the next step.`;
@@ -1497,13 +1516,7 @@
       chatEl.appendChild(typingEl);
       chatEl.scrollTop = chatEl.scrollHeight;
 
-      // Progressive status updates so the user knows the agent is working
-      const statusTimers = [];
       const updateTypingStatus = (msg) => { typingContent.textContent = msg; };
-      statusTimers.push(setTimeout(() => updateTypingStatus('Working on it…'), 5000));
-      statusTimers.push(setTimeout(() => updateTypingStatus('Still processing…'), 15000));
-      statusTimers.push(setTimeout(() => updateTypingStatus('Taking longer than expected…'), 30000));
-      const clearStatusTimers = () => statusTimers.forEach(t => clearTimeout(t));
 
       // 50-second timeout to prevent infinite hangs
       const controller = new AbortController();
@@ -1526,7 +1539,18 @@
           chatBody.authSignature = authSignature;
           chatBody.authTimestamp = authTimestamp;
           chatBody.executionMode = executionMode;
+          // In autonomous mode with delegation, pass confirmExecution for auto-execute
+          if (executionMode === 'delegated') {
+            const vault = vaultInput.value.trim();
+            const modeKey = `exec-mode:${vault.toLowerCase()}`;
+            if (localStorage.getItem(modeKey) === 'autonomous') {
+              chatBody.confirmExecution = true;
+            }
+          }
         }
+
+        // Enable SSE streaming for real-time updates
+        chatBody.stream = true;
 
         const res = await fetch('/api/chat', {
           method: 'POST',
@@ -1536,6 +1560,7 @@
         });
 
         if (!res.ok) {
+          // SSE stream won't start on error — try parsing JSON error
           const errData = await res.json().catch(() => null);
           const errMsg = errData?.error || `HTTP ${res.status}`;
           // If auth error, auto re-sign and retry once
@@ -1558,6 +1583,7 @@
                   authSignature,
                   authTimestamp,
                   executionMode,
+                  stream: true,
                   ...getAiRequestParams(),
                 }),
               });
@@ -1572,9 +1598,57 @@
           }
           throw new Error(errMsg);
         }
-        const data = await res.json();
-        typingEl.remove();
-        handleChatResponse(data);
+
+        // Stream SSE events from the response
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('text/event-stream') && res.body) {
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          let finalResponse = null;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || ''; // keep incomplete line in buffer
+
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              try {
+                const event = JSON.parse(line.slice(6));
+                if (event.type === 'status') {
+                  updateTypingStatus(event.message);
+                } else if (event.type === 'reasoning') {
+                  const summary = String(event.content || '').trim().split('\n')[0].slice(0, 140);
+                  updateTypingStatus(summary ? `Reasoning: ${summary}` : 'Reasoning...');
+                } else if (event.type === 'tool_call') {
+                  updateTypingStatus(`Running ${event.name}…`);
+                } else if (event.type === 'tool_result') {
+                  updateTypingStatus(event.error ? `${event.name} failed` : `${event.name} done`);
+                } else if (event.type === 'text') {
+                  // Progressive text — update typing indicator
+                  updateTypingStatus('Composing response…');
+                } else if (event.type === 'transaction') {
+                  updateTypingStatus('Transaction ready');
+                } else if (event.type === 'done') {
+                  finalResponse = event.response;
+                }
+              } catch { /* skip malformed events */ }
+            }
+          }
+
+          typingEl.remove();
+          if (finalResponse) {
+            handleChatResponse(finalResponse);
+          }
+        } else {
+          // Fallback: non-streaming JSON response
+          const data = await res.json();
+          typingEl.remove();
+          handleChatResponse(data);
+        }
       } catch (err) {
         typingEl.remove();
         const msg = err.name === 'AbortError'
@@ -1583,7 +1657,6 @@
         appendMessage('system', msg);
       } finally {
         clearTimeout(timeoutId);
-        clearStatusTimers();
         sendBtn.disabled = false;
         inputEl.focus();
       }
@@ -1607,7 +1680,15 @@
 
       // Show tool results but skip the verbose tool call name/args when a transaction is present
       if (data.toolCalls?.length > 0) {
+        const suppressEcho = !!(
+          data.reply &&
+          data.toolCalls.length === 1 &&
+          !data.toolCalls[0].error &&
+          (data.toolCalls[0].result || '').trim() === data.reply.trim()
+        );
+
         for (const tc of data.toolCalls) {
+          if (suppressEcho) continue;
           // Only show the result, not the tool call name/args — the result already describes the swap
           if (tc.result || tc.error) {
             const toolExtras = withModelTrace({
@@ -1636,6 +1717,11 @@
         }
         conversationHistory.push({ role: 'assistant', content: historyContent });
         persistChat();
+
+        // Detect multi-step plans: auto-progress only fires when the agent
+        // signals it has more steps to do (e.g. "Step 1 of 3", "next I'll").
+        const stepPattern = /step\s+\d+\s*(of|\/)\s*\d+|next\s+(step|i['']ll|we['']ll)|after\s+this|then\s+(i['']ll|we['']ll)|following\s+step|first,?\s+.*then/i;
+        multiStepActive = stepPattern.test(data.reply);
       } else if (data.toolCalls?.length > 0) {
         // Reply is empty (e.g., transaction ready) — still push tool results to history
         const resultsText = data.toolCalls
@@ -2703,6 +2789,7 @@
       const setupBtn = document.getElementById('delegation-setup-btn');
       const revokeBtn = document.getElementById('delegation-revoke-btn');
       const telegramBtn = document.getElementById('telegram-pair-btn');
+      const telegramResetBtn = document.getElementById('telegram-reset-btn');
       const agentAddr = document.getElementById('agent-addr');
       const balanceEl = document.getElementById('agent-balance-display');
       const sponsorLabel = document.getElementById('sponsor-toggle-label');
@@ -2717,6 +2804,9 @@
         setupBtn.onclick = () => openDelegationSetup();
         revokeBtn.style.display = 'none';
         if (telegramBtn) telegramBtn.style.display = 'none';
+        if (telegramResetBtn) telegramResetBtn.style.display = 'none';
+        const chatModeInactive = document.getElementById('chat-mode-bar');
+        if (chatModeInactive) chatModeInactive.style.display = 'none';
         agentAddr.style.display = 'none';
         balanceEl.style.display = 'none';
         if (sponsorLabel) sponsorLabel.style.display = 'none';
@@ -2757,6 +2847,13 @@
         }
         revokeBtn.style.display = isOnChain ? '' : 'none';
         if (telegramBtn) telegramBtn.style.display = isOnChain ? '' : 'none';
+        if (telegramResetBtn) telegramResetBtn.style.display = isOnChain ? '' : 'none';
+
+        // Execution mode toggle — visible in chat input when delegation is active
+        const chatModeBar = document.getElementById('chat-mode-bar');
+        if (chatModeBar) {
+          chatModeBar.style.display = isOnChain ? 'flex' : 'none';
+        }
 
         // Balance is chain-specific — only meaningful when active on current chain
         if (!isOnChain) {
@@ -2812,6 +2909,9 @@
           existingWarn.remove();
         }
       }
+
+      // Load execution mode preference for this vault
+      loadExecMode();
     }
 
     async function fetchAgentBalance(vault) {
@@ -2859,6 +2959,31 @@
       }
     }
 
+    // Execution mode: autonomous (auto-execute) vs confirm (require button click)
+    // Stored in localStorage per vault — used in sendMessage to pass confirmExecution flag
+    function toggleExecMode(checked) {
+      const vault = vaultInput.value.trim();
+      if (!vault) return;
+      const key = `exec-mode:${vault.toLowerCase()}`;
+      localStorage.setItem(key, checked ? 'autonomous' : 'confirm');
+      const label = document.getElementById('chat-mode-label');
+      if (label) label.textContent = checked ? '⚡ Autonomous' : '🔔 Confirm trades';
+      appendMessage('system', checked
+        ? 'Switched to autonomous mode — trades execute immediately.'
+        : 'Switched to confirm mode — you\'ll review each trade before execution.');
+    }
+
+    function loadExecMode() {
+      const vault = vaultInput.value.trim();
+      if (!vault) return;
+      const key = `exec-mode:${vault.toLowerCase()}`;
+      const mode = localStorage.getItem(key) || 'confirm';
+      const cb = document.getElementById('chat-mode-checkbox');
+      const label = document.getElementById('chat-mode-label');
+      if (cb) cb.checked = mode === 'autonomous';
+      if (label) label.textContent = mode === 'autonomous' ? '⚡ Autonomous' : '🔔 Confirm trades';
+    }
+
 
 
     /* ================================================================
@@ -2882,6 +3007,37 @@
       document.getElementById('telegram-generate-btn').disabled = false;
       document.getElementById('telegram-generate-btn').textContent = 'Generate Code';
       document.getElementById('telegram-modal').classList.add('visible');
+    }
+
+    async function resetTelegramPairing() {
+      if (!connectedAddress) {
+        appendMessage('system', 'Connect your wallet first.');
+        return;
+      }
+      const vault = vaultInput.value.trim();
+      if (!vault || vault.length !== 42) {
+        appendMessage('system', 'Enter a vault address first.');
+        return;
+      }
+      if (!confirm('Reset Telegram pairing? This will disconnect Telegram and clear conversation history.')) return;
+      try {
+        const { signature, timestamp } = await signAuthMessage();
+        const res = await fetch('/api/delegation/telegram-reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            operatorAddress: connectedAddress,
+            vaultAddress: vault,
+            authSignature: signature,
+            authTimestamp: timestamp,
+          }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        appendMessage('system', data.message || 'Telegram pairing reset.');
+      } catch (err) {
+        appendMessage('system', 'Reset failed: ' + err.message);
+      }
     }
 
     async function generateTelegramCode() {

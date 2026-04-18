@@ -390,16 +390,11 @@ export async function executeViaDelegation(
   // multicall simulation succeeds. The actual trade is still sent by the agent
   // wallet using only its whitelisted selectors (execute, modifyLiquidities, etc.).
   //
-  // Bridge operations (depositV3) use a higher threshold: assets leave the source
-  // chain and arrive on the destination chain, so source-chain NAV WILL drop by
-  // the transfer amount. The on-chain contract independently enforces its own
-  // navToleranceBps and MINIMUM_SUPPLY_RATIO (12.5% minimum effective supply).
-  const txSelector = (tx.data as Hex).slice(0, 10).toLowerCase();
-  const isBridge = txSelector === ALLOWED_VAULT_SELECTORS.depositV3.toLowerCase();
-  const navMaxDropPct = isBridge ? 87n : undefined; // undefined = default 10%
-  if (isBridge) {
-    console.log(`[executeViaDelegation] Bridge operation detected — using 87% NAV threshold`);
-  }
+  // NAV shield applies equally to ALL transaction types (10% threshold).
+  // For Transfer opType bridges, NAV is NOT affected (assets move but remain in
+  // the vault's cross-chain accounting), so the 10% check passes naturally.
+  // For Sync opType, NAV may be affected — the 10% check applies.
+  // Do NOT weaken the NAV shield for any transaction type.
 
   const navResult = await checkNavImpact(
     tx.to as Address,
@@ -409,7 +404,6 @@ export async function executeViaDelegation(
     env.ALCHEMY_API_KEY,
     config.operatorAddress,
     env.KV,
-    navMaxDropPct,
   );
 
   // Route based on what the NAV shield actually found
@@ -628,9 +622,11 @@ async function broadcastAgentTransaction(
       "GAS_ESTIMATION_FAILED",
     );
   }
-  // 30% buffer over the on-chain estimate — vault adapter routing + oracle
-  // reads can vary significantly between estimation and execution blocks.
-  const gasLimit = estimatedGas + (estimatedGas * 30n) / 100n;
+  // 20% buffer over the on-chain estimate — the estimate already accounts for
+  // vault proxy overhead since we estimate from the actual agent address.
+  // Buffer covers minor execution-time variance (oracle reads, internal state).
+  // Excess gas is refunded.
+  const gasLimit = estimatedGas + (estimatedGas * 20n) / 100n;
 
   // ── Step 4: Estimate fees with safety caps ──
   let fees = await estimateFees(publicClient, chainId);

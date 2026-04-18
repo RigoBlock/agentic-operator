@@ -151,6 +151,23 @@ export async function addStrategy(
   kv: KVNamespace,
   strategy: Omit<Strategy, "id" | "createdAt" | "consecutiveFailures" | "active" | "executionCount"> & { autoExecute?: boolean; maxExecutions?: number },
 ): Promise<Strategy> {
+  const validatedInterval = Math.round(Number(strategy.intervalMinutes));
+  if (!Number.isFinite(validatedInterval) || validatedInterval < MIN_INTERVAL_MINUTES) {
+    throw new Error(
+      `Strategy interval must be at least ${MIN_INTERVAL_MINUTES} minutes.`,
+    );
+  }
+
+  const validatedMaxExecutions = strategy.maxExecutions === undefined
+    ? undefined
+    : Math.round(Number(strategy.maxExecutions));
+  if (
+    validatedMaxExecutions !== undefined &&
+    (!Number.isFinite(validatedMaxExecutions) || validatedMaxExecutions < 1)
+  ) {
+    throw new Error("maxExecutions must be at least 1.");
+  }
+
   const existing = await getStrategies(kv, strategy.vaultAddress);
   if (existing.length >= MAX_STRATEGIES_PER_VAULT) {
     throw new Error(
@@ -160,12 +177,13 @@ export async function addStrategy(
   const nextId = existing.length > 0 ? Math.max(...existing.map((s) => s.id)) + 1 : 1;
   const newStrategy: Strategy = {
     ...strategy,
+    intervalMinutes: validatedInterval,
     id: nextId,
     active: true,
     createdAt: Date.now(),
     consecutiveFailures: 0,
     autoExecute: strategy.autoExecute ?? true,
-    maxExecutions: strategy.maxExecutions,
+    maxExecutions: validatedMaxExecutions,
     executionCount: 0,
   };
   existing.push(newStrategy);
@@ -631,6 +649,20 @@ export async function runDueStrategies(
 
               await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
             }
+          }
+        } else if (env.TELEGRAM_BOT_TOKEN) {
+          // Notify on each individual failure (before auto-pause)
+          const telegramUserId = await getTelegramUserIdByAddress(
+            kv,
+            strategy.operatorAddress,
+          );
+          if (telegramUserId) {
+            const text = [
+              `<b>❌ Strategy #${strategy.id} — evaluation failed</b>`,
+              `Error: <code>${escapeHtml(strategy.lastError || "unknown")}</code>`,
+              `Failures: ${strategy.consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES} (pauses at ${MAX_CONSECUTIVE_FAILURES})`,
+            ].join("\n");
+            await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
           }
         }
 

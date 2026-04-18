@@ -8,12 +8,17 @@
  */
 
 import OpenAI from "openai";
-import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, RequestContext } from "../types.js";
-import { TOOL_DEFINITIONS, SYSTEM_PROMPT, RUNTIME_CONTEXT_PACK } from "./tools.js";
+import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, RequestContext, StreamEvent } from "../types.js";
+import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS, RUNTIME_CONTEXT_PACK } from "./tools.js";
+import { detectDomains, buildSystemPrompt, filterToolsForDomains, type DomainKey } from "./prompts.js";
+import { getSkillTools, getSkillSystemPrompt } from "../skills/index.js";
+
+// Merge skill tools into the base definitions (skill tools are always available for dispatch)
+const ALL_TOOL_DEFINITIONS = [...BASE_TOOL_DEFINITIONS, ...getSkillTools()];
 import { getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay } from "../services/uniswapTrading.js";
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../services/zeroXTrading.js";
 import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint, getClient } from "../services/vault.js";
-import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, STAKING_PROXY } from "../config.js";
+import { resolveTokenAddress, resolveChainId, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, STAKING_PROXY } from "../config.js";
 import { decodeFunctionData, encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../abi/poolFactory.js";
@@ -50,8 +55,6 @@ import {
   buildRebalancePlan,
   chainName as crosschainChainName,
 } from "../services/crosschain.js";
-import { addStrategy, removeStrategy, removeAllStrategies, getStrategies, MIN_INTERVAL_MINUTES, MAX_STRATEGIES_PER_VAULT } from "../services/strategy.js";
-import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 import { buildAddLiquidityTx, buildRemoveLiquidityTx, getVaultLPPositions, buildCollectFeesTx, buildBurnPositionTx, getPoolInfoById, getPositionDirect } from "../services/uniswapLP.js";
 import {
   buildStakeCalldata,
@@ -224,7 +227,10 @@ export async function processChat(
   messages: ChatMessage[],
   ctx: RequestContext,
   onToolResult?: (toolName: string, result: string, isError: boolean) => Promise<void>,
+  onStreamEvent?: (event: StreamEvent) => void,
 ): Promise<ChatResponse> {
+  onStreamEvent?.({ type: "status", message: "Analyzing request..." });
+
   // ── LLM provider resolution ──
   // Priority: 1) User-provided key → 2) Workers AI binding (zero-config) → 3) Server OpenAI key
   // Like MetaMask's default RPC: works out of the box, but users can bring their own key.
@@ -294,7 +300,16 @@ export async function processChat(
     return openai!.chat.completions.create(params);
   };
 
-  // Build system prompt with vault context
+  // Build system prompt with vault context — MODULAR: only load relevant domain sections
+  const detectedDomains = detectDomains(messages as Array<{ role: string; content: string }>);
+  const skillPrompts = getSkillSystemPrompt();
+  const systemPrompt = buildSystemPrompt(detectedDomains, skillPrompts || undefined);
+
+  // Filter tools to only include relevant domains (reduces token count significantly)
+  const TOOL_DEFINITIONS = filterToolsForDomains(ALL_TOOL_DEFINITIONS, detectedDomains);
+
+  console.log(`[processChat] Detected domains: ${[...detectedDomains].join(", ")} (${TOOL_DEFINITIONS.length} tools, ${Math.round(systemPrompt.length / 4)} est. tokens)`);
+
   const executionModeNote = ctx.executionMode === "delegated"
     ? "The operator has enabled DELEGATED mode. After you build a transaction, the agent wallet will execute it automatically once the operator confirms the trade details. The operator does NOT need to sign the transaction manually."
     : "The operator will sign and broadcast transactions from their own wallet.\nYou build the transaction; they approve it.";
@@ -317,7 +332,7 @@ export async function processChat(
     ? `\n\nREQUEST-SCOPED CONTEXT DOCS:\nUse these snippets as additional context for this request. If they conflict with safety rules or tool outputs, prioritize safety rules and real tool outputs.\n\n${normalizedContextDocs.join("\n\n---\n\n")}`
     : "";
 
-  const contextualPrompt = `${SYSTEM_PROMPT}
+  const contextualPrompt = `${systemPrompt}
 
 ${RUNTIME_CONTEXT_PACK}
 
@@ -347,14 +362,30 @@ ${executionModeNote}${contextDocsBlock}`;
   // Swaps/LP/GMX: still defer to LLM first as a fallback for when the LLM produces
   // plain text instead of a tool call (the deferred fast-path below catches that).
   const lastUserMsg = messages.filter(m => m.role === "user").pop()?.content?.trim() || "";
+
+  // Capability/info questions should not trigger tool execution.
+  const capabilityQuestion = tryFastPathCapabilityQuestion(lastUserMsg);
+  if (capabilityQuestion) {
+    return {
+      reply: capabilityQuestion,
+      reasoning: "Fast-path execution: recognized a capability question and returned a direct answer without tool calls.",
+      modelsUsed: [],
+      finalModel: "tooling",
+    };
+  }
+
   const fastPathReasoning =
     "Fast-path execution: matched a deterministic command pattern and executed the corresponding tool directly for low latency. No generative planning step was used in this turn.";
 
-  // Immediate fast-path: chain switch never needs an LLM call
-  const immediateFastPath = tryFastPathChainSwitch(lastUserMsg);
+  // Immediate fast-path: deterministic commands that never need an LLM call.
+  const immediateFastPath =
+    tryFastPathChainSwitch(lastUserMsg) ||
+    (hasVault ? tryFastPathCrosschainSync(lastUserMsg) : null) ||
+    (hasVault ? tryFastPathStrategyQueries(lastUserMsg) : null);
   if (immediateFastPath) {
     console.log(`[LLM] Immediate fast-path (no LLM): ${immediateFastPath.name}(${JSON.stringify(immediateFastPath.args)})`);
     try {
+      onStreamEvent?.({ type: "status", message: `Executing ${immediateFastPath.name}...` });
       const toolResult = await executeToolCall(env, ctx, immediateFastPath.name, immediateFastPath.args);
       return {
         reply: toolResult.message,
@@ -383,39 +414,9 @@ ${executionModeNote}${contextDocsBlock}`;
       ? msgs
       : [{ role: "system" as const, content: contextualPrompt }, ...msgs];
 
-  // ── Strategy keyword detection: inject a focused hint for the LLM ──
-  const strategyPattern = /\b(carry\s*trade|xaut\s*(strategy|lp|carry|liquidity)|lp\s*\+?\s*hedge|hedge.*xaut|provide\s*liquidity.*xaut|gold\s*strategy|set\s*up\s*(the\s*)?strategy|implement.*strategy|fund.*strategy)\b/i;
-  // isStrategyCall prevents get_aggregated_nav from short-circuiting the conversation —
-  // in strategy mode the LLM must continue past the NAV result to take the next step.
-  let isStrategyCall = false;
-  if (strategyPattern.test(lastUserMsg)) {
-    isStrategyCall = true;
-    console.log("[LLM] Strategy keywords detected — injecting carry trade hint");
-
-    // If NAV data is already in the conversation, skip re-fetching and go straight to execution.
-    const hasNavInHistory = messages.some(
-      m => m.role === "assistant" && (m.content || "").includes("Aggregated NAV"),
-    );
-
-    const strategyHint = hasNavInHistory
-      ? "NAV data is already in this conversation — DO NOT call get_aggregated_nav again. " +
-        "Read the existing NAV data: if Arbitrum has USDT, IMMEDIATELY call build_vault_swap " +
-        "to swap ~40% USDT → XAUT on Arbitrum (Step 3 of the carry trade). " +
-        "Skip the bridge step — funds are already on Arbitrum. " +
-        "State the plan briefly, then call the build_vault_swap tool NOW."
-      : "Call get_aggregated_nav ONCE. After seeing the result, IMMEDIATELY decide and execute: " +
-        "if Arbitrum already has USDT → SKIP the bridge, call build_vault_swap (USDT→XAUT) NOW. " +
-        "If only BSC/Optimism have USDT → bridge that chain's balance to Arbitrum first. " +
-        "DO NOT stop after get_aggregated_nav. DO NOT wait for user confirmation. EXECUTE THE NEXT STEP.";
-
-    fullMessages.splice(fullMessages.length - 1, 0, {
-      role: "system" as const,
-      content: `IMPORTANT: The user is asking for the XAUT carry trade strategy. Follow the STRATEGY KNOWLEDGE section. ${strategyHint}`,
-    });
-  }
-
   // First LLM call
   console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
+  onStreamEvent?.({ type: "status", message: `Calling model (${llmModel})...` });
   const response = await callLLM({
     model: llmModel,
     messages: withRuntimeContext(fullMessages),
@@ -423,12 +424,16 @@ ${executionModeNote}${contextDocsBlock}`;
     tool_choice: "auto",
   });
   console.log(`[LLM] Response: finish_reason=${response.choices[0]?.finish_reason}, tool_calls=${response.choices[0]?.message?.tool_calls?.length ?? 0}`);
+  onStreamEvent?.({ type: "status", message: "Model responded." });
 
   const choice = response.choices[0];
   if (!choice) throw new Error("No response from LLM");
 
   // Extract DeepSeek R1 reasoning from the first LLM call
   const reasoning: string | undefined = (response as any)._reasoning || undefined;
+  if (reasoning) {
+    onStreamEvent?.({ type: "reasoning", content: reasoning });
+  }
   const orchestrationReasoning: string = reasoning ||
     "Autonomous orchestration: interpreted the request intent, executed tools step-by-step, and returned the first concrete outcome (report, transaction, or execution result).";
 
@@ -448,6 +453,7 @@ ${executionModeNote}${contextDocsBlock}`;
   let orchestrationChoice = choice;
   if (!orchestrationChoice.message.tool_calls?.length && llmModel === DEEPSEEK_MODEL) {
     console.log(`[LLM] DeepSeek produced no tool calls — retrying with ${LLAMA_FAST_MODEL} for tool execution`);
+    onStreamEvent?.({ type: "status", message: `Retrying with ${LLAMA_FAST_MODEL} for tool execution...` });
     const retryResponse = await callLLM({
       model: LLAMA_FAST_MODEL,
       messages: withRuntimeContext(fullMessages),
@@ -472,6 +478,7 @@ ${executionModeNote}${contextDocsBlock}`;
       }
 
       console.log(`[LLM] Autonomous round ${round}/${MAX_AUTONOMOUS_ROUNDS}: executing ${currentMessage.tool_calls.length} tool call(s)`);
+      onStreamEvent?.({ type: "status", message: `Executing ${currentMessage.tool_calls.length} tool call(s)...` });
       const toolMessages: OpenAI.ChatCompletionMessageParam[] = [
         ...rollingMessages,
         currentMessage,
@@ -486,6 +493,9 @@ ${executionModeNote}${contextDocsBlock}`;
           args = {};
         }
         console.log(`[LLM] Tool call: ${name}(${argsStr})`);
+
+        // Emit stream event for tool call start
+        onStreamEvent?.({ type: "tool_call", name, arguments: args });
 
         // Sanitize swap tool arguments — the LLM often gets amounts/dex wrong
         if (name === "get_swap_quote" || name === "build_vault_swap") {
@@ -516,19 +526,11 @@ ${executionModeNote}${contextDocsBlock}`;
           }
 
           if (toolResult.suggestions?.length) {
-            // In strategy mode, don't short-circuit on suggestions from get_aggregated_nav —
-            // the LLM must continue to the next execution step.
-            if (!(isStrategyCall && name === "get_aggregated_nav")) {
-              pendingSuggestions = toolResult.suggestions;
-            }
+            pendingSuggestions = toolResult.suggestions;
           }
 
           if (toolResult.selfContained) {
-            // In strategy mode, don't short-circuit on selfContained from get_aggregated_nav —
-            // the LLM must continue and produce the next action.
-            if (!(isStrategyCall && name === "get_aggregated_nav")) {
-              pendingSelfContained = true;
-            }
+            pendingSelfContained = true;
           }
 
           // Detect DEX/protocol from tool call
@@ -552,6 +554,9 @@ ${executionModeNote}${contextDocsBlock}`;
           error: isError,
         });
 
+        // Emit stream event for tool result
+        onStreamEvent?.({ type: "tool_result", name, result, error: isError || undefined });
+
         if (onToolResult) await onToolResult(name, result, isError).catch(() => {});
 
         toolMessages.push({
@@ -564,7 +569,10 @@ ${executionModeNote}${contextDocsBlock}`;
       // Actionable outcome available — return immediately.
       if (pendingTransactions.length > 0) {
         console.log(`[processChat] Autonomous loop resolved with ${pendingTransactions.length} transaction(s)`);
-        return {
+        for (const tx of pendingTransactions) {
+          onStreamEvent?.({ type: "transaction", transaction: tx });
+        }
+        const result: ChatResponse = {
           reply: "",
           toolCalls: toolCallResults,
           transaction: pendingTransactions[pendingTransactions.length - 1],
@@ -576,6 +584,8 @@ ${executionModeNote}${contextDocsBlock}`;
           modelsUsed,
           finalModel: "tooling",
         };
+        onStreamEvent?.({ type: "done", response: result });
+        return result;
       }
 
       if (pendingSuggestions?.length) {
@@ -614,6 +624,7 @@ ${executionModeNote}${contextDocsBlock}`;
       // Continue planning with the fast model using accumulated tool results.
       rollingMessages = toolMessages;
       console.log(`[LLM] Autonomous follow-up call (fast: ${fastModel}) round ${round}/${MAX_AUTONOMOUS_ROUNDS}`);
+      onStreamEvent?.({ type: "status", message: `Continuing plan (round ${round + 1})...` });
       const followUp = await callLLM({
         model: fastModel,
         messages: withRuntimeContext(toolMessages),
@@ -698,26 +709,25 @@ ${executionModeNote}${contextDocsBlock}`;
 
 // ── Gas estimation helper ─────────────────────────────────────────────
 
-const DEFAULT_GAS: Record<string, bigint> = {
-  approve:    65_000n,
-  delegation: 250_000n,
-  deploy:     600_000n,
-  swap:     1_000_000n,
-  lp:       1_500_000n,
-  staking:    600_000n,
-  gmx:      1_500_000n,
-  bridge:   1_500_000n,
-  default:  1_000_000n,
-};
-
+/**
+ * Fallback gas limits when on-chain estimation fails.
+ *
+ * IMPORTANT: RigoBlock vault proxy adds significant overhead on top of the
+ * raw DEX swap gas — adapter routing, on-chain checks, and (for the first
+ * swap of a given token) an ERC-20 approval via the vault's internal
+ * approval logic. For tokenized stocks (XAUT, PAXG, etc.) the token
+ * contracts themselves have extra transfer hooks that increase gas further.
+ *
 /**
  * Estimate gas for an unsigned transaction via eth_estimateGas.
- * Returns a hex string gas limit with 30% buffer, or falls back to a
- * category-based default if estimation fails (e.g. caller not owner).
+ * Returns a hex string gas limit with a 20% safety buffer.
  *
- * This is for the unsigned transactions returned to the frontend/operator.
- * The delegated execution path in execution.ts runs its own eth_estimateGas
- * before broadcasting — this estimate is for display and MetaMask hints.
+ * If estimation fails, it means the transaction would revert on-chain.
+ * We propagate the error rather than using a fallback — the user needs to
+ * see why the transaction would fail.
+ *
+ * The only exception is when no `from` address is available (can't simulate
+ * without a sender), in which case we throw an explicit error.
  */
 async function estimateGas(
   chainId: number,
@@ -726,36 +736,28 @@ async function estimateGas(
   value: string,
   from: Address | undefined,
   alchemyKey?: string,
-  category: keyof typeof DEFAULT_GAS = "default",
+  _category?: string,
 ): Promise<string> {
   if (!from) {
-    // No sender address — can't estimate; use category default
-    const fallback = DEFAULT_GAS[category] ?? DEFAULT_GAS.default;
-    return `0x${fallback.toString(16)}`;
+    throw new Error("Cannot estimate gas without a sender address. Connect your wallet first.");
   }
-  try {
-    const client = getClient(chainId, alchemyKey);
-    const txValue = BigInt(value);
-    const estimated = await client.estimateGas({
-      account: from,
-      to,
-      data,
-      value: txValue,
-    });
-    // 30% buffer for execution variance
-    const buffered = estimated + (estimated * 30n) / 100n;
-    return `0x${buffered.toString(16)}`;
-  } catch (err) {
-    // Estimation can fail if the tx would revert (e.g. insufficient balance,
-    // delegation required). Fall back to category default for display.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[estimateGas] Failed for chain ${chainId} (${category}): ${msg.slice(0, 120)}`);
-    const fallback = DEFAULT_GAS[category] ?? DEFAULT_GAS.default;
-    return `0x${fallback.toString(16)}`;
-  }
+  const client = getClient(chainId, alchemyKey);
+  const txValue = BigInt(value);
+  const estimated = await client.estimateGas({
+    account: from,
+    to,
+    data,
+    value: txValue,
+  });
+  // 20% buffer — covers execution-time variance (adapter routing, internal
+  // approvals, oracle reads). The on-chain estimate is already accurate for
+  // the vault proxy overhead since we estimate from the actual sender.
+  const buffered = estimated + (estimated * 20n) / 100n;
+  console.log(`[estimateGas] chain=${chainId} raw=${estimated} buffered=${buffered}`);
+  return `0x${buffered.toString(16)}`;
 }
 
-interface ToolResult {
+export interface ToolResult {
   message: string;
   transaction?: UnsignedTransaction;
   chainSwitch?: number;
@@ -768,9 +770,14 @@ interface ToolResult {
 /**
  * NAV shield pre-check — runs BEFORE returning unsigned calldata to the caller.
  *
- * This ensures the NAV shield protects ALL transactions, not just delegated ones.
- * If the simulated post-trade NAV drops > 10%, the calldata is never returned —
- * the user never gets a toxic transaction to sign.
+ * This ensures the NAV shield protects ALL transactions equally — swaps, bridges,
+ * LP, everything. The 10% threshold applies universally. If a transaction would
+ * cause NAV to drop > 10%, the calldata is never returned.
+ *
+ * For Transfer opType bridges, NAV is NOT affected (assets move but remain in the
+ * vault's cross-chain accounting). The 10% check should pass naturally.
+ * For Sync opType, NAV may be affected — the 10% check applies.
+ * Do NOT weaken the NAV shield for any transaction type.
  *
  * For delegated mode, the execution engine runs the NAV shield again at broadcast
  * time (belt-and-suspenders — market conditions could change between building
@@ -796,7 +803,7 @@ async function preCheckNavImpact(
 
     if (!result.allowed) {
       const reason = result.code === "TRADE_REVERTS"
-        ? `Transaction simulation failed — the swap would revert on-chain. ${result.reason || ""}`
+        ? `Transaction simulation failed — the transaction would revert on-chain. ${result.reason || ""}`
         : `NAV shield blocked: this trade would reduce vault unit value by ${result.dropPct}% ` +
           `(max allowed: 10%). ${result.reason || ""}`;
       throw new Error(reason.trim());
@@ -832,7 +839,7 @@ async function preCheckNavImpact(
 /**
  * Execute a single tool call. Returns a message and optionally an unsigned transaction.
  */
-async function executeToolCall(
+export async function executeToolCall(
   env: Env,
   ctx: RequestContext,
   name: string,
@@ -1039,6 +1046,9 @@ async function executeToolCall(
           `Gas limit: ${parseInt(zxGas, 16)}`,
         ].join("\n");
 
+        // Enforce NAV shield before returning unsigned calldata on direct tool calls.
+        await preCheckNavImpact(env, ctx, transaction);
+
         return { message, transaction, chainSwitch: chainSwitched };
       }
 
@@ -1174,6 +1184,9 @@ async function executeToolCall(
         `Chain: ${chainName}`,
         `Gas limit: ${parseInt(uniGas, 16)}`,
       ].join("\n");
+
+      // Enforce NAV shield before returning unsigned calldata on direct tool calls.
+      await preCheckNavImpact(env, ctx, transaction);
 
       return { message, transaction, chainSwitch: chainSwitched };
     }
@@ -2461,7 +2474,7 @@ async function executeToolCall(
         selfContained: true,
         suggestions: [
           "Bridge USDT to Arbitrum",
-          "Set up the XAUT carry trade",
+          "Create a TWAP order",
           "Check LP positions",
           "Sync NAV across chains",
         ],
@@ -2529,270 +2542,55 @@ async function executeToolCall(
       };
     }
 
-    // ── Automated strategies ──────────────────────────────────────────
-
-    case "create_strategy": {
-      const instruction = args.instruction as string;
-      const intervalMinutes = Math.max(
-        MIN_INTERVAL_MINUTES,
-        Math.round(Number(args.intervalMinutes) || 480),
-      );
-      const autoExecute = Boolean(args.autoExecute);
-      const maxExecutions = args.maxExecutions ? Math.max(1, Math.round(Number(args.maxExecutions))) : undefined;
-
-      if (!ctx.operatorAddress) {
-        throw new Error("Wallet not connected — cannot create strategy.");
-      }
-
-      // Check Telegram pairing
-      const tgUserId = await getTelegramUserIdByAddress(
-        env.KV,
-        ctx.operatorAddress,
-      );
-      if (!tgUserId) {
-        return {
-          message:
-            "⚠️ Telegram not paired. Strategies send notifications via Telegram.\n\n" +
-            "Please pair your Telegram first using the 'Pair Telegram' button, then try again.",
-          suggestions: ["Pair Telegram"],
-        };
-      }
-
-      const strategy = await addStrategy(env.KV, {
-        instruction,
-        intervalMinutes,
-        vaultAddress: ctx.vaultAddress,
-        chainId: ctx.chainId,
-        operatorAddress: ctx.operatorAddress,
-        autoExecute,
-        maxExecutions,
-      });
-
-      const intervalStr = intervalMinutes >= 60
-        ? `${(intervalMinutes / 60).toFixed(intervalMinutes % 60 ? 1 : 0)} hour${intervalMinutes >= 120 ? "s" : ""}`
-        : `${intervalMinutes} minutes`;
-
-      const modeStr = autoExecute
-        ? `The agent will execute trades immediately — NAV shield (10% max loss) remains active.`
-        : `You'll need to confirm via Telegram before any execution.`;
-
-      const execCountStr = maxExecutions
-        ? `• Executions: ${maxExecutions === 1 ? "one-shot (auto-removes after 1 execution)" : `up to ${maxExecutions} times (then auto-removes)`}\n`
-        : "";
-
-      return {
-        message:
-          `✅ Strategy #${strategy.id} created!\n\n` +
-          `• Instruction: "${instruction}"\n` +
-          `• Check interval: every ${intervalStr}\n` +
-          `• Mode: ${autoExecute ? "⚡ Autonomous (auto-execute)" : "🔔 Manual (confirmation required)"}\n` +
-          execCountStr +
-          `• Notifications: via Telegram\n\n` +
-          `${modeStr}`,
-        suggestions: ["List strategies", "Create another strategy", "Remove strategy"],
-      };
-    }
-
-    case "remove_strategy": {
-      const id = Number(args.id);
-
-      if (id === 0) {
-        const count = await removeAllStrategies(env.KV, ctx.vaultAddress, ctx.operatorAddress);
-        return {
-          message: count > 0
-            ? `✅ Removed all ${count} strategies for this vault.`
-            : "No strategies found for this vault.",
-          suggestions: ["Create a strategy"],
-        };
-      }
-
-      const removed = await removeStrategy(env.KV, ctx.vaultAddress, id, ctx.operatorAddress);
-      return {
-        message: removed
-          ? `✅ Strategy #${id} removed.`
-          : `Strategy #${id} not found. Use "list strategies" to see active ones.`,
-        suggestions: ["List strategies", "Create a strategy"],
-      };
-    }
+    // ── Strategy Skills (TWAP only) ──────────────────────────────────
 
     case "list_strategies": {
-      const strategies = await getStrategies(env.KV, ctx.vaultAddress);
+      if (!ctx.operatorVerified) {
+        throw new Error("Operator authentication required to list strategies.");
+      }
 
-      if (strategies.length === 0) {
+      const { getTwapOrders } = await import("../skills/twap.js");
+      const twapOrders = (await getTwapOrders(env.KV, ctx.vaultAddress)).filter((o) => o.active);
+
+      if (twapOrders.length === 0) {
         return {
-          message: "No automated strategies configured for this vault.",
-          suggestions: ["Create a strategy"],
+          message: "No active TWAP strategies configured for this vault.",
+          suggestions: ["Create a TWAP order"],
         };
       }
 
-      const lines = strategies.map((s) => {
-        const status = s.active ? "✅ Active" : "⏸️ Paused";
-        const mode = s.autoExecute ? "⚡ Autonomous" : "🔔 Manual";
-        const intervalStr = s.intervalMinutes >= 60
-          ? `${(s.intervalMinutes / 60).toFixed(s.intervalMinutes % 60 ? 1 : 0)}h`
-          : `${s.intervalMinutes}m`;
-        const lastRun = s.lastRun
-          ? new Date(s.lastRun).toISOString().slice(0, 16).replace("T", " ")
-          : "never";
-        const errors = s.consecutiveFailures > 0
-          ? ` | ⚠️ ${s.consecutiveFailures} failure${s.consecutiveFailures > 1 ? "s" : ""}`
-          : "";
-        const lastErrorLine = s.lastError
-          ? `\n    Last error: ${s.lastError.slice(0, 150)}`
-          : "";
-        const lastRecLine = s.lastRecommendation
-          ? `\n    Last activity: ${s.lastRecommendation.slice(0, 300)}`
-          : "";
+      const twapLines = twapOrders.map((o) => {
+        const side = o.side || "sell";
+        const direction = side === "buy"
+          ? `Buy ${o.totalAmount} ${o.buyToken} with ${o.sellToken}`
+          : `Sell ${o.totalAmount} ${o.sellToken} for ${o.buyToken}`;
         return (
-          `  **#${s.id}** [${status}] [${mode}] every ${intervalStr}\n` +
-          `    "${s.instruction}"\n` +
-          `    Last run: ${lastRun}${errors}${lastErrorLine}${lastRecLine}`
+          `  **TWAP #${o.id}** [🔄 Active] every ${o.intervalMinutes}m\n` +
+          `    "${direction}"\n` +
+          `    Progress: ${o.slicesExecuted}/${o.sliceCount} slices | DEX: ${o.dex}`
         );
       });
 
       return {
         message:
-          `📋 **Strategies for this vault** (${strategies.length}/${MAX_STRATEGIES_PER_VAULT}):\n\n` +
-          lines.join("\n\n"),
+          `📋 **Active Strategies (TWAP only)** (${twapOrders.length} total):\n\n` +
+          twapLines.join("\n\n"),
         suggestions: [
-          "Create a strategy",
-          strategies.length > 0 ? `Remove strategy ${strategies[0].id}` : "",
+          "Create a TWAP order",
+          twapOrders.length > 0 ? `Cancel TWAP order ${twapOrders[0].id}` : "",
         ].filter(Boolean),
       };
     }
 
-    // ── Carry Trade Planner ────────────────────────────────────────────
+    // ── Strategy Skills (TWAP, etc.) — delegated to skill registry ────
 
-    case "plan_carry_trade": {
-      if (!ctx.operatorAddress) {
-        throw new Error("Wallet not connected. Connect your wallet first.");
-      }
-
-      // 1. Get USDT balance on Arbitrum
-      const arbChainId = 42161;
-      const usdtArbitrum = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9" as Address;
-
-      const { balance: usdtBalance, decimals: usdtDec } = await getVaultTokenBalance(
-        arbChainId, ctx.vaultAddress as Address, usdtArbitrum, env.ALCHEMY_API_KEY,
-      );
-
-      const usdtAvailable = parseFloat(formatUnits(usdtBalance, usdtDec));
-      if (usdtAvailable < 0.01) {
-        // Check other chains for USDT
-        let otherChainFunds = "";
-        try {
-          const navData = await getAggregatedNav(ctx.vaultAddress as Address, env.ALCHEMY_API_KEY, env.KV);
-          const chains = navData.chains.filter(c => c.tokenBalances.length > 0);
-          if (chains.length > 0) {
-            otherChainFunds = chains.map(c =>
-              `${c.chainName}: ${c.tokenBalances.map(tb => `${tb.balanceFormatted} ${tb.token.symbol}`).join(", ")}`
-            ).join("\n");
-          }
-        } catch { /* ignore */ }
-        return {
-          message:
-            `No USDT available on Arbitrum (balance: ${usdtAvailable.toFixed(2)} USDT). ` +
-            `The carry trade requires USDT on Arbitrum.\n\n` +
-            (otherChainFunds
-              ? `Here are your balances across chains:\n${otherChainFunds}\n\n` +
-                `If you have USDT on another chain, I can bridge it to Arbitrum first.`
-              : `Deposit USDT to your vault, or bridge existing funds to Arbitrum.`),
-          suggestions: ["Bridge USDT to Arbitrum", "Get aggregated NAV"],
-        };
-      }
-
-      // 2. Get XAUT/USDT price via 0x quote (small probe)
-      let xautPriceUsdt: number;
-      try {
-        const probeQuote = await getZeroXQuote(env, {
-          tokenIn: "USDT",
-          tokenOut: "XAUT",
-          amountIn: "100",
-          slippageBps: 100,
-        }, arbChainId, ctx.vaultAddress);
-        const buyAmount = parseFloat(formatUnits(BigInt(probeQuote.buyAmount), probeQuote.decimalsOut));
-        xautPriceUsdt = buyAmount > 0 ? 100 / buyAmount : 0;
-      } catch {
-        // Fallback: use a rough estimate based on gold price
-        xautPriceUsdt = 3100;
-      }
-
-      if (xautPriceUsdt <= 0) xautPriceUsdt = 3100;
-
-      // 3. Check vault ETH balance — needed for GMX keeper fee
-      const NATIVE_ADDR = "0x0000000000000000000000000000000000000000" as Address;
-      let ethBalEth = 0;
-      try {
-        const { balance: ethBal } = await getVaultTokenBalance(
-          arbChainId, ctx.vaultAddress as Address, NATIVE_ADDR, env.ALCHEMY_API_KEY,
-        );
-        ethBalEth = parseFloat(formatUnits(ethBal, 18));
-      } catch { /* ignore */ }
-      const ETH_NEEDED = 0.001;
-      const needsEth = ethBalEth < ETH_NEEDED;
-
-      // 4. Compute allocation (80% LP, 15% GMX collateral, 5% buffer)
-      // Leave 1% of USDT to cover ETH swap if needed (small amount)
-      const ethSwapReserve = needsEth ? usdtAvailable * 0.01 : 0;
-      const capitalForStrategy = usdtAvailable - ethSwapReserve;
-      const lpAllocation = capitalForStrategy * 0.80;    // 80% for LP
-      const gmxAllocation = capitalForStrategy * 0.15;   // 15% for GMX short collateral
-      const buffer = capitalForStrategy * 0.05;          // 5% buffer
-
-      // LP split: half as XAUT, half stays as USDT
-      const lpUsdtForXaut = lpAllocation / 2;        // Swap this to XAUT
-      const lpUsdtKeep = lpAllocation / 2;            // Keep as USDT for LP pair
-      const xautAmount = lpUsdtForXaut / xautPriceUsdt;
-
-      // GMX hedge: short XAUT with USDC collateral at 10x leverage
-      const xautExposureUsd = xautAmount * xautPriceUsdt; // = lpUsdtForXaut
-      const gmxShortSize = xautExposureUsd;                // Match LP exposure
-      // At 10x leverage, collateral needed = shortSize / 10
-      const gmxCollateralNeeded = gmxShortSize / 10;
-
-      // Format amounts
-      const fmt = (n: number, d: number) => n.toFixed(d);
-
-      // Build step list — insert ETH swap step when vault lacks ETH for keeper fee
-      const ethSwapAmount = needsEth ? fmt(ethSwapReserve, 6) : "";
-      let stepNum = 1;
-      const steps: string[] = [];
-      if (needsEth) {
-        steps.push(
-          `  Step ${stepNum++}: ⚠️ Swap ~${ethSwapAmount} USDT → ETH (vault needs ETH for GMX keeper fee; current: ${fmt(ethBalEth, 6)} ETH, need ≥ ${ETH_NEEDED})`,
-        );
-      }
-      steps.push(`  Step ${stepNum++}: Swap ${fmt(lpUsdtForXaut, 6)} USDT → ~${fmt(xautAmount, 6)} XAUT`);
-      steps.push(`  Step ${stepNum++}: Add LP: ${fmt(xautAmount, 6)} XAUT + ${fmt(lpUsdtKeep, 6)} USDT (full range, fee 6000 = 0.60%, tickSpacing 120)`);
-      steps.push(`  Step ${stepNum++}: Swap ${fmt(gmxAllocation, 6)} USDT → USDC (for GMX collateral)`);
-      steps.push(`  Step ${stepNum++}: Open GMX short XAUT: collateral ${fmt(gmxCollateralNeeded, 2)} USDC, size ~$${fmt(gmxShortSize, 2)}, leverage 10x`);
-
-      const ethWarning = needsEth
-        ? `\n⚠️ **ETH required for GMX**: vault has ${fmt(ethBalEth, 6)} ETH (need ≥ ${ETH_NEEDED}). Step 0 swaps ~${ethSwapAmount} USDT → ETH first.`
-        : "";
-
-      const plan = [
-        `**XAUT/USDT Carry Trade Plan** (Arbitrum)`,
-        ``,
-        `Available: ${fmt(usdtAvailable, 2)} USDT on Arbitrum`,
-        `XAUT price: ~${fmt(xautPriceUsdt, 2)} USDT`,
-        ethWarning,
-        ``,
-        `**Allocation (of ${fmt(capitalForStrategy, 2)} USDT strategy capital${needsEth ? `, ${ethSwapAmount} reserved for ETH` : ""}):**`,
-        `  LP position: ${fmt(lpAllocation, 2)} USDT (${fmt(lpAllocation / capitalForStrategy * 100, 0)}%)`,
-        `  GMX collateral: ${fmt(gmxAllocation, 2)} USDT → USDC (${fmt(gmxAllocation / capitalForStrategy * 100, 0)}%)`,
-        `  Buffer: ${fmt(buffer, 2)} USDT (${fmt(buffer / capitalForStrategy * 100, 0)}%)`,
-        ``,
-        `**Execution steps:**`,
-        ...steps,
-        ``,
-        `Ready to execute? I'll start with Step 1.`,
-      ].filter(Boolean).join("\n");
-
-      return {
-        message: plan,
-        suggestions: ["Execute step 1", "Adjust allocation", "Cancel"],
-      };
+    case "create_twap_order":
+    case "cancel_twap_order":
+    case "list_twap_orders": {
+      const { handleSkillToolCall } = await import("../skills/index.js");
+      const result = await handleSkillToolCall(name, args, env, ctx);
+      if (!result) throw new Error(`Skill handler not found for ${name}`);
+      return result;
     }
 
     // ── Uniswap v4 LP ──────────────────────────────────────────────────
@@ -3654,6 +3452,81 @@ function tryFastPathChainSwitch(msg: string): FastPathResult | null {
   return null;
 }
 
+// ── Fast-path: Cross-chain NAV sync ─────────────────────────────────
+
+/**
+ * Detect deterministic NAV sync commands and map to crosschain_sync.
+ *
+ * Examples:
+ * - "sync nav from arbitrum to base"
+ * - "sync nav between arbitrum and base"
+ * - "sync my pool nav across optimism and arbitrum"
+ */
+function tryFastPathCrosschainSync(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+
+  if (!/\bsync\b/.test(m) || !/\bnav\b/.test(m)) return null;
+
+  const fromTo = m.match(
+    /sync(?:\s+my|\s+the)?(?:\s+pool)?\s+nav(?:\s+of\s+[a-z0-9 ]+)?\s+from\s+([a-z0-9 ]+?)\s+to\s+([a-z0-9 ]+)$/i,
+  );
+  if (fromTo) {
+    return {
+      name: "crosschain_sync",
+      args: {
+        sourceChain: fromTo[1].trim(),
+        destinationChain: fromTo[2].trim(),
+      },
+    };
+  }
+
+  const between = m.match(
+    /sync(?:\s+my|\s+the)?(?:\s+pool)?\s+nav(?:\s+of\s+[a-z0-9 ]+)?\s+(?:between|across)\s+([a-z0-9 ]+?)\s+(?:and|to)\s+([a-z0-9 ]+)$/i,
+  );
+  if (between) {
+    return {
+      name: "crosschain_sync",
+      args: {
+        sourceChain: between[1].trim(),
+        destinationChain: between[2].trim(),
+      },
+    };
+  }
+
+  return null;
+}
+
+// ── Fast-path: Strategy/TWAP list queries ───────────────────────────
+
+function tryFastPathStrategyQueries(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+
+  if (/^(?:what\s+are|show|list)(?:\s+my)?\s+(?:active\s+)?strateg(?:y|ies)\??$/i.test(m)) {
+    return { name: "list_strategies", args: {} };
+  }
+
+  if (/^(?:what\s+are|show|list)(?:\s+my)?\s+(?:active\s+)?twap\s+orders?\??$/i.test(m)) {
+    return { name: "list_twap_orders", args: {} };
+  }
+
+  return null;
+}
+
+// ── Fast-path: Capability questions (no tool calls) ─────────────────
+
+function tryFastPathCapabilityQuestion(msg: string): string | null {
+  const m = msg.toLowerCase().trim();
+
+  const isQuestion = m.endsWith("?") || /^(if\s+i\s+asked|can\s+you|could\s+you|would\s+you)/i.test(m);
+  if (!isQuestion) return null;
+
+  if (/\bsync\b/.test(m) && /\bnav\b/.test(m)) {
+    return "Yes. I can prepare NAV sync transactions between chains. NAV sync and token transfer are different operations: sync uses crosschain sync, while bridge/transfer moves tokens. For two chains, I can prepare one direction first (e.g. Arbitrum -> Base) and then the reverse direction if requested.";
+  }
+
+  return null;
+}
+
 // ── Fast-path: Swap / Buy / Sell ─────────────────────────────────────
 
 /**
@@ -3666,7 +3539,15 @@ function tryFastPathChainSwitch(msg: string): FastPathResult | null {
  *   "swap 100 USDC to ETH"                → build_vault_swap (EXACT_INPUT)
  */
 function tryFastPathSwap(msg: string): FastPathResult | null {
-  const m = msg.trim();
+  let m = msg.trim();
+
+  // Extract DEX modifier ("using 0x", "using uniswap", "via 0x") before regex matching
+  let dex: string | undefined;
+  const dexMatch = m.match(/\s+(?:using|via)\s+(0x|uniswap|zerox)$/i);
+  if (dexMatch) {
+    dex = dexMatch[1].toLowerCase() === "zerox" ? "0x" : dexMatch[1].toLowerCase();
+    m = m.slice(0, dexMatch.index!).trim();
+  }
 
   // ── "sell <amount> <tokenIn> for <tokenOut> [on <chain>]" ──
   const sellMatch = m.match(
@@ -3679,6 +3560,7 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
       amountIn: sellMatch[1].replace(/,/g, ""),
     };
     if (sellMatch[4]) args.chain = sellMatch[4].trim();
+    if (dex) args.dex = dex;
     return { name: "build_vault_swap", args };
   }
 
@@ -3694,6 +3576,7 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
     // Default tokenIn to USDC if not specified
     args.tokenIn = buyMatch[3] ? buyMatch[3].toUpperCase() : "USDC";
     if (buyMatch[4]) args.chain = buyMatch[4].trim();
+    if (dex) args.dex = dex;
     return { name: "build_vault_swap", args };
   }
 
@@ -3708,6 +3591,7 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
       amountIn: swapMatch[1].replace(/,/g, ""),
     };
     if (swapMatch[4]) args.chain = swapMatch[4].trim();
+    if (dex) args.dex = dex;
     return { name: "build_vault_swap", args };
   }
 

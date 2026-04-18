@@ -20,12 +20,13 @@ import { quote } from "./routes/quote.js";
 import { delegation } from "./routes/delegation.js";
 import { gasPolicy } from "./routes/gasPolicy.js";
 import { telegram } from "./routes/telegram.js";
+import { tools as toolsRoute } from "./routes/tools.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
 import { createX402Middleware } from "./middleware/x402.js";
-import { runDueStrategies } from "./services/strategy.js";
-import { getStrategyEvents } from "./services/strategy.js";
+import { runAllSkills } from "./skills/index.js";
+import { getTwapEvents } from "./skills/twap.js";
 import { processChat } from "./llm/client.js";
 import { ensureWebhookRegistered, deriveWebhookSecret } from "./services/telegram.js";
 import type { Address } from "viem";
@@ -48,6 +49,7 @@ app.use("*", createX402Middleware());
 // ── API Routes ────────────────────────────────────────────────────────
 app.route("/api/chat", chat);
 app.route("/api/quote", quote);
+app.route("/api/tools", toolsRoute);
 app.route("/api/delegation", delegation);
 app.route("/api/gas-policy", gasPolicy);
 app.route("/api/telegram", telegram);
@@ -107,7 +109,20 @@ app.get("/api/strategy-events", async (c) => {
     return c.json({ error: "vault query param required (0x…)" }, 400);
   }
   const since = Number(c.req.query("since") || "0");
-  const events = await getStrategyEvents(c.env.KV, vault, since || undefined);
+  const twapEvents = await getTwapEvents(c.env.KV, vault, since || undefined);
+
+  const normalizedTwapEvents = twapEvents.map((e) => ({
+    type: "twap" as const,
+    timestamp: e.timestamp,
+    success: e.success,
+    twapOrderId: e.orderId,
+    summary: e.success
+      ? `Slice ${e.sliceNumber}/${e.totalSlices}: ${e.sellAmount} → ${e.buyAmount}`
+      : `Slice ${e.sliceNumber}/${e.totalSlices} failed: ${e.error || "unknown error"}`,
+  }));
+
+  const events = normalizedTwapEvents.sort((a, b) => a.timestamp - b.timestamp);
+
   return c.json({ events });
 });
 
@@ -161,7 +176,7 @@ export default {
       : Promise.resolve();
 
     ctx.waitUntil(Promise.all([
-      runDueStrategies(env, processChat),
+      runAllSkills(env, processChat),
       telegramRefresh,
     ]));
   },

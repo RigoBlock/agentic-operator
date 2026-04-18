@@ -109,6 +109,8 @@ export interface ChatRequest {
   executionMode?: ExecutionMode;
   /** When true in delegated mode, confirms the agent should execute the pending tx */
   confirmExecution?: boolean;
+  /** When true, response is streamed as SSE events instead of a single JSON blob */
+  stream?: boolean;
   /** User-provided AI API key (OpenRouter, Anthropic, or OpenAI) */
   aiApiKey?: string;
   /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b") */
@@ -177,6 +179,18 @@ export interface ChatResponse {
   /** Model that authored the final natural-language output (or 'tooling' when output is tool-native) */
   finalModel?: string;
 }
+
+// ── SSE Stream Events ─────────────────────────────────────────────────
+/** Events emitted during SSE streaming of /api/chat responses */
+export type StreamEvent =
+  | { type: "status"; message: string }
+  | { type: "reasoning"; content: string }
+  | { type: "tool_call"; name: string; arguments: Record<string, unknown> }
+  | { type: "tool_result"; name: string; result: string; error?: boolean }
+  | { type: "transaction"; transaction: UnsignedTransaction }
+  | { type: "chain_switch"; chainId: number }
+  | { type: "text"; content: string }
+  | { type: "done"; response: ChatResponse };
 
 // ── Agent Wallet ──────────────────────────────────────────────────────
 /** Stored agent wallet info (private key is encrypted in KV) */
@@ -267,6 +281,8 @@ export interface RequestContext {
   vaultAddress: Address;
   chainId: number;
   operatorAddress?: Address;
+  /** True only when operator auth signature has been verified on-chain */
+  operatorVerified?: boolean;
   /** Execution mode for this request */
   executionMode?: ExecutionMode;
   /** User-provided AI API key (overrides server OPENAI_API_KEY) */

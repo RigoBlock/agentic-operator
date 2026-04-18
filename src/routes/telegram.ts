@@ -21,7 +21,7 @@ import type { Env, ChatMessage, RequestContext, ChatResponse, TelegramConversati
 import type { Address } from "viem";
 import { processChat } from "../llm/client.js";
 import { isDelegationActive, isDelegationActiveAnyChain, getDelegationConfig, getActiveChains } from "../services/delegation.js";
-import { executeTxList, type TxExecOutcome } from "../services/execution.js";
+import { executeTxList, formatOutcomesMarkdown, type TxExecOutcome } from "../services/execution.js";
 import { initTokenResolver } from "../services/tokenResolver.js";
 import {
   sendMessage,
@@ -71,9 +71,9 @@ telegram.post("/webhook", async (c) => {
     if (received !== expected) {
       // Secret mismatch means the webhook was registered without a secret (or the
       // secret rotated). Re-register with the correct secret in the background so
-      // Telegram's retry (triggered by our 503) arrives with a matching token.
+      // future updates arrive with the correct token.
       const webhookUrl = `${new URL(c.req.url).origin}/api/telegram/webhook`;
-      console.warn(`[telegram] Webhook secret mismatch — re-registering ${webhookUrl} and returning 503 for Telegram retry`);
+      console.warn(`[telegram] Webhook secret mismatch — re-registering ${webhookUrl} (processing update anyway)`);
       c.executionCtx.waitUntil(
         Promise.all([
           setWebhook(token, webhookUrl, expected)
@@ -82,11 +82,10 @@ telegram.post("/webhook", async (c) => {
           c.env.KV.put(WEBHOOK_URL_KV_KEY, webhookUrl),
         ]),
       );
-      // Return 200 (not 503) so Telegram marks this update as delivered and doesn't
-      // retry-storm. The mismatch means our webhook registration is stale — re-register
-      // in the background so future updates arrive with the correct secret.
-      // The current update is dropped (security: reject mismatched requests).
-      return c.json({ ok: true });
+      // IMPORTANT: Do NOT drop the update — process it below. The bot token itself
+      // already authenticates this webhook URL (only Telegram knows it). Dropping
+      // updates on secret mismatch causes complete bot silence when the webhook was
+      // registered without a secret or the secret rotated.
     }
   }
 
@@ -278,6 +277,12 @@ async function handleUpdate(env: Env, token: string, update: TgUpdate): Promise<
     }
   } catch (err) {
     console.error("[telegram] handleUpdate error:", err);
+    // Try to notify the user about the error
+    const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
+    if (chatId) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      await sendMessage(token, chatId, `⚠️ Internal error: ${escapeHtml(sanitizeError(msg).slice(0, 200))}`).catch(() => {});
+    }
     // Don't re-throw — Telegram will retry endlessly
   }
 }
@@ -393,6 +398,35 @@ async function handleMessage(
         return;
       }
 
+      case "/mode": {
+        // Toggle between autonomous (auto-execute) and confirm (show Execute button) modes
+        const modeKey = `tg-execmode:${userId}`;
+        const pick = args[0]?.toLowerCase();
+        if (!pick) {
+          // Show current mode
+          const current = await env.KV.get(modeKey);
+          const mode = current === "confirm" ? "confirm" : "autonomous";
+          await sendMessage(token, chatId,
+            `Current mode: <b>${mode === "autonomous" ? "⚡ Autonomous" : "🔔 Confirm"}</b>\n\n` +
+            `<code>/mode autonomous</code> — execute trades immediately (requires delegation)\n` +
+            `<code>/mode confirm</code> — show Execute/Cancel buttons before each trade`,
+          );
+          return;
+        }
+        if (pick === "autonomous" || pick === "auto") {
+          await env.KV.put(modeKey, "autonomous");
+          await sendMessage(token, chatId, "Switched to <b>⚡ Autonomous</b> — trades execute immediately when delegation is active.");
+        } else if (pick === "confirm" || pick === "manual") {
+          await env.KV.put(modeKey, "confirm");
+          await sendMessage(token, chatId, "Switched to <b>🔔 Confirm</b> — you'll see Execute/Cancel buttons before each trade.");
+        } else {
+          await sendMessage(token, chatId,
+            `Unknown mode "<code>${escapeHtml(pick)}</code>".\nUse <code>/mode autonomous</code> or <code>/mode confirm</code>.`,
+          );
+        }
+        return;
+      }
+
       case "/unpair": {
         const addr = args[0];
         if (!addr) {
@@ -401,6 +435,39 @@ async function handleMessage(
         }
         const removed = await unlinkVault(env.KV, userId, addr);
         await sendMessage(token, chatId, removed ? "Vault unlinked." : "Vault not found in your linked list.");
+        return;
+      }
+
+      case "/reset": {
+        // Complete reset — wipe all Telegram state for this user
+        const userToReset = await getTelegramUser(env.KV, userId);
+        const keysToDelete: string[] = [
+          `tg-user:${userId}`,
+          `tg-conv:${userId}`,
+          `tg-model:${userId}`,
+          `tg-pending-tx:${userId}`,
+          `tg-strategy-rec:${userId}`,
+        ];
+        // Also clean up reverse lookups for all linked operators
+        if (userToReset) {
+          const operators = new Set(
+            userToReset.vaults
+              .map(v => v.operatorAddress?.toLowerCase())
+              .filter(Boolean),
+          );
+          if (userToReset.operatorAddress) {
+            operators.add(userToReset.operatorAddress.toLowerCase());
+          }
+          for (const op of operators) {
+            keysToDelete.push(`tg-addr:${op}`);
+          }
+        }
+        await Promise.all(keysToDelete.map(k => env.KV.delete(k)));
+        await sendMessage(
+          token,
+          chatId,
+          "🔄 Reset complete — all vaults, conversations, and preferences cleared.\n\nTo start fresh, pair a vault from the web app or use <code>/pair CODE</code>.",
+        );
         return;
       }
 
@@ -571,6 +638,10 @@ async function handleMessage(
   // "deepseek" → DeepSeek R1 reasoning mode; anything else → Llama 3.3 70B (default).
   const modelPref = await env.KV.get(`tg-model:${userId}`);
 
+  // Load execution mode preference: "autonomous" = auto-execute, "confirm" (default) = show buttons
+  const execModePref = await env.KV.get(`tg-execmode:${userId}`);
+  const autoExecuteFromTelegram = execModePref === "autonomous";
+
   const ctx: RequestContext = {
     vaultAddress: vault.address,
     chainId: vault.chainId,
@@ -691,13 +762,6 @@ async function handleMessage(
       }
 
       if (executableTxs.length > 0) {
-        // Store executable transactions with timestamp for staleness detection
-        const txKey = `tg-pending-tx:${userId}`;
-        const payload = { txs: executableTxs, createdAt: Date.now() };
-        await env.KV.put(txKey, JSON.stringify(payload), {
-          expirationTtl: 120, // 2 min — swap quotes expire quickly
-        });
-
         // Build trade summary for executable transactions
         const tradeLabels: string[] = [];
         for (const tx of executableTxs) {
@@ -712,20 +776,57 @@ async function handleMessage(
         }
 
         const tradeCount = executableTxs.length > 1 ? `${executableTxs.length} trades` : "Trade";
-        replyParts.push(`\n🔔 <b>${tradeCount} ready:</b>\n${tradeLabels.join("\n")}`);
 
-        const keyboard: TgInlineKeyboardMarkup = {
-          inline_keyboard: [
-            [
-              { text: `✅ Execute${executableTxs.length > 1 ? " All" : ""}`, callback_data: `exec:${userId}` },
-              { text: "❌ Cancel", callback_data: `cancel:${userId}` },
+        if (autoExecuteFromTelegram) {
+          // ⚡ Autonomous mode — execute immediately, no confirmation needed
+          replyParts.push(`\n⚡ <b>Executing ${tradeCount.toLowerCase()}…</b>\n${tradeLabels.join("\n")}`);
+          const statusReply = replyParts.join("\n\n");
+          const truncated = statusReply.length > 4000 ? statusReply.slice(0, 3990) + "…" : statusReply;
+          const statusMsg = await sendMessage(token, chatId, truncated);
+
+          try {
+            const outcomes = await executeTxList(
+              env,
+              executableTxs,
+              vault.address,
+            );
+            const summary = formatOutcomesMarkdown(outcomes);
+            const resultText = `✅ <b>Executed:</b>\n${formatForTelegram(summary)}`;
+            if (statusMsg?.message_id) {
+              await editMessageText(token, chatId, statusMsg.message_id,
+                (truncated + "\n\n" + resultText).slice(0, 4000),
+              ).catch(() => {});
+            } else {
+              await sendMessage(token, chatId, resultText);
+            }
+          } catch (execErr) {
+            const errMsg = execErr instanceof Error ? execErr.message : "Execution failed";
+            await sendMessage(token, chatId, `⚠️ Execution error: ${escapeHtml(sanitizeError(errMsg).slice(0, 200))}`);
+          }
+        } else {
+          // 🔔 Confirm mode (default) — show Execute/Cancel buttons
+          replyParts.push(`\n🔔 <b>${tradeCount} ready:</b>\n${tradeLabels.join("\n")}`);
+
+          // Store executable transactions with timestamp for staleness detection
+          const txKey = `tg-pending-tx:${userId}`;
+          const payload = { txs: executableTxs, createdAt: Date.now() };
+          await env.KV.put(txKey, JSON.stringify(payload), {
+            expirationTtl: 120, // 2 min — swap quotes expire quickly
+          });
+
+          const keyboard: TgInlineKeyboardMarkup = {
+            inline_keyboard: [
+              [
+                { text: `✅ Execute${executableTxs.length > 1 ? " All" : ""}`, callback_data: `exec:${userId}` },
+                { text: "❌ Cancel", callback_data: `cancel:${userId}` },
+              ],
             ],
-          ],
-        };
+          };
 
-        const fullReply = replyParts.join("\n\n") || "Ready.";
-        const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
-        await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
+          const fullReply = replyParts.join("\n\n") || "Ready.";
+          const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
+          await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
+        }
       } else {
         // All transactions blocked — no Execute button
         const fullReply = replyParts.join("\n\n") || "No executable trades.";
@@ -1067,8 +1168,10 @@ async function sendHelpMessage(token: string, chatId: number): Promise<void> {
     "/pool &lt;name&gt; — switch active vault",
     "/addpool &lt;0xAddr&gt; — add vault by address",
     "/model [llama|deepseek] — view or change AI model",
+    "/mode [autonomous|confirm] — toggle auto-execute or confirm",
     "/clear — reset conversation",
     "/unpair &lt;addr&gt; — unlink a vault",
+    "/reset — wipe all state and start fresh",
     "/help — this message",
     "",
     "<b>Note:</b> Trades execute automatically via your agent wallet (delegation). Set up delegation in the <a href=\"https://trader.rigoblock.com\">web app</a> first.",

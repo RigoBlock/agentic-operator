@@ -34,6 +34,7 @@ import {
 import { getAgentWalletInfo, syncAgentWallet, deleteAgentWallet } from "../services/agentWallet.js";
 import { checkAgentBalance, checkPendingTxStatus, executeViaDelegation, ExecutionError } from "../services/execution.js";
 import { sanitizeError } from "../config.js";
+import { getTelegramUser, getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 import type { Address, Hex } from "viem";
 
 const delegation = new Hono<{ Bindings: Env }>();
@@ -526,6 +527,73 @@ delegation.post("/settings", async (c) => {
       return c.json({ error: err.message }, err.status as 401 | 403);
     }
     console.error("[delegation/settings] Error:", err);
+    return c.json({ error: sanitizeError(err instanceof Error ? err.message : "Internal error") }, 500);
+  }
+});
+
+/**
+ * POST /api/delegation/telegram-reset
+ *
+ * Reset Telegram pairing and conversation state for the authenticated operator.
+ * Equivalent to the /reset command in the Telegram bot.
+ *
+ * Body: { operatorAddress, vaultAddress, authSignature, authTimestamp }
+ */
+delegation.post("/telegram-reset", async (c) => {
+  try {
+    const body = await c.req.json<{
+      operatorAddress: string;
+      vaultAddress: string;
+      authSignature: string;
+      authTimestamp: number;
+    }>();
+
+    await verifyOperatorAuth({
+      operatorAddress: body.operatorAddress,
+      vaultAddress: body.vaultAddress,
+      authSignature: body.authSignature,
+      authTimestamp: body.authTimestamp,
+      preferredChainId: 1,
+      alchemyKey: c.env.ALCHEMY_API_KEY,
+    });
+
+    const addr = body.operatorAddress.toLowerCase();
+    const userId = await getTelegramUserIdByAddress(c.env.KV, addr);
+    if (!userId) {
+      return c.json({ ok: true, message: "No Telegram pairing found for this address." });
+    }
+
+    const user = await getTelegramUser(c.env.KV, userId);
+    const keysToDelete: string[] = [
+      `tg-user:${userId}`,
+      `tg-conv:${userId}`,
+      `tg-model:${userId}`,
+      `tg-pending-tx:${userId}`,
+      `tg-strategy-rec:${userId}`,
+    ];
+
+    if (user) {
+      const operators = new Set(
+        user.vaults
+          .map((v: { operatorAddress?: string }) => v.operatorAddress?.toLowerCase())
+          .filter(Boolean),
+      );
+      if (user.operatorAddress) {
+        operators.add(user.operatorAddress.toLowerCase());
+      }
+      for (const op of operators) {
+        keysToDelete.push(`tg-addr:${op}`);
+      }
+    }
+
+    await Promise.all(keysToDelete.map(k => c.env.KV.delete(k)));
+
+    return c.json({ ok: true, message: "Telegram pairing and conversation state reset." });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return c.json({ error: err.message }, err.status as 401 | 403);
+    }
+    console.error("[delegation/telegram-reset] Error:", err);
     return c.json({ error: sanitizeError(err instanceof Error ? err.message : "Internal error") }, 500);
   }
 });

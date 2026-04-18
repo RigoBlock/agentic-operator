@@ -291,7 +291,7 @@ of operations — use your own judgment on how to phrase requests:
 
 ### Uniswap v4 Liquidity
 - Add/remove LP positions, list positions, collect fees
-- XAUT/USDT pool on Arbitrum (the carry trade pool):
+- XAUT/USDT pool on Arbitrum (reference pool):
   - Pool ID: `0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34`
   - fee: `6000` (0.60%), tickSpacing: `120`, hooks: `0x0000000000000000000000000000000000000000`
   - currency0: XAUT `0x40461291347e1eCbb09499F3371D3f17f10d7159`, currency1: USDT `0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9`
@@ -317,68 +317,19 @@ of operations — use your own judgment on how to phrase requests:
 
 ## Strategy Knowledge
 
-One strategy: XAUT/USDT LP + permanent hedge. **You decide** how to size
-positions and when to rebalance — these are guidelines, not rigid scripts.
-Full details in `{baseDir}/references/STRATEGIES.md`.
+Only deterministic TWAP automation is supported.
 
-### XAUT/USDT LP + Permanent Hedge (Arbitrum)
+Use these tools:
 
-**What it is:** Earn LP fees on the XAUT/USDT Uniswap v4 pool on Arbitrum,
-hedge all directional XAUT exposure with a 1x GMX short on Arbitrum.
-Both legs on the same chain — no cross-chain complexity for the strategy itself.
-The hedge is **always on** — it is not removed when funding costs money.
-Yield = LP fees minus hedge cost.
+1. `create_twap_order`
+2. `list_twap_orders`
+3. `cancel_twap_order`
 
-**How it works:**
-- **BSC + Optimism (capital):** Investors fund vault tokens on BSC or Optimism
-  (USDT as base token). Capital is bridged to Arbitrum via Across.
-- **Arbitrum vault (LP + hedge):** Swap USDT → XAUT, add XAUT/USDT LP on
-  Uni v4 (fee=6000, tickSpacing=120, no hooks). Convert ~15% to USDC, open 1x short
-  XAUT/USD on GMX with USDC as collateral. Earn LP fees, hedge offsets
-  directional XAUT exposure.
-- **Cross-chain NAV sync:** Call `crosschain_sync` every ~30 minutes AND on
-  significant price deviations (>1% move). Sync more frequently if NAV
-  deviation is large.
+Notes:
 
-**Core principle:** The GMX short is the hedge for XAUT LP exposure.
-Even when funding costs money, the hedge stays on. Removing it would
-create unhedged directional XAUT exposure — that is speculation.
-
-**Allocation:** You decide all amounts autonomously — maximize LP
-allocation while maintaining sufficient GMX margin and a liquidity buffer.
-Approximate: ~80% to LP (40% XAUT + 40% USDT), ~15% GMX collateral (USDC), ~5% buffer.
-
-**Monitoring:**
-- Check positions every **5 minutes** (perp collateral can deteriorate fast)
-- Rebalance hedge when coverage drifts > 5% from target
-- Top up GMX margin if leverage exceeds 12x (target 10x)
-- Sync NAV every ~30 minutes (more often on significant deviation)
-
-**Key steps (you sequence these):** discover funds across chains → bridge to
-Arbitrum if needed → swap USDT → XAUT → add LP (with oracle hook) → swap
-USDT → USDC → open short hedge → monitor → sync NAV regularly.
-
-**Risk:** Hedge cost reduces net yield when GMX funding is negative.
-This is expected — the cost of maintaining hedged exposure.
-
-### Cross-Chain NAV Sync
-
-**Critical.** When the vault operates across BSC, Optimism, and Arbitrum,
-NAV must be kept in sync:
-
-- **Regular sync:** Call `crosschain_sync` every ~30 minutes during normal
-  conditions. More frequently if NAV deviation is significant (>2%).
-- **Price deviation sync:** If XAUT price moves >1% since last sync,
-  trigger an immediate sync. Stale NAV = inaccurate accounting.
-- **Before rebalancing:** Always sync NAV before making allocation decisions
-  across chains. Use `get_aggregated_nav` to see the full picture first.
-- **After bridging:** Sync NAV after any cross-chain bridge operation
-  completes (Across fills in seconds).
-
-**Why this matters:** Investors can mint/burn vault tokens at any time.
-If NAV is stale on one chain, the unit price is wrong — this could let
-someone arbitrage the vault (mint cheap, burn expensive). Regular sync
-prevents this.
+- `list_strategies` is a compatibility alias and returns TWAP orders only.
+- Generic free-form LLM strategies are not part of the supported surface.
+- Each TWAP slice still goes through the same swap safety path (including NAV shield checks).
 
 ## Safety Guarantees
 

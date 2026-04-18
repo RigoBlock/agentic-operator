@@ -80,6 +80,13 @@ export function resolveChainId(chainArg: string): number {
   return match.id;
 }
 
+/** Resolve a chain ID to a human-readable chain name. */
+export function resolveChainName(chainId: number): string {
+  const allChains = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS];
+  const match = allChains.find(c => c.id === chainId);
+  return match?.name || `Chain ${chainId}`;
+}
+
 /**
  * Alchemy network slugs for each chain.
  * Chains not listed here use their default public RPC.

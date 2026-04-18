@@ -50,14 +50,10 @@ const REQUIRED_TOOLS = [
   "fund_pool",
   // Utility
   "switch_chain",
-  // Strategy
-  "create_strategy",
-  "remove_strategy",
+  // Strategy listing compatibility alias (TWAP-only at runtime)
   "list_strategies",
   // Bridge verification
   "verify_bridge_arrival",
-  // Carry trade planner
-  "plan_carry_trade",
 ];
 
 describe("TOOL_DEFINITIONS", () => {
