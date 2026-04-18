@@ -554,7 +554,7 @@ to track evolving positions.
 Via the chat interface (browser or API):
 
 ```
-"Create a 15-minute autonomous strategy to rebalance my XAUT/USDT LP
+"Create a 15-minute autonomous strategy to rebalance my ETH/USDC LP
  position when it drifts more than 2% from the target range"
 ```
 

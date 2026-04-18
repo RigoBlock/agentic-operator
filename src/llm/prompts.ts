@@ -77,8 +77,13 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
     domains.add("vault");
   }
 
-  // Strategy
-  if (/\b(strateg|cron|automat|recurring|every.*min|dca|twap|scheduled|timer)\b/.test(all)) {
+  // Strategy — TWAP / recurring trade patterns
+  // Detect: "every N min", "N at a time", "DCA", "TWAP", "slice", etc.
+  // Note: "every.*min" inside \b fails on "every 5 minutes" — check separately.
+  if (
+    /\b(strateg|cron|automat|recurring|dca|twap|scheduled|timer|at\s+a\s+time|slice|in\s+parts|incrementally|gradually)\b/.test(all) ||
+    /every\s+\d+\s*(min|hour|hr)/i.test(all)
+  ) {
     domains.add("strategy");
   }
 
@@ -239,7 +244,6 @@ INTENT PARSING — CRITICAL:
 - To cancel: gmx_cancel_order with the orderKey from gmx_get_positions.
 - Stop-loss/take-profit: gmx_close_position with orderType="stop_loss"/"limit" and triggerPrice.
 - Default collateral: ALWAYS USDC unless user specifies otherwise.
-- XAUT index token: 0x40461291347e1eCbb09499F3371D3f17f10d7159 (Arbitrum), uses WBTC (long) and USDC (short) collateral.
 
 NOTIONAL (USD) SYNTAX: "long 1000 ETHUSDC 5x" means notionalUsd=1000, leverage=5, collateral=200 USDC.
 COLLATERAL SYNTAX: "long ETH 5x with 0.5 ETH" means collateral 0.5 ETH, leverage 5x.
@@ -251,18 +255,11 @@ GMX INTENT PARSING:
 - "set stop loss on ETH long at $3000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all", orderType="stop_loss", triggerPrice="3000"`,
 
   lp: `UNISWAP V4 LP WORKFLOW:
-KNOWN POOL: The XAUT/USDT pool on Arbitrum is the only pool with hardcoded parameters (see below).
-FOR ANY OTHER POOL: Ask the user for pool details or pool ID, then call get_pool_info.
+Ask the user for pool details or a pool ID, then call get_pool_info to discover the exact pool key.
 
-1. Call get_pool_info first if you only have the pool ID.
+1. Call get_pool_info if you only have the pool ID.
 2. Call add_liquidity with ONE token amount — the backend computes the optimal counterpart.
 3. tickRange options: "full" (entire range), "wide" (±50%), "narrow" (±5%), or exact "tickLower,tickUpper".
-
-XAUT/USDT POOL ON ARBITRUM:
-  Pool ID: 0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34
-  fee: 6000, tickSpacing: 120, hooks: 0x0000000000000000000000000000000000000000
-  currency0: 0x40461291347e1eCbb09499F3371D3f17f10d7159 (XAUT)
-  currency1: 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 (USDT)
 
 LP POSITION LIFECYCLE:
   Active → [remove_liquidity] → Closed (0 liquidity, fees may remain, NFT exists)
@@ -350,7 +347,28 @@ On Polygon the native token is POL. On BNB Chain it's BNB, not ETH.`,
 - cancel_twap_order: cancel an active TWAP order by ID.
 - list_twap_orders: show active TWAP orders.
 - list_strategies: compatibility alias; returns active TWAP orders only.
-- Do not propose or execute generic free-form LLM strategies.`,
+- Do not propose or execute generic free-form LLM strategies.
+
+TWAP INTENT RECOGNITION — CRITICAL:
+Any time the user asks to execute a trade in increments or over time, call create_twap_order.
+NEVER call build_vault_swap for these patterns.
+
+Examples that ALWAYS mean create_twap_order:
+- "sell 100 GRG for ETH, 25 at a time every 5 minutes"
+- "DCA 500 USDC into ETH over 10 periods"
+- "buy 1 ETH slowly, 0.1 ETH every hour"
+- "split 200 USDC into 4 swaps, one every 15 min"
+- "TWAP sell 50 WBTC, 10 at a time"
+
+Parameters for create_twap_order:
+- side: "sell" or "buy"
+- sellToken / buyToken: token symbols
+- totalAmount: total amount to trade across all slices
+- sliceAmount: amount per individual slice
+- intervalMinutes: minutes between slices (minimum 5)
+- dex: "uniswap" or "0x" (honor explicit requests; default "0x")
+
+Do NOT ask the user to confirm — call create_twap_order immediately when intent is clear.`,
 };
 
 // ── Build the full prompt for a request ───────────────────────────────

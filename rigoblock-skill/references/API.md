@@ -100,9 +100,9 @@ message, invokes zero or one tool, and returns a result.
 
 | Category | Natural Language Examples |
 |----------|-------------------------|
-| Spot swaps | "swap 1000 USDT for XAUT on Arbitrum" |
-| GMX perps | "open a 1x short XAUT/USD with 500 USDT collateral" |
-| Uni v4 LP | "add liquidity to XAUT/USDT pool on Arbitrum" |
+| Spot swaps | "swap 1000 USDT for ETH on Arbitrum" |
+| GMX perps | "open a 1x short ETH/USD with 500 USDT collateral" |
+| Uni v4 LP | "add liquidity to ETH/USDC pool on Arbitrum" |
 | Bridge | "bridge 1000 USDT from BSC to Arbitrum" |
 | Vault info | "show vault info" / "get NAV" |
 | Delegation | "setup delegation" / "check delegation status" |

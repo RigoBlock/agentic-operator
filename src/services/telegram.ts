@@ -172,6 +172,9 @@ export const WEBHOOK_URL_KV_KEY = "tg-webhook-url";
 /**
  * Derive a deterministic webhook secret from a base secret string.
  * Telegram allows 1–256 chars, A-Za-z0-9_- only.
+ *
+ * @deprecated Use getWebhookSecret(env) instead. This exists only for
+ * backwards-compatibility when TELEGRAM_WEBHOOK_SECRET is not set.
  */
 export async function deriveWebhookSecret(secret: string): Promise<string> {
   const data = new TextEncoder().encode(`tg-webhook-secret:${secret}`);
@@ -179,6 +182,23 @@ export async function deriveWebhookSecret(secret: string): Promise<string> {
   const bytes = new Uint8Array(hash);
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
   return Array.from(bytes.slice(0, 32), (b) => chars[b % chars.length]).join("");
+}
+
+/**
+ * Get the effective webhook secret.
+ * Prefers TELEGRAM_WEBHOOK_SECRET directly (no derivation needed).
+ * Falls back to deriving from CDP_WALLET_SECRET for backwards compatibility.
+ */
+export async function getWebhookSecret(
+  env: { TELEGRAM_WEBHOOK_SECRET?: string; CDP_WALLET_SECRET?: string },
+): Promise<string | undefined> {
+  if (env.TELEGRAM_WEBHOOK_SECRET) {
+    return env.TELEGRAM_WEBHOOK_SECRET;
+  }
+  if (env.CDP_WALLET_SECRET) {
+    return deriveWebhookSecret(env.CDP_WALLET_SECRET);
+  }
+  return undefined;
 }
 
 /**

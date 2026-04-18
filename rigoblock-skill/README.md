@@ -150,9 +150,9 @@ Every DeFi operation maps to one HTTP call:
 | Operation | HTTP Call |
 |-----------|----------|
 | Get a price quote | `GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base` |
-| Swap tokens | `POST /api/chat` with message: `"swap 1000 USDT for XAUT on Arbitrum"` |
-| Add LP | `POST /api/chat` with message: `"add liquidity to XAUT/USDT pool..."` |
-| Open GMX position | `POST /api/chat` with message: `"open a 1x short XAUT/USD..."` |
+| Swap tokens | `POST /api/chat` with message: `"swap 1000 USDT for ETH on Arbitrum"` |
+| Add LP | `POST /api/chat` with message: `"add liquidity to ETH/USDC pool..."` |
+| Open GMX position | `POST /api/chat` with message: `"open a 1x short ETH/USD..."` |
 | Bridge tokens | `POST /api/chat` with message: `"bridge 1000 USDT from Ethereum to Arbitrum"` |
 | Get vault info | `POST /api/chat` with message: `"show vault info on Arbitrum"` |
 
@@ -181,13 +181,9 @@ Sign this message to verify your wallet and access your smart pool assistant.
 
 ## Strategies
 
-The agent composes strategies from API primitives. The system prompt embeds
-strategy knowledge; the agent provides the reasoning. See
-[references/STRATEGIES.md](./references/STRATEGIES.md) for detailed templates.
-
-| Strategy | Chain(s) | What | When |
-|----------|----------|------|------|
-| LP + Permanent Hedge | Ethereum + Arbitrum | XAUT/USDT LP on Uni v4 + 1x GMX short hedge + NAV sync | Always hedged — hedge is never removed |
+The service exposes atomic DeFi primitives via `POST /api/chat` and `GET /api/quote`.
+External agents compose these into custom strategies. Built-in automated strategies:
+TWAP and NAV Sync. See [references/STRATEGIES.md](./references/STRATEGIES.md).
 
 ---
 
@@ -265,7 +261,7 @@ creates it (because the agent can't fiat-on-ramp itself yet).
 5. Agent funds vaults and starts trading in delegated mode:
      rigoblock_chat("fund pool with 1 ETH", vaultAddress=VAULT_ETH, chainId=1)
      rigoblock_chat("bridge 500 USDT from Ethereum to Arbitrum", ...)
-     rigoblock_chat("swap 100 USDT for XAUT on Ethereum", executionMode="delegated")
+     rigoblock_chat("swap 100 USDT for ETH on Ethereum", executionMode="delegated")
 ```
 
 The agent uses `rigoblock_chat()` and `rigoblock_quote()` skills (HTTP wrappers
@@ -281,11 +277,11 @@ around our API with x402 payment built in).
 5. Bridge hedge collateral from Ethereum to Arbitrum via Across:
      rigoblock_chat("bridge 500 USDT from Ethereum to Arbitrum",
        vaultAddress=VAULT_ETH, chainId=1)
-6. LP on Ethereum (XAUT/USDT Uni v4 pool):
-     rigoblock_chat("add liquidity to XAUT/USDT pool",
+6. LP on Ethereum (ETH/USDC Uni v4 pool):
+     rigoblock_chat("add liquidity to ETH/USDC pool",
        vaultAddress=VAULT_ETH, chainId=1)
 7. Hedge on Arbitrum (GMX perps):
-     rigoblock_chat("open 1x short XAUT/USD with 500 USDT collateral on GMX",
+     rigoblock_chat("open 1x short ETH/USD with 500 USDT collateral on GMX",
        vaultAddress=VAULT_ARB, chainId=42161)
 8. Sync NAV across chains:
      rigoblock_chat("sync NAV", ...)

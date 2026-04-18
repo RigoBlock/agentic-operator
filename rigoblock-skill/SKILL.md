@@ -1,5 +1,5 @@
 ---
-name: rigoblock-trader
+name: rigoblock-skill
 description: Trade DeFi on Rigoblock vaults via autonomous AI execution. Supports spot swaps (Uniswap, 0x), Uniswap v4 LP, GMX V2 perpetuals, cross-chain bridging (Across), and vault management across 7 EVM chains. x402 USDC payments on Base. STAR automated safety layer protects every transaction.
 metadata: {"homepage":"https://trader.rigoblock.com"}
 ---
@@ -93,7 +93,7 @@ const client = new RigoblockClient({
   authTimestamp: Date.now(),
 }, fetchWithX402Payment);           // your x402-wrapped fetch
 
-const result = await client.swap("USDT", "XAUT", "1000", "arbitrum");
+const result = await client.swap("USDT", "ETH", "1000", "arbitrum");
 ```
 
 Using plain HTTP (no SDK required — recommended for external agents):
@@ -141,7 +141,7 @@ response = requests.post(
     "https://trader.rigoblock.com/api/chat",
     headers={"X-PAYMENT": x402_payment_header, "Content-Type": "application/json"},
     json={
-        "messages": [{"role": "user", "content": "swap 100 USDT for XAUT on Arbitrum"}],
+        "messages": [{"role": "user", "content": "swap 100 USDT for ETH on Arbitrum"}],
         "vaultAddress": "0xYourVault",
         "chainId": 42161,
         "operatorAddress": account.address,
@@ -217,7 +217,7 @@ Content-Type: application/json
 X-PAYMENT: <x402-payment-header>
 
 {
-  "messages": [{"role": "user", "content": "swap 1000 USDT for XAUT on Arbitrum"}],
+  "messages": [{"role": "user", "content": "swap 1000 USDT for ETH on Arbitrum"}],
   "vaultAddress": "0xYourVault",
   "chainId": 42161
 }
@@ -226,13 +226,13 @@ X-PAYMENT: <x402-payment-header>
 **Manual mode** (default) — returns unsigned transaction data:
 ```json
 {
-  "reply": "I'll prepare a swap of 1000 USDT → XAUT...",
+  "reply": "I'll prepare a swap of 1000 USDT → ETH...",
   "transaction": {
     "to": "0xYourVault",
     "data": "0x...",
     "value": "0x0",
     "chainId": 42161,
-    "description": "Swap 1000 USDT → 0.32 XAUT via Uniswap"
+    "description": "Swap 1000 USDT → 0.32 ETH via Uniswap"
   }
 }
 ```
@@ -240,7 +240,7 @@ X-PAYMENT: <x402-payment-header>
 **Delegated mode** (with operator auth) — executes the transaction:
 ```json
 {
-  "messages": [{"role": "user", "content": "swap 1000 USDT for XAUT on Arbitrum"}],
+  "messages": [{"role": "user", "content": "swap 1000 USDT for ETH on Arbitrum"}],
   "vaultAddress": "0xYourVault",
   "chainId": 42161,
   "operatorAddress": "0xOperatorWallet",
@@ -287,21 +287,21 @@ of operations — use your own judgment on how to phrase requests:
 
 ### Spot Trading
 - Swap tokens on any supported chain via Uniswap or 0x aggregator
-- Examples: "swap 1000 USDT for XAUT on Arbitrum", "swap 0.5 ETH to USDC on Base using 0x"
+- Examples: "swap 1000 USDT for ETH on Arbitrum", "swap 0.5 ETH to USDC on Base using 0x"
 
 ### Uniswap v4 Liquidity
 - Add/remove LP positions, list positions, collect fees
-- XAUT/USDT pool on Arbitrum (reference pool):
+- ETH/USDC pool on Arbitrum (reference pool):
   - Pool ID: `0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34`
   - fee: `6000` (0.60%), tickSpacing: `120`, hooks: `0x0000000000000000000000000000000000000000`
-  - currency0: XAUT `0x40461291347e1eCbb09499F3371D3f17f10d7159`, currency1: USDT `0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9`
+  - currency0: ETH `0x40461291347e1eCbb09499F3371D3f17f10d7159`, currency1: USDT `0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9`
 - For unknown pools: call `get_pool_info` with the pool ID to discover fee, tickSpacing, and hooks before adding liquidity
-- Examples: "add liquidity to XAUT/USDT pool with 0.5 XAUT and 1500 USDT on Arbitrum"
+- Examples: "add liquidity to ETH/USDC pool with 0.5 ETH and 1500 USDT on Arbitrum"
 
 ### GMX V2 Perpetuals (Arbitrum)
 - Open, close, increase positions; get positions; cancel/update orders; claim funding
-- XAUT/USD market: `XAUT.v2/USD [WBTC.b-USDC]`, index `0x40461291347e1eCbb09499F3371D3f17f10d7159`
-- Examples: "open a 1x short XAUT/USD position with 500 USDT collateral on GMX"
+- ETH/USD market: `ETH/USD [WBTC.b-USDC]`, index `0x40461291347e1eCbb09499F3371D3f17f10d7159`
+- Examples: "open a 1x short ETH/USD position with 500 USDT collateral on GMX"
 
 ### Cross-Chain Bridge (Across Protocol)
 - Transfer tokens between any two supported chains

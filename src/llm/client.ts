@@ -381,7 +381,8 @@ ${executionModeNote}${contextDocsBlock}`;
   const immediateFastPath =
     tryFastPathChainSwitch(lastUserMsg) ||
     (hasVault ? tryFastPathCrosschainSync(lastUserMsg) : null) ||
-    (hasVault ? tryFastPathStrategyQueries(lastUserMsg) : null);
+    (hasVault ? tryFastPathStrategyQueries(lastUserMsg) : null) ||
+    (hasVault ? tryFastPathTwapCreate(lastUserMsg) : null);
   if (immediateFastPath) {
     console.log(`[LLM] Immediate fast-path (no LLM): ${immediateFastPath.name}(${JSON.stringify(immediateFastPath.args)})`);
     try {
@@ -514,8 +515,12 @@ ${executionModeNote}${contextDocsBlock}`;
 
           if (toolResult.transaction) {
             // ── NAV shield pre-check (universal hook) ──
-            if (toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress.toLowerCase()) {
+            if (
+              !toolResult.transaction.navShieldChecked &&
+              toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress.toLowerCase()
+            ) {
               await preCheckNavImpact(env, ctx, toolResult.transaction);
+              toolResult.transaction.navShieldChecked = true;
             }
             pendingTransactions.push(toolResult.transaction);
           }
@@ -1029,6 +1034,7 @@ export async function executeToolCall(
               : "",
             dex: "0x Aggregator",
           },
+          navShieldChecked: true,
         };
 
         const sellLine = is0xEstimated
@@ -1166,6 +1172,7 @@ export async function executeToolCall(
             : "",
           dex: "Uniswap",
         },
+        navShieldChecked: true,
       };
 
       const sellLine = isExactOutput
@@ -1319,7 +1326,7 @@ export async function executeToolCall(
 
       // Find market and get prices
       const market = await findGmxMarket(marketSymbol);
-      const collateralAddr = resolveGmxCollateral(collateralSymbol);
+      const collateralAddr = await resolveGmxCollateral(collateralSymbol);
       const collateralDecimals = getGmxTokenDecimals(collateralAddr);
       const [collateralPrice, indexTokenPrice] = await Promise.all([
         getGmxTokenPrice(collateralAddr),
@@ -1544,7 +1551,7 @@ export async function executeToolCall(
 
       // Resolve collateral from args or from position
       let collateralSymbol = (args.collateral as string) || "USDC";
-      const collateralAddr = resolveGmxCollateral(collateralSymbol);
+      const collateralAddr = await resolveGmxCollateral(collateralSymbol);
       const collateralDecimals = getGmxTokenDecimals(collateralAddr);
 
       // Get index token price for slippage protection
@@ -3489,6 +3496,66 @@ function tryFastPathCrosschainSync(msg: string): FastPathResult | null {
       args: {
         sourceChain: between[1].trim(),
         destinationChain: between[2].trim(),
+      },
+    };
+  }
+
+  return null;
+}
+
+// ── Fast-path: TWAP order creation ───────────────────────────────────
+// Detects: "sell 100 GRG for ETH, 25 at a time every 5 min [using 0x]"
+//          "buy 50 ETH with USDC 10 at a time every 10 minutes"
+//
+// The "N at a time every M minutes" pattern is unambiguous — only create_twap_order
+// handles it. Bypassing the LLM avoids Llama hallucinating non-existent tool names
+// like "sell_token" or "schedule_swap".
+
+function tryFastPathTwapCreate(msg: string): FastPathResult | null {
+  const m = msg;
+
+  // Require both "at a time" and "every N min" patterns
+  const intervalMatch = m.match(/every\s+(\d+)\s*min(?:ute)?s?/i);
+  if (!intervalMatch) return null;
+  const sliceMatch = m.match(/(\d+(?:\.\d+)?)\s+at\s+a\s+time/i);
+  if (!sliceMatch) return null;
+
+  const intervalMinutes = parseInt(intervalMatch[1]);
+  const sliceAmount = sliceMatch[1];
+
+  // Determine side and parse tokens/amount
+  // sell: "sell TOTAL TOKEN for/to BUYTOKEN"
+  const sellMatch = m.match(/\bsell\s+(\d+(?:\.\d+)?)\s+(\w+)\s+(?:for|to|into)\s+(\w+)/i);
+  if (sellMatch) {
+    const dex = /\b0x\b/i.test(m) ? "0x" : "uniswap";
+    return {
+      name: "create_twap_order",
+      args: {
+        side: "sell",
+        sellToken: sellMatch[2].toUpperCase(),
+        buyToken: sellMatch[3].toUpperCase(),
+        totalAmount: sellMatch[1],
+        sliceAmount,
+        intervalMinutes,
+        dex,
+      },
+    };
+  }
+
+  // buy: "buy TOTAL TOKEN with/using SELLTOKEN"
+  const buyMatch = m.match(/\bbuy\s+(\d+(?:\.\d+)?)\s+(\w+)\s+(?:with|using)\s+(\w+)/i);
+  if (buyMatch) {
+    const dex = /\b0x\b/i.test(m) ? "0x" : "uniswap";
+    return {
+      name: "create_twap_order",
+      args: {
+        side: "buy",
+        buyToken: buyMatch[2].toUpperCase(),
+        sellToken: buyMatch[3].toUpperCase(),
+        totalAmount: buyMatch[1],
+        sliceAmount,
+        intervalMinutes,
+        dex,
       },
     };
   }

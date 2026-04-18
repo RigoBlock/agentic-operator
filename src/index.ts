@@ -28,7 +28,7 @@ import { createX402Middleware } from "./middleware/x402.js";
 import { runAllSkills } from "./skills/index.js";
 import { getTwapEvents } from "./skills/twap.js";
 import { processChat } from "./llm/client.js";
-import { ensureWebhookRegistered, deriveWebhookSecret } from "./services/telegram.js";
+import { ensureWebhookRegistered, getWebhookSecret } from "./services/telegram.js";
 import type { Address } from "viem";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -168,9 +168,7 @@ export default {
     // without any manual operator action.
     const telegramRefresh = env.TELEGRAM_BOT_TOKEN
       ? (async () => {
-          const secret = env.CDP_WALLET_SECRET
-            ? await deriveWebhookSecret(env.CDP_WALLET_SECRET)
-            : undefined;
+          const secret = await getWebhookSecret(env);
           return ensureWebhookRegistered(env.TELEGRAM_BOT_TOKEN!, env.KV, secret);
         })().catch(err => console.warn("[cron] Telegram webhook refresh failed:", err))
       : Promise.resolve();

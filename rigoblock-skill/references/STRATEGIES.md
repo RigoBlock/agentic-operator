@@ -1,26 +1,36 @@
-# Strategies
+# Automated Strategies
 
-Generic free-form strategies and carry-trade planning were removed.
+Two deterministic strategy types are supported. Both go through the full safety stack
+(NAV shield, delegation checks, 7-point validation) on every execution.
 
-The only supported automated strategy is deterministic TWAP.
+## TWAP (Time-Weighted Average Price)
 
-## TWAP (Deterministic)
+Split a large swap into equal-size slices executed at a fixed interval.
 
-Use these tools:
+| Tool | Purpose |
+|------|---------|
+| `create_twap_order` | Create a TWAP order |
+| `list_twap_orders` | List active/completed orders (`list_strategies` is an alias) |
+| `cancel_twap_order` | Cancel an active order |
 
-1. create_twap_order
-2. list_twap_orders
-3. cancel_twap_order
+Execution is deterministic — no LLM reasoning at run time.
+Each slice executes independently through the full safety pipeline.
 
-Behavior:
+## NAV Sync
 
-- Each order is split into fixed slices and executed on schedule.
-- Execution is deterministic and does not rely on ad-hoc LLM reasoning at run time.
-- Swap safety checks still apply per slice, including NAV shield enforcement on swap build and delegated execution.
-- list_strategies remains a compatibility alias that returns TWAP orders only.
-   evaluate whether to remove and re-add liquidity with an updated range.
-4. **Liquidity buffer** — Keep enough idle USDT on the capital chain (BSC/Optimism) for
-   rebalancing operations and gas. The agent decides the appropriate amount
-   based on position sizes and market volatility.
-5. **NAV deviation** — If cross-chain NAV differs significantly, sync
-   immediately rather than waiting for the regular 8-hour schedule.
+Periodically synchronise NAV across all active chains when unitary value deviates
+beyond a configurable threshold.
+
+| Tool | Purpose |
+|------|---------|
+| `create_nav_sync` | Create a NAV sync config |
+| `list_nav_syncs` | List active configs |
+| `cancel_nav_sync` | Cancel a config |
+
+For one-off manual sync, use `crosschain_sync` directly.
+
+---
+
+Custom strategies (e.g. LP + hedge, carry trade, yield optimisation) are NOT built into
+this service. External agents compose them from the atomic API primitives exposed by
+`POST /api/chat` and `GET /api/quote`. See AGENTS.md for the composability model.

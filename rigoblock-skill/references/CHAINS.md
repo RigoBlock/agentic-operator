@@ -14,7 +14,7 @@
 
 ## Key Tokens by Chain
 
-### XAUT (Tether Gold)
+### ETH (Ethereum)
 - **Ethereum:** `0x68749665FF8D2d112Fa859AA293F07A622782F38`
 - **Arbitrum:** `0x40461291347e1eCbb09499F3371D3f17f10d7159` (bridged)
 
@@ -25,20 +25,20 @@
 
 | Strategy | Primary Chain | Secondary Chain | Why |
 |----------|--------------|-----------------|-----|
-| XAUT LP + IL Hedge | Arbitrum | BSC + Optimism (capital) | LP + hedge both on Arbitrum (GMX perps + Uni v4 LP on same chain) |
+| ETH LP + IL Hedge | Arbitrum | BSC + Optimism (capital) | LP + hedge both on Arbitrum (GMX perps + Uni v4 LP on same chain) |
 
 ## Key Addresses
 
-### XAUT/USDT Uniswap v4 Pool (Ethereum — legacy)
+### ETH/USDC Uniswap v4 Pool (Ethereum — legacy)
 ```
 0x19a01cd4a3d7a1fd58ee778fcdc74fce46023adb0ac179a603e5b3234dd5610d
 ```
 
-Note: The current strategy deploys the XAUT/USDT LP on **Arbitrum** (same chain as the GMX hedge).
+Note: The current strategy deploys the ETH/USDC LP on **Arbitrum** (same chain as the GMX hedge).
 The Arbitrum pool uses a Rigoblock oracle hook — the operator provides the hook address at LP creation.
 
-### XAUT GMX V2 Market (Arbitrum)
+### ETH GMX V2 Market (Arbitrum)
 ```
-Market: XAUT.v2/USD [WBTC.b-USDC]
+Market: ETH/USD [WBTC.b-USDC]
 Index Token: 0x40461291347e1eCbb09499F3371D3f17f10d7159
 ```

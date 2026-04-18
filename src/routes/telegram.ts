@@ -31,6 +31,7 @@ import {
   deleteMessage,
   setWebhook,
   deriveWebhookSecret,
+  getWebhookSecret,
   WEBHOOK_URL_KV_KEY,
   formatForTelegram,
   escapeHtml,
@@ -65,8 +66,8 @@ telegram.post("/webhook", async (c) => {
   }
 
   // Verify the webhook secret (prevents forged requests even if bot token leaks)
-  if (c.env.CDP_WALLET_SECRET) {
-    const expected = await deriveWebhookSecret(c.env.CDP_WALLET_SECRET);
+  const expected = await getWebhookSecret(c.env);
+  if (expected) {
     const received = c.req.header("x-telegram-bot-api-secret-token") || "";
     if (received !== expected) {
       // Secret mismatch means the webhook was registered without a secret (or the
@@ -185,9 +186,7 @@ telegram.post("/pair", async (c) => {
     // so the cron trigger can keep it fresh even without user action.
     if (c.env.TELEGRAM_BOT_TOKEN) {
       try {
-        const webhookSecret = c.env.CDP_WALLET_SECRET
-          ? await deriveWebhookSecret(c.env.CDP_WALLET_SECRET)
-          : undefined;
+        const webhookSecret = await getWebhookSecret(c.env);
         const webhookUrl = `${new URL(c.req.url).origin}/api/telegram/webhook`;
         await setWebhook(c.env.TELEGRAM_BOT_TOKEN, webhookUrl, webhookSecret);
         await c.env.KV.put(WEBHOOK_URL_KV_KEY, webhookUrl);
@@ -235,10 +234,8 @@ const setupHandler = async (c: Context<{ Bindings: Env }>) => {
   const host = urlOverride || new URL(c.req.url).origin;
   const webhookUrl = `${host}/api/telegram/webhook`;
 
-  // Derive a webhook secret so Telegram sends it with every update
-  const secret = c.env.CDP_WALLET_SECRET
-    ? await deriveWebhookSecret(c.env.CDP_WALLET_SECRET)
-    : undefined;
+  // Get the webhook secret so Telegram sends it with every update
+  const secret = await getWebhookSecret(c.env);
 
   await setWebhook(token, webhookUrl, secret);
   await c.env.KV.put(WEBHOOK_URL_KV_KEY, webhookUrl);
@@ -642,10 +639,14 @@ async function handleMessage(
   const execModePref = await env.KV.get(`tg-execmode:${userId}`);
   const autoExecuteFromTelegram = execModePref === "autonomous";
 
+  // Telegram users proved vault ownership at pairing time (EIP-191 signature +
+  // on-chain owner check). operatorVerified: true grants the same access as a
+  // browser session with a signed auth message.
   const ctx: RequestContext = {
     vaultAddress: vault.address,
     chainId: vault.chainId,
     operatorAddress: vault.operatorAddress || user.operatorAddress,
+    operatorVerified: true,
     executionMode,
     aiModel: modelPref === "deepseek" ? "deepseek" : undefined,
   };
@@ -966,6 +967,7 @@ async function handleCallbackQuery(
       vaultAddress: rec.vaultAddress as Address,
       chainId: rec.chainId,
       operatorAddress: (rec.operatorAddress) as Address,
+      operatorVerified: true,
       executionMode: "delegated",
     };
 

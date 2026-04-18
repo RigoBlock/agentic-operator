@@ -8,11 +8,13 @@
 import type { Env, RequestContext } from "../types.js";
 import type { StrategySkill, SkillToolDefinition, SkillToolResult, ProcessChatFn } from "./types.js";
 import { twapSkill } from "./twap.js";
+import { navSyncSkill } from "./navsync.js";
 
 // ── Register all skills here ──────────────────────────────────────────
 
 const skills: StrategySkill[] = [
   twapSkill,
+  navSyncSkill,
 ];
 
 // ── Public API ────────────────────────────────────────────────────────

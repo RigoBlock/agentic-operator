@@ -64,6 +64,7 @@ export interface TwapEvent {
 // ── Constants ─────────────────────────────────────────────────────────
 
 const MAX_TWAP_ORDERS_PER_VAULT = 3;
+const MAX_STORED_CLOSED_ORDERS_PER_VAULT = 20;
 const MIN_INTERVAL_MINUTES = 5;
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_EVENTS = 20;
@@ -73,6 +74,7 @@ const EVENTS_TTL = 24 * 60 * 60;
 
 const TWAP_PREFIX = "twap:";
 const TWAP_EVENTS_PREFIX = "twap-events:";
+const TWAP_HWM_PREFIX = "twap-hwm:";
 
 function twapKey(vaultAddress: string): string {
   return `${TWAP_PREFIX}${vaultAddress.toLowerCase()}`;
@@ -82,16 +84,32 @@ function twapEventsKey(vaultAddress: string): string {
   return `${TWAP_EVENTS_PREFIX}${vaultAddress.toLowerCase()}`;
 }
 
+/** High-water-mark key: stores the highest ID ever assigned for this vault. Never deleted. */
+function twapHwmKey(vaultAddress: string): string {
+  return `${TWAP_HWM_PREFIX}${vaultAddress.toLowerCase()}`;
+}
+
 export async function getTwapOrders(kv: KVNamespace, vaultAddress: string): Promise<TwapOrder[]> {
   const raw = await kv.get(twapKey(vaultAddress));
   return raw ? (JSON.parse(raw) as TwapOrder[]) : [];
 }
 
 export async function saveTwapOrders(kv: KVNamespace, vaultAddress: string, orders: TwapOrder[]): Promise<void> {
-  if (orders.length === 0) {
+  const active = orders.filter((o) => o.active);
+  const closed = orders
+    .filter((o) => !o.active)
+    .sort((a, b) => {
+      const at = a.completedAt || a.lastExecution || a.createdAt;
+      const bt = b.completedAt || b.lastExecution || b.createdAt;
+      return bt - at;
+    })
+    .slice(0, MAX_STORED_CLOSED_ORDERS_PER_VAULT);
+  const pruned = [...active, ...closed];
+
+  if (pruned.length === 0) {
     await kv.delete(twapKey(vaultAddress));
   } else {
-    await kv.put(twapKey(vaultAddress), JSON.stringify(orders));
+    await kv.put(twapKey(vaultAddress), JSON.stringify(pruned));
   }
 }
 
@@ -100,10 +118,15 @@ async function addTwapOrder(
   order: Omit<TwapOrder, "id" | "createdAt" | "consecutiveFailures" | "active" | "slicesExecuted" | "amountSpent" | "totalBought" | "completedAt">,
 ): Promise<TwapOrder> {
   const existing = await getTwapOrders(kv, order.vaultAddress);
-  if (existing.length >= MAX_TWAP_ORDERS_PER_VAULT) {
+  const activeCount = existing.filter((o) => o.active).length;
+  if (activeCount >= MAX_TWAP_ORDERS_PER_VAULT) {
     throw new Error(`Maximum ${MAX_TWAP_ORDERS_PER_VAULT} TWAP orders per vault. Cancel one first.`);
   }
-  const nextId = existing.length > 0 ? Math.max(...existing.map((o) => o.id)) + 1 : 1;
+  // Use a persistent high-water-mark so IDs never restart, even if the order history is pruned.
+  const hwmRaw = await kv.get(twapHwmKey(order.vaultAddress));
+  const hwm = hwmRaw ? parseInt(hwmRaw, 10) : 0;
+  const existingMax = existing.length > 0 ? Math.max(...existing.map((o) => o.id)) : 0;
+  const nextId = Math.max(hwm, existingMax) + 1;
   const newOrder: TwapOrder = {
     ...order,
     id: nextId,
@@ -116,6 +139,8 @@ async function addTwapOrder(
   };
   existing.push(newOrder);
   await saveTwapOrders(kv, order.vaultAddress, existing);
+  // Persist the HWM so future orders always get a higher ID.
+  await kv.put(twapHwmKey(order.vaultAddress), String(nextId));
   return newOrder;
 }
 
@@ -324,7 +349,8 @@ async function handleCancel(
 
   if (id === 0) {
     const activeCount = orders.filter(o => o.active).length;
-    const cancelled = orders.map(o => o.active ? { ...o, active: false } : o);
+    const now = Date.now();
+    const cancelled = orders.map(o => o.active ? { ...o, active: false, completedAt: now } : o);
     await saveTwapOrders(env.KV, ctx.vaultAddress, cancelled);
     return {
       message: activeCount > 0
@@ -341,7 +367,7 @@ async function handleCancel(
       suggestions: ["List TWAP orders"],
     };
   }
-  orders[idx] = { ...orders[idx], active: false };
+  orders[idx] = { ...orders[idx], active: false, completedAt: Date.now() };
   await saveTwapOrders(env.KV, ctx.vaultAddress, orders);
   return {
     message: `✅ TWAP order #${id} cancelled. ${orders[idx].slicesExecuted}/${orders[idx].sliceCount} slices were executed.`,
@@ -432,10 +458,16 @@ async function runDueTwapOrders(env: Env, processChat: ProcessChatFn): Promise<v
       try {
         // Format as a simple swap that the fast-path regex can match.
         // No mention of TWAP/slices/automation to avoid Llama refusals.
+        // IMPORTANT: chain must come before DEX ("on arbitrum using uniswap")
+        // because tryFastPathSwap extracts the DEX suffix with a $ anchor — it
+        // must be the last token in the string.  If DEX came last ("using uniswap
+        // on arbitrum") the fast-path misses entirely and the LLM handles it,
+        // wasting a full round-trip on every slice.
+        const chainSuffix = ` on ${chainName}`;
         const dexSuffix = order.dex ? ` using ${order.dex}` : "";
         const swapInstruction = side === "buy"
-          ? `buy ${order.sliceAmount} ${order.buyToken} with ${order.sellToken}${dexSuffix} on ${chainName}`
-          : `sell ${order.sliceAmount} ${order.sellToken} for ${order.buyToken}${dexSuffix} on ${chainName}`;
+          ? `buy ${order.sliceAmount} ${order.buyToken} with ${order.sellToken}${chainSuffix}${dexSuffix}`
+          : `sell ${order.sliceAmount} ${order.sellToken} for ${order.buyToken}${chainSuffix}${dexSuffix}`;
 
         const ctx: RequestContext = {
           vaultAddress: order.vaultAddress as Address,
@@ -566,8 +598,7 @@ async function runDueTwapOrders(env: Env, processChat: ProcessChatFn): Promise<v
     }
 
     if (changed) {
-      const remaining = orders.filter((o) => o.active || !o.completedAt);
-      await saveTwapOrders(kv, vaultAddr, remaining);
+      await saveTwapOrders(kv, vaultAddr, orders);
     }
   }
 }

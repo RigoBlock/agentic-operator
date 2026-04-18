@@ -32,6 +32,9 @@ const READ_ONLY_TOOLS = new Set([
   "get_crosschain_quote",
   "get_aggregated_nav",
   "get_rebalance_plan",
+  "list_twap_orders",
+  "list_strategies",
+  "list_nav_syncs",
 ]);
 
 tools.post("/:toolName", async (c) => {

@@ -33,8 +33,9 @@ export interface Env {
   ZEROX_API_KEY: string;    // 0x Swap API key (dashboard.0x.org)
   ALCHEMY_API_KEY: string;  // Alchemy RPC key (avoids public RPC rate limits)
   ALCHEMY_GAS_POLICY_ID?: string; // Alchemy Gas Manager policy ID (optional, enables sponsored gas)
-  TELEGRAM_BOT_TOKEN?: string; // Telegram Bot API token (optional, enables Telegram control)
-  CDP_API_KEY_ID: string;      // Coinbase Developer Platform API key ID
+  TELEGRAM_BOT_TOKEN?: string;        // Telegram Bot API token (optional, enables Telegram control)
+  TELEGRAM_WEBHOOK_SECRET?: string;   // Dedicated webhook secret (recommended). If absent, falls back to deriving from CDP_WALLET_SECRET.
+  CDP_API_KEY_ID: string;             // Coinbase Developer Platform API key ID
   CDP_API_KEY_SECRET: string;  // Coinbase Developer Platform API key secret
   CDP_WALLET_SECRET: string;   // Coinbase Developer Platform wallet secret (agent wallet signing)
 }
@@ -153,6 +154,8 @@ export interface UnsignedTransaction {
     price: string;        // "1 ETH = 3000.12 USDC"
     dex: string;          // "0x Aggregator" | "Uniswap"
   };
+  /** Internal marker: NAV shield pre-check already ran for this tx build path. */
+  navShieldChecked?: boolean;
 }
 
 export interface ChatResponse {

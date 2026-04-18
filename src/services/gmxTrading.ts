@@ -232,11 +232,11 @@ export async function getGmxTokenPrice(
  * Resolve a token symbol to its collateral address on Arbitrum for GMX.
  * Common mappings: ETH/WETH → WETH, USDC → USDC, etc.
  */
-export function resolveGmxCollateral(
+export async function resolveGmxCollateral(
   symbol: string,
-): Address {
+): Promise<Address> {
   const s = symbol.toUpperCase().replace(/\.V\d+$/i, "");
-  const TOKEN_MAP: Record<string, Address> = {
+  const STATIC_MAP: Record<string, Address> = {
     ETH: GMX_ADDRESSES.WETH,
     WETH: GMX_ADDRESSES.WETH,
     USDC: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address,
@@ -250,13 +250,25 @@ export function resolveGmxCollateral(
     SOL: "0x2bcC6D6CdBbDC0a4071e48bb3B969b06B3330c07" as Address,
     XAUT: "0x40461291347e1eCbb09499F3371D3f17f10d7159" as Address,
   };
-  const addr = TOKEN_MAP[s];
-  if (!addr) {
-    throw new Error(
-      `Unknown GMX collateral token: ${symbol}. Supported: ${Object.keys(TOKEN_MAP).join(", ")}`,
-    );
+
+  const staticAddr = STATIC_MAP[s];
+  if (staticAddr) return staticAddr;
+
+  const tickers = await getGmxTickers();
+  const normalized = s.replace(/[^A-Z0-9]/g, "");
+  const match = tickers.find((t) => {
+    const sym = t.tokenSymbol.toUpperCase().replace(/\.V\d+$/i, "").replace(/[^A-Z0-9]/g, "");
+    return sym === normalized;
+  });
+
+  if (match?.tokenAddress?.startsWith("0x")) {
+    return match.tokenAddress as Address;
   }
-  return addr;
+
+  const available = [...new Set(tickers.map((t) => t.tokenSymbol.toUpperCase().replace(/\.V\d+$/i, "")))].sort();
+  throw new Error(
+    `Unknown GMX collateral token: ${symbol}. Available from GMX API: ${available.join(", ")}`,
+  );
 }
 
 // ── Order building ─────────────────────────────────────────────────────
