@@ -1661,7 +1661,17 @@ export async function buildCrosschainSync(params: {
     amount,
   );
 
-  const toleranceBps = params.navToleranceBps ?? DEFAULT_NAV_TOLERANCE_BPS;
+  // Determine NAV tolerance.
+  // When equalizeNav computes the bridge amount to correct a divergence, the on-chain
+  // NavImpactLib checks that the source-chain NAV drop stays within navToleranceBps.
+  // The default 1% (100 bps) is too tight when correcting larger divergences — the
+  // bridge amount is intentionally sized to shift NAV, so the tolerance must accommodate
+  // the expected impact. We use the pre-bridge divergence + 200 bps margin, capped at
+  // the on-chain MAX_NAV_TOLERANCE_BPS (10000 = 100%).
+  const toleranceBps = params.navToleranceBps
+    ?? (navEqualization
+      ? Math.min(navEqualization.divergenceBps + 200, 10000)
+      : DEFAULT_NAV_TOLERANCE_BPS);
 
   // Build initial calldata (shared buildDepositV3Calldata, only opType + tolerance differ)
   let calldata = buildDepositV3Calldata({
