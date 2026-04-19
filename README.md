@@ -14,7 +14,7 @@ Telegram Bot      ───┤            ┌───────────�
                      ├──►  POST   │  Hono App                 │          Rigoblock Vault
 External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     │           (Smart Pool)
   (x402 payer)                    │  ├── Operator Auth (EIP-191)│             │
-                                  │  ├── Workers AI (default LLM) + Tools │             │
+                                  │  ├── Workers AI (DeepSeek R1 + Llama 3.3) │          │
                                   │  │   ├── get_swap_quote    │             │
                                   │  │   ├── build_vault_swap  │             │
                                   │  │   ├── get_positions     │             │
@@ -22,6 +22,7 @@ External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     �
                                   │  ├── 0x Aggregator (default)│             │
                                   │  ├── Uniswap Trading API   │───execute()─►│
                                   │  ├── GMX V2 (Arbitrum)     │             │
+                                  │  ├── Across Protocol (bridge)│            │
                                   │  ├── NAV Shield (10% max)  │             │
                                   │  └── Agent Wallet (CDP)    │             │
                                   └───────────────────────────┘
@@ -46,7 +47,7 @@ External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     �
 ### Safety Guarantees
 
 - **NAV Shield**: Simulates every trade's impact on vault Net Asset Value. Blocks any trade that would drop NAV > 10% vs the higher of pre-swap NAV or 24-hour baseline
-- **Selector whitelist**: Only `execute()` and `modifyLiquidities()` — no `withdraw`, no `transferOwnership`
+- **Selector whitelist**: Only `execute()`, `modifyLiquidities()`, `multicall()`, and `depositV3()` — no `withdraw`, no `transferOwnership`
 - **Target validation**: Transactions can only target the vault address itself
 - **Gas caps**: Per-chain hard limits on gas spending
 - **Slippage protection**: Default 1% (100 bps), enforced in swap calldata
@@ -86,6 +87,15 @@ The typical flow for a new operator using the web interface:
 | Polygon | 137 | 0x, Uniswap V2/V3/V4 |
 | BNB Chain | 56 | 0x, Uniswap V2/V3/V4 |
 | Unichain | 130 | Uniswap V2/V3/V4 |
+
+### Cross-Chain Bridging
+
+Cross-chain asset transfers and NAV synchronization via [Across Protocol](https://across.to). Supports:
+
+- **Transfer mode** (NAV-neutral): Moves tokens between chains using a Virtual Supply model — NAV stays constant on both chains
+- **Sync mode** (NAV-equalizing): Rebalances NAV across chains with a closed-form equalization formula
+- **NAV equalization**: Deterministic calculation of optimal bridge amount to converge NAV across chain pairs
+- All 7 supported chains as source and destination
 
 ## DEX Integrations
 
@@ -138,7 +148,8 @@ src/
 │   └── aIntents.ts          #   AIntents adapter
 ├── llm/
 │   ├── client.ts            # LLM provider routing + tool execution loop
-│   └── tools.ts             # Tool definitions (55+) + system prompt
+│   ├── prompts.ts           # Modular system prompt (core + domain sections)
+│   └── tools.ts             # Tool definitions (55+)
 ├── middleware/
 │   └── x402.ts              # x402 payment gate + settlement
 ├── routes/
@@ -151,19 +162,26 @@ src/
     ├── agentWallet.ts       # CDP Server Wallet (per-vault agent EOA via Coinbase)
     ├── auth.ts              # EIP-191 signature + vault ownership
     ├── bundler.ts           # ERC-4337 bundler (gas sponsorship)
-    ├── crosschain.ts        # Cross-chain bridging
+    ├── crosschain.ts        # Cross-chain bridging (Across Protocol)
+    ├── crosschainConfig.ts  # Bridgeable tokens + chain config
     ├── delegation.ts        # Delegation state (KV-backed)
     ├── execution.ts         # 7-point validation + NAV shield + broadcast
     ├── gmxTrading.ts        # GMX V2 perpetuals
     ├── gmxPositions.ts      # GMX position queries
+    ├── grgStaking.ts        # GRG staking via vault adapter
     ├── navGuard.ts          # NAV shield simulation (10% threshold)
-    ├── strategy.ts          # Cron strategies (autonomous by default)
     ├── telegram.ts          # Telegram Bot API helpers
     ├── telegramPairing.ts   # Telegram ↔ wallet pairing
     ├── tokenResolver.ts     # Dynamic token address resolution
     ├── uniswapTrading.ts    # Uniswap quote/swap (Trading API v1)
     ├── vault.ts             # On-chain vault reads
+    ├── uniswapLP.ts         # Uniswap v4 LP positions
     └── zeroXTrading.ts      # 0x aggregator integration
+skills/
+├── index.ts                 # Skill runner (cron-triggered)
+├── navsync.ts               # Cross-chain NAV sync skill
+├── twap.ts                  # TWAP order execution skill
+└── types.ts                 # Skill type definitions
 public/
 └── index.html               # Chat UI with wallet connect
 ```
@@ -219,7 +237,7 @@ npx wrangler secret put CDP_API_KEY_SECRET        # CDP Server Wallet
 npx wrangler secret put CDP_WALLET_SECRET         # CDP Server Wallet signing
 ```
 
-> **Note:** `OPENAI_API_KEY` is optional — the default LLM is Workers AI (Llama 4 Scout / DeepSeek R1). Set `aiApiKey` + `aiModel` per-request to use OpenAI, Anthropic, or any OpenAI-compatible provider.
+> **Note:** `OPENAI_API_KEY` is optional — the default LLM is Workers AI (DeepSeek R1 for reasoning + Llama 3.3 70B for fast tool calls). Set `aiApiKey` + `aiModel` per-request to use OpenAI, Anthropic, or any OpenAI-compatible provider.
 
 ### Deploy
 
@@ -233,7 +251,7 @@ npm run deploy
 
 ### AI / LLM Behaviour
 - **The agent can hallucinate.** Like any LLM-based system, the agent may produce incorrect token addresses, amounts, or transaction descriptions.
-- **Different AI models give different results.** The default model is Workers AI (Llama 4 Scout fast path, DeepSeek R1 for reasoning). Switching to GPT-4, Claude Sonnet, or other models via `aiApiKey` / `aiModel` in the API request will change the agent's behaviour, tool-calling accuracy, and output quality.
+- **Different AI models give different results.** The default model is Workers AI (DeepSeek R1 for reasoning, Llama 3.3 70B for fast tool calls). Switching to GPT-4, Claude Sonnet, or other models via `aiApiKey` / `aiModel` in the API request will change the agent's behaviour, tool-calling accuracy, and output quality.
 - **No multi-step orchestration in a single message.** The `/api/chat` endpoint handles one atomic operation per request. Complex strategies (bridge + swap + LP) require separate messages or an orchestrator agent on your side.
 
 ### Execution & Safety

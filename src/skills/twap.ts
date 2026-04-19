@@ -18,7 +18,9 @@ import type { StrategySkill, SkillToolDefinition, SkillToolResult, ProcessChatFn
 import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 import { sendMessage, escapeHtml } from "../services/telegram.js";
 import { executeTxList, formatOutcomesMarkdown } from "../services/execution.js";
-import { sanitizeError, resolveChainId, resolveChainName } from "../config.js";
+import { executeToolCall } from "../llm/client.js";
+import { sanitizeError, resolveChainId, resolveChainName, resolveTokenAddress } from "../config.js";
+import { initTokenResolver } from "../services/tokenResolver.js";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -29,6 +31,10 @@ export interface TwapOrder {
   side: "buy" | "sell";
   sellToken: string;
   buyToken: string;
+  /** Resolved contract address for sellToken on the target chain */
+  sellTokenAddress?: string;
+  /** Resolved contract address for buyToken on the target chain */
+  buyTokenAddress?: string;
   /** Total amount — of buyToken when side="buy", of sellToken when side="sell". */
   totalAmount: string;
   amountSpent: string;
@@ -285,6 +291,35 @@ async function handleCreate(
   const chain = args.chain as string | undefined;
   const autoExecute = args.autoExecute !== false;
 
+  // Resolve the target chain early — needed for token resolution
+  const targetChainId = chain ? (resolveChainId(chain) ?? ctx.chainId) : ctx.chainId;
+
+  // ── Resolve token addresses at creation time ──
+  // This validates that both tokens exist on the target chain BEFORE creating
+  // the strategy. Prevents cron-time failures like "GRG not found on chain 8453".
+  // Stores resolved addresses so execution uses them directly (no CoinGecko needed).
+  initTokenResolver(env.KV);
+  let sellTokenAddress: string | undefined;
+  let buyTokenAddress: string | undefined;
+  try {
+    sellTokenAddress = await resolveTokenAddress(targetChainId, sellToken);
+  } catch (err) {
+    throw new Error(
+      `Cannot resolve sell token "${sellToken}" on ${resolveChainName(targetChainId)} (chain ${targetChainId}). ` +
+      `${err instanceof Error ? err.message : String(err)}\n` +
+      `Please provide the contract address instead of the symbol.`,
+    );
+  }
+  try {
+    buyTokenAddress = await resolveTokenAddress(targetChainId, buyToken);
+  } catch (err) {
+    throw new Error(
+      `Cannot resolve buy token "${buyToken}" on ${resolveChainName(targetChainId)} (chain ${targetChainId}). ` +
+      `${err instanceof Error ? err.message : String(err)}\n` +
+      `Please provide the contract address instead of the symbol.`,
+    );
+  }
+
   // Slice count priority: sliceAmount > sliceCount > durationMinutes > default 5
   let sliceCount: number;
   if (args.sliceAmount) {
@@ -304,11 +339,13 @@ async function handleCreate(
 
   const order = await addTwapOrder(env.KV, {
     vaultAddress: ctx.vaultAddress,
-    chainId: chain ? (resolveChainId(chain) ?? ctx.chainId) : ctx.chainId,
+    chainId: targetChainId,
     operatorAddress: ctx.operatorAddress,
     side,
     sellToken,
     buyToken,
+    sellTokenAddress,
+    buyTokenAddress,
     totalAmount,
     sliceAmount: amountPerSlice,
     sliceCount,
@@ -412,7 +449,7 @@ async function handleList(
 
 // ── Cron Executor ─────────────────────────────────────────────────────
 
-async function runDueTwapOrders(env: Env, processChat: ProcessChatFn): Promise<void> {
+async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<void> {
   const kv = env.KV;
   const now = Date.now();
   const list = await kv.list({ prefix: TWAP_PREFIX });
@@ -456,18 +493,18 @@ async function runDueTwapOrders(env: Env, processChat: ProcessChatFn): Promise<v
       );
 
       try {
-        // Format as a simple swap that the fast-path regex can match.
-        // No mention of TWAP/slices/automation to avoid Llama refusals.
-        // IMPORTANT: chain must come before DEX ("on arbitrum using uniswap")
-        // because tryFastPathSwap extracts the DEX suffix with a $ anchor — it
-        // must be the last token in the string.  If DEX came last ("using uniswap
-        // on arbitrum") the fast-path misses entirely and the LLM handles it,
-        // wasting a full round-trip on every slice.
-        const chainSuffix = ` on ${chainName}`;
-        const dexSuffix = order.dex ? ` using ${order.dex}` : "";
-        const swapInstruction = side === "buy"
-          ? `buy ${order.sliceAmount} ${order.buyToken} with ${order.sellToken}${chainSuffix}${dexSuffix}`
-          : `sell ${order.sliceAmount} ${order.sellToken} for ${order.buyToken}${chainSuffix}${dexSuffix}`;
+        // Direct tool call — bypasses the LLM entirely for deterministic execution.
+        // Each slice calls build_vault_swap with structured args (token addresses,
+        // amount, chain, dex). This is faster, cheaper, and fully deterministic
+        // compared to the old approach of formatting a natural language instruction
+        // and routing it through processChat → LLM → tool call.
+        const sellRef = order.sellTokenAddress || order.sellToken;
+        const buyRef = order.buyTokenAddress || order.buyToken;
+
+        const toolArgs: Record<string, unknown> = side === "buy"
+          ? { tokenOut: buyRef, tokenIn: sellRef, amountOut: order.sliceAmount, dex: order.dex || "uniswap" }
+          : { tokenIn: sellRef, tokenOut: buyRef, amountIn: order.sliceAmount, dex: order.dex || "uniswap" };
+        toolArgs.chain = chainName;
 
         const ctx: RequestContext = {
           vaultAddress: order.vaultAddress as Address,
@@ -476,14 +513,12 @@ async function runDueTwapOrders(env: Env, processChat: ProcessChatFn): Promise<v
           executionMode: order.autoExecute ? "delegated" : "manual",
         };
 
-        const result = await processChat(env, [{ role: "user" as const, content: swapInstruction }], ctx);
+        const toolResult = await executeToolCall(env, ctx, "build_vault_swap", toolArgs);
 
-        const txList = result.transactions && result.transactions.length > 0
-          ? result.transactions
-          : result.transaction ? [result.transaction] : [];
+        const txList = toolResult.transaction ? [toolResult.transaction] : [];
 
         if (txList.length === 0) {
-          throw new Error(result.reply || "No swap transaction produced");
+          throw new Error(toolResult.message || "No swap transaction produced");
         }
 
         if (order.autoExecute) {

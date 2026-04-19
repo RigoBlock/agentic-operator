@@ -297,6 +297,24 @@ ANTI-HALLUCINATION — LP:
 - Bridge fees: 0.01%-0.5%, max 2%. Fill time: 2s-10min.
 - Requires depositV3 selector delegated for delegated execution.
 
+NAV EQUALIZATION — SINGLE TOOL CALL (DO NOT calculate manually):
+When the user asks to "equalise NAV", "match unitary prices", "make the price the same on both chains",
+or "calculate the right amount for sync so prices converge":
+→ Call crosschain_sync with equalizeNav=true. Do NOT set amount or token.
+The service reads NAV on both chains internally, auto-selects the best token with sufficient balance,
+and calculates the bridge amount automatically. Do NOT guess or assume any token or direction.
+Example: user says "sync chain A and chain B so they have the same unitary price"
+→ crosschain_sync(sourceChain="<chain A>", destinationChain="<chain B>", equalizeNav=true)
+Direction rule: source = the chain with the HIGHER unitary value. If unsure, pass the two chains
+in any order — the service auto-detects and corrects the direction silently.
+
+ANTI-BIAS — CROSSCHAIN:
+- Do NOT assume source chain or token from prior conversation messages or previous errors.
+- Each crosschain_sync call is independent — the tool re-reads live NAV and balances.
+- Do NOT specify token= unless the user EXPLICITLY names a specific token to use.
+- If a previous sync attempt failed with one token, the tool automatically tries others.
+- NEVER reason about which token to use — the tool iterates all bridgeable tokens internally.
+
 REBALANCING WORKFLOW:
 1. get_aggregated_nav to see positions
 2. get_rebalance_plan (with target chain if stated)

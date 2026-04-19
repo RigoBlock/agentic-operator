@@ -14,6 +14,7 @@ import {
   http,
   formatUnits,
   encodeFunctionData,
+  decodeFunctionResult,
   type Address,
   type Hex,
   type PublicClient,
@@ -393,6 +394,124 @@ export async function getNavData(
     totalValue: navData.totalValue,
     unitaryValue: navData.unitaryValue,
     timestamp: navData.timestamp,
+  };
+}
+
+/** Pool tokens data from getPoolTokens() + getPool() */
+export interface PoolTokensData {
+  /** NAV per pool token (in pool.decimals scale) */
+  unitaryValue: bigint;
+  /** Total pool token supply (in pool.decimals scale) */
+  totalSupply: bigint;
+  /** Pool decimals (= base token decimals on the creation chain) */
+  decimals: number;
+  /** Pool base token address */
+  baseToken: Address;
+}
+
+/**
+ * Read pool token data: unitaryValue, totalSupply, decimals, and baseToken.
+ * Uses getPoolTokens() for NAV data and getPool() for decimals/base token.
+ *
+ * IMPORTANT: pool.decimals may differ between chains for the same vault because
+ * the base token (e.g. USDT) has different decimals on different chains
+ * (6 on Arbitrum, 18 on BSC). Always use the per-chain decimals when comparing
+ * or normalizing unitaryValue across chains.
+ */
+export async function getPoolTokensData(
+  chainId: number,
+  vaultAddress: Address,
+  alchemyKey?: string,
+): Promise<PoolTokensData> {
+  const client = getClient(chainId, alchemyKey);
+  const [poolTokens, poolData] = await Promise.all([
+    client.readContract({
+      address: vaultAddress,
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "getPoolTokens",
+    }),
+    getPoolData(chainId, vaultAddress, alchemyKey),
+  ]);
+  const pt = poolTokens as { unitaryValue: bigint; totalSupply: bigint };
+  return {
+    unitaryValue: pt.unitaryValue,
+    totalSupply: pt.totalSupply,
+    decimals: poolData.decimals,
+    baseToken: poolData.baseToken,
+  };
+}
+
+/** Effective pool state from updateUnitaryValue() simulation */
+export interface EffectivePoolState {
+  /** NAV per pool token (live computation — accounts for virtual supply) */
+  unitaryValue: bigint;
+  /** Total pool value in base token units (at pool.decimals scale) */
+  netTotalValue: bigint;
+  /** Effective supply = totalSupply + virtualSupply (from crosschain transfers) */
+  effectiveSupply: bigint;
+  /** Pool decimals (= base token decimals on this chain) */
+  decimals: number;
+  /** Pool base token address */
+  baseToken: Address;
+}
+
+/**
+ * Read effective pool state via updateUnitaryValue() simulation.
+ *
+ * Unlike getPoolTokens() which returns totalSupply (can be 0 when all supply
+ * is from crosschain transfers), this computes the EFFECTIVE supply that
+ * includes virtual supply. Critical for NAV equalization across chains.
+ *
+ * updateUnitaryValue() is a write function called via eth_call (no state change).
+ * It recomputes the live NAV accounting for all token positions and virtual
+ * supply. The function is permissionless — any address can call it.
+ */
+export async function getEffectivePoolState(
+  chainId: number,
+  vaultAddress: Address,
+  alchemyKey?: string,
+): Promise<EffectivePoolState> {
+  const client = getClient(chainId, alchemyKey);
+
+  // Encode the updateUnitaryValue() call for eth_call simulation
+  const calldata = encodeFunctionData({
+    abi: RIGOBLOCK_VAULT_ABI,
+    functionName: "updateUnitaryValue",
+  });
+
+  // Run updateUnitaryValue() + getPool() in parallel
+  const [callResult, poolData] = await Promise.all([
+    client.call({ to: vaultAddress, data: calldata }),
+    getPoolData(chainId, vaultAddress, alchemyKey),
+  ]);
+
+  if (!callResult.data) {
+    throw new Error(`updateUnitaryValue simulation returned no data on chain ${chainId}`);
+  }
+
+  // Decode the NetAssetsValue return struct
+  const navResult = decodeFunctionResult({
+    abi: RIGOBLOCK_VAULT_ABI,
+    functionName: "updateUnitaryValue",
+    data: callResult.data,
+  }) as { unitaryValue: bigint; netTotalValue: bigint; netTotalLiabilities: bigint };
+
+  const { unitaryValue, netTotalValue } = navResult;
+
+  // effectiveSupply = netTotalValue × 10^decimals / unitaryValue
+  // This is the supply that includes both minted tokens AND virtual supply
+  // from crosschain transfers — the true denominator for NAV computation.
+  const decPow = 10n ** BigInt(poolData.decimals);
+  const effectiveSupply = unitaryValue > 0n
+    ? (netTotalValue * decPow) / unitaryValue
+    : 0n;
+
+  return {
+    unitaryValue,
+    netTotalValue,
+    effectiveSupply,
+    decimals: poolData.decimals,
+    baseToken: poolData.baseToken,
   };
 }
 

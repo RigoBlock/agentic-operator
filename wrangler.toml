@@ -33,6 +33,15 @@ id = "2c0f24cd5916471ab4e2cd8d3fd1b1b7"
 # CDP_API_KEY_SECRET    — Coinbase Developer Platform API key secret
 # CDP_WALLET_SECRET     — Coinbase Developer Platform wallet secret (agent wallet signing)
 
+# ── CPU time limit ─────────────────────────────────────────────────────
+# Paid plan default is 30s, max 5 min. DeepSeek reasoning can take 15-20s
+# of wall time, plus tool calls that make RPC/API subrequests. Raising this
+# gives headroom for complex multi-step orchestration (DeepSeek → Llama → tools).
+# Note: CPU time only counts active JS execution — waiting on fetch()/AI
+# subrequests is wall time (unlimited for HTTP requests while client connected).
+[limits]
+cpu_ms = 300000
+
 # ── Cron Triggers ──────────────────────────────────────────────────────
 # Strategy engine: runs every 5 minutes, checks which strategies are due
 # based on each strategy's configured interval (min 5 min, default 480 min).

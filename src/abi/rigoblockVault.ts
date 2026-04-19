@@ -161,7 +161,27 @@ export const RIGOBLOCK_VAULT_ABI = [
     ],
   },
 
-
+  // updateUnitaryValue() → NetAssetsValue { unitaryValue, netTotalValue, netTotalLiabilities }
+  // Non-view function — called via eth_call (simulateContract) to get live NAV
+  // that accounts for virtual supply from crosschain transfers.
+  // The function is permissionless ("allows anyone to store an up-to-date pool price").
+  {
+    name: "updateUnitaryValue",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [
+      {
+        name: "navParams",
+        type: "tuple",
+        components: [
+          { name: "unitaryValue", type: "uint256" },
+          { name: "netTotalValue", type: "uint256" },
+          { name: "netTotalLiabilities", type: "uint256" },
+        ],
+      },
+    ],
+  },
 
   // ── Capital provision (minting pool tokens) ──
 

@@ -65,19 +65,35 @@ import {
 } from "../services/grgStaking.js";
 import { checkNavImpact } from "../services/navGuard.js";
 
+// Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
+// These appear as 4-byte hex prefixes in "execution reverted" messages.
+const POOL_ERROR_SELECTORS: Record<string, string> = {
+  "0xd99e07af": "OutputAmountTooLow — bridge relay fee is too high for this amount/route. Try a larger amount (e.g. ≥$5 USDC) or wait for a less congested window.",
+  "0x7eb8a32f": "OutputAmountTooHigh — the bridge output exceeds what the solver can cover.",
+  "0xf722177f": "InvalidQuoteTimestamp — the bridge quote expired before submission. Retry to get a fresh quote.",
+  "0x0f6e887f": "EffectiveSupplyTooLow — a prior bridge left the source pool below minimum operating supply. The pool cannot send more assets until supply is replenished on that chain.",
+  "0x162e92dd": "SameChainTransfer — the source and destination chain resolved to the same chain. This usually means the NAV equalization auto-corrected the direction incorrectly.",
+};
+
 /**
  * Translate raw error messages into user-friendly language.
- * Hides contract revert details, RPC errors, and stack traces.
+ * Preserves on-chain revert details (decoded from selectors) while hiding
+ * RPC internals, stack traces, and API keys.
  */
 function friendlyError(raw: string): string {
+  // Pass through already-formatted rich error messages (multiline with context).
+  // These come from tool handlers (crosschain_sync, etc.) that include proposed
+  // action details, NAV data, and decoded revert reasons. Don't strip them.
+  if (raw.includes('\n') && (raw.startsWith('❌') || raw.includes('Proposed action:'))) {
+    return raw;
+  }
   // Gas-sponsored execution failures
   if (/Invalid parameters.*RPC method/i.test(raw)) {
     return "Gas-sponsored execution failed due to an RPC configuration issue. Try again or contact support.";
   }
-  // Effective supply too low (bridge cap)
-  const supplyMatch = raw.match(/EffectiveSupplyTooLow/i);
-  if (supplyMatch) {
-    return "Cannot bridge this amount — it would leave the source pool below minimum supply. The backend will automatically cap the amount to the safe maximum (87.5% of balance).";
+  // Effective supply too low — named error in message
+  if (/EffectiveSupplyTooLow/i.test(raw)) {
+    return POOL_ERROR_SELECTORS["0x0f6e887f"];
   }
   // Unknown tool
   const unknownTool = raw.match(/Unknown tool:\s*(\S+)/);
@@ -97,10 +113,22 @@ function friendlyError(raw: string): string {
       ? `Transaction would fail on-chain: ${onChainErr[1].trim()}.`
       : "Transaction simulation failed — it would revert on-chain. Check parameters and try again.";
   }
+  // Decode known 4-byte pool/bridge error selectors from "execution reverted" messages.
+  // These appear as 0x<8 hex chars> in the revert data — map them to human-readable errors.
+  if (/execution reverted/i.test(raw)) {
+    const selMatch = raw.match(/0x([0-9a-fA-F]{8})\b/);
+    if (selMatch) {
+      const sel = `0x${selMatch[1].toLowerCase()}`;
+      if (POOL_ERROR_SELECTORS[sel]) return `On-chain revert: ${POOL_ERROR_SELECTORS[sel]}`;
+    }
+    // No decoded selector — show the full raw message (truncated at 300 chars).
+    // Truncating at 150 was hiding critical revert context.
+    return raw.length <= 300 ? raw : raw.slice(0, 300) + "…";
+  }
   // Keep it if already short
-  if (raw.length < 150) return raw;
-  // Truncate long errors
-  return raw.slice(0, 150).replace(/\s+\S*$/, "") + "…";
+  if (raw.length < 200) return raw;
+  // Truncate long errors (increased from 150 to preserve more context)
+  return raw.slice(0, 200).replace(/\s+\S*$/, "") + "…";
 }
 
 /**
@@ -115,6 +143,7 @@ async function callWorkersAI(
   model: string,
   messages: OpenAI.ChatCompletionMessageParam[],
   tools?: OpenAI.ChatCompletionTool[],
+  onReasoningToken?: (accumulated: string) => void,
 ): Promise<OpenAI.ChatCompletion> {
   // Workers AI rejects null content (which the OpenAI spec allows for assistant
   // messages that contain tool_calls). Normalise to "" before sending so the
@@ -124,9 +153,166 @@ async function callWorkersAI(
     content: m.content === null ? "" : m.content,
   }));
 
+  // For DeepSeek R1: use higher max_tokens to allow full chain-of-thought reasoning.
+  // Default Workers AI token limit can truncate reasoning mid-thought, causing the
+  // model to produce incomplete plans. DeepSeek R1 needs more tokens for <think> blocks.
+  const isDeepSeek = model.includes('deepseek');
+
+  // ── Streaming mode for DeepSeek + live reasoning callback ──
+  // Streams tokens as they arrive so the user sees reasoning in real-time
+  // instead of a static "Thinking…" for 20 seconds.
+  if (isDeepSeek && onReasoningToken) {
+    const stream = await (ai as any).run(model, {
+      messages: sanitizedMessages as any,
+      ...(tools ? { tools: tools as any } : {}),
+      max_tokens: 16384,
+      stream: true,
+    });
+
+    // Parse the SSE stream and emit reasoning tokens in real-time
+    const reader = (stream as ReadableStream).getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+    let lineBuffer = '';
+    let inThink = false;
+    let reasoning = '';
+    // Throttle reasoning events: emit at most every 150ms to avoid flooding the SSE pipe
+    let lastEmitTime = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      lineBuffer += decoder.decode(value, { stream: true });
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop() || ''; // keep incomplete line in buffer
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === 'data: [DONE]') continue;
+        if (!trimmed.startsWith('data: ')) continue;
+
+        try {
+          const json = JSON.parse(trimmed.slice(6));
+          const token: string = json.response || '';
+          if (!token) continue;
+          fullText += token;
+
+          // Detect <think> open tag
+          if (!inThink && fullText.includes('<think>')) {
+            inThink = true;
+            reasoning = fullText.split('<think>').slice(1).join('<think>');
+            if (reasoning.includes('</think>')) {
+              reasoning = reasoning.split('</think>')[0];
+              inThink = false;
+            }
+          } else if (inThink) {
+            reasoning += token;
+            // Detect </think> close tag
+            if (reasoning.includes('</think>')) {
+              reasoning = reasoning.split('</think>')[0];
+              inThink = false;
+            }
+          }
+
+          // Emit accumulated reasoning periodically (throttled)
+          if (inThink && reasoning.length > 0) {
+            const now = Date.now();
+            if (now - lastEmitTime > 150) {
+              onReasoningToken(reasoning.trim());
+              lastEmitTime = now;
+            }
+          }
+        } catch {
+          // Malformed JSON chunk — skip
+        }
+      }
+    }
+
+    // Final reasoning emit (un-throttled)
+    if (reasoning.trim()) {
+      onReasoningToken(reasoning.trim());
+    }
+
+    // Now process the accumulated fullText exactly like the non-streaming path
+    let hasToolCalls = false;
+    let toolCalls: any[] | undefined;
+    let textContent: string | null = fullText || null;
+
+    // Extract reasoning from the accumulated text
+    let extractedReasoning: string | null = null;
+    if (textContent) {
+      const thinkMatch = textContent.match(/<think>([\s\S]*?)<\/think>/);
+      if (thinkMatch) {
+        extractedReasoning = thinkMatch[1].trim();
+        textContent = textContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim() || null;
+      }
+    }
+
+    // Extract text-embedded tool calls
+    if (textContent) {
+      const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
+      const keyPattern = /\{\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
+      const keyMatch = cleaned.match(keyPattern);
+      if (keyMatch) {
+        const fnName = keyMatch[1];
+        const afterKey = cleaned.slice(keyMatch.index! + keyMatch[0].length);
+        let depth = 0;
+        let end = -1;
+        for (let i = 0; i < afterKey.length; i++) {
+          if (afterKey[i] === '{') depth++;
+          else if (afterKey[i] === '}') {
+            depth--;
+            if (depth === 0) { end = i + 1; break; }
+          }
+        }
+        if (end > 0) {
+          const fnArgs = afterKey.slice(0, end);
+          const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
+          if (validTools.includes(fnName)) {
+            console.log(`[Workers AI streaming] Extracted text-embedded tool call: ${fnName}`);
+            hasToolCalls = true;
+            toolCalls = [{ function: { name: fnName, arguments: fnArgs } }];
+            textContent = null;
+          }
+        }
+      }
+    }
+
+    return {
+      id: `chatcmpl-wai-${Date.now()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant" as const,
+          content: hasToolCalls ? null : textContent,
+          ...(hasToolCalls ? {
+            tool_calls: toolCalls!.map((tc: any, i: number) => ({
+              id: tc.id || `call_${Date.now()}_${i}`,
+              type: "function" as const,
+              function: {
+                name: tc.function?.name || tc.name || "",
+                arguments: typeof tc.function?.arguments === "string"
+                  ? tc.function.arguments
+                  : JSON.stringify(tc.function?.arguments || tc.arguments || {}),
+              },
+            })),
+          } : {}),
+        },
+        finish_reason: (hasToolCalls ? "tool_calls" : "stop") as any,
+      }],
+      _reasoning: extractedReasoning,
+    } as any;
+  }
+
+  // ── Non-streaming path (Llama, or DeepSeek without reasoning callback) ──
   const result = await (ai as any).run(model, {
     messages: sanitizedMessages as any,
     ...(tools ? { tools: tools as any } : {}),
+    max_tokens: isDeepSeek ? 16384 : 4096,
   });
 
   let hasToolCalls = Array.isArray(result.tool_calls) && result.tool_calls.length > 0;
@@ -266,13 +452,19 @@ export async function processChat(
     // Workers AI via binding (default — no API key needed, zero-config)
     //
     // Primary model: Llama 3.3 70B — reliable structured tool calling on Workers AI.
-    // DeepSeek R1 is available as opt-in via ctx.aiModel="deepseek" for tasks where
-    // chain-of-thought reasoning matters more than tool-call reliability.
+    // DeepSeek R1 is available as opt-in or auto-selected for complex multi-step reasoning.
     //
     // Fast follow-up model: always Llama 3.3 70B (better tool calling, lower latency).
     useBinding = true;
-    // DeepSeek is opt-in: via ctx.aiModel="deepseek" (Telegram /model deepseek)
-    // or via routingMode="deepseek_only" (web UI settings selector).
+    // Model routing strategy:
+    //   Default: Llama 3.3 70B — fast, reliable tool calling.
+    //   DeepSeek R1: opt-in via user setting, OR automatic escalation.
+    //
+    // NO regex pattern matching for model selection. Instead:
+    //   1. Llama tries first (fast — handles most requests in ~5s)
+    //   2. If Llama fails (no tool calls, unhelpful text) → escalate to DeepSeek
+    //   3. DeepSeek reasons → hand back to Llama for tool execution
+    // This is robust: no regex can be tricked, no pattern can be missed.
     llmModel = (ctx.aiModel === "deepseek" || ctx.routingMode === "deepseek_only")
       ? DEEPSEEK_MODEL
       : LLAMA_FAST_MODEL;
@@ -292,10 +484,15 @@ export async function processChat(
     messages: OpenAI.ChatCompletionMessageParam[];
     tools?: OpenAI.ChatCompletionTool[];
     tool_choice?: "auto";
-  }) => {
+  }, streamReasoning?: boolean) => {
     recordModel(params.model);
     if (useBinding) {
-      return callWorkersAI(env.AI!, params.model, params.messages, params.tools);
+      // When streamReasoning is true AND we have an onStreamEvent callback,
+      // pass it to callWorkersAI so DeepSeek reasoning streams in real-time.
+      const reasoningCallback = (streamReasoning && onStreamEvent)
+        ? (accumulated: string) => onStreamEvent({ type: 'reasoning', content: accumulated })
+        : undefined;
+      return callWorkersAI(env.AI!, params.model, params.messages, params.tools, reasoningCallback);
     }
     return openai!.chat.completions.create(params);
   };
@@ -378,9 +575,12 @@ ${executionModeNote}${contextDocsBlock}`;
     "Fast-path execution: matched a deterministic command pattern and executed the corresponding tool directly for low latency. No generative planning step was used in this turn.";
 
   // Immediate fast-path: deterministic commands that never need an LLM call.
+  // NOTE: crosschain_sync is intentionally NOT in the fast-path.
+  // Cross-chain operations need LLM reasoning to show the user what was computed
+  // (NAV data, direction, token, amount) and explain errors. Speed is not the
+  // priority — correctness and transparency are.
   const immediateFastPath =
     tryFastPathChainSwitch(lastUserMsg) ||
-    (hasVault ? tryFastPathCrosschainSync(lastUserMsg) : null) ||
     (hasVault ? tryFastPathStrategyQueries(lastUserMsg) : null) ||
     (hasVault ? tryFastPathTwapCreate(lastUserMsg) : null);
   if (immediateFastPath) {
@@ -398,7 +598,23 @@ ${executionModeNote}${contextDocsBlock}`;
         finalModel: "tooling",
       };
     } catch (err) {
-      // Fast-path failed (e.g. unknown chain name) — fall through to LLM for a helpful error
+      const errMsg = err instanceof Error ? err.message : String(err);
+      // For tool calls that produced informative errors (balance, revert, NAV),
+      // return the error directly — falling through to DeepSeek would hallucinate.
+      const isInformativeError = /insufficient|revert|blocked|failed|not found|not bridgeable|no bridgeable/i.test(errMsg);
+      if (isInformativeError) {
+        console.warn(`[LLM] Immediate fast-path informative error, returning directly: ${errMsg}`);
+        const friendlyMsg = friendlyError(sanitizeError(errMsg));
+        onStreamEvent?.({ type: "tool_result", name: immediateFastPath.name, result: `Error: ${friendlyMsg}`, error: true });
+        return {
+          reply: friendlyMsg,
+          toolCalls: [{ name: immediateFastPath.name, arguments: immediateFastPath.args, result: `Error: ${friendlyMsg}`, error: true }],
+          reasoning: fastPathReasoning,
+          modelsUsed: [],
+          finalModel: "tooling",
+        };
+      }
+      // Non-informative error (e.g. unknown chain name) — fall through to LLM for help
       console.warn(`[LLM] Immediate fast-path failed, falling through to LLM: ${err}`);
     }
   }
@@ -417,25 +633,41 @@ ${executionModeNote}${contextDocsBlock}`;
 
   // First LLM call
   console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
-  onStreamEvent?.({ type: "status", message: `Calling model (${llmModel})...` });
+  // User-friendly model label for status messages
+  const modelLabel = llmModel.includes('deepseek') ? 'DeepSeek R1 (reasoning)'
+    : llmModel.includes('llama') ? 'Llama 3.3' : llmModel.split('/').pop() || llmModel;
+  onStreamEvent?.({ type: "status", message: `Thinking (${modelLabel})…` });
+  // For DeepSeek: stream reasoning tokens in real-time so the user sees thinking progress
+  // instead of a static "Thinking…" for 20 seconds. The streamReasoning flag enables this.
+  const isDeepSeekFirstCall = llmModel.includes('deepseek');
   const response = await callLLM({
     model: llmModel,
     messages: withRuntimeContext(fullMessages),
     tools: TOOL_DEFINITIONS,
     tool_choice: "auto",
-  });
+  }, isDeepSeekFirstCall);
   console.log(`[LLM] Response: finish_reason=${response.choices[0]?.finish_reason}, tool_calls=${response.choices[0]?.message?.tool_calls?.length ?? 0}`);
-  onStreamEvent?.({ type: "status", message: "Model responded." });
+  // Don't emit "Model responded" — the next meaningful event (reasoning, tool_call, text) replaces it
 
   const choice = response.choices[0];
   if (!choice) throw new Error("No response from LLM");
 
-  // Extract DeepSeek R1 reasoning from the first LLM call
-  const reasoning: string | undefined = (response as any)._reasoning || undefined;
+  // Extract DeepSeek R1 reasoning from the first LLM call.
+  // When DeepSeek streaming is active, reasoning was already emitted token-by-token.
+  // Emit the final complete version to ensure the frontend has the full text.
+  let reasoning: string | undefined = (response as any)._reasoning || undefined;
   if (reasoning) {
     onStreamEvent?.({ type: "reasoning", content: reasoning });
   }
-  const orchestrationReasoning: string = reasoning ||
+  // Emit the model's text content (its plan/analysis) so the user sees it in real time.
+  // For models that return both text + tool_calls (OpenRouter, OpenAI), this shows the
+  // model's plan before tool execution starts. Workers AI discards text when tool_calls
+  // are present, so this is a no-op for the default path.
+  const firstCallText = choice.message.content?.trim();
+  if (firstCallText) {
+    onStreamEvent?.({ type: "text", content: firstCallText });
+  }
+  let orchestrationReasoning: string = reasoning ||
     "Autonomous orchestration: interpreted the request intent, executed tools step-by-step, and returned the first concrete outcome (report, transaction, or execution result).";
 
   const toolCallResults: ToolCallResult[] = [];
@@ -448,16 +680,146 @@ ${executionModeNote}${contextDocsBlock}`;
   // Autonomous orchestration loop: continue tool execution across multiple rounds
   // until we reach an actionable outcome (tx batch / self-contained report) or max rounds.
   //
-  // DeepSeek fallback: if the primary model (DeepSeek R1) produced no tool calls,
-  // retry with Llama 3.3 70B which has better tool-calling reliability. The DeepSeek
-  // reasoning trace is preserved and included in the response.
+  // Bidirectional model escalation:
+  //   Llama → DeepSeek: when Llama can't handle a request (no tool calls, unhelpful text)
+  //   DeepSeek → Llama: when DeepSeek reasons but doesn't call tools (existing path below)
   let orchestrationChoice = choice;
+
+  // ── Llama → DeepSeek escalation ──
+  // If Llama returned no tool calls and gave an unhelpful response ("lacking details",
+  // "provide more information", etc.), escalate to DeepSeek R1 for reasoning.
+  // DeepSeek understands complex intents (crosschain sync, multi-step plans) that
+  // Llama can't handle alone. Its reasoning is then handed to Llama for tool execution.
+  //
+  // This is the robust alternative to regex pattern matching: instead of trying to
+  // predict which requests need reasoning, we let Llama try first and escalate on failure.
+  //
+  // LOOP GUARD: The entire escalation path is bounded to at most 3 LLM calls:
+  //   Call 1: Llama (fast) — initial attempt
+  //   Call 2: DeepSeek (reasoning) — escalation (only if Llama was unhelpful)
+  //   Call 3: Llama (fast retry) — tool execution with DeepSeek's context
+  // After that, we proceed to the orchestration loop or return directly.
+  // No further escalation is possible because `escalatedToDeepSeek` prevents re-entry.
+  let escalatedToDeepSeek = false;
+  if (
+    !orchestrationChoice.message.tool_calls?.length &&
+    llmModel === LLAMA_FAST_MODEL &&
+    useBinding
+  ) {
+    const llamaText = orchestrationChoice.message.content?.trim() || '';
+    const isUnhelpful = !llamaText || llamaText.length < 100 ||
+      /\b(lacking|need more|specify|provide more|unable to|cannot determine|more information|more details|more context)\b/i.test(llamaText);
+
+    if (isUnhelpful) {
+      console.log(`[LLM] Llama produced unhelpful response — escalating to DeepSeek R1 for reasoning`);
+      onStreamEvent?.({ type: "status", message: "Escalating to DeepSeek R1 for deeper analysis…" });
+
+      const deepSeekEscalation = await callLLM({
+        model: DEEPSEEK_MODEL,
+        messages: withRuntimeContext(fullMessages),
+        tools: TOOL_DEFINITIONS,
+        tool_choice: "auto",
+      }, true); // stream reasoning in real-time
+
+      const dsChoice = deepSeekEscalation.choices[0];
+      if (dsChoice) {
+        // Update reasoning from DeepSeek's response
+        const dsReasoning = (deepSeekEscalation as any)._reasoning as string | undefined;
+        if (dsReasoning) {
+          reasoning = dsReasoning;
+          orchestrationReasoning = dsReasoning;
+          onStreamEvent?.({ type: "reasoning", content: dsReasoning });
+        }
+        const dsText = dsChoice.message.content?.trim();
+        if (dsText) {
+          onStreamEvent?.({ type: "text", content: dsText });
+        }
+        orchestrationChoice = dsChoice;
+        // Mark as DeepSeek so the existing DeepSeek→Llama handoff fires below
+        // if DeepSeek also produced no tool calls (it will hand reasoning to Llama).
+        llmModel = DEEPSEEK_MODEL;
+        escalatedToDeepSeek = true;
+      }
+    }
+  }
+
+  // ── DeepSeek → Llama handoff ──
+  // DeepSeek is great at reasoning but often doesn't produce structured tool calls.
+  // When DeepSeek returns text (reasoning + plan) but no tool calls, hand the
+  // condensed intent to Llama for fast, reliable tool execution.
   if (!orchestrationChoice.message.tool_calls?.length && llmModel === DEEPSEEK_MODEL) {
     console.log(`[LLM] DeepSeek produced no tool calls — retrying with ${LLAMA_FAST_MODEL} for tool execution`);
-    onStreamEvent?.({ type: "status", message: `Retrying with ${LLAMA_FAST_MODEL} for tool execution...` });
+    // DeepSeek's text was already emitted as "text" event via firstCallText above — don't duplicate it.
+    const deepseekText = orchestrationChoice.message.content?.trim();
+    onStreamEvent?.({ type: "status", message: "Executing DeepSeek's plan…" });
+
+    // CRITICAL: Pass DeepSeek's intent (not raw text) to Llama so it calls the right tools.
+    // DeepSeek's raw text often contains hallucinated numbers, formulas, and step-by-step
+    // instructions ("bridge 1000 USDC", "use Dune Analytics") that Llama copies literally
+    // instead of using the tools' built-in calculation logic.
+    //
+    // Strategy: pass a condensed intent summary with explicit tool-calling guidance,
+    // NOT DeepSeek's full text with hallucinated specifics.
+    const deepseekContext: OpenAI.ChatCompletionMessageParam[] = [];
+
+    // Extract intent from DeepSeek's reasoning (short summary, no numbers or token bias)
+    const intentSummary = reasoning
+      ? reasoning
+          // Strip formula blocks (LaTeX, code blocks, equations)
+          .replace(/\$\$[\s\S]*?\$\$/g, '')
+          .replace(/\$[^$]+\$/g, '')
+          .replace(/```[\s\S]*?```/g, '')
+          // Strip specific numbers that DeepSeek hallucinated
+          .replace(/\b\d+(?:\.\d+)?\s*(?:USDC|USDT|ETH|WETH|WBTC|tokens?|units?)\b/gi, '[auto-calculated]')
+          // Strip token-specific assumptions ("use USDT", "with USDC", "bridge USDT")
+          .replace(/\b(use|with|bridge|send|transfer)\s+(USDC|USDT|WETH|WBTC)\b/gi, '$1 [auto-selected token]')
+          // Strip "I remember" / "from previous" bias patterns
+          .replace(/I\s+remember\s+that[^.]*\./gi, '')
+          .replace(/from\s+(?:the\s+)?previous[^.]*\./gi, '')
+          .replace(/in\s+(?:the\s+)?(?:last|prior|earlier)[^.]*\./gi, '')
+          // Collapse to first 500 chars of cleaned text
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 500)
+      : null;
+
+    const planBlock = deepseekText || '';
+    // Extract just the high-level intent (first 1-2 sentences), strip formulas and specifics
+    const cleanedPlan = planBlock
+      .replace(/###.*$/gm, '')          // strip markdown headers
+      .replace(/\*\*/g, '')             // strip bold markers
+      .replace(/\[.*?\]/g, '')          // strip LaTeX
+      .replace(/\d{3,}/g, '[N]')        // replace large numbers with placeholder
+      .split(/\n\n/)[0]                 // take first paragraph only
+      ?.trim()
+      .slice(0, 300) || '';
+
+    if (intentSummary || cleanedPlan) {
+      deepseekContext.push({
+        role: "assistant" as const,
+        content: `DeepSeek analysis summary: ${intentSummary || cleanedPlan}`,
+      });
+      deepseekContext.push({
+        role: "user" as const,
+        content: [
+          "Now execute the intent above using the available tools.",
+          "Call the appropriate tool — do NOT output text analysis.",
+          "",
+          "CRITICAL TOOL-CALLING RULES:",
+          "- For crosschain sync / NAV equalization / price equalization: call crosschain_sync with equalizeNav=true.",
+          "  Do NOT set amount or token — the service auto-calculates direction, amount, and token.",
+          "  Do NOT assume source chain, token, or direction from the analysis above or conversation history.",
+          "  Just pass the two chain names and equalizeNav=true. The tool handles everything else.",
+          "- For bridge/transfer: call crosschain_transfer. Do NOT set amounts from the analysis.",
+          "- NEVER hardcode amounts or token names from the reasoning. The tools read on-chain state.",
+          "- NEVER echo or repeat the analysis text. Just call the tool.",
+        ].join("\n"),
+      });
+    }
+
     const retryResponse = await callLLM({
       model: LLAMA_FAST_MODEL,
-      messages: withRuntimeContext(fullMessages),
+      messages: withRuntimeContext([...fullMessages, ...deepseekContext]),
       tools: TOOL_DEFINITIONS,
       tool_choice: "auto",
     });
@@ -472,6 +834,12 @@ ${executionModeNote}${contextDocsBlock}`;
     let currentMessage = orchestrationChoice.message;
     let rollingMessages: OpenAI.ChatCompletionMessageParam[] = [...fullMessages];
     const MAX_AUTONOMOUS_ROUNDS = 6;
+
+    // Track consecutive failures to stop the loop early when the same tool
+    // keeps failing with the same error (prevents 5x repeated error spam).
+    let lastFailedTool: string | undefined;
+    let lastFailedError: string | undefined;
+    let consecutiveFailures = 0;
 
     for (let round = 1; round <= MAX_AUTONOMOUS_ROUNDS; round++) {
       if (!currentMessage.tool_calls || currentMessage.tool_calls.length === 0) {
@@ -548,7 +916,42 @@ ${executionModeNote}${contextDocsBlock}`;
             detectedDex = "GMX";
           }
         } catch (err) {
-          result = `Error: ${friendlyError(sanitizeError(err instanceof Error ? err.message : String(err)))}`;
+          // Extract the most informative error string from viem/RPC errors.
+          // Viem wraps errors in multiple layers:
+          //   EstimateGasExecutionError → CallExecutionError → ExecutionRevertedError → RpcRequestError
+          // The revert data (4-byte selector) is on RpcRequestError.data, 3+ levels deep.
+          // The top-level .message is often just "Execution reverted for an unknown reason."
+          let rawMsg: string;
+          if (err instanceof Error) {
+            // Walk the full cause chain to find revert data or a meaningful message
+            let revertData: string | undefined;
+            let bestMessage: string | undefined;
+            let e: any = err;
+            while (e) {
+              // RpcRequestError.data contains raw hex revert data
+              if (e.data && typeof e.data === 'string' && e.data.startsWith('0x')) {
+                revertData = e.data;
+                break;
+              }
+              // Collect the deepest meaningful message
+              if (e.shortMessage && !e.shortMessage.includes('unknown reason')) {
+                bestMessage = e.shortMessage;
+              } else if (e.details && !e.details.includes('unknown reason')) {
+                bestMessage = e.details;
+              }
+              e = e.cause;
+            }
+            if (revertData) {
+              rawMsg = `execution reverted: ${revertData}`;
+            } else if (bestMessage) {
+              rawMsg = bestMessage;
+            } else {
+              rawMsg = err.message;
+            }
+          } else {
+            rawMsg = String(err);
+          }
+          result = `Error: ${friendlyError(sanitizeError(rawMsg))}`;
           isError = true;
         }
 
@@ -563,6 +966,43 @@ ${executionModeNote}${contextDocsBlock}`;
         onStreamEvent?.({ type: "tool_result", name, result, error: isError || undefined });
 
         if (onToolResult) await onToolResult(name, result, isError).catch(() => {});
+
+        // Detect consecutive failures of the same tool with the same error.
+        // Break immediately to avoid repeating the same failing call in every round.
+        if (isError) {
+          if (name === lastFailedTool && result === lastFailedError) {
+            consecutiveFailures++;
+            if (consecutiveFailures >= 2) {
+              toolMessages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                content: result,
+              });
+              console.log(`[LLM] Consecutive failure limit reached for tool '${name}'. Stopping orchestration loop.`);
+              // Return with the error message visible to the user
+              return {
+                reply: result.replace(/^Error: /, ""),
+                toolCalls: toolCallResults,
+                transaction: pendingTransactions[pendingTransactions.length - 1],
+                transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
+                chainSwitch: pendingChainSwitch,
+                dexProvider: detectedDex,
+                reasoning: orchestrationReasoning,
+                modelsUsed,
+                finalModel: "tooling",
+              };
+            }
+          } else {
+            consecutiveFailures = 1;
+            lastFailedTool = name;
+            lastFailedError = result;
+          }
+        } else {
+          // Reset on success
+          consecutiveFailures = 0;
+          lastFailedTool = undefined;
+          lastFailedError = undefined;
+        }
 
         toolMessages.push({
           role: "tool",
@@ -629,7 +1069,7 @@ ${executionModeNote}${contextDocsBlock}`;
       // Continue planning with the fast model using accumulated tool results.
       rollingMessages = toolMessages;
       console.log(`[LLM] Autonomous follow-up call (fast: ${fastModel}) round ${round}/${MAX_AUTONOMOUS_ROUNDS}`);
-      onStreamEvent?.({ type: "status", message: `Continuing plan (round ${round + 1})...` });
+      onStreamEvent?.({ type: "status", message: `Planning next step (round ${round + 1})…` });
       const followUp = await callLLM({
         model: fastModel,
         messages: withRuntimeContext(toolMessages),
@@ -639,6 +1079,24 @@ ${executionModeNote}${contextDocsBlock}`;
       const followUpChoice = followUp.choices[0];
       if (!followUpChoice) {
         break;
+      }
+
+      // Stream the model's plan/thinking text so the user sees what it decided.
+      // This replaces the old "Continuing plan…" hardcoded message.
+      const followUpReasoning = (followUp as any)._reasoning as string | undefined;
+      if (followUpReasoning) {
+        onStreamEvent?.({ type: "reasoning", content: followUpReasoning });
+      }
+      const followUpText = followUpChoice.message.content?.trim();
+      if (followUpText) {
+        // Suppress text that just echoes an already-shown error (prevents 3x+ duplication)
+        const isErrorEcho = /^(error:|insufficient|.*revert|.*failed)/i.test(followUpText);
+        const isRepeatOfToolResult = toolCallResults.some(
+          tc => tc.error && tc.result && followUpText.includes(tc.result.replace(/^Error:\s*/i, '').slice(0, 50)),
+        );
+        if (!isErrorEcho && !isRepeatOfToolResult) {
+          onStreamEvent?.({ type: "text", content: followUpText });
+        }
       }
 
       currentMessage = followUpChoice.message;
@@ -2268,6 +2726,7 @@ export async function executeToolCall(
         // If user is sending actual WETH tokens, they want WETH on destination.
         shouldUnwrapOnDestination: shouldUnwrapOnDestination || useNativeEth,
         alchemyKey: env.ALCHEMY_API_KEY,
+        operatorAddress: ctx.operatorAddress,
       });
 
       const gas = await estimateGas(
@@ -2306,21 +2765,25 @@ export async function executeToolCall(
     case "crosschain_sync": {
       const srcChainArg = args.sourceChain as string | undefined;
       const destChainArg = args.destinationChain as string;
-      const tokenSymbol = args.token as string | undefined;
-      const amount = args.amount as string | undefined;
       const navToleranceBps = args.navToleranceBps as number | undefined;
+      const equalizeNav = args.equalizeNav as boolean | undefined;
+
+      // When equalizeNav=true, IGNORE LLM-provided amount and token.
+      // These are computed DETERMINISTICALLY by the equalization algorithm.
+      // The LLM's only job is to pass the two chain names + equalizeNav=true.
+      const tokenSymbol = equalizeNav ? undefined : (args.token as string | undefined);
+      const amount = equalizeNav ? undefined : (args.amount as string | undefined);
 
       if (!destChainArg) {
         throw new Error("destinationChain is required for crosschain_sync.");
       }
 
-      const srcChainId = srcChainArg
+      const userSrcChainId = srcChainArg
         ? resolveChainArg(srcChainArg.trim()).id
         : ctx.chainId;
-      const srcName = resolveChainName(srcChainId);
       const destMatch = resolveChainArg(destChainArg.trim());
 
-      if (srcChainId === destMatch.id) {
+      if (userSrcChainId === destMatch.id) {
         throw new Error(
           `Source and destination are both ${destMatch.name}. Cross-chain sync requires different chains.`,
         );
@@ -2328,25 +2791,100 @@ export async function executeToolCall(
 
       const result = await buildCrosschainSync({
         vaultAddress: ctx.vaultAddress as Address,
-        srcChainId,
+        srcChainId: userSrcChainId,
         dstChainId: destMatch.id,
         tokenSymbol,
         amount,
         navToleranceBps,
+        equalizeNav,
         alchemyKey: env.ALCHEMY_API_KEY,
+        operatorAddress: ctx.operatorAddress,
       });
 
-      const syncGas = await estimateGas(
-        srcChainId, ctx.vaultAddress as Address,
-        result.calldata as Hex, "0x0",
-        ctx.operatorAddress, env.ALCHEMY_API_KEY, "bridge",
-      );
+      // CRITICAL: Use the EFFECTIVE chain IDs from the quote, NOT the user's
+      // original args. When NAV equalization auto-swaps direction (bridges
+      // FROM higher-NAV chain), the effective source differs from user input.
+      // Using the original srcChainId for estimateGas would simulate on the
+      // WRONG chain → SameChainTransfer revert (the calldata targets the
+      // swapped source but simulation runs on the original source).
+      const effectiveSrcChainId = result.quote.srcChainId;
+      const effectiveDstChainId = result.quote.dstChainId;
+      const effectiveSrcName = resolveChainName(effectiveSrcChainId);
+      const effectiveDstName = resolveChainName(effectiveDstChainId);
+
+      // Build context summary BEFORE estimateGas — so we can include it in errors.
+      const eq = result.navEqualization;
+      const navEqContext = eq
+        ? [
+            `NAV equalization${eq.directionAutoSwapped ? ' (direction auto-corrected)' : ''}:`,
+            `  ${effectiveSrcName} NAV: ${eq.srcNavFormatted} (${eq.srcDecimals}-dec pool)`,
+            `  ${effectiveDstName} NAV: ${eq.dstNavFormatted} (${eq.dstDecimals}-dec pool)`,
+            `  Pre-bridge divergence: ${(eq.divergenceBps / 100).toFixed(2)}%`,
+            `  Bridge: ${eq.bridgeAmountFormatted} ${eq.bridgeToken.symbol}`,
+            `  Post-bridge projected NAV: ${effectiveSrcName}=${eq.postSrcNav}, ${effectiveDstName}=${eq.postDstNav}`,
+            `  Target NAV: ${eq.targetNav}`,
+            `  Post-bridge divergence: ${(eq.postDivergenceBps / 100).toFixed(2)}%`,
+            ...(eq.capped ? [`  ⚠ ${eq.capReason}`] : []),
+          ].join('\n')
+        : '';
+
+      let syncGas: string;
+      try {
+        syncGas = await estimateGas(
+          effectiveSrcChainId, ctx.vaultAddress as Address,
+          result.calldata as Hex, "0x0",
+          ctx.operatorAddress, env.ALCHEMY_API_KEY, "bridge",
+        );
+      } catch (err) {
+        let revertReason: string;
+        if (err instanceof Error) {
+          let revertData: string | undefined;
+          let bestMessage: string | undefined;
+          let e: any = err;
+          while (e) {
+            if (e.data && typeof e.data === 'string' && e.data.startsWith('0x')) {
+              revertData = e.data;
+              break;
+            }
+            if (e.shortMessage && !e.shortMessage.includes('unknown reason')) {
+              bestMessage = e.shortMessage;
+            } else if (e.details && !e.details.includes('unknown reason')) {
+              bestMessage = e.details;
+            }
+            e = e.cause;
+          }
+          if (revertData) {
+            revertReason = friendlyError(`execution reverted: ${revertData}`);
+          } else if (bestMessage) {
+            revertReason = friendlyError(sanitizeError(bestMessage));
+          } else {
+            revertReason = friendlyError(sanitizeError(err.message));
+          }
+        } else {
+          revertReason = friendlyError(sanitizeError(String(err)));
+        }
+
+        const errorLines = [
+          `❌ NAV sync failed — transaction would revert on-chain`,
+          ``,
+          `Proposed action:`,
+          `  Route: ${effectiveSrcName} → ${effectiveDstName}`,
+          `  Token: ${result.quote.inputToken.symbol}`,
+          `  Amount: ${result.quote.inputAmount} ${result.quote.inputToken.symbol}`,
+          `  Bridge fee: ${result.quote.feePct}`,
+        ];
+        if (navEqContext) {
+          errorLines.push(``, navEqContext);
+        }
+        errorLines.push(``, `Revert reason: ${revertReason}`);
+        throw new Error(errorLines.join('\n'));
+      }
 
       const transaction: UnsignedTransaction = {
         to: ctx.vaultAddress as Address,
         data: result.calldata,
         value: "0x0",
-        chainId: srcChainId,
+        chainId: effectiveSrcChainId,
         gas: syncGas,
         description: result.description,
       };
@@ -2357,11 +2895,12 @@ export async function executeToolCall(
 
       const message = [
         `✅ NAV sync ready`,
-        `Route: ${srcName} → ${destMatch.name}`,
+        `Route: ${effectiveSrcName} → ${effectiveDstName}`,
         `Sync amount: ${result.quote.inputAmount} ${result.quote.inputToken.symbol}`,
         `NAV tolerance: ${toleranceDisplay}`,
         `Bridge fee: ${result.quote.feePct}`,
         `Estimated time: ${result.quote.estimatedTime}`,
+        ...(navEqContext ? ['', navEqContext] : []),
         "",
         "Sign this transaction to synchronise NAV across chains.",
       ].join("\n");
@@ -3472,10 +4011,15 @@ function tryFastPathChainSwitch(msg: string): FastPathResult | null {
 function tryFastPathCrosschainSync(msg: string): FastPathResult | null {
   const m = msg.toLowerCase().trim();
 
-  if (!/\bsync\b/.test(m) || !/\bnav\b/.test(m)) return null;
+  // Must mention sync (crosschain sync, sync nav, nav sync, etc.)
+  if (!/\bsync\b/.test(m)) return null;
 
+  // Detect equalizeNav intent — user wants automatic NAV/price equalization
+  const wantsEqualize = /\b(calculat|equaliz|match.*price|same.*price|price.*(?:equal|same|parity|converg)|unitary.*(?:same|equal|match)|so that|in order to)\b/i.test(m);
+
+  // Extract chain pair: "from X to Y" pattern
   const fromTo = m.match(
-    /sync(?:\s+my|\s+the)?(?:\s+pool)?\s+nav(?:\s+of\s+[a-z0-9 ]+)?\s+from\s+([a-z0-9 ]+?)\s+to\s+([a-z0-9 ]+)$/i,
+    /(?:sync|crosschain\s+sync)(?:\s+(?:my|the))?(?:\s+(?:pool|nav))?\s*(?:nav\s*)?(?:of\s+[a-z0-9 ]+?)?\s*from\s+([a-z0-9 ]+?)\s+to\s+([a-z0-9 ]+?)(?:\s*[.,;!]|\s+(?:calculat|so\b|in\b|and\b|with\b)|$)/i,
   );
   if (fromTo) {
     return {
@@ -3483,12 +4027,14 @@ function tryFastPathCrosschainSync(msg: string): FastPathResult | null {
       args: {
         sourceChain: fromTo[1].trim(),
         destinationChain: fromTo[2].trim(),
+        ...(wantsEqualize ? { equalizeNav: true } : {}),
       },
     };
   }
 
+  // Extract chain pair: "between X and Y" or "across X and Y"
   const between = m.match(
-    /sync(?:\s+my|\s+the)?(?:\s+pool)?\s+nav(?:\s+of\s+[a-z0-9 ]+)?\s+(?:between|across)\s+([a-z0-9 ]+?)\s+(?:and|to)\s+([a-z0-9 ]+)$/i,
+    /(?:sync|crosschain\s+sync)(?:\s+(?:my|the))?(?:\s+(?:pool|nav))?\s*(?:nav\s*)?(?:of\s+[a-z0-9 ]+?)?\s*(?:between|across)\s+([a-z0-9 ]+?)\s+(?:and|to)\s+([a-z0-9 ]+?)(?:\s*[.,;!]|\s+(?:calculat|so\b|in\b|and\b|with\b)|$)/i,
   );
   if (between) {
     return {
@@ -3496,6 +4042,22 @@ function tryFastPathCrosschainSync(msg: string): FastPathResult | null {
       args: {
         sourceChain: between[1].trim(),
         destinationChain: between[2].trim(),
+        ...(wantsEqualize ? { equalizeNav: true } : {}),
+      },
+    };
+  }
+
+  // Extract chain pair for loose patterns: "crosschain sync arbitrum bsc"
+  // Only if we have "sync" + two recognizable chain names
+  const CHAIN_NAMES = /\b(ethereum|eth|mainnet|arbitrum|arb|optimism|op|base|polygon|matic|bsc|bnb|unichain)\b/gi;
+  const chains = [...m.matchAll(CHAIN_NAMES)].map(match => match[1]);
+  if (chains.length >= 2) {
+    return {
+      name: "crosschain_sync",
+      args: {
+        sourceChain: chains[0],
+        destinationChain: chains[1],
+        ...(wantsEqualize ? { equalizeNav: true } : {}),
       },
     };
   }
@@ -3608,6 +4170,12 @@ function tryFastPathCapabilityQuestion(msg: string): string | null {
 function tryFastPathSwap(msg: string): FastPathResult | null {
   let m = msg.trim();
 
+  // Normalise token references: uppercase symbols, preserve addresses (lowercase).
+  // Addresses start with 0x and are 42 chars — don't uppercase them or
+  // resolveTokenAddress() won't recognise them (checks .startsWith("0x")).
+  const normalizeToken = (t: string) =>
+    /^0x[0-9a-f]{40}$/i.test(t) ? t.toLowerCase() : t.toUpperCase();
+
   // Extract DEX modifier ("using 0x", "using uniswap", "via 0x") before regex matching
   let dex: string | undefined;
   const dexMatch = m.match(/\s+(?:using|via)\s+(0x|uniswap|zerox)$/i);
@@ -3622,8 +4190,8 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
   );
   if (sellMatch) {
     const args: Record<string, unknown> = {
-      tokenIn: sellMatch[2].toUpperCase(),
-      tokenOut: sellMatch[3].toUpperCase(),
+      tokenIn: normalizeToken(sellMatch[2]),
+      tokenOut: normalizeToken(sellMatch[3]),
       amountIn: sellMatch[1].replace(/,/g, ""),
     };
     if (sellMatch[4]) args.chain = sellMatch[4].trim();
@@ -3637,11 +4205,11 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
   );
   if (buyMatch) {
     const args: Record<string, unknown> = {
-      tokenOut: buyMatch[2].toUpperCase(),
+      tokenOut: normalizeToken(buyMatch[2]),
       amountOut: buyMatch[1].replace(/,/g, ""),
     };
     // Default tokenIn to USDC if not specified
-    args.tokenIn = buyMatch[3] ? buyMatch[3].toUpperCase() : "USDC";
+    args.tokenIn = buyMatch[3] ? normalizeToken(buyMatch[3]) : "USDC";
     if (buyMatch[4]) args.chain = buyMatch[4].trim();
     if (dex) args.dex = dex;
     return { name: "build_vault_swap", args };
@@ -3653,8 +4221,8 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
   );
   if (swapMatch) {
     const args: Record<string, unknown> = {
-      tokenIn: swapMatch[2].toUpperCase(),
-      tokenOut: swapMatch[3].toUpperCase(),
+      tokenIn: normalizeToken(swapMatch[2]),
+      tokenOut: normalizeToken(swapMatch[3]),
       amountIn: swapMatch[1].replace(/,/g, ""),
     };
     if (swapMatch[4]) args.chain = swapMatch[4].trim();

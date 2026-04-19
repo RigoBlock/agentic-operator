@@ -1621,15 +1621,89 @@
                 if (event.type === 'status') {
                   updateTypingStatus(event.message);
                 } else if (event.type === 'reasoning') {
-                  const summary = String(event.content || '').trim().split('\n')[0].slice(0, 140);
-                  updateTypingStatus(summary ? `Reasoning: ${summary}` : 'Reasoning...');
+                  const reasoningText = String(event.content || '').trim();
+                  // Show reasoning visible (not collapsed) so the user can follow agent thinking.
+                  // These blocks are persisted into the chat when typingEl is removed.
+                  let reasoningEl = typingEl.querySelector('.reasoning-block');
+                  if (!reasoningEl) {
+                    reasoningEl = document.createElement('div');
+                    reasoningEl.className = 'reasoning-block';
+                    reasoningEl.style.cssText = 'margin-top:6px;font-size:0.82em;opacity:0.75;max-height:300px;overflow-y:auto;border-left:2px solid #a78bfa;padding-left:8px;';
+                    const label = document.createElement('div');
+                    label.textContent = '\uD83E\uDDE0 Agent reasoning:';
+                    label.style.cssText = 'font-weight:600;margin-bottom:4px;color:#a78bfa;';
+                    reasoningEl.appendChild(label);
+                    const pre = document.createElement('pre');
+                    pre.className = 'reasoning-text';
+                    pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;margin:0;';
+                    reasoningEl.appendChild(pre);
+                    typingEl.appendChild(reasoningEl);
+                  }
+                  const pre = reasoningEl.querySelector('.reasoning-text');
+                  if (pre) pre.textContent = reasoningText.length > 3000 ? reasoningText.slice(0, 3000) + '...' : reasoningText;
+                  updateTypingStatus('Reasoning...');
+                  chatEl.scrollTop = chatEl.scrollHeight;
                 } else if (event.type === 'tool_call') {
-                  updateTypingStatus(`Running ${event.name}…`);
+                  // Show meaningful status for crosschain operations
+                  let callStatus = `Running ${event.name}…`;
+                  const a = event.arguments || {};
+                  if (event.name === 'crosschain_sync') {
+                    const src = a.sourceChain || a.srcChain || '';
+                    const dst = a.destinationChain || a.dstChain || '';
+                    const eq = a.equalizeNav ? ' (auto-calculate equalization amount)' : (a.amount ? ` ${a.amount} ${a.tokenSymbol || ''}` : '');
+                    callStatus = src && dst ? `Syncing NAV: ${src} → ${dst}${eq}…` : callStatus;
+                  } else if (event.name === 'crosschain_transfer') {
+                    const src = a.sourceChain || a.srcChain || '';
+                    const dst = a.destinationChain || a.dstChain || '';
+                    const amt = a.amount ? `${a.amount} ${a.tokenSymbol || ''}` : '';
+                    callStatus = src && dst ? `Bridging ${amt} ${src} → ${dst}…` : callStatus;
+                  } else if (event.name === 'get_aggregated_nav') {
+                    callStatus = 'Reading NAV across all chains…';
+                  }
+                  updateTypingStatus(callStatus);
                 } else if (event.type === 'tool_result') {
-                  updateTypingStatus(event.error ? `${event.name} failed` : `${event.name} done`);
+                  if (event.error) {
+                    // Show error details inline in the typing indicator, not just status
+                    updateTypingStatus(`${event.name} failed`);
+                    let errEl = typingEl.querySelector('.tool-error-block');
+                    if (!errEl) {
+                      errEl = document.createElement('div');
+                      errEl.className = 'tool-error-block';
+                      errEl.style.cssText = 'margin-top:6px;font-size:0.83em;color:#f87171;border-left:2px solid #f87171;padding-left:8px;white-space:pre-wrap;word-break:break-word;';
+                      typingEl.appendChild(errEl);
+                    }
+                    errEl.textContent = String(event.result || '').replace(/^Error:\s*/i, '');
+                    chatEl.scrollTop = chatEl.scrollHeight;
+                  } else {
+                    updateTypingStatus(`${event.name} done`);
+                  }
                 } else if (event.type === 'text') {
-                  // Progressive text — update typing indicator
-                  updateTypingStatus('Composing response…');
+                  // Show the agent's thinking/plan text in real time
+                  const planText = String(event.content || '').trim();
+                  if (planText) {
+                    // Reuse existing plan block (overwrite) — prevents duplicate plan display
+                    // when DeepSeek text + Llama retry produce the same or similar content.
+                    let planEl = typingEl.querySelector('.plan-block');
+                    if (!planEl) {
+                      planEl = document.createElement('div');
+                      planEl.className = 'plan-block';
+                      planEl.style.cssText = 'margin-top:6px;font-size:0.85em;opacity:0.85;border-left:2px solid #60a5fa;padding-left:8px;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto;';
+                      const label = document.createElement('div');
+                      label.textContent = '\uD83D\uDCAC Agent plan:';
+                      label.style.cssText = 'font-weight:600;margin-bottom:2px;color:#60a5fa;font-size:0.92em;';
+                      planEl.appendChild(label);
+                      const textNode = document.createElement('span');
+                      textNode.className = 'plan-text';
+                      planEl.appendChild(textNode);
+                      typingEl.appendChild(planEl);
+                    }
+                    const textNode = planEl.querySelector('.plan-text');
+                    if (textNode) {
+                      textNode.textContent = planText.length > 2000 ? planText.slice(0, 2000) + '...' : planText;
+                    }
+                    chatEl.scrollTop = chatEl.scrollHeight;
+                  }
+                  updateTypingStatus('Agent thinking...');
                 } else if (event.type === 'transaction') {
                   updateTypingStatus('Transaction ready');
                 } else if (event.type === 'done') {
@@ -1639,8 +1713,41 @@
             }
           }
 
+          // Persist reasoning/thinking/errors from typingEl into the chat
+          // BEFORE removing typingEl — otherwise all visible agent output is destroyed.
+          const persistBlocks = typingEl.querySelectorAll('.reasoning-block, .plan-block, .tool-error-block');
+          const hasToolErrors = typingEl.querySelectorAll('.tool-error-block').length > 0;
+          const hasPlanBlocks = typingEl.querySelectorAll('.plan-block').length > 0;
+          if (persistBlocks.length > 0) {
+            const thinkingMsg = document.createElement('div');
+            thinkingMsg.className = 'msg assistant thinking-trace';
+            const thinkingContent = document.createElement('div');
+            thinkingContent.className = 'msg-content';
+            thinkingContent.style.cssText = 'opacity:0.85;font-size:0.9em;';
+            for (const block of persistBlocks) {
+              thinkingContent.appendChild(block.cloneNode(true));
+            }
+            thinkingMsg.appendChild(thinkingContent);
+            chatEl.appendChild(thinkingMsg);
+          }
+
           typingEl.remove();
           if (finalResponse) {
+            // Skip reasoning in handleChatResponse — we already persisted it from the stream
+            if (persistBlocks.length > 0) delete finalResponse.reasoning;
+            // When stream already showed error/plan blocks, suppress duplicate display
+            // of the reply text if it matches content we already persisted.
+            if ((hasToolErrors || hasPlanBlocks) && finalResponse.reply) {
+              const replyLower = (finalResponse.reply || '').toLowerCase();
+              const isErrorEcho = replyLower.startsWith('error:') ||
+                replyLower.includes('insufficient') ||
+                replyLower.includes('revert') ||
+                replyLower.includes('sync failed') ||
+                replyLower.includes('failed');
+              if (isErrorEcho) finalResponse.reply = '';
+            }
+            // Mark that stream already displayed errors — suppress duplicate toolCall rendering
+            if (hasToolErrors) finalResponse._streamShowedErrors = true;
             handleChatResponse(finalResponse);
           }
         } else {
@@ -1679,7 +1786,7 @@
       }
 
       // Show tool results but skip the verbose tool call name/args when a transaction is present
-      if (data.toolCalls?.length > 0) {
+      if (data.toolCalls?.length > 0 && !data._streamShowedErrors) {
         const suppressEcho = !!(
           data.reply &&
           data.toolCalls.length === 1 &&

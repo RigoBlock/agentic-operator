@@ -297,6 +297,7 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
         srcChainId: snap.chainId,
         dstChainId: reference.chainId,
         alchemyKey: env.ALCHEMY_API_KEY,
+        operatorAddress: config.operatorAddress as Address,
       });
 
       const tx: UnsignedTransaction = {

@@ -561,12 +561,16 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "crosschain_sync",
       description:
-        "Synchronise NAV data from one chain to a destination chain. " +
-        "Uses a small token amount to carry the sync message via Across Protocol. " +
-        "This validates NAV impact tolerance without moving significant tokens. " +
-        "Token and amount are AUTO-CALCULATED if not provided — the agent picks the cheapest " +
-        "bridgeable token with sufficient balance and uses the minimum amount to cover fees. " +
-        "Useful when the vault has positions on multiple chains and needs NAV consistency.",
+        "Synchronise NAV data from one chain to a destination chain via Across Protocol. " +
+        "Sends a token amount carrying the sync message — the on-chain AIntents adapter " +
+        "validates NAV impact on the destination. " +
+        "When equalizeNav=true: the tool DETERMINISTICALLY computes direction, token, and amount. " +
+        "It reads getPoolTokens() on both chains, normalizes unitaryValue accounting for decimal " +
+        "differences (e.g. USDT is 6-dec on Arbitrum but 18-dec on BSC), applies a closed-form " +
+        "formula to find the exact bridge amount that equalizes NAV, and simulates post-bridge " +
+        "NAV to verify convergence. Do NOT pass amount or token when equalizeNav=true — they " +
+        "are ignored in favor of the deterministic calculation. " +
+        "When equalizeNav=false (default): performs a minimal sync to propagate NAV state.",
       parameters: {
         type: "object",
         properties: {
@@ -576,19 +580,29 @@ export const TOOL_DEFINITIONS = [
           },
           destinationChain: {
             type: "string",
-            description: "Destination chain name or ID (e.g., 'Arbitrum', 'Base').",
+            description: "Destination chain name or ID (e.g., 'Arbitrum', 'BSC', 'Base').",
           },
           token: {
             type: "string",
-            description: "Token to use for the sync message (USDC, USDT, WETH, WBTC). Auto-selected if omitted.",
+            description: "Token for sync message (USDC, USDT, WETH, WBTC). IGNORED when equalizeNav=true — auto-selected.",
           },
           amount: {
             type: "string",
-            description: "Amount to carry the sync. Auto-calculated if omitted (minimum to cover fees).",
+            description: "Explicit amount to bridge. IGNORED when equalizeNav=true — computed by closed-form formula.",
           },
           navToleranceBps: {
             type: "number",
-            description: "NAV tolerance in basis points (default: 100 = 1%). Higher values allow more NAV divergence.",
+            description: "NAV tolerance in basis points (default: 100 = 1%). Higher values allow more NAV divergence on destination.",
+          },
+          equalizeNav: {
+            type: "boolean",
+            description:
+              "When true: deterministic NAV equalization. Reads pool state on both chains, " +
+              "normalizes for decimal differences, computes exact bridge amount via closed-form " +
+              "formula, and shows pre/post NAV simulation. Direction, token, and amount are ALL " +
+              "auto-determined — do NOT set them. " +
+              "Use when user says 'equalise NAV', 'match unitary prices', 'same price on both chains', " +
+              "'calculate the amount for sync', or 'crosschain sync'.",
           },
         },
         required: ["destinationChain"],
@@ -1336,8 +1350,14 @@ CROSS-CHAIN (AINTENTS + ACROSS PROTOCOL):
   IMPORTANT: For WETH bridges, if the vault holds native ETH (not WETH), set useNativeEth=true.
   The vault auto-wraps ETH→WETH via sourceNativeAmount — no WETH balance needed, only native ETH.
   For OpType.Transfer (simple bridge), this is the default operation type.
-- Use crosschain_sync to synchronise NAV across chains (sends a small amount with a sync message).
+- Use crosschain_sync to synchronise NAV across chains (sends a token amount with a sync message).
   Token and amount are auto-calculated if omitted — just specify destinationChain.
+  NAV EQUALIZATION: When the user asks to "equalise NAV", "match unitary prices", or "calculate the right
+  amount for sync so prices converge" → call crosschain_sync with equalizeNav=true. Do NOT set amount,
+  do NOT set token, and do NOT call get_aggregated_nav first — the service reads getPoolTokens() on
+  both chains, normalizes for decimal differences (e.g. USDT is 6-dec on Arbitrum, 18-dec on BSC),
+  computes the exact bridge amount via closed-form formula, and simulates post-bridge NAV.
+  Direction is auto-corrected (bridges FROM higher-NAV chain). ALL parameters are deterministic.
 - Use get_crosschain_quote to show bridge fees without executing.
 - Use get_aggregated_nav to see the vault's NAV and token balances on ALL chains at once.
   This also shows which chains have delegation set up and which are missing.
