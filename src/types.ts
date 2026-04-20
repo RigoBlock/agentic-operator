@@ -122,7 +122,12 @@ export interface ChatRequest {
   routingMode?: "deepseek_only" | "hybrid_fast_followup";
   /** Optional per-request context snippets (e.g. selected markdown excerpts) injected into runtime prompt */
   contextDocs?: string[];
-  /** Default slippage tolerance in basis points. Only integer values are honored and effective value is clamped to [10, 500]. Overrides stored KV value for this request. */
+  /**
+   * Default slippage tolerance in basis points. Only integer values are honored and effective value is
+   * clamped to [10, 500]. This per-request override is only applied when the operator is verified;
+   * stored KV slippage is also only consulted for verified operators. Unverified callers always
+   * receive the global default (100 bps = 1%).
+   */
   slippageBps?: number;
 }
 

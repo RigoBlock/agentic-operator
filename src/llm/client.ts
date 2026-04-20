@@ -4247,18 +4247,23 @@ async function runSwapShield(
     const explanation = isFavorable
       ? `This can indicate a stale oracle or a manipulated routing path producing an implausibly favorable quote.`
       : `This usually indicates significant price impact from the trade size.`;
+    const disableShieldOption = isVerifiedOperatorContext(ctx)
+      ? `3. **Disable shield** — say "disable swap shield" to suspend it for 10 minutes ` +
+        (isFavorable
+          ? `(use with caution — you accept oracle/route integrity risk)\n`
+          : `(use with caution — you accept full price impact risk)\n`)
+      : `3. **Disable shield** — requires operator authentication; sign in as the vault owner first ` +
+        `then say "disable swap shield"\n`;
     const options = isFavorable
       ? `Options:\n` +
         `1. **Retry later** — wait for pricing to normalize and request a fresh quote\n` +
         `2. **Verify route** — compare venues or try a different swap path\n` +
-        `3. **Disable shield** — say "disable swap shield" for 10 minutes ` +
-        `(use with caution — you accept oracle/route integrity risk)\n`
+        disableShieldOption
       : `Options:\n` +
         `1. **Split with TWAP** — create a TWAP order to execute ${sellAmt} ${sellSymbol} → ${buySymbol} ` +
         `in smaller slices over time, reducing price impact\n` +
         `2. **Reduce amount** — try a smaller trade\n` +
-        `3. **Disable shield** — say "disable swap shield" for 10 minutes ` +
-        `(use with caution — you accept full price impact risk)\n`;
+        disableShieldOption;
     throw new Error(
       `⚠️ Swap Shield blocked this trade.\n\n` +
       `The DEX quote diverges ${result.divergencePct}% from the on-chain oracle price, ` +
@@ -4670,17 +4675,22 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
     "",
   ).trim();
 
-  // Extract chain modifier first ("on base", "on bnb chain") — always appears last
+  // Extract chain modifier — appears either as the final suffix OR before a DEX modifier:
+  //   "sell 1 ETH for USDC on base"             → chain=base
+  //   "sell 1 ETH for USDC on base using 0x"    → chain=base, DEX suffix preserved
+  //   "sell 1 ETH for USDC using 0x on base"    → chain=base, DEX suffix preserved
   let chain: string | undefined;
-  const chainMatch = m.match(/\s+on\s+([a-z0-9 ]+?)$/i);
-  if (chainMatch) {
-    const possibleChain = chainMatch[1].trim().toLowerCase();
+  // Pattern: "on <chain> [using/via <dex>]" — chain comes before optional DEX suffix
+  const chainWithDexMatch = m.match(/\s+on\s+([a-z0-9 ]+?)(?=\s+(?:using|via)\s+[a-z0-9x]+\s*$|\s*$)/i);
+  if (chainWithDexMatch) {
+    const possibleChain = chainWithDexMatch[1].trim().toLowerCase();
     // Accept any chain alias that resolveChainArg understands (supports
     // multi-word names like "bnb chain" / "ethereum mainnet").
     try {
       const resolved = resolveChainArg(possibleChain);
       chain = resolved.name.toLowerCase();
-      m = m.slice(0, chainMatch.index!).trim();
+      // Remove just the "on <chain>" segment, preserving any trailing DEX modifier.
+      m = (m.slice(0, chainWithDexMatch.index!) + m.slice(chainWithDexMatch.index! + chainWithDexMatch[0].length)).trim();
     } catch {
       // Not a chain alias; leave untouched so DEX suffix parsing can handle
       // patterns like "on uniswap".
