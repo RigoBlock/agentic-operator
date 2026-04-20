@@ -1237,10 +1237,21 @@ export interface ToolResult {
  * LP, everything. The 10% threshold applies universally. If a transaction would
  * cause NAV to drop > 10%, the calldata is never returned.
  *
- * For Transfer opType bridges, NAV is NOT affected (assets move but remain in the
- * vault's cross-chain accounting). The 10% check should pass naturally.
- * For Sync opType, NAV may be affected — the 10% check applies.
- * Do NOT weaken the NAV shield for any transaction type.
+ * The NAV shield MUST NEVER be skipped for any transaction type. When something
+ * doesn't work, the effort must be in fixing the root cause, not in skipping
+ * the shield to avoid errors. The NAV shield is the user's primary protection
+ * against rogue transactions.
+ *
+ * For cross-chain bridges (depositV3), Transfer and Sync have fundamentally
+ * different NAV behavior:
+ *   - Transfer (OpType.Transfer): updates virtual supply — source NAV is preserved
+ *     because effectiveSupply decreases proportionally with value.
+ *   - Sync (OpType.Sync): does NOT update virtual supply — source NAV drops because
+ *     tokens leave but supply stays. Uses navToleranceBps for on-chain validation.
+ *
+ * The NAV shield uses updateUnitaryValue() (the actual contract algorithm) instead
+ * of getNavDataView() (view-only extension) to avoid an edge case where the view
+ * returns unitaryValue=0 when the actual contract preserves the stored value.
  *
  * For delegated mode, the execution engine runs the NAV shield again at broadcast
  * time (belt-and-suspenders — market conditions could change between building

@@ -492,6 +492,10 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
         `${side} ${order.sliceAmount} ${sliceToken} on ${chainName}`,
       );
 
+      // Track the built transaction outside try/catch so the catch block can
+      // include tx details (to/value/data) in error logs for Tenderly debugging.
+      let lastBuiltTx: UnsignedTransaction | undefined;
+
       try {
         // Direct tool call — bypasses the LLM entirely for deterministic execution.
         // Each slice calls build_vault_swap with structured args (token addresses,
@@ -516,6 +520,7 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
         const toolResult = await executeToolCall(env, ctx, "build_vault_swap", toolArgs);
 
         const txList = toolResult.transaction ? [toolResult.transaction] : [];
+        lastBuiltTx = txList[0];
 
         if (txList.length === 0) {
           throw new Error(toolResult.message || "No swap transaction produced");
@@ -525,8 +530,20 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
           const outcomes = await executeTxList(env, txList, order.vaultAddress);
           const hasFailure = outcomes.some((o) => o.error || o.result?.reverted);
           if (hasFailure) {
-            throw new Error(`Slice execution failed: ${formatOutcomesMarkdown(outcomes)}`);
+            // Include tx details (from/to/value/data) in the error so the operator
+            // can independently verify on Tenderly whether the calldata is correct.
+            const failedOutcome = outcomes.find((o) => o.error || o.result?.reverted);
+            const failedTx = failedOutcome?.tx;
+            const txDebug = failedTx
+              ? `\n\nTx debug:\n  from: ${order.operatorAddress}\n  to: ${failedTx.to}\n  value: ${failedTx.value}\n  data: ${failedTx.data}\n  chainId: ${failedTx.chainId}`
+              : "";
+            throw new Error(`Slice execution failed: ${formatOutcomesMarkdown(outcomes)}${txDebug}`);
           }
+
+          // Extract explorer URL from the first successful outcome
+          const confirmedOutcome = outcomes.find((o) => o.result?.confirmed);
+          const explorerUrl = confirmedOutcome?.result?.explorerUrl;
+          const txHash = confirmedOutcome?.result?.txHash;
 
           const sliceMeta = txList[0]?.swapMeta;
           const sellAmount = sliceMeta?.sellAmount || (side === "sell" ? order.sliceAmount : "0");
@@ -562,11 +579,15 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
                 : side === "buy"
                   ? `\nProgress: ${order.slicesExecuted}/${order.sliceCount} slices (${order.totalBought}/${order.totalAmount} ${order.buyToken} target, ${order.amountSpent} ${order.sellToken} spent)`
                   : `\nProgress: ${order.slicesExecuted}/${order.sliceCount} slices (${order.amountSpent}/${order.totalAmount} ${order.sellToken} spent)`;
+              const txLink = explorerUrl
+                ? `\n<a href="${explorerUrl}">View transaction</a>`
+                : txHash ? `\nTx: <code>${txHash}</code>` : "";
               const text = [
                 `<b>⚡ TWAP #${order.id} — Slice ${sliceNum}/${order.sliceCount}</b>`,
                 `Swapped ${sellAmount} ${order.sellToken} → ~${buyAmount} ${order.buyToken} on ${chainName}`,
                 completionNote,
-              ].join("\n");
+                txLink,
+              ].filter(Boolean).join("\n");
               await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
             }
           }
@@ -599,6 +620,19 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
         order.lastError = sanitizeError(rawError);
         changed = true;
 
+        // Build tx debug string for diagnostics (allows Tenderly simulation)
+        const txDebugLines = lastBuiltTx
+          ? [
+            `  to: ${lastBuiltTx.to}`,
+            `  value: ${lastBuiltTx.value}`,
+            `  data: ${lastBuiltTx.data}`,
+            `  chainId: ${lastBuiltTx.chainId}`,
+          ]
+          : [];
+        const txDebugConsole = lastBuiltTx
+          ? `\n  Tx debug: from=${order.operatorAddress} to=${lastBuiltTx.to} value=${lastBuiltTx.value} chainId=${lastBuiltTx.chainId} data=${lastBuiltTx.data}`
+          : "";
+
         await recordTwapEvent(kv, order.vaultAddress, {
           orderId: order.id, timestamp: now, sliceNumber: sliceNum,
           totalSlices: order.sliceCount, sellAmount: order.sliceAmount,
@@ -609,6 +643,9 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
         if (env.TELEGRAM_BOT_TOKEN) {
           const telegramUserId = await getTelegramUserIdByAddress(kv, order.operatorAddress);
           if (telegramUserId) {
+            const txDebugHtml = txDebugLines.length > 0
+              ? `\n\nTx debug (for Tenderly):\n<code>${escapeHtml(txDebugLines.join("\n"))}</code>`
+              : "";
             if (order.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
               order.active = false;
               const text = [
@@ -616,19 +653,21 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
                 `Paused after ${MAX_CONSECUTIVE_FAILURES} consecutive failures.`,
                 `Last error: <code>${escapeHtml(order.lastError || "unknown")}</code>`,
                 `Progress: ${order.slicesExecuted}/${order.sliceCount} slices completed.`,
-              ].join("\n");
+                txDebugHtml,
+              ].filter(Boolean).join("\n");
               await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
             } else {
               const text = [
                 `<b>❌ TWAP #${order.id} — Slice ${sliceNum}/${order.sliceCount} failed</b>`,
                 `Error: <code>${escapeHtml(order.lastError || "unknown")}</code>`,
                 `Failures: ${order.consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES} (pauses at ${MAX_CONSECUTIVE_FAILURES})`,
-              ].join("\n");
+                txDebugHtml,
+              ].filter(Boolean).join("\n");
               await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
             }
           }
         }
-        console.error(`[TWAP] Order #${order.id} (${order.vaultAddress}) slice failed:`, err);
+        console.error(`[TWAP] Order #${order.id} (${order.vaultAddress}) slice failed:`, err, txDebugConsole);
       }
     }
 

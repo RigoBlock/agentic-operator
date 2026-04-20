@@ -378,9 +378,9 @@ export async function executeViaDelegation(
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // ██ NAV SHIELD — MANDATORY (cannot be skipped, disabled, or bypassed) ██
+  // ██ NAV SHIELD — MANDATORY (must NEVER be skipped, disabled, or bypassed) ██
   // ══════════════════════════════════════════════════════════════════════
-  // Simulates multicall([tx, getNavDataView]) as the OPERATOR (vault owner).
+  // Simulates multicall([tx, updateUnitaryValue]) as the OPERATOR (vault owner).
   // If NAV drops > threshold → transaction BLOCKED, never broadcast.
   //
   // IMPORTANT: Simulation uses the OPERATOR address (vault owner), not the agent.
@@ -390,11 +390,22 @@ export async function executeViaDelegation(
   // multicall simulation succeeds. The actual trade is still sent by the agent
   // wallet using only its whitelisted selectors (execute, modifyLiquidities, etc.).
   //
-  // NAV shield applies equally to ALL transaction types (10% threshold).
-  // For Transfer opType bridges, NAV is NOT affected (assets move but remain in
-  // the vault's cross-chain accounting), so the 10% check passes naturally.
-  // For Sync opType, NAV may be affected — the 10% check applies.
-  // Do NOT weaken the NAV shield for any transaction type.
+  // Uses updateUnitaryValue() (the actual contract NAV algorithm) instead of
+  // getNavDataView() to avoid an ENavView edge case where the view incorrectly
+  // returns unitaryValue=0 when the actual contract preserves the stored value.
+  //
+  // Cross-chain bridge operations (depositV3) have two fundamentally different
+  // behaviors based on opType:
+  //   - Transfer (OpType.Transfer): updates virtual supply — source NAV is preserved
+  //     because effectiveSupply decreases proportionally with value. The NAV shield
+  //     correctly allows these because updateUnitaryValue() returns stored value
+  //     when effectiveSupply reaches 0.
+  //   - Sync (OpType.Sync): does NOT update virtual supply — source NAV drops because
+  //     tokens leave but supply stays. The 10% default threshold applies normally.
+  //
+  // The NAV shield must NEVER be skipped. When it produces incorrect results, the
+  // fix must be in correcting the root cause (e.g. switching from getNavDataView
+  // to updateUnitaryValue), not in skipping the shield.
 
   const navResult = await checkNavImpact(
     tx.to as Address,
@@ -475,9 +486,19 @@ export async function executeViaDelegation(
         // For bundler/paymaster errors (e.g. policy expired, chain not covered),
         // fall back to direct broadcast so the agent wallet pays gas instead.
         const sponsoredMsg = sponsoredErr instanceof Error ? sponsoredErr.message : String(sponsoredErr);
+        // Extract nested error details from Alchemy SDK (often has .details or .cause)
+        const sponsoredDetails = (sponsoredErr as any)?.details
+          || (sponsoredErr as any)?.cause?.message
+          || (sponsoredErr as any)?.cause?.details
+          || "";
+        const sponsoredCode = (sponsoredErr as any)?.code
+          || (sponsoredErr as any)?.cause?.code
+          || "";
         console.warn(
           `[executeViaDelegation] Sponsored execution failed, falling back to direct broadcast. ` +
-          `Error: ${sponsoredMsg}`,
+          `Error: ${sponsoredMsg}` +
+          (sponsoredDetails ? ` | Details: ${sponsoredDetails}` : "") +
+          (sponsoredCode ? ` | Code: ${sponsoredCode}` : ""),
         );
         try {
           result = await broadcastAgentTransaction(
@@ -489,14 +510,18 @@ export async function executeViaDelegation(
         } catch (directErr) {
           // If direct broadcast also fails due to no balance, the real problem is the
           // sponsored path. Surface a user-friendly message about what went wrong.
+          // Include the actual bundler error so the operator can diagnose the root cause.
           if (directErr instanceof ExecutionError && directErr.code === "INSUFFICIENT_BALANCE") {
             const friendly = parseSponsoredError(sponsoredMsg, tx.chainId, agentAccount.address);
             const sanitizedMsg = sanitizeError(sponsoredMsg);
+            const detailSuffix = sponsoredDetails
+              ? ` Bundler details: ${sanitizeError(String(sponsoredDetails))}.`
+              : "";
+            const codeSuffix = sponsoredCode ? ` Code: ${sponsoredCode}.` : "";
             throw new ExecutionError(
-              friendly ||
-              `Gas-sponsored execution failed: ${sanitizedMsg}. ` +
-              `This is usually a temporary issue — please try again in a moment. ` +
-              `If the problem persists, the gas sponsorship policy may need to be reconfigured for chain ${tx.chainId}.`,
+              (friendly
+                ? `${friendly}${detailSuffix}${codeSuffix} Raw: ${sanitizedMsg}`
+                : `Gas-sponsored execution failed: ${sanitizedMsg}.${detailSuffix}${codeSuffix}`),
               "SPONSORED_FAILED",
             );
           }
@@ -895,8 +920,14 @@ async function sponsoredAgentTransaction(
   }
 
   if (result.status === "failure") {
+    const failReceipt = result.receipts?.[0];
+    const failTxHash = failReceipt?.transactionHash;
+    const failExplorer = explorerBase && failTxHash ? `${explorerBase}${failTxHash}` : undefined;
+    const failDetail = failTxHash
+      ? ` Tx hash: ${failTxHash}.${failExplorer ? ` Explorer: ${failExplorer}` : ""}`
+      : " No receipt returned by bundler.";
     throw new ExecutionError(
-      `Sponsored execution failed. The transaction may have been rejected by the bundler or paymaster.`,
+      `Sponsored execution failed — the bundler or paymaster rejected the transaction.${failDetail}`,
       "SPONSORED_FAILED",
     );
   }

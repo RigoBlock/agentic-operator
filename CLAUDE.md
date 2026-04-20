@@ -39,24 +39,33 @@ RULE: No code path may allow delegated (auto-execute) mode without
 **Why:** A malicious agent with $0.01 could trigger trades on any delegated vault,
 enabling sandwich attacks that extract ~10% per day within NAV shield limits.
 
-### 2. NAV shield must NEVER be bypassed or weakened
+### 2. NAV shield must NEVER be bypassed, weakened, or skipped
 
 ```
-RULE: The NAV shield (10% max drop check) runs BEFORE every swap transaction
-      is returned or broadcast. It protects ALL execution modes:
+RULE: The NAV shield (10% max drop check) runs BEFORE every transaction
+      is returned or broadcast — for ALL transaction types including swaps,
+      LP operations, AND cross-chain bridges. It protects ALL execution modes:
         - Manual: runs when building unsigned calldata (preCheckNavImpact in client.ts)
         - Delegated: runs BOTH when building calldata AND at broadcast time (execution.ts)
       It is outside the agent's control surface. Do NOT add code paths that skip it.
       When NAV can be measured: FAIL-CLOSED (block if drop > threshold).
       When NAV cannot be measured: graceful degradation (proceed with warning).
+      When the NAV shield produces incorrect results, FIX THE ROOT CAUSE
+      (correct the NAV reading method, adjust thresholds, fix edge cases).
+      NEVER skip or bypass the shield to avoid errors.
 ```
 
 - **Pre-check** (`preCheckNavImpact()` in `client.ts`): runs before returning unsigned
-  calldata from `build_vault_swap`. Blocks toxic swaps before the user sees them.
+  calldata from any tool that builds vault transactions. Blocks toxic transactions
+  before the user sees them.
 - **Broadcast check** (`checkNavImpact()` in `execution.ts`): runs before delegated
   broadcast. Belt-and-suspenders — catches changes between building and broadcasting.
 - Both call the same `checkNavImpact()` from `navGuard.ts`
-- It simulates atomically via `multicall([swap, getNavDataView])` on the RPC
+- It simulates atomically via `multicall([tx, updateUnitaryValue])` on the RPC
+- **Uses `updateUnitaryValue()`** (the actual contract NAV algorithm via `eth_call`),
+  NOT `getNavDataView()`. The view function (ENavView) has an edge case bug where it
+  returns `unitaryValue=0` when `effectiveSupply > 0` AND `totalValue <= 0`, while
+  the actual contract (`_updateNav` in MixinPoolValue) preserves the stored value.
 - **Simulation runs as the OPERATOR (vault owner)**, not the agent wallet.
   Reason: `multicall` is intentionally NOT in the agent's delegated selectors
   (delegating it would let the agent compose arbitrary vault calls). The operator
@@ -71,7 +80,25 @@ RULE: The NAV shield (10% max drop check) runs BEFORE every swap transaction
 - If the pre-swap NAV read fails → BLOCK (not skip)
 - **NEVER** add `multicall` to `ALLOWED_VAULT_SELECTORS` / delegated selectors
 - **NEVER** add a flag, env var, or config to disable the NAV shield entirely
+- **NEVER** skip the NAV shield for any transaction type (including bridges)
 - **NEVER** confuse "trade reverts" with "NAV shield blocked" — use the correct error code
+- When something doesn't work, the effort must be in **fixing it**, not skipping it
+
+#### Cross-chain bridges and the NAV shield
+
+Cross-chain operations (`depositV3`) use the same NAV shield as all other transactions.
+Transfer and Sync are **fundamentally different** despite using the same Across interface:
+
+| Aspect | Transfer (`OpType.Transfer`) | Sync (`OpType.Sync`) |
+|--------|------------------------------|----------------------|
+| Virtual supply | Updated (burns on source, mints on destination) | NOT updated |
+| Source NAV impact | Preserved (effectiveSupply decreases with value) | Drops (tokens leave, supply unchanged) |
+| NAV shield behavior | `updateUnitaryValue()` returns stored value → no drop | Source-chain NAV drops → threshold applies |
+| On-chain protection | NavImpactLib + EffectiveSupplyTooLow | navToleranceBps parameter |
+
+**Do NOT conflate Transfer and Sync.** They behave completely differently based on
+the `opType` parameter passed to `depositV3`. The NAV shield correctly handles both
+because `updateUnitaryValue()` produces the same result as the actual contract.
 
 ### 3. Auth model — three independent layers
 

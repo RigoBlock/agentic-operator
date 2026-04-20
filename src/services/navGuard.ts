@@ -7,8 +7,8 @@
  *
  * ## How it works
  *
- * 1. Read current NAV via `getNavDataView()` on the vault
- * 2. Simulate a vault `multicall([swap, getNavDataView])` via `eth_call`
+ * 1. Read current NAV via `updateUnitaryValue()` simulation on the vault
+ * 2. Simulate a vault `multicall([swap, updateUnitaryValue])` via `eth_call`
  *    — this captures the post-swap NAV in a single atomic simulation
  *    — the simulation runs as the vault OPERATOR (not the agent wallet),
  *      because `multicall` is not in the agent's delegated selectors.
@@ -17,6 +17,23 @@
  * 3. Compare post-swap unitaryValue vs pre-swap unitaryValue
  * 4. If drop > MAX_NAV_DROP_PCT, reject the transaction
  * 5. Store the 24-hour baseline in KV for rolling protection
+ *
+ * ## Why updateUnitaryValue() instead of getNavDataView()
+ *
+ * getNavDataView() is a view-only extension (ENavView) that has an edge case
+ * bug: when effectiveSupply > 0 AND totalValue <= 0, it returns unitaryValue=0.
+ * The actual contract algorithm (_updateNav in MixinPoolValue) returns the
+ * STORED unitaryValue in this case, preserving the last known good price.
+ * Since eth_call can simulate non-view functions, we use updateUnitaryValue()
+ * to get the correct result matching actual contract behavior.
+ *
+ * ## The NAV shield must NEVER be skipped
+ *
+ * The NAV shield is the user's primary protection against rogue transactions.
+ * When it produces incorrect results (e.g. blocking a valid bridge), the fix
+ * must be in correcting the root cause (switching to updateUnitaryValue,
+ * adjusting thresholds), not in skipping the shield. No code path, flag,
+ * env var, or config may disable the NAV shield.
  *
  * This shield runs BEFORE the transaction is broadcast (both sponsored
  * and direct paths), so it's entirely server-side and outside the agent's
@@ -133,11 +150,18 @@ function parseKnownError(errMsg: string): string | null {
  * @param callerAddress - Address that will execute the tx (agent wallet)
  * @param kv - KV namespace for baseline storage (optional)
  * @param maxDropPct - Maximum allowed NAV drop percentage (default 10).
- *   The 10% threshold applies to ALL transaction types equally.
- *   For Transfer opType bridges, NAV is NOT affected (assets remain in the
- *   vault's cross-chain accounting), so the 10% check passes naturally.
- *   For Sync opType, NAV may be affected — the 10% check applies.
- *   Do NOT weaken the threshold for any transaction type.
+ *   The 10% threshold applies to swap, LP, AND bridge operations equally.
+ *   The NAV shield must NEVER be skipped for any transaction type. When it
+ *   produces incorrect results, fix the root cause (not skip the shield).
+ *
+ *   For Transfer bridges (depositV3 with OpType.Transfer): virtual supply
+ *   updates make effectiveSupply decrease proportionally with value, so
+ *   updateUnitaryValue() returns the stored unitaryValue → no NAV drop.
+ *
+ *   For Sync bridges (depositV3 with OpType.Sync): virtual supply is NOT
+ *   updated, so source-chain NAV drops. The 10% threshold applies normally.
+ *   If the caller knows the expected tolerance (e.g. from navToleranceBps),
+ *   they can pass a higher maxDropPct.
  * @returns NavShieldResult with allowed=true/false
  */
 export async function checkNavImpact(
@@ -152,19 +176,35 @@ export async function checkNavImpact(
 ): Promise<NavShieldResult> {
   const publicClient = getClient(chainId, alchemyKey);
 
-  // ── Step 1: Read current (pre-swap) NAV ──
+  // ── Step 1: Read current (pre-swap) NAV via updateUnitaryValue() ──
+  // We use updateUnitaryValue() (the actual contract NAV algorithm) instead of
+  // getNavDataView() (view-only extension) because ENavView has an edge case
+  // where it returns unitaryValue=0 when effectiveSupply > 0 AND totalValue <= 0,
+  // while the actual _updateNav() preserves the stored unitaryValue in that case.
+  // eth_call simulates the non-view function without persisting state changes.
   let preNav: NavData;
   try {
-    const result = await publicClient.readContract({
-      address: vaultAddress,
+    const updateNavCalldata = encodeFunctionData({
       abi: RIGOBLOCK_VAULT_ABI,
-      functionName: "getNavDataView",
-    }) as { totalValue: bigint; unitaryValue: bigint; timestamp: bigint };
+      functionName: "updateUnitaryValue",
+    });
+    const callResult = await publicClient.call({
+      to: vaultAddress,
+      data: updateNavCalldata,
+    });
+    if (!callResult.data) {
+      throw new Error("updateUnitaryValue simulation returned no data");
+    }
+    const navResult = decodeFunctionResult({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "updateUnitaryValue",
+      data: callResult.data,
+    }) as { unitaryValue: bigint; netTotalValue: bigint; netTotalLiabilities: bigint };
 
     preNav = {
-      totalValue: result.totalValue,
-      unitaryValue: result.unitaryValue,
-      timestamp: result.timestamp,
+      totalValue: navResult.netTotalValue,
+      unitaryValue: navResult.unitaryValue,
+      timestamp: 0n, // updateUnitaryValue doesn't return timestamp
     };
     console.log(
       `[NavShield] Pre-swap NAV: unitaryValue=${preNav.unitaryValue} ` +
@@ -198,18 +238,20 @@ export async function checkNavImpact(
     };
   }
 
-  // ── Step 2: Simulate multicall([swap, getNavDataView]) ──
-  // Encode the getNavDataView call
-  const navViewCalldata = encodeFunctionData({
+  // ── Step 2: Simulate multicall([tx, updateUnitaryValue]) ──
+  // Uses updateUnitaryValue() (the actual contract algorithm) to capture the
+  // post-tx NAV atomically. This avoids the ENavView edge case where the view
+  // returns unitaryValue=0 when effectiveSupply > 0 AND totalValue <= 0.
+  const navCalldata = encodeFunctionData({
     abi: RIGOBLOCK_VAULT_ABI,
-    functionName: "getNavDataView",
+    functionName: "updateUnitaryValue",
   });
 
-  // Encode the multicall: [original tx, getNavDataView]
+  // Encode the multicall: [original tx, updateUnitaryValue]
   const multicallData = encodeFunctionData({
     abi: RIGOBLOCK_VAULT_ABI,
     functionName: "multicall",
-    args: [[txData, navViewCalldata]],
+    args: [[txData, navCalldata]],
   });
 
   let postNav: NavData;
@@ -233,20 +275,20 @@ export async function checkNavImpact(
       data: multicallResult.data,
     }) as readonly Hex[];
 
-    // The second result is the getNavDataView return bytes
+    // The second result is the updateUnitaryValue return bytes
     const navResultBytes = decodedMulticall[1];
 
-    // Decode the NavData tuple from the raw bytes
+    // Decode the NetAssetsValue tuple from the raw bytes
     const decodedNav = decodeFunctionResult({
       abi: RIGOBLOCK_VAULT_ABI,
-      functionName: "getNavDataView",
+      functionName: "updateUnitaryValue",
       data: navResultBytes,
-    }) as { totalValue: bigint; unitaryValue: bigint; timestamp: bigint };
+    }) as { unitaryValue: bigint; netTotalValue: bigint; netTotalLiabilities: bigint };
 
     postNav = {
-      totalValue: decodedNav.totalValue,
+      totalValue: decodedNav.netTotalValue,
       unitaryValue: decodedNav.unitaryValue,
-      timestamp: decodedNav.timestamp,
+      timestamp: 0n, // updateUnitaryValue doesn't return timestamp
     };
 
     console.log(
