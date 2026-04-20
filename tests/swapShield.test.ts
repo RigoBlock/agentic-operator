@@ -3,7 +3,7 @@
  *
  * Tests:
  * 1. Divergence calculation (DEX gives less than oracle → blocked)
- * 2. Reverse slippage engineering (extracting theoretical market price)
+ * 2. Direct expected-output divergence (no slippage reversal)
  * 3. Graceful degradation (no price feed, oracle error)
  * 4. Edge cases (zero amounts, same token, wrap/unwrap)
  * 5. Opt-out / opt-in flow
@@ -68,15 +68,14 @@ describe("Swap Shield — checkSwapPrice", () => {
   });
 
   it("allows swaps within 5% divergence", async () => {
-    // Oracle says 1000 tokenOut, DEX gives 960 (after reversing 1% slippage → ~970 theoretical)
-    // Theoretical = 960 * 10000 / 9900 ≈ 969.69
-    // Divergence = (1000 - 969.69) / 1000 ≈ 3.03%
+    // Oracle says 1000 tokenOut, DEX gives 960
+    // Divergence = (1000 - 960) / 1000 = 4%
     mockReadContract.mockResolvedValue(1000n * 10n ** 18n);
 
     const result = await checkSwapPrice(
       VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,       // 1 tokenIn
-      960n * 10n ** 18n,     // 960 tokenOut (DEX quote with slippage)
+      960n * 10n ** 18n,
       100,                    // 1% slippage
       ALCHEMY_KEY,
     );
@@ -87,8 +86,8 @@ describe("Swap Shield — checkSwapPrice", () => {
   });
 
   it("blocks swaps exceeding 5% divergence", async () => {
-    // Oracle says 1000, DEX gives 800 (after reversing 1% slippage → ~808)
-    // Divergence = (1000 - 808) / 1000 ≈ 19.2%
+    // Oracle says 1000, DEX gives 800
+    // Divergence = (1000 - 800) / 1000 = 20%
     mockReadContract.mockResolvedValue(1000n * 10n ** 18n);
 
     const result = await checkSwapPrice(
@@ -121,7 +120,7 @@ describe("Swap Shield — checkSwapPrice", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
-    expect(result.divergencePct).toBe("0.00");
+    expect(result.divergencePct).toBe("-5.00");
   });
 
   it("blocks swaps where DEX gives suspiciously MORE than oracle (>10% favorable)", async () => {
@@ -141,10 +140,8 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.code).toBe("BLOCKED");
   });
 
-  it("correctly reverses slippage when calculating theoretical DEX price", async () => {
-    // With 3% slippage (300 bps):
-    // DEX quote = 970, theoretical = 970 * 10000 / 9700 = 1000
-    // Oracle = 1000 → divergence = 0%
+  it("uses expected DEX output directly for divergence", async () => {
+    // Oracle = 1000, DEX quote = 970 → divergence = 3%
     mockReadContract.mockResolvedValue(1000n);
 
     const result = await checkSwapPrice(
@@ -157,8 +154,7 @@ describe("Swap Shield — checkSwapPrice", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
-    // 970 * 10000 / 9700 = 1000 exactly → divergence = 0
-    expect(result.divergencePct).toBe("0.00");
+    expect(result.divergencePct).toBe("3.00");
   });
 
   it("gracefully handles missing price feed", async () => {
@@ -236,13 +232,13 @@ describe("Swap Shield — checkSwapPrice", () => {
   });
 
   it("respects custom maxDivergencePct", async () => {
-    // Divergence ~3%, custom threshold 2%
+    // Divergence = 4%, custom threshold 2%
     mockReadContract.mockResolvedValue(1000n);
 
     const result = await checkSwapPrice(
       VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n,
-      960n,  // theoretical = 960*10000/9900 ≈ 969 → divergence ≈ 3.1%
+      960n,
       100,
       ALCHEMY_KEY,
       2, // 2% max divergence

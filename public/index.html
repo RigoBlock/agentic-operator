@@ -1286,16 +1286,29 @@
         dd.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:24px;">No saved vaults yet.</div>';
         return;
       }
-      dd.innerHTML = vaults.map(v => {
-        const safeAddr = escapeHtml(v.address);
-        const safeName = escapeHtml(v.name || v.address.slice(0,6) + '…' + v.address.slice(-4));
-        return `
-        <div class="saved-vault-item" onclick="loadVault('${safeAddr}')">
-          <span class="vault-label">${safeName}</span>
-          <button class="remove-vault" onclick="event.stopPropagation(); removeVault('${safeAddr}')">&times;</button>
-        </div>
-      `;
-      }).join('');
+      dd.innerHTML = '';
+      for (const v of vaults) {
+        const item = document.createElement('div');
+        item.className = 'saved-vault-item';
+        item.addEventListener('click', () => loadVault(v.address));
+
+        const label = document.createElement('span');
+        label.className = 'vault-label';
+        label.textContent = v.name || `${v.address.slice(0,6)}…${v.address.slice(-4)}`;
+
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'remove-vault';
+        removeBtn.type = 'button';
+        removeBtn.innerHTML = '&times;';
+        removeBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          removeVault(v.address);
+        });
+
+        item.appendChild(label);
+        item.appendChild(removeBtn);
+        dd.appendChild(item);
+      }
     }
 
     function loadVault(address) {
@@ -1776,29 +1789,35 @@
             localStorage.removeItem(AUTH_STORAGE_KEY);
             await signAuthMessage();
             if (authSignature) {
-              // Preserve original confirmExecution and stream intent from the initial request
-              const originalConfirmExecution = typeof lastConfirmExecution !== 'undefined' ? lastConfirmExecution : (typeof confirmExecution !== 'undefined' ? confirmExecution : false);
-              const originalStream = typeof lastStream !== 'undefined' ? lastStream : (typeof stream !== 'undefined' ? stream : false);
+              const retryBody = {
+                ...chatBody,
+                authSignature,
+                authTimestamp,
+              };
               const retryRes = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 signal: controller.signal,
-                body: JSON.stringify({
-                  messages: conversationHistory,
-                  vaultAddress: effectiveVault,
-                  chainId,
-                  operatorAddress: connectedAddress,
-                  authSignature,
-                  authTimestamp,
-                  executionMode,
-                  slippageBps: getSlippageBps(),
-                  confirmExecution: originalConfirmExecution,
-                  stream: originalStream,
-                  ...getAiRequestParams(),
-                }),
+                body: JSON.stringify(retryBody),
               });
               if (retryRes.ok) {
-                const retryData = await retryRes.json();
+                const retryType = retryRes.headers.get('content-type') || '';
+                let retryData = null;
+                if (retryType.includes('text/event-stream')) {
+                  const raw = await retryRes.text();
+                  for (const line of raw.split('\n')) {
+                    if (!line.startsWith('data: ')) continue;
+                    try {
+                      const event = JSON.parse(line.slice(6));
+                      if (event.type === 'done' && event.response) {
+                        retryData = event.response;
+                      }
+                    } catch { /* ignore malformed retry SSE chunks */ }
+                  }
+                } else {
+                  retryData = await retryRes.json().catch(() => null);
+                }
+                if (!retryData) throw new Error('Retry succeeded but returned no response payload');
                 typingEl.remove();
                 handleChatResponse(retryData);
                 return;

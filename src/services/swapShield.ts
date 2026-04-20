@@ -65,6 +65,7 @@ import { getClient } from "./vault.js";
  * low-liquidity routing without false-positiving on normal DEX spread.
  */
 const DEFAULT_MAX_DIVERGENCE_PCT = 5;
+const MAX_FAVORABLE_DIVERGENCE_PCT = 10;
 
 /** Native ETH address (zero address) — EOracle treats this equivalently to WETH */
 const NATIVE_ETH = "0x0000000000000000000000000000000000000000" as Address;
@@ -120,7 +121,7 @@ export interface SwapShieldResult {
  * @param tokenOut - Address of the token being bought
  * @param amountInRaw - Raw amount of tokenIn (in native decimals, as bigint)
  * @param dexExpectedOutRaw - Raw amount of tokenOut the DEX promises (in native decimals, as bigint)
- * @param slippageBps - Slippage tolerance used in the DEX quote (basis points)
+ * @param _slippageBps - Reserved for future quote-type specific handling
  * @param alchemyKey - Alchemy API key for RPC
  * @param maxDivergencePct - Maximum allowed divergence (default 5%)
  * @returns SwapShieldResult
@@ -132,10 +133,12 @@ export async function checkSwapPrice(
   tokenOut: Address,
   amountInRaw: bigint,
   dexExpectedOutRaw: bigint,
-  slippageBps: number,
+  _slippageBps: number,
   alchemyKey: string,
   maxDivergencePct: number = DEFAULT_MAX_DIVERGENCE_PCT,
 ): Promise<SwapShieldResult> {
+  void _slippageBps;
+
   // Skip for zero amounts
   if (amountInRaw === 0n || dexExpectedOutRaw === 0n) {
     return {
@@ -245,42 +248,17 @@ export async function checkSwapPrice(
     };
   }
 
-  // ── Validate slippageBps before arithmetic ──
-  // Guard against NaN (from non-finite input) and clamp to [0, 9999] to prevent
-  // division by zero (10000 - 10000 = 0) or negative divisors.
-  const safeSlippageBps = Number.isFinite(slippageBps)
-    ? Math.max(0, Math.min(9999, Math.round(slippageBps)))
-    : 0;
-
-  // ── Reverse-engineer the theoretical market price from the DEX quote ──
-  // The DEX quote includes slippage buffer. To compare fairly against the oracle
-  // (which gives the mid-price), we reverse out the slippage:
-  //   theoreticalDexOutput = dexExpectedOut * 10000 / (10000 - slippageBps)
-  // This gives us what the DEX thinks the market price is, without the slippage buffer.
-  //
-  // NOTE: For exact-output swaps the slippage buffer is on the input side, not the output,
-  // so this inflates the theoretical output by ~slippageBps%. This makes the shield slightly
-  // more lenient (understates divergence by ≤1%), which is a safe-side error.
-  const theoreticalDexOut =
-    (dexExpectedOutRaw * 10000n) / (10000n - BigInt(safeSlippageBps));
-
-  // ── Calculate divergence ──
-  // Divergence = how much LESS the DEX gives vs oracle (positive = bad for user)
-  // divergenceBps = (oracleAmount - theoreticalDexOut) * 10000 / oracleAmount
-  let divergenceBps: bigint;
-  if (oracleAmountRaw > theoreticalDexOut) {
-    // DEX gives less than oracle predicts — potentially bad quote
-    divergenceBps =
-      ((oracleAmountRaw - theoreticalDexOut) * 10000n) / oracleAmountRaw;
-  } else {
-    // DEX gives more than oracle — favorable for user (or stale oracle)
-    divergenceBps = 0n;
-  }
+  // ── Calculate signed divergence directly from expected output ──
+  // divergenceBps = (oracleAmount - dexExpectedOut) * 10000 / oracleAmount
+  //   > 0  => DEX gives less than oracle (potentially bad)
+  //   < 0  => DEX gives more than oracle (potentially suspiciously favorable)
+  const divergenceBps =
+    ((oracleAmountRaw - dexExpectedOutRaw) * 10000n) / oracleAmountRaw;
   const divergencePct = Number(divergenceBps) / 100;
 
   console.log(
-    `[SwapShield] Comparison: oracle=${oracleAmountRaw} dexTheoretical=${theoreticalDexOut} ` +
-    `dexWithSlippage=${dexExpectedOutRaw} divergence=${divergencePct.toFixed(2)}% ` +
+    `[SwapShield] Comparison: oracle=${oracleAmountRaw} dexExpected=${dexExpectedOutRaw} ` +
+    `divergence=${divergencePct.toFixed(2)}% ` +
     `(max=${maxDivergencePct}%)`,
   );
 
@@ -308,11 +286,9 @@ export async function checkSwapPrice(
 
   // Block if DEX is suspiciously favorable (>10% better than oracle)
   // This catches stale oracle prices or manipulated DEX routes.
-  if (oracleAmountRaw > 0n && theoreticalDexOut > oracleAmountRaw) {
-    const favorableBps =
-      ((theoreticalDexOut - oracleAmountRaw) * 10000n) / oracleAmountRaw;
-    const favorablePct = Number(favorableBps) / 100;
-    if (favorablePct > 10) {
+  if (divergenceBps < 0n) {
+    const favorablePct = Math.abs(divergencePct);
+    if (favorablePct > MAX_FAVORABLE_DIVERGENCE_PCT) {
       console.warn(
         `[SwapShield] ✗ BLOCKED: DEX quote ${favorablePct.toFixed(2)}% BETTER than oracle — ` +
         `likely stale oracle or manipulated route`,
