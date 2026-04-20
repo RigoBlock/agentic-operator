@@ -93,9 +93,9 @@ const POOL_ERROR_SELECTORS: Record<string, string> = {
  */
 function friendlyError(raw: string): string {
   // Pass through already-formatted rich error messages (multiline with context).
-  // These come from tool handlers (crosschain_sync, etc.) that include proposed
-  // action details, NAV data, and decoded revert reasons. Don't strip them.
-  if (raw.includes('\n') && (raw.startsWith('❌') || raw.includes('Proposed action:'))) {
+  // These come from tool handlers (crosschain_sync, Swap Shield, etc.) that include proposed
+  // action details, NAV data, options, and decoded revert reasons. Don't strip them.
+  if (raw.includes('\n') && (raw.startsWith('❌') || raw.startsWith('⚠️') || raw.includes('Proposed action:'))) {
     return raw;
   }
   // Gas-sponsored execution failures
@@ -140,6 +140,22 @@ function friendlyError(raw: string): string {
   if (raw.length < 200) return raw;
   // Truncate long errors (increased from 150 to preserve more context)
   return raw.slice(0, 200).replace(/\s+\S*$/, "") + "…";
+}
+
+/**
+ * Extract the first balanced `{…}` block from a string.
+ * Returns the content (including outer braces) or null if not found.
+ */
+function extractBalancedBraces(s: string): string | null {
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '{') depth++;
+    else if (s[i] === '}') {
+      depth--;
+      if (depth === 0) return s.slice(0, i + 1);
+    }
+  }
+  return null;
 }
 
 /**
@@ -260,33 +276,50 @@ async function callWorkersAI(
       }
     }
 
-    // Extract text-embedded tool calls
+    // Extract text-embedded tool calls (same logic as non-streaming path)
     if (textContent) {
       const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
-      const keyPattern = /\{\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
-      const keyMatch = cleaned.match(keyPattern);
-      if (keyMatch) {
-        const fnName = keyMatch[1];
-        const afterKey = cleaned.slice(keyMatch.index! + keyMatch[0].length);
-        let depth = 0;
-        let end = -1;
-        for (let i = 0; i < afterKey.length; i++) {
-          if (afterKey[i] === '{') depth++;
-          else if (afterKey[i] === '}') {
-            depth--;
-            if (depth === 0) { end = i + 1; break; }
+      const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
+
+      let extractedFnName: string | undefined;
+      let extractedFnArgs: string | undefined;
+
+      // Pattern 1: name/function key before parameters/arguments
+      const fwdPattern = /\{\s*(?:"type"\s*:\s*"function"\s*,\s*)?"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
+      const fwdMatch = cleaned.match(fwdPattern);
+      if (fwdMatch) {
+        const fnName = fwdMatch[1];
+        const afterKey = cleaned.slice(fwdMatch.index! + fwdMatch[0].length);
+        const args = extractBalancedBraces(afterKey);
+        if (args !== null && validTools.includes(fnName)) {
+          extractedFnName = fnName;
+          extractedFnArgs = args;
+        }
+      }
+
+      // Pattern 2: parameters/arguments before name (reversed key order)
+      if (!extractedFnName) {
+        const revPattern = /\{\s*(?:"type"\s*:\s*"function"\s*,\s*)?"(?:parameters|arguments)"\s*:\s*/;
+        const revMatch = cleaned.match(revPattern);
+        if (revMatch) {
+          const afterParams = cleaned.slice(revMatch.index! + revMatch[0].length);
+          const args = extractBalancedBraces(afterParams);
+          if (args !== null) {
+            const rest = afterParams.slice(args.length).replace(/^\s*}\s*/, '');
+            const nameAfter = rest.match(/,\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"/);
+            if (nameAfter && validTools.includes(nameAfter[1])) {
+              extractedFnName = nameAfter[1];
+              extractedFnArgs = args;
+            }
           }
         }
-        if (end > 0) {
-          const fnArgs = afterKey.slice(0, end);
-          const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
-          if (validTools.includes(fnName)) {
-            console.log(`[Workers AI streaming] Extracted text-embedded tool call: ${fnName}`);
-            hasToolCalls = true;
-            toolCalls = [{ function: { name: fnName, arguments: fnArgs } }];
-            textContent = null;
-          }
-        }
+      }
+
+      if (extractedFnName && extractedFnArgs) {
+        console.log(`[Workers AI streaming] Extracted text-embedded tool call: ${extractedFnName}`);
+        hasToolCalls = true;
+        toolCalls = [{ function: { name: extractedFnName, arguments: extractedFnArgs } }];
+        textContent = null;
       }
     }
 
@@ -347,37 +380,55 @@ async function callWorkersAI(
   // Matches: {"function": "name", "parameters": {...}}
   //          {"function_name": "name", "parameters": {...}}
   //          {"name": "name", "parameters": {...}}
+  //          {"type": "function", "name": "...", "parameters": {...}}
   //          ```json\n{"name": ...}\n``` (markdown code blocks)
+  //          Also handles reversed key order (parameters before name).
   if (!hasToolCalls && textContent) {
     // Strip markdown code fences if present
     const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
-    // Match the key and function name, then capture everything after "parameters": up to matching }
-    const keyPattern = /\{\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
-    const keyMatch = cleaned.match(keyPattern);
-    if (keyMatch) {
-      const fnName = keyMatch[1];
-      const afterKey = cleaned.slice(keyMatch.index! + keyMatch[0].length);
-      // Extract balanced braces for the parameters object
-      let depth = 0;
-      let end = -1;
-      for (let i = 0; i < afterKey.length; i++) {
-        if (afterKey[i] === '{') depth++;
-        else if (afterKey[i] === '}') {
-          depth--;
-          if (depth === 0) { end = i + 1; break; }
+    const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
+
+    // Try multiple patterns — Llama sometimes outputs different JSON structures
+    let extractedFnName: string | undefined;
+    let extractedFnArgs: string | undefined;
+
+    // Pattern 1: name/function key comes BEFORE parameters/arguments
+    const fwdPattern = /\{\s*(?:"type"\s*:\s*"function"\s*,\s*)?"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
+    const fwdMatch = cleaned.match(fwdPattern);
+    if (fwdMatch) {
+      const fnName = fwdMatch[1];
+      const afterKey = cleaned.slice(fwdMatch.index! + fwdMatch[0].length);
+      const args = extractBalancedBraces(afterKey);
+      if (args !== null && validTools.includes(fnName)) {
+        extractedFnName = fnName;
+        extractedFnArgs = args;
+      }
+    }
+
+    // Pattern 2: parameters/arguments come BEFORE name (reversed key order)
+    if (!extractedFnName) {
+      const revPattern = /\{\s*(?:"type"\s*:\s*"function"\s*,\s*)?"(?:parameters|arguments)"\s*:\s*/;
+      const revMatch = cleaned.match(revPattern);
+      if (revMatch) {
+        const afterParams = cleaned.slice(revMatch.index! + revMatch[0].length);
+        const args = extractBalancedBraces(afterParams);
+        if (args !== null) {
+          // After the args object, look for the name key
+          const rest = afterParams.slice(args.length).replace(/^\s*}\s*/, '');
+          const nameAfter = rest.match(/,\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"/);
+          if (nameAfter && validTools.includes(nameAfter[1])) {
+            extractedFnName = nameAfter[1];
+            extractedFnArgs = args;
+          }
         }
       }
-      if (end > 0) {
-        const fnArgs = afterKey.slice(0, end);
-        // Verify this is a real tool name (not random JSON in the response)
-        const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
-        if (validTools.includes(fnName)) {
-          console.log(`[Workers AI] Extracted text-embedded tool call: ${fnName}`);
-          hasToolCalls = true;
-          toolCalls = [{ function: { name: fnName, arguments: fnArgs } }];
-          textContent = null; // discard the text — the tool call replaces it
-        }
-      }
+    }
+
+    if (extractedFnName && extractedFnArgs) {
+      console.log(`[Workers AI] Extracted text-embedded tool call: ${extractedFnName}`);
+      hasToolCalls = true;
+      toolCalls = [{ function: { name: extractedFnName, arguments: extractedFnArgs } }];
+      textContent = null; // discard the text — the tool call replaces it
     }
   }
 
@@ -977,6 +1028,33 @@ ${executionModeNote}${contextDocsBlock}`;
         onStreamEvent?.({ type: "tool_result", name, result, error: isError || undefined });
 
         if (onToolResult) await onToolResult(name, result, isError).catch(() => {});
+
+        // Terminal error detection: certain errors from swap/trade tools should be
+        // returned directly to the user instead of giving the LLM another round.
+        // Without this, the model gets confused by the error and calls unrelated tools
+        // (e.g., GMX markets after a swap revert).
+        if (isError && (name === "build_vault_swap" || name === "get_swap_quote")) {
+          const isTerminalError =
+            /Swap Shield blocked/i.test(result) ||
+            /NAV.*shield.*blocked/i.test(result) ||
+            /would revert on-chain/i.test(result) ||
+            /execution reverted/i.test(result) ||
+            /On-chain (?:revert|error)/i.test(result) ||
+            /simulation failed/i.test(result);
+          if (isTerminalError) {
+            console.log(`[LLM] Terminal swap error — returning directly instead of continuing orchestration`);
+            toolMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
+            return {
+              reply: result.replace(/^Error: /, ""),
+              toolCalls: toolCallResults,
+              chainSwitch: pendingChainSwitch,
+              dexProvider: detectedDex,
+              reasoning: orchestrationReasoning,
+              modelsUsed,
+              finalModel: "tooling",
+            };
+          }
+        }
 
         // Detect consecutive failures of the same tool with the same error.
         // Break immediately to avoid repeating the same failing call in every round.
@@ -4379,17 +4457,36 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
   const normalizeToken = (t: string) =>
     /^0x[0-9a-f]{40}$/i.test(t) ? t.toLowerCase() : t.toUpperCase();
 
+  // Strip conversational prefixes ("I want to", "can you", "please", etc.)
+  // so "I want to sell 100 ETH for USDC" matches the same regex as "sell 100 ETH for USDC".
+  m = m.replace(
+    /^(?:(?:i\s+)?(?:want|would like|need|['']d like)\s+to\s+|(?:can|could)\s+you\s+(?:please\s+)?|please\s+)/i,
+    "",
+  ).trim();
+
   // Extract DEX modifier ("using 0x", "using uniswap", "via 0x") before regex matching
   let dex: string | undefined;
-  const dexMatch = m.match(/\s+(?:using|via)\s+(0x|uniswap|zerox)$/i);
+  const dexMatch = m.match(/\s+(?:using|via|on|with)\s+(0x|uniswap|zerox)$/i);
   if (dexMatch) {
     dex = dexMatch[1].toLowerCase() === "zerox" ? "0x" : dexMatch[1].toLowerCase();
     m = m.slice(0, dexMatch.index!).trim();
   }
 
+  // Extract chain modifier ("on base", "on arbitrum") — appears before or after DEX
+  let chain: string | undefined;
+  const chainMatch = m.match(/\s+on\s+([a-z0-9 ]+?)$/i);
+  if (chainMatch) {
+    const possibleChain = chainMatch[1].trim().toLowerCase();
+    // Only match known chain names to avoid eating "on uniswap" or "on 0x"
+    if (/^(ethereum|base|arbitrum|optimism|polygon|bsc|bnb|unichain)$/i.test(possibleChain)) {
+      chain = possibleChain;
+      m = m.slice(0, chainMatch.index!).trim();
+    }
+  }
+
   // ── "sell <amount> <tokenIn> for <tokenOut> [on <chain>]" ──
   const sellMatch = m.match(
-    /^sell\s+([\d.,]+)\s+([a-z0-9]+)\s+(?:for|to|into)\s+([a-z0-9]+)(?:\s+on\s+([a-z0-9 ]+))?$/i,
+    /^sell\s+([\d.,]+)\s+([a-z0-9]+)\s+(?:for|to|into)\s+([a-z0-9]+)$/i,
   );
   if (sellMatch) {
     const args: Record<string, unknown> = {
@@ -4397,14 +4494,14 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
       tokenOut: normalizeToken(sellMatch[3]),
       amountIn: sellMatch[1].replace(/,/g, ""),
     };
-    if (sellMatch[4]) args.chain = sellMatch[4].trim();
+    if (chain) args.chain = chain;
     if (dex) args.dex = dex;
     return { name: "build_vault_swap", args };
   }
 
   // ── "buy <amount> <tokenOut> [with <tokenIn>] [on <chain>]" ──
   const buyMatch = m.match(
-    /^buy\s+([\d.,]+)\s+([a-z0-9]+)(?:\s+(?:with|using|for)\s+([a-z0-9]+))?(?:\s+on\s+([a-z0-9 ]+))?$/i,
+    /^buy\s+([\d.,]+)\s+([a-z0-9]+)(?:\s+(?:with|using|for)\s+([a-z0-9]+))?$/i,
   );
   if (buyMatch) {
     const args: Record<string, unknown> = {
@@ -4413,14 +4510,14 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
     };
     // Default tokenIn to USDC if not specified
     args.tokenIn = buyMatch[3] ? normalizeToken(buyMatch[3]) : "USDC";
-    if (buyMatch[4]) args.chain = buyMatch[4].trim();
+    if (chain) args.chain = chain;
     if (dex) args.dex = dex;
     return { name: "build_vault_swap", args };
   }
 
   // ── "swap <amount> <tokenIn> for/to <tokenOut> [on <chain>]" ──
   const swapMatch = m.match(
-    /^swap\s+([\d.,]+)\s+([a-z0-9]+)\s+(?:for|to|into)\s+([a-z0-9]+)(?:\s+on\s+([a-z0-9 ]+))?$/i,
+    /^swap\s+([\d.,]+)\s+([a-z0-9]+)\s+(?:for|to|into)\s+([a-z0-9]+)$/i,
   );
   if (swapMatch) {
     const args: Record<string, unknown> = {
@@ -4428,7 +4525,7 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
       tokenOut: normalizeToken(swapMatch[3]),
       amountIn: swapMatch[1].replace(/,/g, ""),
     };
-    if (swapMatch[4]) args.chain = swapMatch[4].trim();
+    if (chain) args.chain = chain;
     if (dex) args.dex = dex;
     return { name: "build_vault_swap", args };
   }

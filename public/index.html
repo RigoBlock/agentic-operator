@@ -1911,9 +1911,11 @@
             if ((hasToolErrors || hasPlanBlocks) && finalResponse.reply) {
               const replyLower = (finalResponse.reply || '').toLowerCase();
               const isErrorEcho = replyLower.startsWith('error:') ||
+                replyLower.startsWith('⚠️') ||
                 replyLower.includes('insufficient') ||
                 replyLower.includes('revert') ||
                 replyLower.includes('sync failed') ||
+                replyLower.includes('blocked') ||
                 replyLower.includes('failed');
               if (isErrorEcho) finalResponse.reply = '';
             }
@@ -2438,10 +2440,10 @@
           if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.code === 'METHOD_NOT_ALLOWED' || err.fallbackToManual) {
             container.innerHTML = '';
             const manualMsg = document.createElement('div');
-            manualMsg.style.cssText = 'color:var(--warning,orange);font-size:24px;margin-bottom:16px;';
+            manualMsg.style.cssText = 'color:var(--muted);font-size:13px;margin-bottom:12px;';
             manualMsg.textContent = err.code === 'METHOD_NOT_ALLOWED'
-              ? 'This function selector is not delegated — re-setup delegation or sign from your wallet:'
-              : 'Delegation not active on this chain — sign from your wallet instead:';
+              ? 'This selector is not delegated — sign manually:'
+              : 'Sign with your wallet to execute:';
             container.appendChild(manualMsg);
             // Re-render as manual tx card inline
             const actionsDiv = document.createElement('div');
@@ -2502,7 +2504,7 @@
     function rejectDelegatedExecution(btn) {
       const container = btn.closest('.delegated-confirm');
       container.innerHTML = '<div style="color:var(--muted);font-size:24px;">Execution cancelled.</div>';
-      appendMessage('system', 'Delegated execution cancelled by operator.');
+      appendMessage('system', 'Execution cancelled.');
     }
 
     /* ================================================================
@@ -2604,9 +2606,9 @@
             if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.code === 'METHOD_NOT_ALLOWED' || err.fallbackToManual) {
               if (rowStatusEl) rowStatusEl.textContent = '⚠️';
               const reason = err.code === 'METHOD_NOT_ALLOWED'
-                ? 'Function selector not delegated'
-                : `Delegation not active on chain ${tx.chainId}`;
-              appendMessage('system', `${reason} — sign remaining transactions from your wallet:`);
+                ? 'Selector not delegated'
+                : `Sign remaining transactions with your wallet`;
+              appendMessage('system', reason);
               for (let j = i; j < txList.length; j++) {
                 showManualTxCard(txList[j]);
               }
