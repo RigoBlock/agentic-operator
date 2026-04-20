@@ -2054,6 +2054,9 @@ export async function executeToolCall(
     }
 
     case "disable_swap_shield": {
+      if (!ctx.vaultAddress || ctx.vaultAddress === "0x0000000000000000000000000000000000000000") {
+        throw new Error("No vault selected. Enter a valid vault address before disabling Swap Shield.");
+      }
       await disableSwapShield(
         env.KV,
         ctx.operatorAddress!,
@@ -2068,6 +2071,9 @@ export async function executeToolCall(
     }
 
     case "enable_swap_shield": {
+      if (!ctx.vaultAddress || ctx.vaultAddress === "0x0000000000000000000000000000000000000000") {
+        throw new Error("No vault selected. Enter a valid vault address before enabling Swap Shield.");
+      }
       await enableSwapShield(
         env.KV,
         ctx.operatorAddress!,

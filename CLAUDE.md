@@ -115,9 +115,10 @@ RULE: The Swap Shield compares DEX API quotes against the on-chain BackgeoOracle
 - **Uses**: `vault.convertTokenAmount(tokenIn, amountIn, tokenOut)` via `eth_call`
   — the vault's EOracle extension, which uses the BackgeoOracle 5-minute TWAP
 - **Normalization**: ETH, WETH, address(0), and 0xEeee... all map to address(0)
-- **Reverse slippage**: DEX quotes include slippage buffer. The shield reverses it
-  to get the theoretical market price: `theoreticalOut = dexOut * 10000 / (10000 - slippageBps)`
-- **Divergence calculation**: `(oracleAmount - theoreticalDexOut) / oracleAmount`
+- **DEX quote comparison**: The shield compares the DEX expected output directly
+  against the oracle amount. It does **not** reverse `slippageBps` to derive a
+  separate theoretical market price before applying thresholds.
+- **Divergence calculation**: `(oracleAmount - dexOut) / oracleAmount`
   — two-sided, asymmetric rule: blocks when DEX gives >5% LESS than oracle
   (bad deal for user) AND when DEX gives >10% MORE than oracle (stale oracle
   or manipulated route that could expose the vault to sandwich attacks)
