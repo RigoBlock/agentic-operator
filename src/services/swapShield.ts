@@ -69,8 +69,8 @@ const DEFAULT_MAX_DIVERGENCE_PCT = 5;
 /** Native ETH address (zero address) — EOracle treats this equivalently to WETH */
 const NATIVE_ETH = "0x0000000000000000000000000000000000000000" as Address;
 
-/** Common WETH addresses per chain — mapped to address(0) for EOracle */
-const WETH_ADDRESSES: Record<number, string> = {
+/** Wrapped native token addresses per chain — mapped to address(0) for EOracle */
+const WRAPPED_NATIVE_ADDRESSES: Record<number, string> = {
   1: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",     // Ethereum
   10: "0x4200000000000000000000000000000000000006",      // Optimism
   56: "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",     // BNB (WBNB)
@@ -92,9 +92,9 @@ export interface SwapShieldResult {
   allowed: boolean;
   /** Whether oracle comparison was actually performed */
   verified: boolean;
-  /** Oracle-derived expected output (human-readable) */
+  /** Oracle-derived expected output as a raw bigint string in smallest units */
   oracleAmount: string;
-  /** DEX quote expected output (human-readable) */
+  /** DEX quote expected output as a raw bigint string in smallest units */
   dexAmount: string;
   /** Divergence percentage (positive = DEX gives less than oracle) */
   divergencePct: string;
@@ -246,8 +246,11 @@ export async function checkSwapPrice(
   }
 
   // ── Validate slippageBps before arithmetic ──
-  // Clamp to [0, 9999] to prevent division by zero (10000 - 10000 = 0) or negative divisors.
-  const safeSlippageBps = Math.max(0, Math.min(9999, Math.round(slippageBps)));
+  // Guard against NaN (from non-finite input) and clamp to [0, 9999] to prevent
+  // division by zero (10000 - 10000 = 0) or negative divisors.
+  const safeSlippageBps = Number.isFinite(slippageBps)
+    ? Math.max(0, Math.min(9999, Math.round(slippageBps)))
+    : 0;
 
   // ── Reverse-engineer the theoretical market price from the DEX quote ──
   // The DEX quote includes slippage buffer. To compare fairly against the oracle
@@ -452,8 +455,8 @@ function normalizeTokenAddress(token: Address, chainId: number): Address {
   // 0xEeee... convention used by some DEX APIs for native ETH
   if (lower === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee") return NATIVE_ETH;
 
-  // WETH on this chain → address(0)
-  const weth = WETH_ADDRESSES[chainId];
+  // WETH/wrapped native on this chain → address(0)
+  const weth = WRAPPED_NATIVE_ADDRESSES[chainId];
   if (weth && lower === weth.toLowerCase()) return NATIVE_ETH;
 
   return token;

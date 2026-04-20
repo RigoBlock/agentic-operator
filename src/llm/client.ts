@@ -4182,21 +4182,36 @@ async function runSwapShield(
   );
 
   if (!result.allowed) {
-    // Build a rich error with TWAP suggestion
+    // Build a context-specific error with guidance
     const sellSymbol = intent.tokenIn;
     const buySymbol = intent.tokenOut;
     const sellAmt = intent.amountIn || formatUnits(BigInt(sellAmountRaw), sellDecimals);
+    const divergence = parseFloat(result.divergencePct);
+    const isFavorable = Number.isFinite(divergence) && divergence < 0;
+    const thresholdText = isFavorable
+      ? "10% better-than-oracle safety threshold"
+      : "5% safety threshold";
+    const explanation = isFavorable
+      ? `This can indicate a stale oracle or a manipulated routing path producing an implausibly favorable quote.`
+      : `This usually indicates significant price impact from the trade size.`;
+    const options = isFavorable
+      ? `Options:\n` +
+        `1. **Retry later** — wait for pricing to normalize and request a fresh quote\n` +
+        `2. **Verify route** — compare venues or try a different swap path\n` +
+        `3. **Disable shield** — say "disable swap shield" for 10 minutes ` +
+        `(use with caution — you accept oracle/route integrity risk)\n`
+      : `Options:\n` +
+        `1. **Split with TWAP** — create a TWAP order to execute ${sellAmt} ${sellSymbol} → ${buySymbol} ` +
+        `in smaller slices over time, reducing price impact\n` +
+        `2. **Reduce amount** — try a smaller trade\n` +
+        `3. **Disable shield** — say "disable swap shield" for 10 minutes ` +
+        `(use with caution — you accept full price impact risk)\n`;
     throw new Error(
       `⚠️ Swap Shield blocked this trade.\n\n` +
       `The DEX quote diverges ${result.divergencePct}% from the on-chain oracle price, ` +
-      `exceeding the 5% safety threshold.\n\n` +
-      `This usually indicates significant price impact from the trade size.\n\n` +
-      `Options:\n` +
-      `1. **Split with TWAP** — create a TWAP order to execute ${sellAmt} ${sellSymbol} → ${buySymbol} ` +
-      `in smaller slices over time, reducing price impact\n` +
-      `2. **Reduce amount** — try a smaller trade\n` +
-      `3. **Disable shield** — say "disable swap shield" for 10 minutes ` +
-      `(use with caution — you accept full price impact risk)\n`,
+      `exceeding the ${thresholdText}.\n\n` +
+      `${explanation}\n\n` +
+      `${options}`,
     );
   }
 

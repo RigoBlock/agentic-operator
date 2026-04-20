@@ -1072,7 +1072,9 @@
 
     function getSlippageBps() {
       const stored = localStorage.getItem(SLIPPAGE_STORAGE_KEY);
-      return stored ? parseInt(stored, 10) : 100;
+      if (!stored) return 100;
+      const parsed = parseInt(stored, 10);
+      return Number.isFinite(parsed) ? parsed : 100;
     }
 
     function onSlippageChange() {
@@ -1101,9 +1103,18 @@
     }
 
     function onSwapShieldToggle() {
-      const enabled = document.getElementById('swap-shield-toggle').checked;
+      const toggle = document.getElementById('swap-shield-toggle');
+      const enabled = toggle.checked;
       const label = document.getElementById('swap-shield-label');
       const timer = document.getElementById('swap-shield-timer');
+
+      // Require wallet + vault to change shield state server-side
+      if (!connectedAddress || !vaultInput.value.trim()) {
+        toggle.checked = !enabled; // revert
+        appendMessage('system', 'Connect a wallet and enter a vault address before toggling the swap shield.');
+        return;
+      }
+
       if (enabled) {
         label.textContent = 'Enabled';
         label.style.color = '';
@@ -1275,12 +1286,16 @@
         dd.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:24px;">No saved vaults yet.</div>';
         return;
       }
-      dd.innerHTML = vaults.map(v => `
-        <div class="saved-vault-item" onclick="loadVault('${v.address}')">
-          <span class="vault-label">${v.name || v.address.slice(0,6) + '…' + v.address.slice(-4)}</span>
-          <button class="remove-vault" onclick="event.stopPropagation(); removeVault('${v.address}')">&times;</button>
+      dd.innerHTML = vaults.map(v => {
+        const safeAddr = escapeHtml(v.address);
+        const safeName = escapeHtml(v.name || v.address.slice(0,6) + '…' + v.address.slice(-4));
+        return `
+        <div class="saved-vault-item" onclick="loadVault('${safeAddr}')">
+          <span class="vault-label">${safeName}</span>
+          <button class="remove-vault" onclick="event.stopPropagation(); removeVault('${safeAddr}')">&times;</button>
         </div>
-      `).join('');
+      `;
+      }).join('');
     }
 
     function loadVault(address) {
@@ -1773,7 +1788,8 @@
                   authSignature,
                   authTimestamp,
                   executionMode,
-                  stream: true,
+                  slippageBps: getSlippageBps(),
+                  confirmExecution: executionMode === 'delegated',
                   ...getAiRequestParams(),
                 }),
               });
@@ -2785,10 +2801,10 @@
         const el = document.createElement('div');
         el.className = 'wallet-option';
         el.innerHTML = `
-          <img src="${info.icon}" alt="${info.name}" onerror="this.style.display='none'" />
+          <img src="${escapeHtml(info.icon)}" alt="${escapeHtml(info.name)}" onerror="this.style.display='none'" />
           <div>
-            <div class="wallet-name">${info.name}</div>
-            <div class="wallet-rdns">${info.rdns}</div>
+            <div class="wallet-name">${escapeHtml(info.name)}</div>
+            <div class="wallet-rdns">${escapeHtml(info.rdns)}</div>
           </div>
         `;
         el.onclick = () => connectWithProvider(provider, info.name);
@@ -3447,11 +3463,12 @@
 
         const setupData = await setupRes.json();
 
+        const safeAgentAddr = escapeHtml(setupData.agentAddress);
         // Show agent wallet info
         const infoEl = document.getElementById('delegation-agent-info');
         infoEl.innerHTML = `
-          <div class="row"><span class="label">Agent Wallet</span><span class="value copyable-addr" onclick="copyToClipboard('${setupData.agentAddress}')" title="Click to copy">${setupData.agentAddress}</span></div>
-          <div class="row"><span class="label">Vault</span><span class="value">${vault.slice(0,6)}…${vault.slice(-4)}</span></div>
+          <div class="row"><span class="label">Agent Wallet</span><span class="value copyable-addr" onclick="copyToClipboard('${safeAgentAddr}')" title="Click to copy">${safeAgentAddr}</span></div>
+          <div class="row"><span class="label">Vault</span><span class="value">${escapeHtml(vault.slice(0,6))}…${escapeHtml(vault.slice(-4))}</span></div>
           <div class="row"><span class="label">Chain</span><span class="value">${CHAIN_NAMES[currentChainId] || currentChainId}</span></div>
         `;
         infoEl.style.display = '';

@@ -118,8 +118,10 @@ RULE: The Swap Shield compares DEX API quotes against the on-chain BackgeoOracle
 - **Reverse slippage**: DEX quotes include slippage buffer. The shield reverses it
   to get the theoretical market price: `theoreticalOut = dexOut * 10000 / (10000 - slippageBps)`
 - **Divergence calculation**: `(oracleAmount - theoreticalDexOut) / oracleAmount`
-  — only blocks when DEX gives LESS than oracle (user getting bad deal)
-- **Default threshold**: 5% — blocks when DEX output is >5% worse than oracle
+  — two-sided, asymmetric rule: blocks when DEX gives >5% LESS than oracle
+  (bad deal for user) AND when DEX gives >10% MORE than oracle (stale oracle
+  or manipulated route that could expose the vault to sandwich attacks)
+- **Default thresholds**: 5% worse than oracle → blocked; 10% better than oracle → blocked
 - **Three outcomes**:
   1. `allowed: true` — divergence within threshold
   2. `allowed: false, code: 'BLOCKED'` — divergence exceeds threshold

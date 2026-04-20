@@ -273,8 +273,10 @@ Before every swap calldata is built, the system compares the DEX API quote
 against the on-chain BackgeoOracle TWAP price:
 
 - Uses the vault's `convertTokenAmount()` — a 5-minute TWAP oracle
-- If the DEX quote diverges > 5% from the oracle price → **swap BLOCKED**
-- Catches bad routes, stale liquidity, excessive price impact, and API compromise
+- If the DEX quote is >5% worse than the oracle price → **swap BLOCKED**
+- If the DEX quote is >10% better than the oracle price → **swap BLOCKED**
+- Catches bad routes, stale liquidity, excessive price impact, API compromise,
+  stale oracle conditions, and manipulated routes
 - Graceful degradation: when the oracle has no price feed, the swap proceeds
   with a warning (does NOT block)
 - The operator can temporarily disable it (10-minute TTL) for known high-impact trades
