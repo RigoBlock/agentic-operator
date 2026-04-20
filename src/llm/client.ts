@@ -102,6 +102,17 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
 };
 
 /**
+ * True when request context includes a verified operator identity.
+ * Use this for ALL operator-scoped KV reads/writes to avoid trusting
+ * caller-supplied operatorAddress without auth.
+ */
+export function isVerifiedOperatorContext(
+  ctx: RequestContext,
+): ctx is RequestContext & { operatorAddress: Address; operatorVerified: true } {
+  return !!ctx.operatorVerified && !!ctx.operatorAddress;
+}
+
+/**
  * Tools that require verified operator authentication.
  *
  * Keep this as the single source of truth instead of scattering checks in
@@ -4115,11 +4126,11 @@ function resolveChainName(chainId: number): string {
  * SECURITY: Clamped to [MIN_SLIPPAGE_BPS, MAX_SLIPPAGE_BPS].
  * The LLM CANNOT set slippage — only the operator via settings or chat tool.
  */
-async function resolveSlippage(env: Env, ctx: RequestContext): Promise<number> {
+export async function resolveSlippage(env: Env, ctx: RequestContext): Promise<number> {
   // 1. Per-request override from body (ONLY for verified operators)
   // Unverified callers must not be able to weaken per-request safety controls.
   if (
-    ctx.operatorVerified &&
+    isVerifiedOperatorContext(ctx) &&
     ctx.slippageBps != null &&
     typeof ctx.slippageBps === "number" &&
     Number.isFinite(ctx.slippageBps) &&
@@ -4130,7 +4141,7 @@ async function resolveSlippage(env: Env, ctx: RequestContext): Promise<number> {
   }
 
   // 2. Stored operator preference (ONLY for verified operators)
-  if (ctx.operatorVerified && ctx.operatorAddress && env.KV) {
+  if (isVerifiedOperatorContext(ctx) && env.KV) {
     const stored = await getStoredSlippage(env.KV, ctx.operatorAddress);
     if (stored !== null) return stored;
   }
@@ -4155,7 +4166,7 @@ async function runSwapShield(
   buyAmountRaw: string,
 ): Promise<void> {
   // Check opt-out
-  if (ctx.operatorVerified && ctx.operatorAddress && env.KV) {
+  if (isVerifiedOperatorContext(ctx) && env.KV) {
     const disabled = await isSwapShieldDisabled(
       env.KV,
       ctx.operatorAddress,
@@ -4609,7 +4620,7 @@ function tryFastPathCapabilityQuestion(msg: string): string | null {
  *   "swap 100 USDC for ETH"               → build_vault_swap (EXACT_INPUT)
  *   "swap 100 USDC to ETH"                → build_vault_swap (EXACT_INPUT)
  */
-function tryFastPathSwap(msg: string): FastPathResult | null {
+export function tryFastPathSwap(msg: string): FastPathResult | null {
   let m = msg.trim();
 
   // Normalise token references: uppercase symbols, preserve addresses (lowercase).
