@@ -4116,8 +4116,10 @@ function resolveChainName(chainId: number): string {
  * The LLM CANNOT set slippage — only the operator via settings or chat tool.
  */
 async function resolveSlippage(env: Env, ctx: RequestContext): Promise<number> {
-  // 1. Per-request override from body (validate it's a usable integer)
+  // 1. Per-request override from body (ONLY for verified operators)
+  // Unverified callers must not be able to weaken per-request safety controls.
   if (
+    ctx.operatorVerified &&
     ctx.slippageBps != null &&
     typeof ctx.slippageBps === "number" &&
     Number.isFinite(ctx.slippageBps) &&
@@ -4127,8 +4129,8 @@ async function resolveSlippage(env: Env, ctx: RequestContext): Promise<number> {
     return clamped;
   }
 
-  // 2. Stored operator preference
-  if (ctx.operatorAddress && env.KV) {
+  // 2. Stored operator preference (ONLY for verified operators)
+  if (ctx.operatorVerified && ctx.operatorAddress && env.KV) {
     const stored = await getStoredSlippage(env.KV, ctx.operatorAddress);
     if (stored !== null) return stored;
   }

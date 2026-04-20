@@ -312,6 +312,10 @@ describe("Swap Shield — slippage storage", () => {
     await expect(setStoredSlippage(kv, OPERATOR, 5)).rejects.toThrow("Slippage must be between");
   });
 
+  it("rejects non-integer slippage", async () => {
+    await expect(setStoredSlippage(kv, OPERATOR, 50.5)).rejects.toThrow("integer");
+  });
+
   it("rejects slippage above maximum", async () => {
     await expect(setStoredSlippage(kv, OPERATOR, 600)).rejects.toThrow("Slippage must be between");
   });

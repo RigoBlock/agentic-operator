@@ -1108,7 +1108,7 @@
       sel.value = 'custom';
     }
 
-    function onSwapShieldToggle() {
+    async function onSwapShieldToggle() {
       const toggle = document.getElementById('swap-shield-toggle');
       const enabled = toggle.checked;
       const label = document.getElementById('swap-shield-label');
@@ -1121,46 +1121,46 @@
         return;
       }
 
-      if (enabled) {
-        label.textContent = 'Enabled';
-        label.style.color = '';
-        timer.style.display = 'none';
-        localStorage.removeItem(SHIELD_STORAGE_KEY);
-        if (shieldTimerInterval) { clearInterval(shieldTimerInterval); shieldTimerInterval = null; }
-        // Re-enable server-side via deterministic fast-path
-        if (connectedAddress && vaultInput.value.trim()) {
-          fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              messages: [{ role: 'user', content: '__enable_swap_shield__' }],
-              vaultAddress: vaultInput.value.trim(),
-              chainId: currentChainId,
-              operatorAddress: connectedAddress,
-              authSignature, authTimestamp,
-            }),
-          }).catch(() => {});
+      // Persist UI state only after server confirms.
+      const command = enabled ? '__enable_swap_shield__' : '__disable_swap_shield__';
+      toggle.disabled = true;
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: command }],
+            vaultAddress: vaultInput.value.trim(),
+            chainId: currentChainId,
+            operatorAddress: connectedAddress,
+            authSignature, authTimestamp,
+          }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${res.status}`);
         }
-      } else {
-        label.textContent = 'Disabled (10 min)';
-        label.style.color = 'var(--warn)';
-        const expiry = Date.now() + 600000;
-        localStorage.setItem(SHIELD_STORAGE_KEY, String(expiry));
-        startShieldTimer(expiry);
-        // Disable server-side via deterministic fast-path
-        if (connectedAddress && vaultInput.value.trim()) {
-          fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              messages: [{ role: 'user', content: '__disable_swap_shield__' }],
-              vaultAddress: vaultInput.value.trim(),
-              chainId: currentChainId,
-              operatorAddress: connectedAddress,
-              authSignature, authTimestamp,
-            }),
-          }).catch(() => {});
+
+        if (enabled) {
+          label.textContent = 'Enabled';
+          label.style.color = '';
+          timer.style.display = 'none';
+          localStorage.removeItem(SHIELD_STORAGE_KEY);
+          if (shieldTimerInterval) { clearInterval(shieldTimerInterval); shieldTimerInterval = null; }
+        } else {
+          label.textContent = 'Disabled (10 min)';
+          label.style.color = 'var(--warn)';
+          const expiry = Date.now() + 600000;
+          localStorage.setItem(SHIELD_STORAGE_KEY, String(expiry));
+          startShieldTimer(expiry);
         }
+      } catch (err) {
+        // Revert checkbox and keep previous UI state when server-side toggle fails.
+        toggle.checked = !enabled;
+        appendMessage('system', `Failed to ${enabled ? 'enable' : 'disable'} swap shield: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        toggle.disabled = false;
       }
     }
 

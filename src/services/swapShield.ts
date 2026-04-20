@@ -416,6 +416,9 @@ export async function setStoredSlippage(
   operatorAddress: string,
   slippageBps: number,
 ): Promise<void> {
+  if (!Number.isFinite(slippageBps) || !Number.isInteger(slippageBps)) {
+    throw new Error("Slippage must be an integer number of basis points.");
+  }
   if (slippageBps < MIN_SLIPPAGE_BPS || slippageBps > MAX_SLIPPAGE_BPS) {
     throw new Error(
       `Slippage must be between ${MIN_SLIPPAGE_BPS / 100}% (${MIN_SLIPPAGE_BPS} bps) ` +
