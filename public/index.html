@@ -1776,6 +1776,9 @@
             localStorage.removeItem(AUTH_STORAGE_KEY);
             await signAuthMessage();
             if (authSignature) {
+              // Preserve original confirmExecution and stream intent from the initial request
+              const originalConfirmExecution = typeof lastConfirmExecution !== 'undefined' ? lastConfirmExecution : (typeof confirmExecution !== 'undefined' ? confirmExecution : false);
+              const originalStream = typeof lastStream !== 'undefined' ? lastStream : (typeof stream !== 'undefined' ? stream : false);
               const retryRes = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1789,7 +1792,8 @@
                   authTimestamp,
                   executionMode,
                   slippageBps: getSlippageBps(),
-                  confirmExecution: executionMode === 'delegated',
+                  confirmExecution: originalConfirmExecution,
+                  stream: originalStream,
                   ...getAiRequestParams(),
                 }),
               });

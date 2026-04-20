@@ -141,8 +141,8 @@ export async function checkSwapPrice(
     return {
       allowed: true,
       verified: false,
-      oracleAmount: "0",
-      dexAmount: "0",
+      oracleAmount: amountInRaw.toString(),
+      dexAmount: dexExpectedOutRaw.toString(),
       divergencePct: "0",
       reason: "Zero amount — skipping oracle check",
     };
