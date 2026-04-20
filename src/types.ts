@@ -122,6 +122,8 @@ export interface ChatRequest {
   routingMode?: "deepseek_only" | "hybrid_fast_followup";
   /** Optional per-request context snippets (e.g. selected markdown excerpts) injected into runtime prompt */
   contextDocs?: string[];
+  /** Default slippage tolerance in basis points (10-500). Overrides stored KV value for this request. */
+  slippageBps?: number;
 }
 
 export interface ToolCallResult {
@@ -298,6 +300,8 @@ export interface RequestContext {
   routingMode?: "deepseek_only" | "hybrid_fast_followup";
   /** Optional per-request context snippets injected into runtime prompt */
   contextDocs?: string[];
+  /** Default slippage tolerance in basis points (10-500). Resolved from: request body → KV → 100. */
+  slippageBps?: number;
 }
 
 // ── Swap intent ───────────────────────────────────────────────────────

@@ -654,6 +654,43 @@
         </div>
       </div>
 
+      <!-- Trading section -->
+      <div class="settings-section">
+        <h4>Trading</h4>
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+          <div>
+            <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Default Slippage</label>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <select id="slippage-select" onchange="onSlippageChange()" style="flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;">
+                <option value="10">0.1%</option>
+                <option value="25">0.25%</option>
+                <option value="50">0.5%</option>
+                <option value="100" selected>1% (default)</option>
+                <option value="200">2%</option>
+                <option value="300">3%</option>
+                <option value="500">5%</option>
+                <option value="custom">Custom…</option>
+              </select>
+              <input id="slippage-custom" type="number" min="0.1" max="5" step="0.1" placeholder="%" style="display: none; width: 80px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;" onchange="onSlippageCustomChange()" />
+            </div>
+          </div>
+          <div>
+            <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Swap Shield (Oracle Protection)</label>
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <label class="testnet-toggle" title="Oracle-based price protection. Blocks swaps where DEX quote diverges >5% from TWAP oracle.">
+                <input type="checkbox" id="swap-shield-toggle" checked onchange="onSwapShieldToggle()" />
+                <span class="toggle-track"></span>
+                <span id="swap-shield-label">Enabled</span>
+              </label>
+              <span id="swap-shield-timer" style="font-size: 12px; color: var(--muted); display: none;"></span>
+            </div>
+            <span style="font-size: 12px; color: var(--muted); margin-top: 4px; display: block;">
+              Compares DEX quotes against on-chain TWAP oracle. Disable temporarily for large trades with known impact.
+            </span>
+          </div>
+        </div>
+      </div>
+
       <!-- Delegation section -->
       <div class="settings-section">
         <h4>Delegation</h4>
@@ -1026,6 +1063,139 @@
     const TESTNET_CHAINS_LIST = [
       { id: 11155111, name: 'Sepolia' },
     ];
+
+    /* ================================================================
+       Trading Settings (slippage, swap shield)
+       ================================================================ */
+    const SLIPPAGE_STORAGE_KEY = 'rigoblock_slippage_bps';
+    const SHIELD_STORAGE_KEY = 'rigoblock_swap_shield';
+
+    function getSlippageBps() {
+      const stored = localStorage.getItem(SLIPPAGE_STORAGE_KEY);
+      return stored ? parseInt(stored, 10) : 100;
+    }
+
+    function onSlippageChange() {
+      const sel = document.getElementById('slippage-select');
+      const customInput = document.getElementById('slippage-custom');
+      if (sel.value === 'custom') {
+        customInput.style.display = 'block';
+        customInput.focus();
+      } else {
+        customInput.style.display = 'none';
+        localStorage.setItem(SLIPPAGE_STORAGE_KEY, sel.value);
+      }
+    }
+
+    function onSlippageCustomChange() {
+      const pct = parseFloat(document.getElementById('slippage-custom').value);
+      if (isNaN(pct) || pct < 0.1 || pct > 5) {
+        alert('Slippage must be between 0.1% and 5%.');
+        return;
+      }
+      const bps = Math.round(pct * 100);
+      localStorage.setItem(SLIPPAGE_STORAGE_KEY, String(bps));
+      // Update select to show "Custom…" with the value
+      const sel = document.getElementById('slippage-select');
+      sel.value = 'custom';
+    }
+
+    function onSwapShieldToggle() {
+      const enabled = document.getElementById('swap-shield-toggle').checked;
+      const label = document.getElementById('swap-shield-label');
+      const timer = document.getElementById('swap-shield-timer');
+      if (enabled) {
+        label.textContent = 'Enabled';
+        label.style.color = '';
+        timer.style.display = 'none';
+        localStorage.removeItem(SHIELD_STORAGE_KEY);
+        // Re-enable server-side via chat (best-effort)
+        if (connectedAddress && vaultInput.value.trim()) {
+          fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messages: [{ role: 'user', content: '__enable_swap_shield__' }],
+              vaultAddress: vaultInput.value.trim(),
+              chainId: currentChainId,
+              operatorAddress: connectedAddress,
+              authSignature, authTimestamp,
+            }),
+          }).catch(() => {});
+        }
+      } else {
+        label.textContent = 'Disabled (10 min)';
+        label.style.color = 'var(--warn)';
+        const expiry = Date.now() + 600000;
+        localStorage.setItem(SHIELD_STORAGE_KEY, String(expiry));
+        startShieldTimer(expiry);
+        // Disable server-side via chat (best-effort)
+        if (connectedAddress && vaultInput.value.trim()) {
+          fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messages: [{ role: 'user', content: '__disable_swap_shield__' }],
+              vaultAddress: vaultInput.value.trim(),
+              chainId: currentChainId,
+              operatorAddress: connectedAddress,
+              authSignature, authTimestamp,
+            }),
+          }).catch(() => {});
+        }
+      }
+    }
+
+    function startShieldTimer(expiry) {
+      const timer = document.getElementById('swap-shield-timer');
+      timer.style.display = 'inline';
+      const update = () => {
+        const remaining = Math.max(0, expiry - Date.now());
+        if (remaining <= 0) {
+          timer.style.display = 'none';
+          document.getElementById('swap-shield-toggle').checked = true;
+          document.getElementById('swap-shield-label').textContent = 'Enabled';
+          document.getElementById('swap-shield-label').style.color = '';
+          localStorage.removeItem(SHIELD_STORAGE_KEY);
+          return;
+        }
+        const mins = Math.floor(remaining / 60000);
+        const secs = Math.floor((remaining % 60000) / 1000);
+        timer.textContent = `(${mins}:${secs.toString().padStart(2, '0')} remaining)`;
+        requestAnimationFrame(update);
+      };
+      update();
+    }
+
+    function restoreTradeSettings() {
+      // Restore slippage
+      const bps = getSlippageBps();
+      const sel = document.getElementById('slippage-select');
+      const customInput = document.getElementById('slippage-custom');
+      const option = sel.querySelector(`option[value="${bps}"]`);
+      if (option) {
+        sel.value = String(bps);
+        customInput.style.display = 'none';
+      } else {
+        sel.value = 'custom';
+        customInput.style.display = 'block';
+        customInput.value = (bps / 100).toString();
+      }
+
+      // Restore swap shield state
+      const shieldExpiry = localStorage.getItem(SHIELD_STORAGE_KEY);
+      if (shieldExpiry) {
+        const expiry = parseInt(shieldExpiry, 10);
+        if (expiry > Date.now()) {
+          document.getElementById('swap-shield-toggle').checked = false;
+          document.getElementById('swap-shield-label').textContent = 'Disabled (10 min)';
+          document.getElementById('swap-shield-label').style.color = 'var(--warn)';
+          startShieldTimer(expiry);
+        } else {
+          localStorage.removeItem(SHIELD_STORAGE_KEY);
+        }
+      }
+    }
 
     function toggleTestnet() {
       const on = document.getElementById('testnet-toggle').checked;
@@ -1528,6 +1698,7 @@
           vaultAddress: effectiveVault,
           chainId,
           ...getAiRequestParams(),
+          slippageBps: getSlippageBps(),
         };
         // Always send operatorAddress when connected — needed for calldata building
         // (pool deployment, swaps, etc.) regardless of vault ownership.
@@ -3524,6 +3695,9 @@
     (function initDelegation() {
       setTimeout(() => refreshDelegationStatus(), 600);
     })();
+
+    // Restore trading settings from localStorage
+    restoreTradeSettings();
 
     /* ================================================================
        Pool Onboarding — show/hide based on vault input

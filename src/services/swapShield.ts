@@ -1,0 +1,431 @@
+/**
+ * Swap Shield — oracle-protected swap validation.
+ *
+ * Compares DEX API quotes against on-chain oracle (BackgeoOracle) TWAP prices
+ * via the vault's `convertTokenAmount()` extension. Blocks swaps where the DEX
+ * quote diverges more than MAX_DIVERGENCE_PCT from the oracle price.
+ *
+ * ## How it works
+ *
+ * 1. Call `vault.convertTokenAmount(tokenIn, amountIn, tokenOut)` via `eth_call`
+ *    — this uses the BackgeoOracle TWAP (up to 5-minute window) to compute the
+ *      oracle-derived expected output for the given input
+ *    — routes through ETH internally when needed (token→ETH→targetToken)
+ * 2. Compare oracle output vs DEX expected output
+ * 3. If the DEX gives significantly less than the oracle predicts, block the swap
+ *
+ * ## Why convertTokenAmount() instead of direct oracle
+ *
+ * The vault's EOracle extension:
+ * - Handles ETH routing automatically (any ERC-20 → any ERC-20 via ETH)
+ * - Uses a 5-minute TWAP window (capped at oracle cardinality)
+ * - Guaranteed coverage for all tokens the vault can hold (the pool cannot
+ *   own a token without a price feed)
+ * - Single eth_call vs. manual PoolKey construction + observe() + tick math
+ *
+ * Direct oracle access (BackgeoOracle.observe()) can be added later for EOA
+ * support using the same SwapShieldResult interface.
+ *
+ * ## Edge cases
+ *
+ * - **No price feed**: convertTokenAmount reverts (division by zero in
+ *   _getSecondsAgos when cardinality=0). We catch this and return
+ *   `code: 'NO_PRICE_FEED'` — the caller decides how to handle it.
+ * - **Native ETH**: EOracle treats address(0) and WETH equivalently.
+ *   We normalize ETH to address(0) before calling.
+ * - **Zero amounts**: Skip the check (nothing to protect).
+ * - **Token sold has no price feed but is in vault**: This can happen when
+ *   tokens are sent to the vault externally. The check degrades gracefully.
+ *
+ * ## Divergence direction
+ *
+ * We only BLOCK when the DEX gives less than the oracle predicts (user getting
+ * a bad deal). When the DEX gives more than the oracle (stale oracle or
+ * favorable route), we allow but log a note.
+ *
+ * ## Independence from NAV shield
+ *
+ * The swap shield is independent of the NAV shield. Both run on every swap.
+ * The swap shield catches bad quotes BEFORE calldata is built (price-level).
+ * The NAV shield catches excessive NAV impact AFTER calldata is built (value-level).
+ * Either can block independently.
+ */
+
+import { type Address } from "viem";
+import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
+import { getClient } from "./vault.js";
+
+// ── Constants ────────────────────────────────────────────────────────
+
+/**
+ * Default maximum allowed divergence from oracle price (5%).
+ * Catches rogue quotes, API compromise, fat-finger errors, and extreme
+ * low-liquidity routing without false-positiving on normal DEX spread.
+ */
+const DEFAULT_MAX_DIVERGENCE_PCT = 5;
+
+/** Native ETH address (zero address) — EOracle treats this equivalently to WETH */
+const NATIVE_ETH = "0x0000000000000000000000000000000000000000" as Address;
+
+/** Common WETH addresses per chain — mapped to address(0) for EOracle */
+const WETH_ADDRESSES: Record<number, string> = {
+  1: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",     // Ethereum
+  10: "0x4200000000000000000000000000000000000006",      // Optimism
+  56: "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",     // BNB (WBNB)
+  130: "0x4200000000000000000000000000000000000006",     // Unichain
+  137: "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",   // Polygon (WMATIC)
+  8453: "0x4200000000000000000000000000000000000006",    // Base
+  42161: "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",  // Arbitrum
+};
+
+/** KV key prefix for swap shield opt-out */
+const SWAP_SHIELD_DISABLED_PREFIX = "swap-shield-disabled:";
+
+/** Opt-out TTL: 10 minutes */
+const SWAP_SHIELD_DISABLE_TTL = 600;
+
+// ── Types ────────────────────────────────────────────────────────────
+
+export interface SwapShieldResult {
+  allowed: boolean;
+  /** Whether oracle comparison was actually performed */
+  verified: boolean;
+  /** Oracle-derived expected output (human-readable) */
+  oracleAmount: string;
+  /** DEX quote expected output (human-readable) */
+  dexAmount: string;
+  /** Divergence percentage (positive = DEX gives less than oracle) */
+  divergencePct: string;
+  reason?: string;
+  /**
+   * Result code:
+   * - 'BLOCKED'       — DEX quote diverges too much from oracle (user getting bad deal)
+   * - 'NO_PRICE_FEED' — oracle has no price feed for one of the tokens
+   * - 'ORACLE_ERROR'  — oracle call failed for another reason
+   * - undefined       — allowed, oracle check passed
+   */
+  code?: "BLOCKED" | "NO_PRICE_FEED" | "ORACLE_ERROR";
+}
+
+// ── Public API ───────────────────────────────────────────────────────
+
+/**
+ * Check if a swap quote from a DEX API diverges from the on-chain oracle price.
+ *
+ * @param vaultAddress - The vault contract address (has EOracle extension)
+ * @param chainId - Chain ID
+ * @param tokenIn - Address of the token being sold
+ * @param tokenOut - Address of the token being bought
+ * @param amountInRaw - Raw amount of tokenIn (in native decimals, as bigint)
+ * @param dexExpectedOutRaw - Raw amount of tokenOut the DEX promises (in native decimals, as bigint)
+ * @param slippageBps - Slippage tolerance used in the DEX quote (basis points)
+ * @param alchemyKey - Alchemy API key for RPC
+ * @param maxDivergencePct - Maximum allowed divergence (default 5%)
+ * @returns SwapShieldResult
+ */
+export async function checkSwapPrice(
+  vaultAddress: Address,
+  chainId: number,
+  tokenIn: Address,
+  tokenOut: Address,
+  amountInRaw: bigint,
+  dexExpectedOutRaw: bigint,
+  slippageBps: number,
+  alchemyKey: string,
+  maxDivergencePct: number = DEFAULT_MAX_DIVERGENCE_PCT,
+): Promise<SwapShieldResult> {
+  // Skip for zero amounts
+  if (amountInRaw === 0n || dexExpectedOutRaw === 0n) {
+    return {
+      allowed: true,
+      verified: false,
+      oracleAmount: "0",
+      dexAmount: "0",
+      divergencePct: "0",
+      reason: "Zero amount — skipping oracle check",
+    };
+  }
+
+  // Normalize native ETH and WETH to address(0) for EOracle
+  const normalizedIn = normalizeTokenAddress(tokenIn, chainId);
+  const normalizedOut = normalizeTokenAddress(tokenOut, chainId);
+
+  // Same token after normalization — skip (wrap/unwrap)
+  if (normalizedIn.toLowerCase() === normalizedOut.toLowerCase()) {
+    return {
+      allowed: true,
+      verified: false,
+      oracleAmount: amountInRaw.toString(),
+      dexAmount: dexExpectedOutRaw.toString(),
+      divergencePct: "0",
+      reason: "Same token (wrap/unwrap) — skipping oracle check",
+    };
+  }
+
+  const publicClient = getClient(chainId, alchemyKey);
+
+  // ── Call convertTokenAmount via eth_call ──
+  let oracleAmountRaw: bigint;
+  try {
+    const result = await publicClient.readContract({
+      address: vaultAddress,
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "convertTokenAmount",
+      args: [normalizedIn, amountInRaw, normalizedOut],
+    });
+
+    oracleAmountRaw = result as bigint;
+
+    // Handle negative amounts (shouldn't happen for positive inputs, but be safe)
+    if (oracleAmountRaw < 0n) oracleAmountRaw = -oracleAmountRaw;
+
+    console.log(
+      `[SwapShield] Oracle: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
+      `(chain=${chainId})`,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+
+    // Detect "no price feed" — convertTokenAmount reverts when oracle cardinality=0
+    // (division by zero in _getSecondsAgos, or observe() reverts on uninitialized pool)
+    const isNoPriceFeed =
+      msg.includes("division") ||
+      msg.includes("revert") ||
+      msg.includes("overflow") ||
+      msg.includes("execution reverted");
+
+    if (isNoPriceFeed) {
+      console.warn(
+        `[SwapShield] ⚠ No oracle price feed available on chain ${chainId}: ${msg.slice(0, 200)}`,
+      );
+      return {
+        allowed: true,
+        verified: false,
+        oracleAmount: "0",
+        dexAmount: dexExpectedOutRaw.toString(),
+        divergencePct: "0",
+        code: "NO_PRICE_FEED",
+        reason:
+          `Oracle price feed not available for this token pair on chain ${chainId}. ` +
+          `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
+      };
+    }
+
+    // Other oracle errors — graceful degradation
+    console.error(`[SwapShield] Oracle error: ${msg.slice(0, 300)}`);
+    return {
+      allowed: true,
+      verified: false,
+      oracleAmount: "0",
+      dexAmount: dexExpectedOutRaw.toString(),
+      divergencePct: "0",
+      code: "ORACLE_ERROR",
+      reason: `Oracle check failed (${msg.slice(0, 200)}). Proceeding without oracle protection.`,
+    };
+  }
+
+  // Oracle returned 0 — can't compare meaningfully
+  if (oracleAmountRaw === 0n) {
+    console.warn("[SwapShield] Oracle returned 0 — skipping comparison");
+    return {
+      allowed: true,
+      verified: false,
+      oracleAmount: "0",
+      dexAmount: dexExpectedOutRaw.toString(),
+      divergencePct: "0",
+      code: "ORACLE_ERROR",
+      reason: "Oracle returned zero amount — cannot verify quote.",
+    };
+  }
+
+  // ── Reverse-engineer the theoretical market price from the DEX quote ──
+  // The DEX quote includes slippage buffer. To compare fairly against the oracle
+  // (which gives the mid-price), we reverse out the slippage:
+  //   theoreticalDexOutput = dexExpectedOut * 10000 / (10000 - slippageBps)
+  // This gives us what the DEX thinks the market price is, without the slippage buffer.
+  const theoreticalDexOut =
+    (dexExpectedOutRaw * 10000n) / (10000n - BigInt(slippageBps));
+
+  // ── Calculate divergence ──
+  // Divergence = how much LESS the DEX gives vs oracle (positive = bad for user)
+  // divergenceBps = (oracleAmount - theoreticalDexOut) * 10000 / oracleAmount
+  let divergenceBps: bigint;
+  if (oracleAmountRaw > theoreticalDexOut) {
+    // DEX gives less than oracle predicts — potentially bad quote
+    divergenceBps =
+      ((oracleAmountRaw - theoreticalDexOut) * 10000n) / oracleAmountRaw;
+  } else {
+    // DEX gives more than oracle — favorable for user (or stale oracle)
+    divergenceBps = 0n;
+  }
+  const divergencePct = Number(divergenceBps) / 100;
+
+  console.log(
+    `[SwapShield] Comparison: oracle=${oracleAmountRaw} dexTheoretical=${theoreticalDexOut} ` +
+    `dexWithSlippage=${dexExpectedOutRaw} divergence=${divergencePct.toFixed(2)}% ` +
+    `(max=${maxDivergencePct}%)`,
+  );
+
+  // ── Enforce threshold ──
+  if (divergencePct > maxDivergencePct) {
+    console.warn(
+      `[SwapShield] ✗ BLOCKED: DEX quote diverges ${divergencePct.toFixed(2)}% from oracle ` +
+      `(max allowed: ${maxDivergencePct}%)`,
+    );
+    return {
+      allowed: false,
+      verified: true,
+      oracleAmount: oracleAmountRaw.toString(),
+      dexAmount: dexExpectedOutRaw.toString(),
+      divergencePct: divergencePct.toFixed(2),
+      code: "BLOCKED",
+      reason:
+        `⚠️ Swap Shield blocked: the DEX quote diverges ${divergencePct.toFixed(2)}% from the oracle price ` +
+        `(max allowed: ${maxDivergencePct}%). ` +
+        `This likely indicates significant price impact, a bad route, or stale liquidity.\n\n` +
+        `To proceed anyway, you can temporarily disable the swap shield (10 min): "disable swap shield"\n` +
+        `Or split the trade into smaller amounts using a TWAP order to reduce price impact.`,
+    };
+  }
+
+  // Log if DEX is suspiciously favorable (>10% better than oracle)
+  if (oracleAmountRaw > 0n && theoreticalDexOut > oracleAmountRaw) {
+    const favorableBps =
+      ((theoreticalDexOut - oracleAmountRaw) * 10000n) / oracleAmountRaw;
+    const favorablePct = Number(favorableBps) / 100;
+    if (favorablePct > 10) {
+      console.warn(
+        `[SwapShield] ⚠ DEX quote ${favorablePct.toFixed(2)}% BETTER than oracle — ` +
+        `oracle may be stale or DEX route includes rebates`,
+      );
+    }
+  }
+
+  console.log(
+    `[SwapShield] ✓ ALLOWED: divergence ${divergencePct.toFixed(2)}% within ${maxDivergencePct}% limit`,
+  );
+
+  return {
+    allowed: true,
+    verified: true,
+    oracleAmount: oracleAmountRaw.toString(),
+    dexAmount: dexExpectedOutRaw.toString(),
+    divergencePct: divergencePct.toFixed(2),
+  };
+}
+
+// ── Opt-out helpers ──────────────────────────────────────────────────
+
+/**
+ * Check if the swap shield is currently disabled for this operator+vault.
+ * Returns true if disabled (opt-out active), false otherwise.
+ */
+export async function isSwapShieldDisabled(
+  kv: KVNamespace,
+  operatorAddress: string,
+  vaultAddress: string,
+): Promise<boolean> {
+  const key = `${SWAP_SHIELD_DISABLED_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
+  const val = await kv.get(key);
+  return val !== null;
+}
+
+/**
+ * Temporarily disable the swap shield (10-minute TTL).
+ */
+export async function disableSwapShield(
+  kv: KVNamespace,
+  operatorAddress: string,
+  vaultAddress: string,
+): Promise<void> {
+  const key = `${SWAP_SHIELD_DISABLED_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
+  await kv.put(key, String(Date.now()), { expirationTtl: SWAP_SHIELD_DISABLE_TTL });
+  console.log(
+    `[SwapShield] Disabled for ${operatorAddress} on vault ${vaultAddress} (10 min TTL)`,
+  );
+}
+
+/**
+ * Re-enable the swap shield (delete opt-out key).
+ */
+export async function enableSwapShield(
+  kv: KVNamespace,
+  operatorAddress: string,
+  vaultAddress: string,
+): Promise<void> {
+  const key = `${SWAP_SHIELD_DISABLED_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
+  await kv.delete(key);
+  console.log(
+    `[SwapShield] Re-enabled for ${operatorAddress} on vault ${vaultAddress}`,
+  );
+}
+
+// ── Slippage KV helpers ──────────────────────────────────────────────
+
+const SLIPPAGE_KEY_PREFIX = "slippage:";
+
+/** Minimum allowed slippage: 0.1% (10 bps) */
+export const MIN_SLIPPAGE_BPS = 10;
+/** Maximum allowed slippage: 5% (500 bps) */
+export const MAX_SLIPPAGE_BPS = 500;
+/** Default slippage: 1% (100 bps) */
+export const DEFAULT_SLIPPAGE_BPS = 100;
+
+/**
+ * Read the operator's stored default slippage from KV.
+ * Returns null if not set (caller should use DEFAULT_SLIPPAGE_BPS).
+ */
+export async function getStoredSlippage(
+  kv: KVNamespace,
+  operatorAddress: string,
+): Promise<number | null> {
+  const raw = await kv.get(`${SLIPPAGE_KEY_PREFIX}${operatorAddress.toLowerCase()}`);
+  if (!raw) return null;
+  const val = parseInt(raw, 10);
+  if (isNaN(val) || val < MIN_SLIPPAGE_BPS || val > MAX_SLIPPAGE_BPS) return null;
+  return val;
+}
+
+/**
+ * Store the operator's default slippage in KV (persistent).
+ */
+export async function setStoredSlippage(
+  kv: KVNamespace,
+  operatorAddress: string,
+  slippageBps: number,
+): Promise<void> {
+  if (slippageBps < MIN_SLIPPAGE_BPS || slippageBps > MAX_SLIPPAGE_BPS) {
+    throw new Error(
+      `Slippage must be between ${MIN_SLIPPAGE_BPS / 100}% (${MIN_SLIPPAGE_BPS} bps) ` +
+      `and ${MAX_SLIPPAGE_BPS / 100}% (${MAX_SLIPPAGE_BPS} bps).`,
+    );
+  }
+  await kv.put(
+    `${SLIPPAGE_KEY_PREFIX}${operatorAddress.toLowerCase()}`,
+    String(slippageBps),
+  );
+}
+
+// ── Internal helpers ─────────────────────────────────────────────────
+
+/**
+ * Normalize token address for EOracle:
+ * - Native ETH (zero address or 0xEeee...) → address(0)
+ * - WETH → address(0)
+ * - Everything else → unchanged
+ */
+function normalizeTokenAddress(token: Address, chainId: number): Address {
+  const lower = token.toLowerCase();
+
+  // Zero address = native ETH
+  if (lower === NATIVE_ETH) return NATIVE_ETH;
+
+  // 0xEeee... convention used by some DEX APIs for native ETH
+  if (lower === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee") return NATIVE_ETH;
+
+  // WETH on this chain → address(0)
+  const weth = WETH_ADDRESSES[chainId];
+  if (weth && lower === weth.toLowerCase()) return NATIVE_ETH;
+
+  return token;
+}

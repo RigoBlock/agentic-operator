@@ -100,6 +100,44 @@ Transfer and Sync are **fundamentally different** despite using the same Across 
 the `opType` parameter passed to `depositV3`. The NAV shield correctly handles both
 because `updateUnitaryValue()` produces the same result as the actual contract.
 
+### Swap Shield (Oracle Price Protection)
+
+```
+RULE: The Swap Shield compares DEX API quotes against the on-chain BackgeoOracle
+      TWAP price. It runs BEFORE calldata is built (price-level check).
+      It is INDEPENDENT of the NAV shield (value-level check). Both run on every swap.
+      The operator can temporarily disable it (10-minute TTL) but it auto-re-enables.
+      When the oracle has no price feed for a token, the shield degrades gracefully
+      (allows the swap with a warning, does NOT block).
+```
+
+- **Service**: `src/services/swapShield.ts`
+- **Uses**: `vault.convertTokenAmount(tokenIn, amountIn, tokenOut)` via `eth_call`
+  — the vault's EOracle extension, which uses the BackgeoOracle 5-minute TWAP
+- **Normalization**: ETH, WETH, address(0), and 0xEeee... all map to address(0)
+- **Reverse slippage**: DEX quotes include slippage buffer. The shield reverses it
+  to get the theoretical market price: `theoreticalOut = dexOut * 10000 / (10000 - slippageBps)`
+- **Divergence calculation**: `(oracleAmount - theoreticalDexOut) / oracleAmount`
+  — only blocks when DEX gives LESS than oracle (user getting bad deal)
+- **Default threshold**: 5% — blocks when DEX output is >5% worse than oracle
+- **Three outcomes**:
+  1. `allowed: true` — divergence within threshold
+  2. `allowed: false, code: 'BLOCKED'` — divergence exceeds threshold
+  3. `allowed: true, code: 'NO_PRICE_FEED'` — oracle has no feed (graceful degradation)
+- **Opt-out**: KV key `swap-shield-disabled:{operator}:{vault}` with 600s TTL
+- **TWAP suggestion**: When blocked, the error message suggests splitting the trade
+  into a TWAP order to reduce price impact
+
+#### Configurable slippage
+
+Slippage is no longer hardcoded. Resolution priority:
+1. Per-request `slippageBps` in the body (from frontend settings)
+2. Stored operator preference in KV (`slippage:{operatorAddress}`)
+3. Default: 100 bps (1%)
+
+Clamped to [10, 500] bps (0.1% to 5%). The LLM CANNOT set slippage directly —
+only the operator via the `set_default_slippage` tool or frontend settings.
+
 ### 3. Auth model — three independent layers
 
 ```
@@ -166,9 +204,10 @@ These files contain security-critical logic. Changes require extra care:
 | File | What it guards |
 |------|---------------|
 | `src/routes/chat.ts` | Auth gate, execution mode resolution |
-| `src/llm/client.ts` | NAV shield pre-check for all swap calldata |
+| `src/llm/client.ts` | NAV shield pre-check + Swap Shield for all swap calldata |
 | `src/services/execution.ts` | 7-point validation, NAV shield at broadcast |
 | `src/services/navGuard.ts` | NAV shield simulation and threshold check |
+| `src/services/swapShield.ts` | Oracle price comparison, slippage storage, opt-out |
 | `src/services/auth.ts` | Signature verification, vault ownership |
 | `src/services/delegation.ts` | On-chain delegation state |
 | `src/services/agentWallet.ts` | CDP Server Wallet (per-vault agent EOA via Coinbase) |
@@ -303,6 +342,7 @@ src/
     auth.ts             ← Signature verification + vault ownership
     execution.ts        ← 7-point validation + NAV shield + broadcast
     navGuard.ts         ← NAV shield simulation (10% threshold)
+    swapShield.ts       ← Oracle price comparison, slippage storage, opt-out
     delegation.ts       ← Delegation state management
     agentWallet.ts      ← CDP Server Wallet (per-vault agent EOA via Coinbase)
     strategy.ts         ← Cron strategies (manual default, autonomous opt-in)

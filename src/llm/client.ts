@@ -64,6 +64,17 @@ import {
   buildWithdrawDelegatorRewardsCalldata,
 } from "../services/grgStaking.js";
 import { checkNavImpact } from "../services/navGuard.js";
+import {
+  checkSwapPrice,
+  isSwapShieldDisabled,
+  disableSwapShield,
+  enableSwapShield,
+  getStoredSlippage,
+  setStoredSlippage,
+  DEFAULT_SLIPPAGE_BPS,
+  MIN_SLIPPAGE_BPS,
+  MAX_SLIPPAGE_BPS,
+} from "../services/swapShield.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
 // These appear as 4-byte hex prefixes in "execution reverted" messages.
@@ -1331,15 +1342,15 @@ export async function executeToolCall(
         }
       }
 
+      // Resolve slippage: request body → KV stored default → 100 bps
+      const resolvedSlippage = await resolveSlippage(env, ctx);
+
       const intent: SwapIntent = {
         tokenIn: args.tokenIn as string,
         tokenOut: args.tokenOut as string,
         amountIn: args.amountIn as string | undefined,
         amountOut: args.amountOut as string | undefined,
-        // SECURITY: Slippage is hardcoded server-side at 1% (100 bps).
-        // Not exposed to the LLM to prevent a compromised agent from
-        // setting arbitrary slippage and enabling sandwich attacks.
-        slippageBps: 100,
+        slippageBps: resolvedSlippage,
       };
       if (!intent.amountIn && !intent.amountOut) {
         throw new Error("Either amountIn or amountOut must be specified.");
@@ -1386,13 +1397,15 @@ export async function executeToolCall(
         }
       }
 
+      // Resolve slippage: request body → KV stored default → 100 bps
+      const resolvedSlippage = await resolveSlippage(env, ctx);
+
       const intent: SwapIntent = {
         tokenIn: args.tokenIn as string,
         tokenOut: args.tokenOut as string,
         amountIn: args.amountIn as string | undefined,
         amountOut: args.amountOut as string | undefined,
-        // SECURITY: Slippage hardcoded at 1% — not controllable by the LLM.
-        slippageBps: 100,
+        slippageBps: resolvedSlippage,
       };
       if (!intent.amountIn && !intent.amountOut) {
         throw new Error("Either amountIn or amountOut must be specified.");
@@ -1454,6 +1467,13 @@ export async function executeToolCall(
       if (dex === "0x" || dex === "zerox") {
         // ── 0x AllowanceHolder flow ──
         const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
+
+        // ── Swap Shield — oracle price check ──
+        await runSwapShield(
+          env, ctx, intent,
+          zxQuote.sellAmount, zxQuote.decimalsIn,
+          zxQuote.buyAmount, zxQuote.decimalsOut,
+        );
 
         // The 0x API returns a complete transaction targeting AllowanceHolder.
         // For the vault, we send the 0x calldata TO the vault address.
@@ -1531,6 +1551,15 @@ export async function executeToolCall(
 
       // 2. Get quote from Uniswap Trading API
       const quote = await getUniswapQuote(env, intent, ctx.chainId, ctx.vaultAddress);
+
+      // ── Swap Shield — oracle price check ──
+      if (quote.quote.input?.amount && quote.quote.output?.amount) {
+        await runSwapShield(
+          env, ctx, intent,
+          quote.quote.input.amount, quote.decimalsIn,
+          quote.quote.output.amount, quote.decimalsOut,
+        );
+      }
 
       // ── Balance pre-check for exact-output swaps ──
       // For exact-output, we only know required input after the quote. Check here
@@ -1771,6 +1800,67 @@ export async function executeToolCall(
       return {
         message: `Switched to ${match.name} (chain ${match.id}). All subsequent operations will use this chain.`,
         chainSwitch: match.id,
+      };
+    }
+
+    // ── Trading Settings ────────────────────────────────────────────
+
+    case "set_default_slippage": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+      const raw = (args.slippage as string).trim();
+      let bps: number;
+      const num = parseFloat(raw);
+      if (isNaN(num) || num <= 0) {
+        throw new Error("Invalid slippage value. Provide a positive number (e.g., '0.5' for 0.5%).");
+      }
+      // Heuristic: values ≤ 50 are percentages, > 50 are bps
+      if (num <= 50) {
+        bps = Math.round(num * 100);
+      } else {
+        bps = Math.round(num);
+      }
+      if (bps < MIN_SLIPPAGE_BPS || bps > MAX_SLIPPAGE_BPS) {
+        throw new Error(
+          `Slippage must be between ${MIN_SLIPPAGE_BPS / 100}% and ${MAX_SLIPPAGE_BPS / 100}%. ` +
+          `Got: ${bps / 100}% (${bps} bps).`,
+        );
+      }
+      await setStoredSlippage(env.KV, ctx.operatorAddress, bps);
+      return {
+        message: `✅ Default slippage set to ${bps / 100}% (${bps} bps). This applies to all future swaps until changed.`,
+      };
+    }
+
+    case "disable_swap_shield": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+      await disableSwapShield(
+        env.KV,
+        ctx.operatorAddress,
+        ctx.vaultAddress as string,
+      );
+      return {
+        message:
+          "⚠️ Swap Shield disabled for 10 minutes. During this time, swaps will NOT be checked " +
+          "against oracle prices. The shield will re-enable automatically.\n\n" +
+          "The NAV shield (10% max loss) still protects against catastrophic trades.",
+      };
+    }
+
+    case "enable_swap_shield": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+      await enableSwapShield(
+        env.KV,
+        ctx.operatorAddress,
+        ctx.vaultAddress as string,
+      );
+      return {
+        message: "✅ Swap Shield re-enabled. All swaps will be checked against oracle prices.",
       };
     }
 
@@ -3815,6 +3905,108 @@ function levenshtein(a: string, b: string): number {
 function resolveChainName(chainId: number): string {
   const allChains = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS];
   return allChains.find((c) => c.id === chainId)?.name || `Chain ${chainId}`;
+}
+
+/**
+ * Resolve slippage tolerance (bps) — priority:
+ *   1. Per-request value from context (body.slippageBps)
+ *   2. Stored operator preference in KV
+ *   3. Default 100 bps (1%)
+ *
+ * SECURITY: Clamped to [MIN_SLIPPAGE_BPS, MAX_SLIPPAGE_BPS].
+ * The LLM CANNOT set slippage — only the operator via settings or chat tool.
+ */
+async function resolveSlippage(env: Env, ctx: RequestContext): Promise<number> {
+  // 1. Per-request override from body
+  if (ctx.slippageBps != null) {
+    const clamped = Math.max(MIN_SLIPPAGE_BPS, Math.min(MAX_SLIPPAGE_BPS, ctx.slippageBps));
+    return clamped;
+  }
+
+  // 2. Stored operator preference
+  if (ctx.operatorAddress && env.KV) {
+    const stored = await getStoredSlippage(env.KV, ctx.operatorAddress);
+    if (stored !== null) return stored;
+  }
+
+  // 3. Default
+  return DEFAULT_SLIPPAGE_BPS;
+}
+
+/**
+ * Run the Swap Shield oracle check. Compares DEX quote against on-chain oracle
+ * and throws a descriptive error if the quote diverges too much.
+ *
+ * Called from both 0x and Uniswap flows in build_vault_swap.
+ * Skipped when the operator has temporarily disabled the shield.
+ */
+async function runSwapShield(
+  env: Env,
+  ctx: RequestContext,
+  intent: SwapIntent,
+  sellAmountRaw: string,
+  sellDecimals: number,
+  buyAmountRaw: string,
+  buyDecimals: number,
+): Promise<void> {
+  // Check opt-out
+  if (ctx.operatorAddress && env.KV) {
+    const disabled = await isSwapShieldDisabled(
+      env.KV,
+      ctx.operatorAddress,
+      ctx.vaultAddress as string,
+    );
+    if (disabled) {
+      console.log("[SwapShield] Temporarily disabled by operator — skipping");
+      return;
+    }
+  }
+
+  // Resolve token addresses
+  let tokenInAddr: Address;
+  let tokenOutAddr: Address;
+  try {
+    tokenInAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn) as Address;
+    tokenOutAddr = await resolveTokenAddress(ctx.chainId, intent.tokenOut) as Address;
+  } catch {
+    console.warn("[SwapShield] Token address resolution failed — skipping oracle check");
+    return;
+  }
+
+  const result = await checkSwapPrice(
+    ctx.vaultAddress as Address,
+    ctx.chainId,
+    tokenInAddr,
+    tokenOutAddr,
+    BigInt(sellAmountRaw),
+    BigInt(buyAmountRaw),
+    intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
+    env.ALCHEMY_API_KEY,
+  );
+
+  if (!result.allowed) {
+    // Build a rich error with TWAP suggestion
+    const sellSymbol = intent.tokenIn;
+    const buySymbol = intent.tokenOut;
+    const sellAmt = intent.amountIn || formatUnits(BigInt(sellAmountRaw), sellDecimals);
+    throw new Error(
+      `⚠️ Swap Shield blocked this trade.\n\n` +
+      `The DEX quote diverges ${result.divergencePct}% from the on-chain oracle price, ` +
+      `exceeding the 5% safety threshold.\n\n` +
+      `This usually indicates significant price impact from the trade size.\n\n` +
+      `Options:\n` +
+      `1. **Split with TWAP** — create a TWAP order to execute ${sellAmt} ${sellSymbol} → ${buySymbol} ` +
+      `in smaller slices over time, reducing price impact\n` +
+      `2. **Reduce amount** — try a smaller trade\n` +
+      `3. **Disable shield** — say "disable swap shield" for 10 minutes ` +
+      `(use with caution — you accept full price impact risk)\n`,
+    );
+  }
+
+  // Log non-blocking results
+  if (result.code === "NO_PRICE_FEED" || result.code === "ORACLE_ERROR") {
+    console.warn(`[SwapShield] Non-blocking: ${result.reason}`);
+  }
 }
 
 /**
