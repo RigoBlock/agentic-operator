@@ -84,6 +84,21 @@ const POOL_ERROR_SELECTORS: Record<string, string> = {
   "0xf722177f": "InvalidQuoteTimestamp — the bridge quote expired before submission. Retry to get a fresh quote.",
   "0x0f6e887f": "EffectiveSupplyTooLow — a prior bridge left the source pool below minimum operating supply. The pool cannot send more assets until supply is replenished on that chain.",
   "0x162e92dd": "SameChainTransfer — the source and destination chain resolved to the same chain. This usually means the NAV equalization auto-corrected the direction incorrectly.",
+  "0xec8f2f9a": "TransferFromRecipientNotSettler — the 0x Settler contract rejected this swap because the vault is not recognized as a valid recipient. This token pair may not be supported via 0x for vault swaps. Try using Uniswap instead (omit 'using 0x').",
+};
+
+/**
+ * Map hallucinated LLM tool names to the correct canonical tool name.
+ * Workers AI (Llama) sometimes calls "swap" instead of "build_vault_swap",
+ * "quote" instead of "get_swap_quote", etc.
+ */
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  swap: "build_vault_swap",
+  quote: "get_swap_quote",
+  get_quote: "get_swap_quote",
+  swap_tokens: "build_vault_swap",
+  execute_swap: "build_vault_swap",
+  trade: "build_vault_swap",
 };
 
 /**
@@ -106,10 +121,10 @@ function friendlyError(raw: string): string {
   if (/EffectiveSupplyTooLow/i.test(raw)) {
     return POOL_ERROR_SELECTORS["0x0f6e887f"];
   }
-  // Unknown tool
+  // Unknown tool — after aliasing, this means the tool genuinely doesn't exist
   const unknownTool = raw.match(/Unknown tool:\s*(\S+)/);
   if (unknownTool) {
-    return `Tool "${unknownTool[1]}" does not exist. This is a system error — please try again.`;
+    return `Tool "${unknownTool[1]}" is not available. Please try rephrasing your request.`;
   }
   // Pool not initialized
   if (/pool not initialized/i.test(raw) || /pool not found/i.test(raw) || /exact pool key/i.test(raw)) {
@@ -126,8 +141,9 @@ function friendlyError(raw: string): string {
   }
   // Decode known 4-byte pool/bridge error selectors from "execution reverted" messages.
   // These appear as 0x<8 hex chars> in the revert data — map them to human-readable errors.
+  // NOTE: No word boundary (\b) after the 8 hex chars — revert data always has more hex following.
   if (/execution reverted/i.test(raw)) {
-    const selMatch = raw.match(/0x([0-9a-fA-F]{8})\b/);
+    const selMatch = raw.match(/0x([0-9a-fA-F]{8})/);
     if (selMatch) {
       const sel = `0x${selMatch[1].toLowerCase()}`;
       if (POOL_ERROR_SELECTORS[sel]) return `On-chain revert: ${POOL_ERROR_SELECTORS[sel]}`;
@@ -140,6 +156,26 @@ function friendlyError(raw: string): string {
   if (raw.length < 200) return raw;
   // Truncate long errors (increased from 150 to preserve more context)
   return raw.slice(0, 200).replace(/\s+\S*$/, "") + "…";
+}
+
+/**
+ * Detect text that is just a tool-call recommendation (e.g. "Your function call
+ * should be: {JSON}") rather than actual analysis or plan text. These should NOT
+ * be shown as "Agent plan" — they're noise from the LLM failing to use structured
+ * tool calls.
+ */
+function looksLikeToolCallText(text: string): boolean {
+  // Text that's mostly a JSON tool call with optional prefix/suffix
+  const stripped = text.replace(/```(?:json)?\s*\n?/g, '').trim();
+  // Starts with or contains a tool-call-shaped JSON object
+  if (/(?:function.?call|should\s+(?:be|call)|here\s+is|call\s+the\s+tool)\s*:?\s*\{/i.test(stripped)) return true;
+  // Text is predominantly JSON (>60% of content is inside braces)
+  const braceStart = stripped.indexOf('{');
+  if (braceStart >= 0 && braceStart < 80) {
+    const jsonPart = extractBalancedBraces(stripped.slice(braceStart));
+    if (jsonPart && jsonPart.length > stripped.length * 0.5) return true;
+  }
+  return false;
 }
 
 /**
@@ -280,6 +316,8 @@ async function callWorkersAI(
     if (textContent) {
       const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
       const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
+      const isValidTool = (n: string) => validTools.includes(n) || validTools.includes(TOOL_NAME_ALIASES[n] || '');
+      const resolveTool = (n: string) => validTools.includes(n) ? n : (TOOL_NAME_ALIASES[n] || n);
 
       let extractedFnName: string | undefined;
       let extractedFnArgs: string | undefined;
@@ -291,8 +329,8 @@ async function callWorkersAI(
         const fnName = fwdMatch[1];
         const afterKey = cleaned.slice(fwdMatch.index! + fwdMatch[0].length);
         const args = extractBalancedBraces(afterKey);
-        if (args !== null && validTools.includes(fnName)) {
-          extractedFnName = fnName;
+        if (args !== null && isValidTool(fnName)) {
+          extractedFnName = resolveTool(fnName);
           extractedFnArgs = args;
         }
       }
@@ -307,8 +345,8 @@ async function callWorkersAI(
           if (args !== null) {
             const rest = afterParams.slice(args.length).replace(/^\s*}\s*/, '');
             const nameAfter = rest.match(/,\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"/);
-            if (nameAfter && validTools.includes(nameAfter[1])) {
-              extractedFnName = nameAfter[1];
+            if (nameAfter && isValidTool(nameAfter[1])) {
+              extractedFnName = resolveTool(nameAfter[1]);
               extractedFnArgs = args;
             }
           }
@@ -363,6 +401,34 @@ async function callWorkersAI(
   let toolCalls = hasToolCalls ? result.tool_calls : undefined;
   let textContent: string | null = typeof result.response === 'string' ? result.response : null;
 
+  // Resolve tool name aliases in structured tool_calls (e.g. "swap" → "build_vault_swap").
+  // If ALL tool_calls have unknown names even after aliasing, discard them and try
+  // text-embedded extraction instead — the text often contains the correct tool name.
+  if (hasToolCalls && toolCalls) {
+    const validTools = new Set(tools?.map(t => t.function?.name).filter(Boolean) || []);
+    let allUnknown = true;
+    for (const tc of toolCalls) {
+      const rawName = tc.function?.name || tc.name || "";
+      const aliased = TOOL_NAME_ALIASES[rawName];
+      if (aliased) {
+        console.log(`[Workers AI] Tool alias in structured call: "${rawName}" → "${aliased}"`);
+        if (tc.function) tc.function.name = aliased;
+        else tc.name = aliased;
+      }
+      const finalName = tc.function?.name || tc.name || "";
+      if (validTools.has(finalName) || TOOL_NAME_ALIASES[finalName]) {
+        allUnknown = false;
+      }
+    }
+    // If all structured tool_calls are for unknown tools, discard them so
+    // text-embedded extraction has a chance to find the correct tool.
+    if (allUnknown && textContent) {
+      console.warn(`[Workers AI] All structured tool_calls have unknown names — discarding, will try text extraction`);
+      hasToolCalls = false;
+      toolCalls = undefined;
+    }
+  }
+
   // ── Extract DeepSeek R1 reasoning (<think>...</think> blocks) ──
   // The reasoning trace is stored on the response object for the caller to surface.
   let reasoning: string | null = null;
@@ -387,6 +453,8 @@ async function callWorkersAI(
     // Strip markdown code fences if present
     const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
     const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
+    const isValidTool = (n: string) => validTools.includes(n) || validTools.includes(TOOL_NAME_ALIASES[n] || '');
+    const resolveTool = (n: string) => validTools.includes(n) ? n : (TOOL_NAME_ALIASES[n] || n);
 
     // Try multiple patterns — Llama sometimes outputs different JSON structures
     let extractedFnName: string | undefined;
@@ -399,8 +467,8 @@ async function callWorkersAI(
       const fnName = fwdMatch[1];
       const afterKey = cleaned.slice(fwdMatch.index! + fwdMatch[0].length);
       const args = extractBalancedBraces(afterKey);
-      if (args !== null && validTools.includes(fnName)) {
-        extractedFnName = fnName;
+      if (args !== null && isValidTool(fnName)) {
+        extractedFnName = resolveTool(fnName);
         extractedFnArgs = args;
       }
     }
@@ -416,8 +484,8 @@ async function callWorkersAI(
           // After the args object, look for the name key
           const rest = afterParams.slice(args.length).replace(/^\s*}\s*/, '');
           const nameAfter = rest.match(/,\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"/);
-          if (nameAfter && validTools.includes(nameAfter[1])) {
-            extractedFnName = nameAfter[1];
+          if (nameAfter && isValidTool(nameAfter[1])) {
+            extractedFnName = resolveTool(nameAfter[1]);
             extractedFnArgs = args;
           }
         }
@@ -725,8 +793,9 @@ ${executionModeNote}${contextDocsBlock}`;
   // For models that return both text + tool_calls (OpenRouter, OpenAI), this shows the
   // model's plan before tool execution starts. Workers AI discards text when tool_calls
   // are present, so this is a no-op for the default path.
+  // SKIP text that's just a JSON tool call recommendation — it's noise, not analysis.
   const firstCallText = choice.message.content?.trim();
-  if (firstCallText) {
+  if (firstCallText && !looksLikeToolCallText(firstCallText)) {
     onStreamEvent?.({ type: "text", content: firstCallText });
   }
   let orchestrationReasoning: string = reasoning ||
@@ -793,7 +862,7 @@ ${executionModeNote}${contextDocsBlock}`;
           onStreamEvent?.({ type: "reasoning", content: dsReasoning });
         }
         const dsText = dsChoice.message.content?.trim();
-        if (dsText) {
+        if (dsText && !looksLikeToolCallText(dsText)) {
           onStreamEvent?.({ type: "text", content: dsText });
         }
         orchestrationChoice = dsChoice;
@@ -1183,7 +1252,7 @@ ${executionModeNote}${contextDocsBlock}`;
         const isRepeatOfToolResult = toolCallResults.some(
           tc => tc.error && tc.result && followUpText.includes(tc.result.replace(/^Error:\s*/i, '').slice(0, 50)),
         );
-        if (!isErrorEcho && !isRepeatOfToolResult) {
+        if (!isErrorEcho && !isRepeatOfToolResult && !looksLikeToolCallText(followUpText)) {
           onStreamEvent?.({ type: "text", content: followUpText });
         }
       }
@@ -1223,28 +1292,39 @@ ${executionModeNote}${contextDocsBlock}`;
   // user intent matches a deterministic command, execute fast-path now.
   if (deferredFastPath) {
     console.log(`[LLM] Deferred fast-path after first model pass: ${deferredFastPath.name}`);
+    let fpDex: string | undefined;
+    if (deferredFastPath.name.startsWith("gmx_")) fpDex = "GMX";
+    if (deferredFastPath.name === "get_lp_positions") fpDex = "Uniswap";
+    if (deferredFastPath.name === "build_vault_swap" || deferredFastPath.name === "get_swap_quote") {
+      const dexArg = String((deferredFastPath.args as Record<string, unknown>).dex || "uniswap").toLowerCase();
+      fpDex = dexArg === "0x" ? "0x" : "Uniswap";
+    }
     try {
       const toolResult = await executeToolCall(env, ctx, deferredFastPath.name, deferredFastPath.args);
-      let dexProvider: string | undefined;
-      if (deferredFastPath.name.startsWith("gmx_")) dexProvider = "GMX";
-      if (deferredFastPath.name === "get_lp_positions") dexProvider = "Uniswap";
-      if (deferredFastPath.name === "build_vault_swap" || deferredFastPath.name === "get_swap_quote") {
-        const dexArg = String((deferredFastPath.args as Record<string, unknown>).dex || "uniswap").toLowerCase();
-        dexProvider = dexArg === "0x" ? "0x" : "Uniswap";
-      }
       return {
         reply: toolResult.message,
         toolCalls: [{ name: deferredFastPath.name, arguments: deferredFastPath.args, result: toolResult.message, error: false }],
         transaction: toolResult.transaction,
         chainSwitch: toolResult.chainSwitch,
         suggestions: toolResult.suggestions,
-        dexProvider,
+        dexProvider: fpDex,
         reasoning: reasoning || fastPathReasoning,
         modelsUsed,
         finalModel: "tooling",
       };
     } catch (err) {
-      console.log(`[LLM] Deferred fast-path error, returning model response: ${err}`);
+      // Don't silently swallow — return the error so the user knows why the swap failed.
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      const friendly = friendlyError(sanitizeError(rawMsg));
+      console.log(`[LLM] Deferred fast-path error: ${friendly}`);
+      return {
+        reply: friendly,
+        toolCalls: [{ name: deferredFastPath.name, arguments: deferredFastPath.args, result: `Error: ${friendly}`, error: true }],
+        dexProvider: fpDex,
+        reasoning: reasoning || fastPathReasoning,
+        modelsUsed,
+        finalModel: "tooling",
+      };
     }
   }
 
@@ -1408,7 +1488,12 @@ export async function executeToolCall(
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolResult> {
-  switch (name) {
+  // Resolve hallucinated tool names to canonical names
+  const resolvedName = TOOL_NAME_ALIASES[name] || name;
+  if (resolvedName !== name) {
+    console.log(`[LLM] Tool name alias: "${name}" → "${resolvedName}"`);
+  }
+  switch (resolvedName) {
     case "get_swap_quote": {
       // Auto-switch chain if specified
       let chainSwitched: number | undefined;
