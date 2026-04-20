@@ -3500,14 +3500,26 @@
 
         const setupData = await setupRes.json();
 
-        const safeAgentAddr = escapeHtml(setupData.agentAddress);
-        // Show agent wallet info
+        const rawAgentAddr = String(setupData.agentAddress || "");
+        // Show agent wallet info using DOM APIs — avoids inline-onclick injection risk
+        // because escapeHtml does not escape single-quotes.
         const infoEl = document.getElementById('delegation-agent-info');
         infoEl.innerHTML = `
-          <div class="row"><span class="label">Agent Wallet</span><span class="value copyable-addr" onclick="copyToClipboard('${safeAgentAddr}')" title="Click to copy">${safeAgentAddr}</span></div>
+          <div class="row" id="delegation-agent-row"></div>
           <div class="row"><span class="label">Vault</span><span class="value">${escapeHtml(vault.slice(0,6))}…${escapeHtml(vault.slice(-4))}</span></div>
           <div class="row"><span class="label">Chain</span><span class="value">${CHAIN_NAMES[currentChainId] || currentChainId}</span></div>
         `;
+        const agentRow = document.getElementById('delegation-agent-row');
+        const agentLabel = document.createElement('span');
+        agentLabel.className = 'label';
+        agentLabel.textContent = 'Agent Wallet';
+        const agentValue = document.createElement('span');
+        agentValue.className = 'value copyable-addr';
+        agentValue.title = 'Click to copy';
+        agentValue.textContent = rawAgentAddr;
+        agentValue.addEventListener('click', () => copyToClipboard(rawAgentAddr));
+        agentRow.appendChild(agentLabel);
+        agentRow.appendChild(agentValue);
         infoEl.style.display = '';
 
         // ── Step 2: Ensure wallet is on the correct chain ──

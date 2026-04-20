@@ -210,41 +210,61 @@ export async function checkSwapPrice(
       `[SwapShield] Oracle: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
       `(chain=${chainId})`,
     );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+  } catch {
+    // convertTokenAmount reverted. Use hasPriceFeed to distinguish:
+    //   • Feed genuinely absent    → NO_PRICE_FEED (graceful degradation)
+    //   • Vault has no EOracle ext → ORACLE_ERROR
+    //   • Any other unexpected revert after confirming feeds exist → ORACLE_ERROR
+    // This avoids fragile string-matching and correctly classifies vaults
+    // that do not implement the EOracle extension as ORACLE_ERROR rather than
+    // silently claiming the feed is missing.
+    try {
+      const [tokenInHasFeed, tokenOutHasFeed] = (await Promise.all([
+        publicClient.readContract({
+          address: vaultAddress,
+          abi: RIGOBLOCK_VAULT_ABI,
+          functionName: "hasPriceFeed",
+          args: [normalizedIn],
+        }),
+        publicClient.readContract({
+          address: vaultAddress,
+          abi: RIGOBLOCK_VAULT_ABI,
+          functionName: "hasPriceFeed",
+          args: [normalizedOut],
+        }),
+      ])) as [boolean, boolean];
 
-    // Detect "no price feed" — convertTokenAmount is the vault's EOracle extension.
-    // ALL reverts from this function are oracle-related: cardinality=0 (division by zero
-    // in _getSecondsAgos), uninitialized pool (observe() reverts), or missing feed.
-    // Non-revert errors (network timeout, RPC down) fall through to ORACLE_ERROR.
-    const msgLower = msg.toLowerCase();
-    const isRevert =
-      msgLower.includes("revert") ||
-      msgLower.includes("execution reverted") ||
-      msgLower.includes("division") ||
-      msgLower.includes("overflow") ||
-      msgLower.includes("cardinality") ||
-      msgLower.includes("not initialized");
+      if (!tokenInHasFeed || !tokenOutHasFeed) {
+        const missingToken = !tokenInHasFeed ? normalizedIn : normalizedOut;
+        console.warn(
+          `[SwapShield] ⚠ No oracle price feed for token ${missingToken} on chain ${chainId}`,
+        );
+        return {
+          allowed: true,
+          verified: false,
+          oracleAmount: "0",
+          dexAmount: dexExpectedOutRaw.toString(),
+          divergencePct: "0",
+          code: "NO_PRICE_FEED",
+          reason:
+            `Oracle price feed not available for this token pair on chain ${chainId}. ` +
+            `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
+        };
+      }
 
-    if (isRevert) {
-      console.warn(
-        `[SwapShield] ⚠ No oracle price feed available on chain ${chainId}: ${msg.slice(0, 200)}`,
+      // hasPriceFeed returned true but convertTokenAmount still reverted —
+      // unexpected condition (e.g. cardinality too low, pool not initialized).
+      console.error(
+        `[SwapShield] convertTokenAmount reverted despite feeds reporting available on chain ${chainId}`,
       );
-      return {
-        allowed: true,
-        verified: false,
-        oracleAmount: "0",
-        dexAmount: dexExpectedOutRaw.toString(),
-        divergencePct: "0",
-        code: "NO_PRICE_FEED",
-        reason:
-          `Oracle price feed not available for this token pair on chain ${chainId}. ` +
-          `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
-      };
+    } catch {
+      // hasPriceFeed itself reverted — vault likely does not implement EOracle extension,
+      // or the RPC is down / wrong chain. Both cases should NOT be treated as missing feed.
+      console.error(
+        `[SwapShield] hasPriceFeed call failed — vault may not implement EOracle on chain ${chainId}`,
+      );
     }
 
-    // Other oracle errors — graceful degradation
-    console.error(`[SwapShield] Oracle error: ${msg.slice(0, 300)}`);
     return {
       allowed: true,
       verified: false,
@@ -252,7 +272,9 @@ export async function checkSwapPrice(
       dexAmount: dexExpectedOutRaw.toString(),
       divergencePct: "0",
       code: "ORACLE_ERROR",
-      reason: `Oracle check failed (${msg.slice(0, 200)}). Proceeding without oracle protection.`,
+      reason:
+        `Oracle check failed on chain ${chainId}. ` +
+        `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
     };
   }
 

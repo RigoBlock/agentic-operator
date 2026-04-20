@@ -223,8 +223,11 @@ export const DOMAIN_PROMPTS: Record<DomainKey, string> = {
 
 SWAP SHIELD (Oracle Protection):
 Every swap is automatically checked against the on-chain BackgeoOracle TWAP price.
-If the DEX quote diverges more than 5% from the oracle price, the swap is BLOCKED.
-This catches bad routes, stale liquidity, and excessive price impact.
+The check is asymmetric and two-sided:
+- If the DEX quote is more than 5% WORSE than the oracle price, the swap is BLOCKED.
+  This catches bad routes, stale liquidity, and excessive price impact.
+- If the DEX quote is more than 10% BETTER than the oracle price, the swap is also BLOCKED.
+  This catches stale oracle conditions and manipulated routes that could expose the vault to sandwich attacks.
 - When a swap is blocked by the Swap Shield, explain the divergence and suggest:
   1. Using a TWAP order to split the trade into smaller slices
   2. Reducing the trade amount

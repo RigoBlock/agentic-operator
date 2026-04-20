@@ -1672,10 +1672,14 @@ export async function executeToolCall(
         const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
 
         // ── Swap Shield — oracle price check ──
+        // Pass addresses already resolved by the 0x API so we avoid a
+        // redundant resolver round-trip and never skip the check on transient failures.
         await runSwapShield(
           env, ctx, intent,
           zxQuote.sellAmount, zxQuote.decimalsIn,
           zxQuote.buyAmount,
+          zxQuote.sellToken as Address,
+          zxQuote.buyToken as Address,
         );
 
         // The 0x API returns a complete transaction targeting AllowanceHolder.
@@ -1756,11 +1760,15 @@ export async function executeToolCall(
       const quote = await getUniswapQuote(env, intent, ctx.chainId, ctx.vaultAddress);
 
       // ── Swap Shield — oracle price check ──
+      // Pass addresses already resolved by Uniswap API so we avoid a
+      // redundant resolver round-trip and never skip the check on transient failures.
       if (quote.quote.input?.amount && quote.quote.output?.amount) {
         await runSwapShield(
           env, ctx, intent,
           quote.quote.input.amount, quote.decimalsIn,
           quote.quote.output.amount,
+          quote.quote.input.token as Address,
+          quote.quote.output.token as Address,
         );
       }
 
@@ -4170,6 +4178,8 @@ async function runSwapShield(
   sellAmountRaw: string,
   sellDecimals: number,
   buyAmountRaw: string,
+  resolvedTokenIn?: Address,
+  resolvedTokenOut?: Address,
 ): Promise<void> {
   // Check opt-out
   if (isVerifiedOperatorContext(ctx) && env.KV) {
@@ -4184,15 +4194,23 @@ async function runSwapShield(
     }
   }
 
-  // Resolve token addresses
+  // Use pre-resolved addresses from quote path when available.
+  // Falling back to runtime resolution is kept for compatibility, but if it
+  // fails we throw rather than silently skip the oracle check.
   let tokenInAddr: Address;
   let tokenOutAddr: Address;
-  try {
-    tokenInAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn) as Address;
-    tokenOutAddr = await resolveTokenAddress(ctx.chainId, intent.tokenOut) as Address;
-  } catch {
-    console.warn("[SwapShield] Token address resolution failed — skipping oracle check");
-    return;
+  if (resolvedTokenIn && resolvedTokenOut) {
+    tokenInAddr = resolvedTokenIn;
+    tokenOutAddr = resolvedTokenOut;
+  } else {
+    try {
+      tokenInAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn) as Address;
+      tokenOutAddr = await resolveTokenAddress(ctx.chainId, intent.tokenOut) as Address;
+    } catch (error) {
+      throw new Error(
+        `Swap Shield cannot run: token address resolution failed — ${sanitizeError(error)}`,
+      );
+    }
   }
 
   const result = await checkSwapPrice(

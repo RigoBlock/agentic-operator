@@ -126,7 +126,12 @@ RULE: The Swap Shield compares DEX API quotes against the on-chain BackgeoOracle
 - **Three outcomes**:
   1. `allowed: true` — divergence within threshold
   2. `allowed: false, code: 'BLOCKED'` — divergence exceeds threshold
-  3. `allowed: true, code: 'NO_PRICE_FEED'` — oracle has no feed (graceful degradation)
+  3. `allowed: false, code: 'INVALID_QUOTE'` — non-zero input but zero expected output
+  4. `allowed: true, code: 'NO_PRICE_FEED'` — `hasPriceFeed()` returned false for a token (graceful degradation)
+  5. `allowed: true, code: 'ORACLE_ERROR'` — unexpected oracle revert or vault has no EOracle extension (graceful degradation)
+- **Oracle revert classification**: On `convertTokenAmount` revert, `hasPriceFeed(tokenIn)` and `hasPriceFeed(tokenOut)` are called.
+  If any returns false → `NO_PRICE_FEED`. If `hasPriceFeed` itself reverts (vault has no EOracle) or feeds exist but call still fails → `ORACLE_ERROR`.
+  Never use fragile string-matching on error messages for security-critical classification.
 - **Opt-out**: KV key `swap-shield-disabled:{operator}:{vault}` with 600s TTL
 - **TWAP suggestion**: When blocked, the error message suggests splitting the trade
   into a TWAP order to reduce price impact

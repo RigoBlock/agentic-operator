@@ -157,8 +157,12 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.divergencePct).toBe("3.00");
   });
 
-  it("gracefully handles missing price feed", async () => {
-    mockReadContract.mockRejectedValue(new Error("execution reverted"));
+  it("gracefully handles missing price feed (hasPriceFeed returns false)", async () => {
+    // convertTokenAmount reverts, then hasPriceFeed reports feed absent
+    mockReadContract
+      .mockRejectedValueOnce(new Error("execution reverted"))   // convertTokenAmount
+      .mockResolvedValueOnce(false)                              // hasPriceFeed(tokenIn)
+      .mockResolvedValueOnce(true);                             // hasPriceFeed(tokenOut)
 
     const result = await checkSwapPrice(
       VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -171,6 +175,43 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
     expect(result.code).toBe("NO_PRICE_FEED");
+  });
+
+  it("classifies ORACLE_ERROR when hasPriceFeed returns true but convertTokenAmount still reverts", async () => {
+    // convertTokenAmount reverts, but hasPriceFeed says feeds are available → unexpected condition
+    mockReadContract
+      .mockRejectedValueOnce(new Error("execution reverted"))   // convertTokenAmount
+      .mockResolvedValueOnce(true)                               // hasPriceFeed(tokenIn)
+      .mockResolvedValueOnce(true);                             // hasPriceFeed(tokenOut)
+
+    const result = await checkSwapPrice(
+      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      1n * 10n ** 18n,
+      1000n * 10n ** 18n,
+      100,
+      ALCHEMY_KEY,
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("ORACLE_ERROR");
+  });
+
+  it("classifies ORACLE_ERROR when vault has no EOracle extension (hasPriceFeed also reverts)", async () => {
+    // All readContract calls throw — vault likely doesn't implement EOracle
+    mockReadContract.mockRejectedValue(new Error("execution reverted"));
+
+    const result = await checkSwapPrice(
+      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      1n * 10n ** 18n,
+      1000n * 10n ** 18n,
+      100,
+      ALCHEMY_KEY,
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("ORACLE_ERROR");
   });
 
   it("blocks invalid quote when expected output is zero for non-zero input", async () => {
