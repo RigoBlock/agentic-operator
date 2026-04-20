@@ -1068,6 +1068,7 @@
        Trading Settings (slippage, swap shield)
        ================================================================ */
     const SLIPPAGE_STORAGE_KEY = 'rigoblock_slippage_bps';
+    const SLIPPAGE_OVERRIDE_STORAGE_KEY = 'rigoblock_slippage_override_explicit';
     const SHIELD_STORAGE_KEY = 'rigoblock_swap_shield';
     const DEFAULT_SLIPPAGE_BPS = 100;
     const MIN_SLIPPAGE_BPS = 10;
@@ -1092,6 +1093,7 @@
       } else {
         customInput.style.display = 'none';
         localStorage.setItem(SLIPPAGE_STORAGE_KEY, sel.value);
+        localStorage.setItem(SLIPPAGE_OVERRIDE_STORAGE_KEY, 'true');
       }
     }
 
@@ -1103,6 +1105,7 @@
       }
       const bps = Math.round(pct * 100);
       localStorage.setItem(SLIPPAGE_STORAGE_KEY, String(bps));
+      localStorage.setItem(SLIPPAGE_OVERRIDE_STORAGE_KEY, 'true');
       // Update select to show "Custom…" with the value
       const sel = document.getElementById('slippage-select');
       sel.value = 'custom';
@@ -1751,8 +1754,13 @@
           vaultAddress: effectiveVault,
           chainId,
           ...getAiRequestParams(),
-          slippageBps: getSlippageBps(),
         };
+        // Only send per-request slippage when user explicitly overrides from UI.
+        // Otherwise backend resolves from verified request -> KV -> default.
+        const hasExplicitUiSlippageOverride = localStorage.getItem(SLIPPAGE_OVERRIDE_STORAGE_KEY) === 'true';
+        if (hasExplicitUiSlippageOverride) {
+          chatBody.slippageBps = getSlippageBps();
+        }
         // Always send operatorAddress when connected — needed for calldata building
         // (pool deployment, swaps, etc.) regardless of vault ownership.
         if (connectedAddress) {

@@ -4207,6 +4207,10 @@ async function runSwapShield(
   );
 
   if (!result.allowed) {
+    if (result.code === "INVALID_QUOTE") {
+      throw new Error(result.reason || "Invalid swap quote received from DEX.");
+    }
+
     // Build a context-specific error with guidance
     const sellSymbol = intent.tokenIn;
     const buySymbol = intent.tokenOut;

@@ -173,6 +173,22 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.code).toBe("NO_PRICE_FEED");
   });
 
+  it("blocks invalid quote when expected output is zero for non-zero input", async () => {
+    const result = await checkSwapPrice(
+      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      1n * 10n ** 18n,
+      0n,
+      100,
+      ALCHEMY_KEY,
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("INVALID_QUOTE");
+    expect(result.reason).toContain("expected output is zero");
+    expect(mockReadContract).not.toHaveBeenCalled();
+  });
+
   it("skips check for zero amounts", async () => {
     const result = await checkSwapPrice(
       VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -306,6 +322,14 @@ describe("Swap Shield — slippage storage", () => {
     await setStoredSlippage(kv, OPERATOR, 50);
     const result = await getStoredSlippage(kv, OPERATOR);
     expect(result).toBe(50);
+  });
+
+  it("rejects non-integer stored slippage payloads", async () => {
+    await (kv.put as any)(`slippage:${OPERATOR.toLowerCase()}`, "50.5");
+    expect(await getStoredSlippage(kv, OPERATOR)).toBeNull();
+
+    await (kv.put as any)(`slippage:${OPERATOR.toLowerCase()}`, "50xyz");
+    expect(await getStoredSlippage(kv, OPERATOR)).toBeNull();
   });
 
   it("rejects slippage below minimum", async () => {

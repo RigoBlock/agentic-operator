@@ -111,11 +111,12 @@ export interface SwapShieldResult {
   /**
    * Result code:
    * - 'BLOCKED'       — DEX quote diverges too much from oracle (user getting bad deal)
+   * - 'INVALID_QUOTE' — quote output is invalid for safety checks (e.g., non-zero input, zero output)
    * - 'NO_PRICE_FEED' — oracle has no price feed for one of the tokens
    * - 'ORACLE_ERROR'  — oracle call failed for another reason
    * - undefined       — allowed, oracle check passed
    */
-  code?: "BLOCKED" | "NO_PRICE_FEED" | "ORACLE_ERROR";
+  code?: "BLOCKED" | "INVALID_QUOTE" | "NO_PRICE_FEED" | "ORACLE_ERROR";
 }
 
 // ── Public API ───────────────────────────────────────────────────────
@@ -147,15 +148,28 @@ export async function checkSwapPrice(
 ): Promise<SwapShieldResult> {
   void _slippageBps;
 
-  // Skip for zero amounts
-  if (amountInRaw === 0n || dexExpectedOutRaw === 0n) {
+  // Skip only for zero input amounts
+  if (amountInRaw === 0n) {
     return {
       allowed: true,
       verified: false,
       oracleAmount: amountInRaw.toString(),
       dexAmount: dexExpectedOutRaw.toString(),
       divergencePct: "0",
-      reason: "Zero amount — skipping oracle check",
+      reason: "Zero input amount — skipping oracle check",
+    };
+  }
+
+  // Zero expected output for non-zero input is an invalid quote and must be blocked.
+  if (dexExpectedOutRaw === 0n) {
+    return {
+      allowed: false,
+      verified: false,
+      oracleAmount: amountInRaw.toString(),
+      dexAmount: "0",
+      divergencePct: "0",
+      code: "INVALID_QUOTE",
+      reason: "Invalid quote — expected output is zero for a non-zero input amount.",
     };
   }
 
@@ -403,8 +417,9 @@ export async function getStoredSlippage(
 ): Promise<number | null> {
   const raw = await kv.get(`${SLIPPAGE_KEY_PREFIX}${operatorAddress.toLowerCase()}`);
   if (!raw) return null;
-  const val = parseInt(raw, 10);
-  if (isNaN(val) || val < MIN_SLIPPAGE_BPS || val > MAX_SLIPPAGE_BPS) return null;
+  if (!/^\d+$/.test(raw)) return null;
+  const val = Number(raw);
+  if (!Number.isInteger(val) || val < MIN_SLIPPAGE_BPS || val > MAX_SLIPPAGE_BPS) return null;
   return val;
 }
 
