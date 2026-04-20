@@ -39,9 +39,11 @@
  *
  * ## Divergence direction
  *
- * We only BLOCK when the DEX gives less than the oracle predicts (user getting
- * a bad deal). When the DEX gives more than the oracle (stale oracle or
- * favorable route), we allow but log a note.
+ * The rule is two-sided and asymmetric:
+ * - BLOCK when the DEX gives >5% less than the oracle predicts (bad deal)
+ * - BLOCK when the DEX gives >10% more than the oracle predicts (stale oracle
+ *   or manipulated route — could expose vault to sandwich attacks)
+ * - ALLOW quotes within these bounds (normal spread/slippage)
  *
  * ## Independence from NAV shield
  *

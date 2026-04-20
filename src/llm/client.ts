@@ -1973,6 +1973,9 @@ export async function executeToolCall(
       if (!ctx.operatorAddress) {
         throw new Error("Wallet not connected. Connect your wallet first.");
       }
+      if (!ctx.operatorVerified) {
+        throw new Error("Operator authentication required. Please verify your wallet first.");
+      }
       const raw = String(args.slippage ?? "").trim();
       let bps: number;
       const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
@@ -2021,6 +2024,9 @@ export async function executeToolCall(
       if (!ctx.operatorAddress) {
         throw new Error("Wallet not connected. Connect your wallet first.");
       }
+      if (!ctx.operatorVerified) {
+        throw new Error("Operator authentication required. Please verify your wallet first.");
+      }
       await disableSwapShield(
         env.KV,
         ctx.operatorAddress,
@@ -2037,6 +2043,9 @@ export async function executeToolCall(
     case "enable_swap_shield": {
       if (!ctx.operatorAddress) {
         throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+      if (!ctx.operatorVerified) {
+        throw new Error("Operator authentication required. Please verify your wallet first.");
       }
       await enableSwapShield(
         env.KV,
@@ -4593,15 +4602,7 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
     "",
   ).trim();
 
-  // Extract DEX modifier ("using 0x", "using uniswap", "via 0x") before regex matching
-  let dex: string | undefined;
-  const dexMatch = m.match(/\s+(?:using|via|on|with)\s+(0x|uniswap|zerox)$/i);
-  if (dexMatch) {
-    dex = dexMatch[1].toLowerCase() === "zerox" ? "0x" : dexMatch[1].toLowerCase();
-    m = m.slice(0, dexMatch.index!).trim();
-  }
-
-  // Extract chain modifier ("on base", "on arbitrum") — appears before or after DEX
+  // Extract chain modifier first ("on base", "on arbitrum") — always appears last
   let chain: string | undefined;
   const chainMatch = m.match(/\s+on\s+([a-z0-9 ]+?)$/i);
   if (chainMatch) {
@@ -4611,6 +4612,14 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
       chain = possibleChain;
       m = m.slice(0, chainMatch.index!).trim();
     }
+  }
+
+  // Extract DEX modifier ("using 0x", "via uniswap") — now that chain is stripped
+  let dex: string | undefined;
+  const dexMatch = m.match(/\s+(?:using|via|on|with)\s+(0x|uniswap|zerox)$/i);
+  if (dexMatch) {
+    dex = dexMatch[1].toLowerCase() === "zerox" ? "0x" : dexMatch[1].toLowerCase();
+    m = m.slice(0, dexMatch.index!).trim();
   }
 
   // ── "sell <amount> <tokenIn> for <tokenOut> [on <chain>]" ──
