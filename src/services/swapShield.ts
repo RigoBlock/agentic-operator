@@ -87,6 +87,14 @@ const SWAP_SHIELD_DISABLED_PREFIX = "swap-shield-disabled:";
 /** Opt-out TTL: 10 minutes */
 const SWAP_SHIELD_DISABLE_TTL = 600;
 
+function formatBpsAsPct(bps: bigint): string {
+  const sign = bps < 0n ? "-" : "";
+  const absBps = bps < 0n ? -bps : bps;
+  const wholePct = absBps / 100n;
+  const fractionalPct = (absBps % 100n).toString().padStart(2, "0");
+  return `${sign}${wholePct.toString()}.${fractionalPct}`;
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 export interface SwapShieldResult {
@@ -254,30 +262,35 @@ export async function checkSwapPrice(
   //   < 0  => DEX gives more than oracle (potentially suspiciously favorable)
   const divergenceBps =
     ((oracleAmountRaw - dexExpectedOutRaw) * 10000n) / oracleAmountRaw;
-  const divergencePct = Number(divergenceBps) / 100;
+  const divergencePctDisplay = formatBpsAsPct(divergenceBps);
+  const normalizedMaxDivergencePct = Number.isFinite(maxDivergencePct)
+    ? Math.max(0, maxDivergencePct)
+    : DEFAULT_MAX_DIVERGENCE_PCT;
+  const maxDivergenceBps = BigInt(Math.round(normalizedMaxDivergencePct * 100));
+  const maxFavorableDivergenceBps = BigInt(MAX_FAVORABLE_DIVERGENCE_PCT * 100);
 
   console.log(
     `[SwapShield] Comparison: oracle=${oracleAmountRaw} dexExpected=${dexExpectedOutRaw} ` +
-    `divergence=${divergencePct.toFixed(2)}% ` +
-    `(max=${maxDivergencePct}%)`,
+    `divergence=${divergencePctDisplay}% ` +
+    `(max=${normalizedMaxDivergencePct}%)`,
   );
 
   // ── Enforce threshold ──
-  if (divergencePct > maxDivergencePct) {
+  if (divergenceBps > maxDivergenceBps) {
     console.warn(
-      `[SwapShield] ✗ BLOCKED: DEX quote diverges ${divergencePct.toFixed(2)}% from oracle ` +
-      `(max allowed: ${maxDivergencePct}%)`,
+      `[SwapShield] ✗ BLOCKED: DEX quote diverges ${divergencePctDisplay}% from oracle ` +
+      `(max allowed: ${normalizedMaxDivergencePct}%)`,
     );
     return {
       allowed: false,
       verified: true,
       oracleAmount: oracleAmountRaw.toString(),
       dexAmount: dexExpectedOutRaw.toString(),
-      divergencePct: divergencePct.toFixed(2),
+      divergencePct: divergencePctDisplay,
       code: "BLOCKED",
       reason:
-        `⚠️ Swap Shield blocked: the DEX quote diverges ${divergencePct.toFixed(2)}% from the oracle price ` +
-        `(max allowed: ${maxDivergencePct}%). ` +
+        `⚠️ Swap Shield blocked: the DEX quote diverges ${divergencePctDisplay}% from the oracle price ` +
+        `(max allowed: ${normalizedMaxDivergencePct}%). ` +
         `This likely indicates significant price impact, a bad route, or stale liquidity.\n\n` +
         `To proceed anyway, you can temporarily disable the swap shield (10 min): "disable swap shield"\n` +
         `Or split the trade into smaller amounts using a TWAP order to reduce price impact.`,
@@ -287,10 +300,11 @@ export async function checkSwapPrice(
   // Block if DEX is suspiciously favorable (>10% better than oracle)
   // This catches stale oracle prices or manipulated DEX routes.
   if (divergenceBps < 0n) {
-    const favorablePct = Math.abs(divergencePct);
-    if (favorablePct > MAX_FAVORABLE_DIVERGENCE_PCT) {
+    const favorableBps = -divergenceBps;
+    const favorablePctDisplay = formatBpsAsPct(favorableBps);
+    if (favorableBps > maxFavorableDivergenceBps) {
       console.warn(
-        `[SwapShield] ✗ BLOCKED: DEX quote ${favorablePct.toFixed(2)}% BETTER than oracle — ` +
+        `[SwapShield] ✗ BLOCKED: DEX quote ${favorablePctDisplay}% BETTER than oracle — ` +
         `likely stale oracle or manipulated route`,
       );
       return {
@@ -298,10 +312,10 @@ export async function checkSwapPrice(
         verified: true,
         oracleAmount: oracleAmountRaw.toString(),
         dexAmount: dexExpectedOutRaw.toString(),
-        divergencePct: `-${favorablePct.toFixed(2)}`,
+        divergencePct: `-${favorablePctDisplay}`,
         code: "BLOCKED",
         reason:
-          `⚠️ Swap Shield blocked: the DEX quote is ${favorablePct.toFixed(2)}% better than the oracle price. ` +
+          `⚠️ Swap Shield blocked: the DEX quote is ${favorablePctDisplay}% better than the oracle price. ` +
           `This likely indicates a stale oracle or manipulated route — proceeding could expose ` +
           `the vault to a sandwich attack.\n\n` +
           `To proceed anyway, you can temporarily disable the swap shield (10 min): "disable swap shield"`,
@@ -310,7 +324,7 @@ export async function checkSwapPrice(
   }
 
   console.log(
-    `[SwapShield] ✓ ALLOWED: divergence ${divergencePct.toFixed(2)}% within ${maxDivergencePct}% limit`,
+    `[SwapShield] ✓ ALLOWED: divergence ${divergencePctDisplay}% within ${normalizedMaxDivergencePct}% limit`,
   );
 
   return {
@@ -318,7 +332,7 @@ export async function checkSwapPrice(
     verified: true,
     oracleAmount: oracleAmountRaw.toString(),
     dexAmount: dexExpectedOutRaw.toString(),
-    divergencePct: divergencePct.toFixed(2),
+    divergencePct: divergencePctDisplay,
   };
 }
 

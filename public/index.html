@@ -1069,12 +1069,18 @@
        ================================================================ */
     const SLIPPAGE_STORAGE_KEY = 'rigoblock_slippage_bps';
     const SHIELD_STORAGE_KEY = 'rigoblock_swap_shield';
+    const DEFAULT_SLIPPAGE_BPS = 100;
+    const MIN_SLIPPAGE_BPS = 10;
+    const MAX_SLIPPAGE_BPS = 500;
 
     function getSlippageBps() {
       const stored = localStorage.getItem(SLIPPAGE_STORAGE_KEY);
-      if (!stored) return 100;
+      if (!stored) return DEFAULT_SLIPPAGE_BPS;
       const parsed = parseInt(stored, 10);
-      return Number.isFinite(parsed) ? parsed : 100;
+      if (!Number.isFinite(parsed) || parsed < MIN_SLIPPAGE_BPS || parsed > MAX_SLIPPAGE_BPS) {
+        return DEFAULT_SLIPPAGE_BPS;
+      }
+      return parsed;
     }
 
     function onSlippageChange() {

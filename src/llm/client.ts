@@ -102,6 +102,21 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
 };
 
 /**
+ * Tools that require verified operator authentication.
+ *
+ * Keep this as the single source of truth instead of scattering checks in
+ * individual tool handlers.
+ */
+const OPERATOR_VERIFIED_TOOLS = new Set<string>([
+  // Operator-scoped KV mutations
+  "set_default_slippage",
+  "disable_swap_shield",
+  "enable_swap_shield",
+  // Strategy visibility is operator-private
+  "list_strategies",
+]);
+
+/**
  * Translate raw error messages into user-friendly language.
  * Preserves on-chain revert details (decoded from selectors) while hiding
  * RPC internals, stack traces, and API keys.
@@ -1494,6 +1509,19 @@ export async function executeToolCall(
   if (resolvedName !== name) {
     console.log(`[LLM] Tool name alias: "${name}" → "${resolvedName}"`);
   }
+
+  // Centralized auth gate for operator-verified tools.
+  // This avoids fragile per-tool checks and guarantees consistent behavior for
+  // all execution paths (LLM tool calls + immediate/deferred fast-paths).
+  if (OPERATOR_VERIFIED_TOOLS.has(resolvedName)) {
+    if (!ctx.operatorAddress) {
+      throw new Error("Wallet not connected. Connect your wallet first.");
+    }
+    if (!ctx.operatorVerified) {
+      throw new Error("Operator authentication required. Please verify your wallet first.");
+    }
+  }
+
   switch (resolvedName) {
     case "get_swap_quote": {
       // Auto-switch chain if specified
@@ -1970,12 +1998,6 @@ export async function executeToolCall(
     // ── Trading Settings ────────────────────────────────────────────
 
     case "set_default_slippage": {
-      if (!ctx.operatorAddress) {
-        throw new Error("Wallet not connected. Connect your wallet first.");
-      }
-      if (!ctx.operatorVerified) {
-        throw new Error("Operator authentication required. Please verify your wallet first.");
-      }
       const raw = String(args.slippage ?? "").trim();
       let bps: number;
       const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
@@ -2014,22 +2036,16 @@ export async function executeToolCall(
           `Got: ${bps / 100}% (${bps} bps).`,
         );
       }
-      await setStoredSlippage(env.KV, ctx.operatorAddress, bps);
+      await setStoredSlippage(env.KV, ctx.operatorAddress!, bps);
       return {
         message: `✅ Default slippage set to ${bps / 100}% (${bps} bps). This applies to all future swaps until changed.`,
       };
     }
 
     case "disable_swap_shield": {
-      if (!ctx.operatorAddress) {
-        throw new Error("Wallet not connected. Connect your wallet first.");
-      }
-      if (!ctx.operatorVerified) {
-        throw new Error("Operator authentication required. Please verify your wallet first.");
-      }
       await disableSwapShield(
         env.KV,
-        ctx.operatorAddress,
+        ctx.operatorAddress!,
         ctx.vaultAddress as string,
       );
       return {
@@ -2041,15 +2057,9 @@ export async function executeToolCall(
     }
 
     case "enable_swap_shield": {
-      if (!ctx.operatorAddress) {
-        throw new Error("Wallet not connected. Connect your wallet first.");
-      }
-      if (!ctx.operatorVerified) {
-        throw new Error("Operator authentication required. Please verify your wallet first.");
-      }
       await enableSwapShield(
         env.KV,
-        ctx.operatorAddress,
+        ctx.operatorAddress!,
         ctx.vaultAddress as string,
       );
       return {
@@ -3385,10 +3395,6 @@ export async function executeToolCall(
     // ── Strategy Skills (TWAP only) ──────────────────────────────────
 
     case "list_strategies": {
-      if (!ctx.operatorVerified) {
-        throw new Error("Operator authentication required to list strategies.");
-      }
-
       const { getTwapOrders } = await import("../skills/twap.js");
       const twapOrders = (await getTwapOrders(env.KV, ctx.vaultAddress)).filter((o) => o.active);
 
