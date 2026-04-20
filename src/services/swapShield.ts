@@ -186,15 +186,20 @@ export async function checkSwapPrice(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
 
-    // Detect "no price feed" — convertTokenAmount reverts when oracle cardinality=0
-    // (division by zero in _getSecondsAgos, or observe() reverts on uninitialized pool)
-    const isNoPriceFeed =
-      msg.includes("division") ||
-      msg.includes("revert") ||
-      msg.includes("overflow") ||
-      msg.includes("execution reverted");
+    // Detect "no price feed" — convertTokenAmount is the vault's EOracle extension.
+    // ALL reverts from this function are oracle-related: cardinality=0 (division by zero
+    // in _getSecondsAgos), uninitialized pool (observe() reverts), or missing feed.
+    // Non-revert errors (network timeout, RPC down) fall through to ORACLE_ERROR.
+    const msgLower = msg.toLowerCase();
+    const isRevert =
+      msgLower.includes("revert") ||
+      msgLower.includes("execution reverted") ||
+      msgLower.includes("division") ||
+      msgLower.includes("overflow") ||
+      msgLower.includes("cardinality") ||
+      msgLower.includes("not initialized");
 
-    if (isNoPriceFeed) {
+    if (isRevert) {
       console.warn(
         `[SwapShield] ⚠ No oracle price feed available on chain ${chainId}: ${msg.slice(0, 200)}`,
       );
@@ -238,13 +243,21 @@ export async function checkSwapPrice(
     };
   }
 
+  // ── Validate slippageBps before arithmetic ──
+  // Clamp to [0, 9999] to prevent division by zero (10000 - 10000 = 0) or negative divisors.
+  const safeSlippageBps = Math.max(0, Math.min(9999, Math.round(slippageBps)));
+
   // ── Reverse-engineer the theoretical market price from the DEX quote ──
   // The DEX quote includes slippage buffer. To compare fairly against the oracle
   // (which gives the mid-price), we reverse out the slippage:
   //   theoreticalDexOutput = dexExpectedOut * 10000 / (10000 - slippageBps)
   // This gives us what the DEX thinks the market price is, without the slippage buffer.
+  //
+  // NOTE: For exact-output swaps the slippage buffer is on the input side, not the output,
+  // so this inflates the theoretical output by ~slippageBps%. This makes the shield slightly
+  // more lenient (understates divergence by ≤1%), which is a safe-side error.
   const theoreticalDexOut =
-    (dexExpectedOutRaw * 10000n) / (10000n - BigInt(slippageBps));
+    (dexExpectedOutRaw * 10000n) / (10000n - BigInt(safeSlippageBps));
 
   // ── Calculate divergence ──
   // Divergence = how much LESS the DEX gives vs oracle (positive = bad for user)
@@ -288,16 +301,30 @@ export async function checkSwapPrice(
     };
   }
 
-  // Log if DEX is suspiciously favorable (>10% better than oracle)
+  // Block if DEX is suspiciously favorable (>10% better than oracle)
+  // This catches stale oracle prices or manipulated DEX routes.
   if (oracleAmountRaw > 0n && theoreticalDexOut > oracleAmountRaw) {
     const favorableBps =
       ((theoreticalDexOut - oracleAmountRaw) * 10000n) / oracleAmountRaw;
     const favorablePct = Number(favorableBps) / 100;
     if (favorablePct > 10) {
       console.warn(
-        `[SwapShield] ⚠ DEX quote ${favorablePct.toFixed(2)}% BETTER than oracle — ` +
-        `oracle may be stale or DEX route includes rebates`,
+        `[SwapShield] ✗ BLOCKED: DEX quote ${favorablePct.toFixed(2)}% BETTER than oracle — ` +
+        `likely stale oracle or manipulated route`,
       );
+      return {
+        allowed: false,
+        verified: true,
+        oracleAmount: oracleAmountRaw.toString(),
+        dexAmount: dexExpectedOutRaw.toString(),
+        divergencePct: `-${favorablePct.toFixed(2)}`,
+        code: "BLOCKED",
+        reason:
+          `⚠️ Swap Shield blocked: the DEX quote is ${favorablePct.toFixed(2)}% better than the oracle price. ` +
+          `This likely indicates a stale oracle or manipulated route — proceeding could expose ` +
+          `the vault to a sandwich attack.\n\n` +
+          `To proceed anyway, you can temporarily disable the swap shield (10 min): "disable swap shield"`,
+      };
     }
   }
 

@@ -107,14 +107,14 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.reason).toContain("TWAP");
   });
 
-  it("allows swaps where DEX gives MORE than oracle (favorable)", async () => {
-    // Oracle says 1000, DEX gives 1100 (user getting a good deal)
+  it("allows swaps where DEX gives moderately MORE than oracle (favorable)", async () => {
+    // Oracle says 1000, DEX gives 1050 (5% favorable — within 10% limit)
     mockReadContract.mockResolvedValue(1000n * 10n ** 18n);
 
     const result = await checkSwapPrice(
       VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
-      1100n * 10n ** 18n,
+      1050n * 10n ** 18n,
       100,
       ALCHEMY_KEY,
     );
@@ -122,6 +122,23 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
     expect(result.divergencePct).toBe("0.00");
+  });
+
+  it("blocks swaps where DEX gives suspiciously MORE than oracle (>10% favorable)", async () => {
+    // Oracle says 1000, DEX gives 1200 (20% favorable — stale oracle / manipulated route)
+    mockReadContract.mockResolvedValue(1000n * 10n ** 18n);
+
+    const result = await checkSwapPrice(
+      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      1n * 10n ** 18n,
+      1200n * 10n ** 18n,
+      100,
+      ALCHEMY_KEY,
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.verified).toBe(true);
+    expect(result.code).toBe("BLOCKED");
   });
 
   it("correctly reverses slippage when calculating theoretical DEX price", async () => {

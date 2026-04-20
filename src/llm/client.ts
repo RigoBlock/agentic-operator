@@ -711,6 +711,7 @@ ${executionModeNote}${contextDocsBlock}`;
   // priority — correctness and transparency are.
   const immediateFastPath =
     tryFastPathChainSwitch(lastUserMsg) ||
+    (hasVault ? tryFastPathSwapShieldToggle(lastUserMsg) : null) ||
     (hasVault ? tryFastPathStrategyQueries(lastUserMsg) : null) ||
     (hasVault ? tryFastPathTwapCreate(lastUserMsg) : null);
   if (immediateFastPath) {
@@ -1635,7 +1636,7 @@ export async function executeToolCall(
         await runSwapShield(
           env, ctx, intent,
           zxQuote.sellAmount, zxQuote.decimalsIn,
-          zxQuote.buyAmount, zxQuote.decimalsOut,
+          zxQuote.buyAmount,
         );
 
         // The 0x API returns a complete transaction targeting AllowanceHolder.
@@ -1720,7 +1721,7 @@ export async function executeToolCall(
         await runSwapShield(
           env, ctx, intent,
           quote.quote.input.amount, quote.decimalsIn,
-          quote.quote.output.amount, quote.decimalsOut,
+          quote.quote.output.amount,
         );
       }
 
@@ -1972,17 +1973,37 @@ export async function executeToolCall(
       if (!ctx.operatorAddress) {
         throw new Error("Wallet not connected. Connect your wallet first.");
       }
-      const raw = (args.slippage as string).trim();
+      const raw = String(args.slippage ?? "").trim();
       let bps: number;
-      const num = parseFloat(raw);
-      if (isNaN(num) || num <= 0) {
-        throw new Error("Invalid slippage value. Provide a positive number (e.g., '0.5' for 0.5%).");
-      }
-      // Heuristic: values ≤ 50 are percentages, > 50 are bps
-      if (num <= 50) {
+      const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
+      const bpsMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*bps$/i);
+      const plainMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)$/);
+      if (percentMatch) {
+        const num = parseFloat(percentMatch[1]);
+        if (isNaN(num) || num <= 0) {
+          throw new Error("Invalid slippage value. Provide a positive number (e.g., '0.5%', '50bps', or '0.5').");
+        }
         bps = Math.round(num * 100);
-      } else {
+      } else if (bpsMatch) {
+        const num = parseFloat(bpsMatch[1]);
+        if (isNaN(num) || num <= 0) {
+          throw new Error("Invalid slippage value. Provide a positive number (e.g., '0.5%', '50bps', or '0.5').");
+        }
         bps = Math.round(num);
+      } else if (plainMatch) {
+        const num = parseFloat(plainMatch[1]);
+        if (isNaN(num) || num <= 0) {
+          throw new Error("Invalid slippage value. Provide a positive number (e.g., '0.5%', '50bps', or '0.5').");
+        }
+        // Integers within the configured BPS range are treated as bps (e.g. "50" => 50 bps = 0.5%)
+        // Small decimals and values outside BPS range are treated as percentages (e.g. "0.5" => 50 bps)
+        if (Number.isInteger(num) && num >= MIN_SLIPPAGE_BPS && num <= MAX_SLIPPAGE_BPS) {
+          bps = Math.round(num);
+        } else {
+          bps = Math.round(num * 100);
+        }
+      } else {
+        throw new Error("Invalid slippage value. Use a positive number, optionally suffixed with '%' or 'bps' (e.g., '0.5%', '50bps', or '0.5').");
       }
       if (bps < MIN_SLIPPAGE_BPS || bps > MAX_SLIPPAGE_BPS) {
         throw new Error(
@@ -4080,8 +4101,13 @@ function resolveChainName(chainId: number): string {
  * The LLM CANNOT set slippage — only the operator via settings or chat tool.
  */
 async function resolveSlippage(env: Env, ctx: RequestContext): Promise<number> {
-  // 1. Per-request override from body
-  if (ctx.slippageBps != null) {
+  // 1. Per-request override from body (validate it's a usable integer)
+  if (
+    ctx.slippageBps != null &&
+    typeof ctx.slippageBps === "number" &&
+    Number.isFinite(ctx.slippageBps) &&
+    Number.isInteger(ctx.slippageBps)
+  ) {
     const clamped = Math.max(MIN_SLIPPAGE_BPS, Math.min(MAX_SLIPPAGE_BPS, ctx.slippageBps));
     return clamped;
   }
@@ -4110,7 +4136,6 @@ async function runSwapShield(
   sellAmountRaw: string,
   sellDecimals: number,
   buyAmountRaw: string,
-  buyDecimals: number,
 ): Promise<void> {
   // Check opt-out
   if (ctx.operatorAddress && env.KV) {
@@ -4359,6 +4384,25 @@ function tryFastPathChainSwitch(msg: string): FastPathResult | null {
   );
   if (match) {
     return { name: "switch_chain", args: { chain: match[1].trim() } };
+  }
+
+  return null;
+}
+
+// ── Fast-path: Swap Shield toggle ───────────────────────────────────
+
+/**
+ * Detect swap shield enable/disable commands, including the frontend
+ * magic strings __enable_swap_shield__ / __disable_swap_shield__.
+ */
+function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+
+  if (m === "__enable_swap_shield__" || /^(?:re-?)?enable\s+swap\s+shield$/i.test(m)) {
+    return { name: "enable_swap_shield", args: {} };
+  }
+  if (m === "__disable_swap_shield__" || /^disable\s+swap\s+shield$/i.test(m)) {
+    return { name: "disable_swap_shield", args: {} };
   }
 
   return null;

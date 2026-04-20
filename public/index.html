@@ -1109,7 +1109,8 @@
         label.style.color = '';
         timer.style.display = 'none';
         localStorage.removeItem(SHIELD_STORAGE_KEY);
-        // Re-enable server-side via chat (best-effort)
+        if (shieldTimerInterval) { clearInterval(shieldTimerInterval); shieldTimerInterval = null; }
+        // Re-enable server-side via deterministic fast-path
         if (connectedAddress && vaultInput.value.trim()) {
           fetch('/api/chat', {
             method: 'POST',
@@ -1129,7 +1130,7 @@
         const expiry = Date.now() + 600000;
         localStorage.setItem(SHIELD_STORAGE_KEY, String(expiry));
         startShieldTimer(expiry);
-        // Disable server-side via chat (best-effort)
+        // Disable server-side via deterministic fast-path
         if (connectedAddress && vaultInput.value.trim()) {
           fetch('/api/chat', {
             method: 'POST',
@@ -1157,15 +1158,33 @@
           document.getElementById('swap-shield-label').textContent = 'Enabled';
           document.getElementById('swap-shield-label').style.color = '';
           localStorage.removeItem(SHIELD_STORAGE_KEY);
+          clearInterval(shieldTimerInterval);
+          shieldTimerInterval = null;
+          // Re-enable server-side
+          if (connectedAddress && vaultInput.value.trim()) {
+            fetch('/api/chat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                messages: [{ role: 'user', content: '__enable_swap_shield__' }],
+                vaultAddress: vaultInput.value.trim(),
+                chainId: currentChainId,
+                operatorAddress: connectedAddress,
+                authSignature, authTimestamp,
+              }),
+            }).catch(() => {});
+          }
           return;
         }
         const mins = Math.floor(remaining / 60000);
         const secs = Math.floor((remaining % 60000) / 1000);
         timer.textContent = `(${mins}:${secs.toString().padStart(2, '0')} remaining)`;
-        requestAnimationFrame(update);
       };
       update();
+      if (shieldTimerInterval) clearInterval(shieldTimerInterval);
+      shieldTimerInterval = setInterval(update, 1000);
     }
+    let shieldTimerInterval = null;
 
     function restoreTradeSettings() {
       // Restore slippage

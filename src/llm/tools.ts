@@ -1073,17 +1073,18 @@ export const TOOL_DEFINITIONS = [
       name: "set_default_slippage",
       description:
         "Set the default slippage tolerance for all future swaps. " +
-        "Accepts a percentage (e.g., '0.5' for 0.5%) or basis points (e.g., '50' for 0.5%). " +
-        "Valid range: 0.1% to 5%. Persists until changed.",
+        "Accepts a percentage (e.g., '0.5%' for 0.5%), basis points with suffix (e.g., '50bps' for 0.5%), " +
+        "or a plain number: integers in [10, 500] are treated as bps, decimals as percentages. " +
+        "Valid range: 0.1% (10 bps) to 5% (500 bps). Persists until changed.",
       parameters: {
         type: "object",
         properties: {
           slippage: {
             type: "string",
             description:
-              "Slippage value — either a percentage (e.g., '0.5' for 0.5%, '2' for 2%) " +
-              "or in basis points (e.g., '50' for 0.5%). Values ≤ 50 are treated as percentages, " +
-              "> 50 as basis points.",
+              "Slippage value — use '%' suffix for percentage (e.g., '0.5%' for 0.5%, '2%' for 2%), " +
+              "'bps' suffix for basis points (e.g., '50bps' for 0.5%), or a plain number: " +
+              "integers 10–500 are treated as bps, other values as percentages.",
           },
         },
         required: ["slippage"],
