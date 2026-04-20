@@ -1762,15 +1762,21 @@ export async function executeToolCall(
       // ── Swap Shield — oracle price check ──
       // Pass addresses already resolved by Uniswap API so we avoid a
       // redundant resolver round-trip and never skip the check on transient failures.
-      if (quote.quote.input?.amount && quote.quote.output?.amount) {
-        await runSwapShield(
-          env, ctx, intent,
-          quote.quote.input.amount, quote.decimalsIn,
-          quote.quote.output.amount,
-          quote.quote.input.token as Address,
-          quote.quote.output.token as Address,
+      // Treat missing amounts as a hard error — an unexpected quote shape must not
+      // silently bypass oracle protection.
+      if (!quote.quote.input?.amount || !quote.quote.output?.amount) {
+        throw new Error(
+          "Uniswap quote returned an unexpected shape — input or output amount is missing. " +
+          "Cannot validate swap price. Please retry.",
         );
       }
+      await runSwapShield(
+        env, ctx, intent,
+        quote.quote.input.amount, quote.decimalsIn,
+        quote.quote.output.amount,
+        quote.quote.input.token as Address,
+        quote.quote.output.token as Address,
+      );
 
       // ── Balance pre-check for exact-output swaps ──
       // For exact-output, we only know required input after the quote. Check here

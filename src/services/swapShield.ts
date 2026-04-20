@@ -153,7 +153,8 @@ export async function checkSwapPrice(
     return {
       allowed: true,
       verified: false,
-      oracleAmount: amountInRaw.toString(),
+      // No oracle comparison performed — sentinel "0" signals absence of oracle data.
+      oracleAmount: "0",
       dexAmount: dexExpectedOutRaw.toString(),
       divergencePct: "0",
       reason: "Zero input amount — skipping oracle check",
@@ -165,7 +166,8 @@ export async function checkSwapPrice(
     return {
       allowed: false,
       verified: false,
-      oracleAmount: amountInRaw.toString(),
+      // No oracle comparison performed — sentinel "0" signals absence of oracle data.
+      oracleAmount: "0",
       dexAmount: "0",
       divergencePct: "0",
       code: "INVALID_QUOTE",
