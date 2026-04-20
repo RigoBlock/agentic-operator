@@ -4155,7 +4155,7 @@ async function runSwapShield(
   buyAmountRaw: string,
 ): Promise<void> {
   // Check opt-out
-  if (ctx.operatorAddress && env.KV) {
+  if (ctx.operatorVerified && ctx.operatorAddress && env.KV) {
     const disabled = await isSwapShieldDisabled(
       env.KV,
       ctx.operatorAddress,
@@ -4625,15 +4625,20 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
     "",
   ).trim();
 
-  // Extract chain modifier first ("on base", "on arbitrum") — always appears last
+  // Extract chain modifier first ("on base", "on bnb chain") — always appears last
   let chain: string | undefined;
   const chainMatch = m.match(/\s+on\s+([a-z0-9 ]+?)$/i);
   if (chainMatch) {
     const possibleChain = chainMatch[1].trim().toLowerCase();
-    // Only match known chain names to avoid eating "on uniswap" or "on 0x"
-    if (/^(ethereum|base|arbitrum|optimism|polygon|bsc|bnb|unichain)$/i.test(possibleChain)) {
-      chain = possibleChain;
+    // Accept any chain alias that resolveChainArg understands (supports
+    // multi-word names like "bnb chain" / "ethereum mainnet").
+    try {
+      const resolved = resolveChainArg(possibleChain);
+      chain = resolved.name.toLowerCase();
       m = m.slice(0, chainMatch.index!).trim();
+    } catch {
+      // Not a chain alias; leave untouched so DEX suffix parsing can handle
+      // patterns like "on uniswap".
     }
   }
 

@@ -293,7 +293,7 @@ Even a fully authenticated agent with delegation access CANNOT:
 |--------|---------|
 | Drain vault assets to external address | `withdraw` and `transferOwnership` selectors are never delegated |
 | Execute trades that lose > 10% NAV | NAV shield blocks pre-broadcast |
-| Execute swaps with >5% oracle divergence | Swap Shield compares DEX quote vs TWAP oracle |
+| Execute swaps with >5% oracle divergence when Swap Shield is enabled | Swap Shield compares DEX quote vs TWAP oracle; this block does not apply during an active operator opt-out window |
 | Bypass slippage protection | Slippage is enforced in swap calldata building |
 | Call arbitrary contract functions | Selector whitelist — only approved vault functions |
 | Send transactions to non-vault contracts | Target address must equal vault address |
