@@ -64,6 +64,17 @@ import {
   buildWithdrawDelegatorRewardsCalldata,
 } from "../services/grgStaking.js";
 import { checkNavImpact } from "../services/navGuard.js";
+import {
+  checkSwapPrice,
+  isSwapShieldDisabled,
+  disableSwapShield,
+  enableSwapShield,
+  getStoredSlippage,
+  setStoredSlippage,
+  DEFAULT_SLIPPAGE_BPS,
+  MIN_SLIPPAGE_BPS,
+  MAX_SLIPPAGE_BPS,
+} from "../services/swapShield.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
 // These appear as 4-byte hex prefixes in "execution reverted" messages.
@@ -73,7 +84,48 @@ const POOL_ERROR_SELECTORS: Record<string, string> = {
   "0xf722177f": "InvalidQuoteTimestamp — the bridge quote expired before submission. Retry to get a fresh quote.",
   "0x0f6e887f": "EffectiveSupplyTooLow — a prior bridge left the source pool below minimum operating supply. The pool cannot send more assets until supply is replenished on that chain.",
   "0x162e92dd": "SameChainTransfer — the source and destination chain resolved to the same chain. This usually means the NAV equalization auto-corrected the direction incorrectly.",
+  "0xec8f2f9a": "TransferFromRecipientNotSettler — the 0x Settler contract rejected this swap because the vault is not recognized as a valid recipient. This token pair may not be supported via 0x for vault swaps. Try using Uniswap instead (omit 'using 0x').",
 };
+
+/**
+ * Map hallucinated LLM tool names to the correct canonical tool name.
+ * Workers AI (Llama) sometimes calls "swap" instead of "build_vault_swap",
+ * "quote" instead of "get_swap_quote", etc.
+ */
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  swap: "build_vault_swap",
+  quote: "get_swap_quote",
+  get_quote: "get_swap_quote",
+  swap_tokens: "build_vault_swap",
+  execute_swap: "build_vault_swap",
+  trade: "build_vault_swap",
+};
+
+/**
+ * True when request context includes a verified operator identity.
+ * Use this for ALL operator-scoped KV reads/writes to avoid trusting
+ * caller-supplied operatorAddress without auth.
+ */
+export function isVerifiedOperatorContext(
+  ctx: RequestContext,
+): ctx is RequestContext & { operatorAddress: Address; operatorVerified: true } {
+  return !!ctx.operatorVerified && !!ctx.operatorAddress;
+}
+
+/**
+ * Tools that require verified operator authentication.
+ *
+ * Keep this as the single source of truth instead of scattering checks in
+ * individual tool handlers.
+ */
+const OPERATOR_VERIFIED_TOOLS = new Set<string>([
+  // Operator-scoped KV mutations
+  "set_default_slippage",
+  "disable_swap_shield",
+  "enable_swap_shield",
+  // Strategy visibility is operator-private
+  "list_strategies",
+]);
 
 /**
  * Translate raw error messages into user-friendly language.
@@ -82,9 +134,9 @@ const POOL_ERROR_SELECTORS: Record<string, string> = {
  */
 function friendlyError(raw: string): string {
   // Pass through already-formatted rich error messages (multiline with context).
-  // These come from tool handlers (crosschain_sync, etc.) that include proposed
-  // action details, NAV data, and decoded revert reasons. Don't strip them.
-  if (raw.includes('\n') && (raw.startsWith('❌') || raw.includes('Proposed action:'))) {
+  // These come from tool handlers (crosschain_sync, Swap Shield, etc.) that include proposed
+  // action details, NAV data, options, and decoded revert reasons. Don't strip them.
+  if (raw.includes('\n') && (raw.startsWith('❌') || raw.startsWith('⚠️') || raw.includes('Proposed action:'))) {
     return raw;
   }
   // Gas-sponsored execution failures
@@ -95,10 +147,10 @@ function friendlyError(raw: string): string {
   if (/EffectiveSupplyTooLow/i.test(raw)) {
     return POOL_ERROR_SELECTORS["0x0f6e887f"];
   }
-  // Unknown tool
+  // Unknown tool — after aliasing, this means the tool genuinely doesn't exist
   const unknownTool = raw.match(/Unknown tool:\s*(\S+)/);
   if (unknownTool) {
-    return `Tool "${unknownTool[1]}" does not exist. This is a system error — please try again.`;
+    return `Tool "${unknownTool[1]}" is not available. Please try rephrasing your request.`;
   }
   // Pool not initialized
   if (/pool not initialized/i.test(raw) || /pool not found/i.test(raw) || /exact pool key/i.test(raw)) {
@@ -115,8 +167,9 @@ function friendlyError(raw: string): string {
   }
   // Decode known 4-byte pool/bridge error selectors from "execution reverted" messages.
   // These appear as 0x<8 hex chars> in the revert data — map them to human-readable errors.
+  // NOTE: No word boundary (\b) after the 8 hex chars — revert data always has more hex following.
   if (/execution reverted/i.test(raw)) {
-    const selMatch = raw.match(/0x([0-9a-fA-F]{8})\b/);
+    const selMatch = raw.match(/0x([0-9a-fA-F]{8})/);
     if (selMatch) {
       const sel = `0x${selMatch[1].toLowerCase()}`;
       if (POOL_ERROR_SELECTORS[sel]) return `On-chain revert: ${POOL_ERROR_SELECTORS[sel]}`;
@@ -129,6 +182,42 @@ function friendlyError(raw: string): string {
   if (raw.length < 200) return raw;
   // Truncate long errors (increased from 150 to preserve more context)
   return raw.slice(0, 200).replace(/\s+\S*$/, "") + "…";
+}
+
+/**
+ * Detect text that is just a tool-call recommendation (e.g. "Your function call
+ * should be: {JSON}") rather than actual analysis or plan text. These should NOT
+ * be shown as "Agent plan" — they're noise from the LLM failing to use structured
+ * tool calls.
+ */
+function looksLikeToolCallText(text: string): boolean {
+  // Text that's mostly a JSON tool call with optional prefix/suffix
+  const stripped = text.replace(/```(?:json)?\s*\n?/g, '').trim();
+  // Starts with or contains a tool-call-shaped JSON object
+  if (/(?:function.?call|should\s+(?:be|call)|here\s+is|call\s+the\s+tool)\s*:?\s*\{/i.test(stripped)) return true;
+  // Text is predominantly JSON (>60% of content is inside braces)
+  const braceStart = stripped.indexOf('{');
+  if (braceStart >= 0 && braceStart < 80) {
+    const jsonPart = extractBalancedBraces(stripped.slice(braceStart));
+    if (jsonPart && jsonPart.length > stripped.length * 0.5) return true;
+  }
+  return false;
+}
+
+/**
+ * Extract the first balanced `{…}` block from a string.
+ * Returns the content (including outer braces) or null if not found.
+ */
+function extractBalancedBraces(s: string): string | null {
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '{') depth++;
+    else if (s[i] === '}') {
+      depth--;
+      if (depth === 0) return s.slice(0, i + 1);
+    }
+  }
+  return null;
 }
 
 /**
@@ -249,33 +338,52 @@ async function callWorkersAI(
       }
     }
 
-    // Extract text-embedded tool calls
+    // Extract text-embedded tool calls (same logic as non-streaming path)
     if (textContent) {
       const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
-      const keyPattern = /\{\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
-      const keyMatch = cleaned.match(keyPattern);
-      if (keyMatch) {
-        const fnName = keyMatch[1];
-        const afterKey = cleaned.slice(keyMatch.index! + keyMatch[0].length);
-        let depth = 0;
-        let end = -1;
-        for (let i = 0; i < afterKey.length; i++) {
-          if (afterKey[i] === '{') depth++;
-          else if (afterKey[i] === '}') {
-            depth--;
-            if (depth === 0) { end = i + 1; break; }
+      const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
+      const isValidTool = (n: string) => validTools.includes(n) || validTools.includes(TOOL_NAME_ALIASES[n] || '');
+      const resolveTool = (n: string) => validTools.includes(n) ? n : (TOOL_NAME_ALIASES[n] || n);
+
+      let extractedFnName: string | undefined;
+      let extractedFnArgs: string | undefined;
+
+      // Pattern 1: name/function key before parameters/arguments
+      const fwdPattern = /\{\s*(?:"type"\s*:\s*"function"\s*,\s*)?"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
+      const fwdMatch = cleaned.match(fwdPattern);
+      if (fwdMatch) {
+        const fnName = fwdMatch[1];
+        const afterKey = cleaned.slice(fwdMatch.index! + fwdMatch[0].length);
+        const args = extractBalancedBraces(afterKey);
+        if (args !== null && isValidTool(fnName)) {
+          extractedFnName = resolveTool(fnName);
+          extractedFnArgs = args;
+        }
+      }
+
+      // Pattern 2: parameters/arguments before name (reversed key order)
+      if (!extractedFnName) {
+        const revPattern = /\{\s*(?:"type"\s*:\s*"function"\s*,\s*)?"(?:parameters|arguments)"\s*:\s*/;
+        const revMatch = cleaned.match(revPattern);
+        if (revMatch) {
+          const afterParams = cleaned.slice(revMatch.index! + revMatch[0].length);
+          const args = extractBalancedBraces(afterParams);
+          if (args !== null) {
+            const rest = afterParams.slice(args.length).replace(/^\s*}\s*/, '');
+            const nameAfter = rest.match(/,\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"/);
+            if (nameAfter && isValidTool(nameAfter[1])) {
+              extractedFnName = resolveTool(nameAfter[1]);
+              extractedFnArgs = args;
+            }
           }
         }
-        if (end > 0) {
-          const fnArgs = afterKey.slice(0, end);
-          const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
-          if (validTools.includes(fnName)) {
-            console.log(`[Workers AI streaming] Extracted text-embedded tool call: ${fnName}`);
-            hasToolCalls = true;
-            toolCalls = [{ function: { name: fnName, arguments: fnArgs } }];
-            textContent = null;
-          }
-        }
+      }
+
+      if (extractedFnName && extractedFnArgs) {
+        console.log(`[Workers AI streaming] Extracted text-embedded tool call: ${extractedFnName}`);
+        hasToolCalls = true;
+        toolCalls = [{ function: { name: extractedFnName, arguments: extractedFnArgs } }];
+        textContent = null;
       }
     }
 
@@ -319,6 +427,34 @@ async function callWorkersAI(
   let toolCalls = hasToolCalls ? result.tool_calls : undefined;
   let textContent: string | null = typeof result.response === 'string' ? result.response : null;
 
+  // Resolve tool name aliases in structured tool_calls (e.g. "swap" → "build_vault_swap").
+  // If ALL tool_calls have unknown names even after aliasing, discard them and try
+  // text-embedded extraction instead — the text often contains the correct tool name.
+  if (hasToolCalls && toolCalls) {
+    const validTools = new Set(tools?.map(t => t.function?.name).filter(Boolean) || []);
+    let allUnknown = true;
+    for (const tc of toolCalls) {
+      const rawName = tc.function?.name || tc.name || "";
+      const aliased = TOOL_NAME_ALIASES[rawName];
+      if (aliased) {
+        console.log(`[Workers AI] Tool alias in structured call: "${rawName}" → "${aliased}"`);
+        if (tc.function) tc.function.name = aliased;
+        else tc.name = aliased;
+      }
+      const finalName = tc.function?.name || tc.name || "";
+      if (validTools.has(finalName) || TOOL_NAME_ALIASES[finalName]) {
+        allUnknown = false;
+      }
+    }
+    // If all structured tool_calls are for unknown tools, discard them so
+    // text-embedded extraction has a chance to find the correct tool.
+    if (allUnknown && textContent) {
+      console.warn(`[Workers AI] All structured tool_calls have unknown names — discarding, will try text extraction`);
+      hasToolCalls = false;
+      toolCalls = undefined;
+    }
+  }
+
   // ── Extract DeepSeek R1 reasoning (<think>...</think> blocks) ──
   // The reasoning trace is stored on the response object for the caller to surface.
   let reasoning: string | null = null;
@@ -336,37 +472,57 @@ async function callWorkersAI(
   // Matches: {"function": "name", "parameters": {...}}
   //          {"function_name": "name", "parameters": {...}}
   //          {"name": "name", "parameters": {...}}
+  //          {"type": "function", "name": "...", "parameters": {...}}
   //          ```json\n{"name": ...}\n``` (markdown code blocks)
+  //          Also handles reversed key order (parameters before name).
   if (!hasToolCalls && textContent) {
     // Strip markdown code fences if present
     const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
-    // Match the key and function name, then capture everything after "parameters": up to matching }
-    const keyPattern = /\{\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
-    const keyMatch = cleaned.match(keyPattern);
-    if (keyMatch) {
-      const fnName = keyMatch[1];
-      const afterKey = cleaned.slice(keyMatch.index! + keyMatch[0].length);
-      // Extract balanced braces for the parameters object
-      let depth = 0;
-      let end = -1;
-      for (let i = 0; i < afterKey.length; i++) {
-        if (afterKey[i] === '{') depth++;
-        else if (afterKey[i] === '}') {
-          depth--;
-          if (depth === 0) { end = i + 1; break; }
+    const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
+    const isValidTool = (n: string) => validTools.includes(n) || validTools.includes(TOOL_NAME_ALIASES[n] || '');
+    const resolveTool = (n: string) => validTools.includes(n) ? n : (TOOL_NAME_ALIASES[n] || n);
+
+    // Try multiple patterns — Llama sometimes outputs different JSON structures
+    let extractedFnName: string | undefined;
+    let extractedFnArgs: string | undefined;
+
+    // Pattern 1: name/function key comes BEFORE parameters/arguments
+    const fwdPattern = /\{\s*(?:"type"\s*:\s*"function"\s*,\s*)?"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
+    const fwdMatch = cleaned.match(fwdPattern);
+    if (fwdMatch) {
+      const fnName = fwdMatch[1];
+      const afterKey = cleaned.slice(fwdMatch.index! + fwdMatch[0].length);
+      const args = extractBalancedBraces(afterKey);
+      if (args !== null && isValidTool(fnName)) {
+        extractedFnName = resolveTool(fnName);
+        extractedFnArgs = args;
+      }
+    }
+
+    // Pattern 2: parameters/arguments come BEFORE name (reversed key order)
+    if (!extractedFnName) {
+      const revPattern = /\{\s*(?:"type"\s*:\s*"function"\s*,\s*)?"(?:parameters|arguments)"\s*:\s*/;
+      const revMatch = cleaned.match(revPattern);
+      if (revMatch) {
+        const afterParams = cleaned.slice(revMatch.index! + revMatch[0].length);
+        const args = extractBalancedBraces(afterParams);
+        if (args !== null) {
+          // After the args object, look for the name key
+          const rest = afterParams.slice(args.length).replace(/^\s*}\s*/, '');
+          const nameAfter = rest.match(/,\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"/);
+          if (nameAfter && isValidTool(nameAfter[1])) {
+            extractedFnName = resolveTool(nameAfter[1]);
+            extractedFnArgs = args;
+          }
         }
       }
-      if (end > 0) {
-        const fnArgs = afterKey.slice(0, end);
-        // Verify this is a real tool name (not random JSON in the response)
-        const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
-        if (validTools.includes(fnName)) {
-          console.log(`[Workers AI] Extracted text-embedded tool call: ${fnName}`);
-          hasToolCalls = true;
-          toolCalls = [{ function: { name: fnName, arguments: fnArgs } }];
-          textContent = null; // discard the text — the tool call replaces it
-        }
-      }
+    }
+
+    if (extractedFnName && extractedFnArgs) {
+      console.log(`[Workers AI] Extracted text-embedded tool call: ${extractedFnName}`);
+      hasToolCalls = true;
+      toolCalls = [{ function: { name: extractedFnName, arguments: extractedFnArgs } }];
+      textContent = null; // discard the text — the tool call replaces it
     }
   }
 
@@ -581,6 +737,7 @@ ${executionModeNote}${contextDocsBlock}`;
   // priority — correctness and transparency are.
   const immediateFastPath =
     tryFastPathChainSwitch(lastUserMsg) ||
+    (hasVault ? tryFastPathSwapShieldToggle(lastUserMsg) : null) ||
     (hasVault ? tryFastPathStrategyQueries(lastUserMsg) : null) ||
     (hasVault ? tryFastPathTwapCreate(lastUserMsg) : null);
   if (immediateFastPath) {
@@ -599,9 +756,9 @@ ${executionModeNote}${contextDocsBlock}`;
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      // For tool calls that produced informative errors (balance, revert, NAV),
+      // For tool calls that produced informative errors (balance, revert, NAV, auth),
       // return the error directly — falling through to DeepSeek would hallucinate.
-      const isInformativeError = /insufficient|revert|blocked|failed|not found|not bridgeable|no bridgeable/i.test(errMsg);
+      const isInformativeError = /insufficient|revert|blocked|failed|not found|not bridgeable|no bridgeable|wallet not connected|operator authentication required|not the vault owner|requires.*authentication|authenticate/i.test(errMsg);
       if (isInformativeError) {
         console.warn(`[LLM] Immediate fast-path informative error, returning directly: ${errMsg}`);
         const friendlyMsg = friendlyError(sanitizeError(errMsg));
@@ -663,8 +820,9 @@ ${executionModeNote}${contextDocsBlock}`;
   // For models that return both text + tool_calls (OpenRouter, OpenAI), this shows the
   // model's plan before tool execution starts. Workers AI discards text when tool_calls
   // are present, so this is a no-op for the default path.
+  // SKIP text that's just a JSON tool call recommendation — it's noise, not analysis.
   const firstCallText = choice.message.content?.trim();
-  if (firstCallText) {
+  if (firstCallText && !looksLikeToolCallText(firstCallText)) {
     onStreamEvent?.({ type: "text", content: firstCallText });
   }
   let orchestrationReasoning: string = reasoning ||
@@ -731,7 +889,7 @@ ${executionModeNote}${contextDocsBlock}`;
           onStreamEvent?.({ type: "reasoning", content: dsReasoning });
         }
         const dsText = dsChoice.message.content?.trim();
-        if (dsText) {
+        if (dsText && !looksLikeToolCallText(dsText)) {
           onStreamEvent?.({ type: "text", content: dsText });
         }
         orchestrationChoice = dsChoice;
@@ -967,6 +1125,33 @@ ${executionModeNote}${contextDocsBlock}`;
 
         if (onToolResult) await onToolResult(name, result, isError).catch(() => {});
 
+        // Terminal error detection: certain errors from swap/trade tools should be
+        // returned directly to the user instead of giving the LLM another round.
+        // Without this, the model gets confused by the error and calls unrelated tools
+        // (e.g., GMX markets after a swap revert).
+        if (isError && (name === "build_vault_swap" || name === "get_swap_quote")) {
+          const isTerminalError =
+            /Swap Shield blocked/i.test(result) ||
+            /NAV.*shield.*blocked/i.test(result) ||
+            /would revert on-chain/i.test(result) ||
+            /execution reverted/i.test(result) ||
+            /On-chain (?:revert|error)/i.test(result) ||
+            /simulation failed/i.test(result);
+          if (isTerminalError) {
+            console.log(`[LLM] Terminal swap error — returning directly instead of continuing orchestration`);
+            toolMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
+            return {
+              reply: result.replace(/^Error: /, ""),
+              toolCalls: toolCallResults,
+              chainSwitch: pendingChainSwitch,
+              dexProvider: detectedDex,
+              reasoning: orchestrationReasoning,
+              modelsUsed,
+              finalModel: "tooling",
+            };
+          }
+        }
+
         // Detect consecutive failures of the same tool with the same error.
         // Break immediately to avoid repeating the same failing call in every round.
         if (isError) {
@@ -1094,7 +1279,7 @@ ${executionModeNote}${contextDocsBlock}`;
         const isRepeatOfToolResult = toolCallResults.some(
           tc => tc.error && tc.result && followUpText.includes(tc.result.replace(/^Error:\s*/i, '').slice(0, 50)),
         );
-        if (!isErrorEcho && !isRepeatOfToolResult) {
+        if (!isErrorEcho && !isRepeatOfToolResult && !looksLikeToolCallText(followUpText)) {
           onStreamEvent?.({ type: "text", content: followUpText });
         }
       }
@@ -1134,28 +1319,39 @@ ${executionModeNote}${contextDocsBlock}`;
   // user intent matches a deterministic command, execute fast-path now.
   if (deferredFastPath) {
     console.log(`[LLM] Deferred fast-path after first model pass: ${deferredFastPath.name}`);
+    let fpDex: string | undefined;
+    if (deferredFastPath.name.startsWith("gmx_")) fpDex = "GMX";
+    if (deferredFastPath.name === "get_lp_positions") fpDex = "Uniswap";
+    if (deferredFastPath.name === "build_vault_swap" || deferredFastPath.name === "get_swap_quote") {
+      const dexArg = String((deferredFastPath.args as Record<string, unknown>).dex || "uniswap").toLowerCase();
+      fpDex = dexArg === "0x" ? "0x" : "Uniswap";
+    }
     try {
       const toolResult = await executeToolCall(env, ctx, deferredFastPath.name, deferredFastPath.args);
-      let dexProvider: string | undefined;
-      if (deferredFastPath.name.startsWith("gmx_")) dexProvider = "GMX";
-      if (deferredFastPath.name === "get_lp_positions") dexProvider = "Uniswap";
-      if (deferredFastPath.name === "build_vault_swap" || deferredFastPath.name === "get_swap_quote") {
-        const dexArg = String((deferredFastPath.args as Record<string, unknown>).dex || "uniswap").toLowerCase();
-        dexProvider = dexArg === "0x" ? "0x" : "Uniswap";
-      }
       return {
         reply: toolResult.message,
         toolCalls: [{ name: deferredFastPath.name, arguments: deferredFastPath.args, result: toolResult.message, error: false }],
         transaction: toolResult.transaction,
         chainSwitch: toolResult.chainSwitch,
         suggestions: toolResult.suggestions,
-        dexProvider,
+        dexProvider: fpDex,
         reasoning: reasoning || fastPathReasoning,
         modelsUsed,
         finalModel: "tooling",
       };
     } catch (err) {
-      console.log(`[LLM] Deferred fast-path error, returning model response: ${err}`);
+      // Don't silently swallow — return the error so the user knows why the swap failed.
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      const friendly = friendlyError(sanitizeError(rawMsg));
+      console.log(`[LLM] Deferred fast-path error: ${friendly}`);
+      return {
+        reply: friendly,
+        toolCalls: [{ name: deferredFastPath.name, arguments: deferredFastPath.args, result: `Error: ${friendly}`, error: true }],
+        dexProvider: fpDex,
+        reasoning: reasoning || fastPathReasoning,
+        modelsUsed,
+        finalModel: "tooling",
+      };
     }
   }
 
@@ -1319,7 +1515,25 @@ export async function executeToolCall(
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolResult> {
-  switch (name) {
+  // Resolve hallucinated tool names to canonical names
+  const resolvedName = TOOL_NAME_ALIASES[name] || name;
+  if (resolvedName !== name) {
+    console.log(`[LLM] Tool name alias: "${name}" → "${resolvedName}"`);
+  }
+
+  // Centralized auth gate for operator-verified tools.
+  // This avoids fragile per-tool checks and guarantees consistent behavior for
+  // all execution paths (LLM tool calls + immediate/deferred fast-paths).
+  if (OPERATOR_VERIFIED_TOOLS.has(resolvedName)) {
+    if (!ctx.operatorAddress) {
+      throw new Error("Wallet not connected. Connect your wallet first.");
+    }
+    if (!ctx.operatorVerified) {
+      throw new Error("Operator authentication required. Please verify your wallet first.");
+    }
+  }
+
+  switch (resolvedName) {
     case "get_swap_quote": {
       // Auto-switch chain if specified
       let chainSwitched: number | undefined;
@@ -1331,15 +1545,15 @@ export async function executeToolCall(
         }
       }
 
+      // Resolve slippage: request body → KV stored default → 100 bps
+      const resolvedSlippage = await resolveSlippage(env, ctx);
+
       const intent: SwapIntent = {
         tokenIn: args.tokenIn as string,
         tokenOut: args.tokenOut as string,
         amountIn: args.amountIn as string | undefined,
         amountOut: args.amountOut as string | undefined,
-        // SECURITY: Slippage is hardcoded server-side at 1% (100 bps).
-        // Not exposed to the LLM to prevent a compromised agent from
-        // setting arbitrary slippage and enabling sandwich attacks.
-        slippageBps: 100,
+        slippageBps: resolvedSlippage,
       };
       if (!intent.amountIn && !intent.amountOut) {
         throw new Error("Either amountIn or amountOut must be specified.");
@@ -1376,6 +1590,16 @@ export async function executeToolCall(
         throw new Error("Wallet not connected. Connect your wallet first.");
       }
 
+      // Reject the zero address — the frontend uses it as a sentinel when no
+      // vault has been selected. Building calldata against 0x000...0 would
+      // waste a Swap Shield oracle call and produce an unusable transaction.
+      const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+      if (!ctx.vaultAddress || ctx.vaultAddress.toLowerCase() === ZERO_ADDRESS) {
+        throw new Error(
+          "No vault selected. Please select or deploy a smart pool before swapping.",
+        );
+      }
+
       // Auto-switch chain if specified
       let chainSwitched: number | undefined;
       if (args.chain) {
@@ -1386,13 +1610,15 @@ export async function executeToolCall(
         }
       }
 
+      // Resolve slippage: request body → KV stored default → 100 bps
+      const resolvedSlippage = await resolveSlippage(env, ctx);
+
       const intent: SwapIntent = {
         tokenIn: args.tokenIn as string,
         tokenOut: args.tokenOut as string,
         amountIn: args.amountIn as string | undefined,
         amountOut: args.amountOut as string | undefined,
-        // SECURITY: Slippage hardcoded at 1% — not controllable by the LLM.
-        slippageBps: 100,
+        slippageBps: resolvedSlippage,
       };
       if (!intent.amountIn && !intent.amountOut) {
         throw new Error("Either amountIn or amountOut must be specified.");
@@ -1454,6 +1680,17 @@ export async function executeToolCall(
       if (dex === "0x" || dex === "zerox") {
         // ── 0x AllowanceHolder flow ──
         const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
+
+        // ── Swap Shield — oracle price check ──
+        // Pass addresses already resolved by the 0x API so we avoid a
+        // redundant resolver round-trip and never skip the check on transient failures.
+        const shieldWarning0x = await runSwapShield(
+          env, ctx, intent,
+          zxQuote.sellAmount, zxQuote.decimalsIn,
+          zxQuote.buyAmount,
+          zxQuote.sellToken as Address,
+          zxQuote.buyToken as Address,
+        );
 
         // The 0x API returns a complete transaction targeting AllowanceHolder.
         // For the vault, we send the 0x calldata TO the vault address.
@@ -1519,6 +1756,7 @@ export async function executeToolCall(
           `Slippage: ${intent.slippageBps ? intent.slippageBps / 100 : 1}%`,
           `Chain: ${chainName}`,
           `Gas limit: ${parseInt(zxGas, 16)}`,
+          ...(shieldWarning0x ? [shieldWarning0x] : []),
         ].join("\n");
 
         // Enforce NAV shield before returning unsigned calldata on direct tool calls.
@@ -1531,6 +1769,25 @@ export async function executeToolCall(
 
       // 2. Get quote from Uniswap Trading API
       const quote = await getUniswapQuote(env, intent, ctx.chainId, ctx.vaultAddress);
+
+      // ── Swap Shield — oracle price check ──
+      // Pass addresses already resolved by Uniswap API so we avoid a
+      // redundant resolver round-trip and never skip the check on transient failures.
+      // Treat missing amounts as a hard error — an unexpected quote shape must not
+      // silently bypass oracle protection.
+      if (!quote.quote.input?.amount || !quote.quote.output?.amount) {
+        throw new Error(
+          "Uniswap quote returned an unexpected shape — input or output amount is missing. " +
+          "Cannot validate swap price. Please retry.",
+        );
+      }
+      const shieldWarningUni = await runSwapShield(
+        env, ctx, intent,
+        quote.quote.input.amount, quote.decimalsIn,
+        quote.quote.output.amount,
+        quote.quote.input.token as Address,
+        quote.quote.output.token as Address,
+      );
 
       // ── Balance pre-check for exact-output swaps ──
       // For exact-output, we only know required input after the quote. Check here
@@ -1659,6 +1916,7 @@ export async function executeToolCall(
         `Slippage: ${intent.slippageBps ? intent.slippageBps / 100 : 1}%`,
         `Chain: ${chainName}`,
         `Gas limit: ${parseInt(uniGas, 16)}`,
+        ...(shieldWarningUni ? [shieldWarningUni] : []),
       ].join("\n");
 
       // Enforce NAV shield before returning unsigned calldata on direct tool calls.
@@ -1771,6 +2029,87 @@ export async function executeToolCall(
       return {
         message: `Switched to ${match.name} (chain ${match.id}). All subsequent operations will use this chain.`,
         chainSwitch: match.id,
+      };
+    }
+
+    // ── Trading Settings ────────────────────────────────────────────
+
+    case "set_default_slippage": {
+      const raw = String(args.slippage ?? "").trim();
+      let bps: number;
+      const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
+      const bpsMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*bps$/i);
+      const plainMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)$/);
+      if (percentMatch) {
+        const num = parseFloat(percentMatch[1]);
+        if (isNaN(num) || num <= 0) {
+          throw new Error("Invalid slippage value. Provide a positive number (e.g., '0.5%', '50bps', or '0.5').");
+        }
+        bps = Math.round(num * 100);
+      } else if (bpsMatch) {
+        const num = parseFloat(bpsMatch[1]);
+        if (isNaN(num) || num <= 0) {
+          throw new Error("Invalid slippage value. Provide a positive number (e.g., '0.5%', '50bps', or '0.5').");
+        }
+        if (!Number.isInteger(num)) {
+          throw new Error(`Non-integer bps value '${raw}' is ambiguous — did you mean ${Math.round(num)}bps or ${num}%? Use the '%' suffix for percentages.`);
+        }
+        bps = num;
+      } else if (plainMatch) {
+        const num = parseFloat(plainMatch[1]);
+        if (isNaN(num) || num <= 0) {
+          throw new Error("Invalid slippage value. Provide a positive number (e.g., '0.5%', '50bps', or '0.5').");
+        }
+        // Integers within the configured BPS range are treated as bps (e.g. "50" => 50 bps = 0.5%)
+        // Small decimals and values outside BPS range are treated as percentages (e.g. "0.5" => 50 bps)
+        if (Number.isInteger(num) && num >= MIN_SLIPPAGE_BPS && num <= MAX_SLIPPAGE_BPS) {
+          bps = Math.round(num);
+        } else {
+          bps = Math.round(num * 100);
+        }
+      } else {
+        throw new Error("Invalid slippage value. Use a positive number, optionally suffixed with '%' or 'bps' (e.g., '0.5%', '50bps', or '0.5').");
+      }
+      if (bps < MIN_SLIPPAGE_BPS || bps > MAX_SLIPPAGE_BPS) {
+        throw new Error(
+          `Slippage must be between ${MIN_SLIPPAGE_BPS / 100}% and ${MAX_SLIPPAGE_BPS / 100}%. ` +
+          `Got: ${bps / 100}% (${bps} bps).`,
+        );
+      }
+      await setStoredSlippage(env.KV, ctx.operatorAddress!, bps);
+      return {
+        message: `✅ Default slippage set to ${bps / 100}% (${bps} bps). This applies to all future swaps until changed.`,
+      };
+    }
+
+    case "disable_swap_shield": {
+      if (!ctx.vaultAddress || ctx.vaultAddress === "0x0000000000000000000000000000000000000000") {
+        throw new Error("No vault selected. Enter a valid vault address before disabling Swap Shield.");
+      }
+      await disableSwapShield(
+        env.KV,
+        ctx.operatorAddress!,
+        ctx.vaultAddress as string,
+      );
+      return {
+        message:
+          "⚠️ Swap Shield disabled for 10 minutes. During this time, swaps will NOT be checked " +
+          "against oracle prices. The shield will re-enable automatically.\n\n" +
+          "The NAV shield (10% max loss) still protects against catastrophic trades.",
+      };
+    }
+
+    case "enable_swap_shield": {
+      if (!ctx.vaultAddress || ctx.vaultAddress === "0x0000000000000000000000000000000000000000") {
+        throw new Error("No vault selected. Enter a valid vault address before enabling Swap Shield.");
+      }
+      await enableSwapShield(
+        env.KV,
+        ctx.operatorAddress!,
+        ctx.vaultAddress as string,
+      );
+      return {
+        message: "✅ Swap Shield re-enabled. All swaps will be checked against oracle prices.",
       };
     }
 
@@ -3102,10 +3441,6 @@ export async function executeToolCall(
     // ── Strategy Skills (TWAP only) ──────────────────────────────────
 
     case "list_strategies": {
-      if (!ctx.operatorVerified) {
-        throw new Error("Operator authentication required to list strategies.");
-      }
-
       const { getTwapOrders } = await import("../skills/twap.js");
       const twapOrders = (await getTwapOrders(env.KV, ctx.vaultAddress)).filter((o) => o.active);
 
@@ -3818,6 +4153,176 @@ function resolveChainName(chainId: number): string {
 }
 
 /**
+ * Resolve slippage tolerance (bps) — priority:
+ *   1. Per-request value from context (body.slippageBps)
+ *   2. Stored operator preference in KV
+ *   3. Default 100 bps (1%)
+ *
+ * SECURITY: Clamped to [MIN_SLIPPAGE_BPS, MAX_SLIPPAGE_BPS].
+ * The LLM CANNOT set slippage — only the operator via settings or chat tool.
+ */
+export async function resolveSlippage(env: Env, ctx: RequestContext): Promise<number> {
+  // 1. Per-request override from body (ONLY for verified operators)
+  // Unverified callers must not be able to weaken per-request safety controls.
+  if (
+    isVerifiedOperatorContext(ctx) &&
+    ctx.slippageBps != null &&
+    typeof ctx.slippageBps === "number" &&
+    Number.isFinite(ctx.slippageBps) &&
+    Number.isInteger(ctx.slippageBps)
+  ) {
+    const clamped = Math.max(MIN_SLIPPAGE_BPS, Math.min(MAX_SLIPPAGE_BPS, ctx.slippageBps));
+    return clamped;
+  }
+
+  // 2. Stored operator preference (ONLY for verified operators)
+  if (isVerifiedOperatorContext(ctx) && env.KV) {
+    const stored = await getStoredSlippage(env.KV, ctx.operatorAddress);
+    if (stored !== null) return stored;
+  }
+
+  // 3. Default
+  return DEFAULT_SLIPPAGE_BPS;
+}
+
+/**
+ * Run the Swap Shield oracle check. Compares DEX quote against on-chain oracle
+ * and throws a descriptive error if the quote diverges too much.
+ *
+ * Called from both 0x and Uniswap flows in build_vault_swap.
+ * Skipped when the operator has temporarily disabled the shield.
+ */
+async function runSwapShield(
+  env: Env,
+  ctx: RequestContext,
+  intent: SwapIntent,
+  sellAmountRaw: string,
+  sellDecimals: number,
+  buyAmountRaw: string,
+  resolvedTokenIn?: Address,
+  resolvedTokenOut?: Address,
+): Promise<string | undefined> {
+  // Check opt-out
+  if (isVerifiedOperatorContext(ctx) && env.KV) {
+    const disabled = await isSwapShieldDisabled(
+      env.KV,
+      ctx.operatorAddress,
+      ctx.vaultAddress as string,
+    );
+    if (disabled) {
+      console.log("[SwapShield] Temporarily disabled by operator — skipping");
+      return;
+    }
+  }
+
+  // Use pre-resolved addresses from quote path when available.
+  // Falling back to runtime resolution is kept for compatibility, but if it
+  // fails we throw rather than silently skip the oracle check.
+  let tokenInAddr: Address;
+  let tokenOutAddr: Address;
+  if (resolvedTokenIn && resolvedTokenOut) {
+    tokenInAddr = resolvedTokenIn;
+    tokenOutAddr = resolvedTokenOut;
+  } else {
+    try {
+      tokenInAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn) as Address;
+      tokenOutAddr = await resolveTokenAddress(ctx.chainId, intent.tokenOut) as Address;
+    } catch (error) {
+      throw new Error(
+        `Swap Shield cannot run: token address resolution failed — ${sanitizeError(error instanceof Error ? error.message : String(error))}`,
+      );
+    }
+  }
+
+  // Guard BigInt() so malformed DEX responses surface as clear errors rather
+  // than the generic "Cannot convert X to a BigInt" SyntaxError.
+  let sellRawBig: bigint;
+  let buyRawBig: bigint;
+  try {
+    sellRawBig = BigInt(sellAmountRaw);
+    buyRawBig = BigInt(buyAmountRaw);
+  } catch {
+    throw new Error(
+      "Swap Shield cannot run: DEX quote returned a malformed amount (not a valid integer). " +
+      "Please retry — if this persists, switch DEX (0x ↔ uniswap).",
+    );
+  }
+
+  const result = await checkSwapPrice(
+    ctx.vaultAddress as Address,
+    ctx.chainId,
+    tokenInAddr,
+    tokenOutAddr,
+    sellRawBig,
+    buyRawBig,
+    intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
+    env.ALCHEMY_API_KEY,
+  );
+
+  if (!result.allowed) {
+    if (result.code === "INVALID_QUOTE") {
+      throw new Error(result.reason || "Invalid swap quote received from DEX.");
+    }
+
+    // Build a context-specific error with guidance
+    const sellSymbol = intent.tokenIn;
+    const buySymbol = intent.tokenOut;
+    const sellAmt = intent.amountIn || formatUnits(sellRawBig, sellDecimals);
+    const divergence = parseFloat(result.divergencePct);
+    const isFavorable = Number.isFinite(divergence) && divergence < 0;
+    // Display the absolute magnitude with an explicit direction word to avoid
+    // awkward phrasings like "diverges -20.00%" in the favorable case.
+    const magnitudePct = Number.isFinite(divergence)
+      ? Math.abs(divergence).toFixed(2)
+      : result.divergencePct;
+    const directionClause = isFavorable
+      ? `is ${magnitudePct}% better than the on-chain oracle price`
+      : `is ${magnitudePct}% worse than the on-chain oracle price`;
+    const thresholdText = isFavorable
+      ? "10% better-than-oracle safety threshold"
+      : "5% safety threshold";
+    const explanation = isFavorable
+      ? `This can indicate a stale oracle or a manipulated routing path producing an implausibly favorable quote.`
+      : `This usually indicates significant price impact from the trade size.`;
+    const disableShieldOption = isVerifiedOperatorContext(ctx)
+      ? `3. **Disable shield** — say "disable swap shield" to suspend it for 10 minutes ` +
+        (isFavorable
+          ? `(use with caution — you accept oracle/route integrity risk)\n`
+          : `(use with caution — you accept full price impact risk)\n`)
+      : `3. **Disable shield** — requires operator authentication; sign in as the vault owner first ` +
+        `then say "disable swap shield"\n`;
+    const options = isFavorable
+      ? `Options:\n` +
+        `1. **Retry later** — wait for pricing to normalize and request a fresh quote\n` +
+        `2. **Verify route** — compare venues or try a different swap path\n` +
+        disableShieldOption
+      : `Options:\n` +
+        `1. **Split with TWAP** — create a TWAP order to execute ${sellAmt} ${sellSymbol} → ${buySymbol} ` +
+        `in smaller slices over time, reducing price impact\n` +
+        `2. **Reduce amount** — try a smaller trade\n` +
+        disableShieldOption;
+    throw new Error(
+      `⚠️ Swap Shield blocked this trade.\n\n` +
+      `The DEX quote ${directionClause}, ` +
+      `exceeding the ${thresholdText}.\n\n` +
+      `${explanation}\n\n` +
+      `${options}`,
+    );
+  }
+
+  // Log non-blocking results and surface a warning to the caller so it can
+  // be appended to the swap-ready message. process.emitWarning() is not
+  // available in Cloudflare Workers — returning the string is the correct pattern.
+  if (result.code === "NO_PRICE_FEED" || result.code === "ORACLE_ERROR") {
+    const warning =
+      `⚠️ Swap Shield: quote was not oracle-verified (${result.code}). ` +
+      (result.reason ?? "Oracle check unavailable — proceeding without oracle protection.");
+    console.warn(`[SwapShield] Non-blocking: ${warning}`);
+    return warning;
+  }
+}
+
+/**
  * Format a raw token amount (in smallest units) to human-readable.
  */
 function formatRawAmount(amount: string, decimals: number): string {
@@ -4009,6 +4514,25 @@ function tryFastPathChainSwitch(msg: string): FastPathResult | null {
   return null;
 }
 
+// ── Fast-path: Swap Shield toggle ───────────────────────────────────
+
+/**
+ * Detect swap shield enable/disable commands, including the frontend
+ * magic strings __enable_swap_shield__ / __disable_swap_shield__.
+ */
+function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+
+  if (m === "__enable_swap_shield__" || /^(?:re-?)?enable\s+swap\s+shield$/i.test(m)) {
+    return { name: "enable_swap_shield", args: {} };
+  }
+  if (m === "__disable_swap_shield__" || /^disable\s+swap\s+shield$/i.test(m)) {
+    return { name: "disable_swap_shield", args: {} };
+  }
+
+  return null;
+}
+
 // ── Fast-path: Cross-chain NAV sync ─────────────────────────────────
 
 /**
@@ -4178,7 +4702,7 @@ function tryFastPathCapabilityQuestion(msg: string): string | null {
  *   "swap 100 USDC for ETH"               → build_vault_swap (EXACT_INPUT)
  *   "swap 100 USDC to ETH"                → build_vault_swap (EXACT_INPUT)
  */
-function tryFastPathSwap(msg: string): FastPathResult | null {
+export function tryFastPathSwap(msg: string): FastPathResult | null {
   let m = msg.trim();
 
   // Normalise token references: uppercase symbols, preserve addresses (lowercase).
@@ -4187,9 +4711,40 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
   const normalizeToken = (t: string) =>
     /^0x[0-9a-f]{40}$/i.test(t) ? t.toLowerCase() : t.toUpperCase();
 
-  // Extract DEX modifier ("using 0x", "using uniswap", "via 0x") before regex matching
+  // Strip conversational prefixes ("I want to", "can you", "please", etc.)
+  // so "I want to sell 100 ETH for USDC" matches the same regex as "sell 100 ETH for USDC".
+  m = m.replace(
+    /^(?:(?:i\s+)?(?:want|would like|need|['']d like)\s+to\s+|(?:can|could)\s+you\s+(?:please\s+)?|please\s+)/i,
+    "",
+  ).trim();
+
+  // Extract chain modifier — appears either as the final suffix OR before a DEX modifier:
+  //   "sell 1 ETH for USDC on base"             → chain=base
+  //   "sell 1 ETH for USDC on base using 0x"    → chain=base, DEX suffix preserved
+  //   "sell 1 ETH for USDC on base with 0x"     → chain=base, DEX suffix preserved
+  //   "sell 1 ETH for USDC using 0x on base"    → chain=base, DEX suffix preserved
+  let chain: string | undefined;
+  // Pattern: "on <chain> [using/via/with/on <dex>]" — chain comes before optional DEX suffix.
+  // Lookahead covers all DEX-modifier keywords supported by dexMatch below.
+  const chainWithDexMatch = m.match(/\s+on\s+([a-z0-9 ]+?)(?=\s+(?:using|via|with|on)\s+[a-z0-9x]+\s*$|\s*$)/i);
+  if (chainWithDexMatch) {
+    const possibleChain = chainWithDexMatch[1].trim().toLowerCase();
+    // Accept any chain alias that resolveChainArg understands (supports
+    // multi-word names like "bnb chain" / "bnb smart chain").
+    try {
+      const resolved = resolveChainArg(possibleChain);
+      chain = resolved.name.toLowerCase();
+      // Remove just the "on <chain>" segment, preserving any trailing DEX modifier.
+      m = (m.slice(0, chainWithDexMatch.index!) + m.slice(chainWithDexMatch.index! + chainWithDexMatch[0].length)).trim();
+    } catch {
+      // Not a chain alias; leave untouched so DEX suffix parsing can handle
+      // patterns like "on uniswap".
+    }
+  }
+
+  // Extract DEX modifier ("using 0x", "via uniswap") — now that chain is stripped
   let dex: string | undefined;
-  const dexMatch = m.match(/\s+(?:using|via)\s+(0x|uniswap|zerox)$/i);
+  const dexMatch = m.match(/\s+(?:using|via|on|with)\s+(0x|uniswap|zerox)$/i);
   if (dexMatch) {
     dex = dexMatch[1].toLowerCase() === "zerox" ? "0x" : dexMatch[1].toLowerCase();
     m = m.slice(0, dexMatch.index!).trim();
@@ -4197,7 +4752,7 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
 
   // ── "sell <amount> <tokenIn> for <tokenOut> [on <chain>]" ──
   const sellMatch = m.match(
-    /^sell\s+([\d.,]+)\s+([a-z0-9]+)\s+(?:for|to|into)\s+([a-z0-9]+)(?:\s+on\s+([a-z0-9 ]+))?$/i,
+    /^sell\s+([\d.,]+)\s+([a-z0-9]+)\s+(?:for|to|into)\s+([a-z0-9]+)$/i,
   );
   if (sellMatch) {
     const args: Record<string, unknown> = {
@@ -4205,14 +4760,14 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
       tokenOut: normalizeToken(sellMatch[3]),
       amountIn: sellMatch[1].replace(/,/g, ""),
     };
-    if (sellMatch[4]) args.chain = sellMatch[4].trim();
+    if (chain) args.chain = chain;
     if (dex) args.dex = dex;
     return { name: "build_vault_swap", args };
   }
 
   // ── "buy <amount> <tokenOut> [with <tokenIn>] [on <chain>]" ──
   const buyMatch = m.match(
-    /^buy\s+([\d.,]+)\s+([a-z0-9]+)(?:\s+(?:with|using|for)\s+([a-z0-9]+))?(?:\s+on\s+([a-z0-9 ]+))?$/i,
+    /^buy\s+([\d.,]+)\s+([a-z0-9]+)(?:\s+(?:with|using|for)\s+([a-z0-9]+))?$/i,
   );
   if (buyMatch) {
     const args: Record<string, unknown> = {
@@ -4221,14 +4776,14 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
     };
     // Default tokenIn to USDC if not specified
     args.tokenIn = buyMatch[3] ? normalizeToken(buyMatch[3]) : "USDC";
-    if (buyMatch[4]) args.chain = buyMatch[4].trim();
+    if (chain) args.chain = chain;
     if (dex) args.dex = dex;
     return { name: "build_vault_swap", args };
   }
 
   // ── "swap <amount> <tokenIn> for/to <tokenOut> [on <chain>]" ──
   const swapMatch = m.match(
-    /^swap\s+([\d.,]+)\s+([a-z0-9]+)\s+(?:for|to|into)\s+([a-z0-9]+)(?:\s+on\s+([a-z0-9 ]+))?$/i,
+    /^swap\s+([\d.,]+)\s+([a-z0-9]+)\s+(?:for|to|into)\s+([a-z0-9]+)$/i,
   );
   if (swapMatch) {
     const args: Record<string, unknown> = {
@@ -4236,7 +4791,7 @@ function tryFastPathSwap(msg: string): FastPathResult | null {
       tokenOut: normalizeToken(swapMatch[3]),
       amountIn: swapMatch[1].replace(/,/g, ""),
     };
-    if (swapMatch[4]) args.chain = swapMatch[4].trim();
+    if (chain) args.chain = chain;
     if (dex) args.dex = dex;
     return { name: "build_vault_swap", args };
   }

@@ -75,6 +75,9 @@ const KNOWN_ERRORS: Record<string, string> = {
   // NavImpactLib — keccak256("EffectiveSupplyTooLow()")[:4]
   "0x0f6e887f": "Effective supply too low after operation (EffectiveSupplyTooLow). " +
     "Cannot bridge more than 87.5% of pool supply (on-chain MINIMUM_SUPPLY_RATIO = 8).",
+  // 0x Settler — TransferFromRecipientNotSettler(address)
+  "0xec8f2f9a": "The 0x Settler contract rejected the swap (TransferFromRecipientNotSettler). " +
+    "This token pair may not be routable via 0x for vault swaps. Try Uniswap instead.",
 };
 
 /** KV key prefix for 24-hour NAV baseline */

@@ -240,6 +240,36 @@ export const RIGOBLOCK_VAULT_ABI = [
     outputs: [],
   },
 
+  // ── EOracle extension — Oracle price conversion ──
+
+  // convertTokenAmount(address token, int256 amount, address targetToken) → int256
+  // Converts an amount of `token` to its equivalent in `targetToken` using the
+  // BackGeoOracle TWAP (5-minute window, capped at oracle cardinality).
+  // Routes through ETH internally (token→ETH→targetToken) when needed.
+  // Reverts if no oracle price feed exists for a token.
+  {
+    name: "convertTokenAmount",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "amount", type: "int256" },
+      { name: "targetToken", type: "address" },
+    ],
+    outputs: [{ name: "convertedAmount", type: "int256" }],
+  },
+
+  // hasPriceFeed(address token) → bool
+  // Returns true if the BackGeoOracle has an initialized price feed for `token`.
+  // Native ETH and WETH always return true.
+  {
+    name: "hasPriceFeed",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "token", type: "address" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+
   // ── EApps extension — Uniswap v4 position tracking ──
 
   // getUniV4TokenIds() → uint256[]

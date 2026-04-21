@@ -42,7 +42,7 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
   const all = recentUserMsgs + " " + recentAssistantMsgs;
 
   // Swap
-  if (/\b(swap|buy|sell|exchange|convert|trade|quote|price)\b/.test(all) &&
+  if (/\b(swap|buy|sell|exchange|convert|trade|quote|price|slippage|swap.?shield)\b/.test(all) &&
       !/\b(long|short|perp|leverage|\dx)\b/.test(recentUserMsgs)) {
     domains.add("swap");
   }
@@ -98,7 +98,7 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
 
 /** Map domains to their tool names — used to filter tool definitions. */
 export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
-  swap: ["get_swap_quote", "build_vault_swap"],
+  swap: ["get_swap_quote", "build_vault_swap", "set_default_slippage", "disable_swap_shield", "enable_swap_shield"],
   gmx: [
     "gmx_open_position", "gmx_close_position", "gmx_increase_position",
     "gmx_get_positions", "gmx_cancel_order", "gmx_update_order",
@@ -195,7 +195,7 @@ RULES:
 - NEVER claim the vault "now holds" a specific amount unless you called get_token_balance to verify it.
 - Token symbols resolve automatically. If resolution fails, retry with the contract address from the reference below.
 - Users may use full names (e.g., "chainlink"→LINK, "uniswap"→UNI, "wrapped bitcoin"→WBTC).
-- Default slippage: 1% (100 bps) — hardcoded for safety, not adjustable.
+- Default slippage: 1% (100 bps). Configurable by the operator via settings or "set slippage to X%".
 
 TOKEN ADDRESS REFERENCE:
 Chain 1 (Ethereum): ETH=native, WETH=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2, USDC=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48, USDT=0xdAC17F958D2ee523a2206206994597C13D831ec7, DAI=0x6B175474E89094C44Da98b954EedeAC495271d0F, WBTC=0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599, GRG=0x4FbB350052Bca5417566f188eB2EBCE5b19BC964, XAUT=0x68749665FF8D2d112Fa859AA293F07A622782F38
@@ -220,6 +220,27 @@ export const DOMAIN_PROMPTS: Record<DomainKey, string> = {
 - build_vault_swap and get_swap_quote accept a "chain" parameter. Always include it when the user names a chain.
 - CRITICAL: Auto-switches chains. Do NOT call switch_chain before a swap.
 - Only use switch_chain when the user wants to change chain WITHOUT a swap.
+
+SWAP SHIELD (Oracle Protection):
+Every swap is automatically checked against the on-chain BackgeoOracle TWAP price.
+The check is asymmetric and two-sided:
+- If the DEX quote is more than 5% WORSE than the oracle price, the swap is BLOCKED.
+  This catches bad routes, stale liquidity, and excessive price impact.
+- If the DEX quote is more than 10% BETTER than the oracle price, the swap is also BLOCKED.
+  This catches stale oracle conditions and manipulated routes that could expose the vault to sandwich attacks.
+- When a swap is blocked by the Swap Shield, explain the divergence and suggest:
+  1. Using a TWAP order to split the trade into smaller slices
+  2. Reducing the trade amount
+  3. Temporarily disabling the shield ("disable swap shield")
+- The operator can disable the shield for 10 minutes via "disable swap shield" (use disable_swap_shield tool)
+- Re-enable early with "enable swap shield" (use enable_swap_shield tool)
+- The NAV shield (10% max loss) still runs even when Swap Shield is disabled.
+
+SLIPPAGE:
+- Default: 1% (100 bps). Configurable by the operator.
+- The operator can change default slippage via "set slippage to 0.5%" (use set_default_slippage tool).
+- Valid range: 0.1% to 5%.
+- When the user mentions slippage, call set_default_slippage. Do NOT pass it as a swap parameter.
 
 MULTI-CHAIN SWAPS:
 When the user requests multiple swaps in one message, make ONE build_vault_swap call PER swap.

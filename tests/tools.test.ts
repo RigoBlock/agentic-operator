@@ -50,6 +50,10 @@ const REQUIRED_TOOLS = [
   "fund_pool",
   // Utility
   "switch_chain",
+  // Trading settings
+  "set_default_slippage",
+  "disable_swap_shield",
+  "enable_swap_shield",
   // Strategy listing compatibility alias (TWAP-only at runtime)
   "list_strategies",
   // Bridge verification

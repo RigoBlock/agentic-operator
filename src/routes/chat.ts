@@ -107,6 +107,7 @@ chat.post("/", async (c) => {
       aiBaseUrl: body.aiBaseUrl,
       routingMode: body.routingMode,
       contextDocs: body.contextDocs,
+      slippageBps: body.slippageBps,
     };
 
     // ── SSE streaming mode ──

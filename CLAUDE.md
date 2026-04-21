@@ -100,6 +100,52 @@ Transfer and Sync are **fundamentally different** despite using the same Across 
 the `opType` parameter passed to `depositV3`. The NAV shield correctly handles both
 because `updateUnitaryValue()` produces the same result as the actual contract.
 
+### Swap Shield (Oracle Price Protection)
+
+```
+RULE: The Swap Shield compares DEX API quotes against the on-chain BackgeoOracle
+      TWAP price. It runs BEFORE calldata is built (price-level check).
+      It is INDEPENDENT of the NAV shield (value-level check). Both run on every swap.
+      The operator can temporarily disable it (10-minute TTL) but it auto-re-enables.
+      When the oracle has no price feed for a token, the shield degrades gracefully
+      (allows the swap with a warning, does NOT block).
+```
+
+- **Service**: `src/services/swapShield.ts`
+- **Uses**: `vault.convertTokenAmount(tokenIn, amountIn, tokenOut)` via `eth_call`
+  — the vault's EOracle extension, which uses the BackgeoOracle 5-minute TWAP
+- **Normalization**: ETH, WETH, address(0), and 0xEeee... all map to address(0)
+- **DEX quote comparison**: The shield compares the DEX expected output directly
+  against the oracle amount. It does **not** reverse `slippageBps` to derive a
+  separate theoretical market price before applying thresholds.
+- **Divergence calculation**: `(oracleAmount - dexOut) / oracleAmount`
+  — two-sided, asymmetric rule: blocks when DEX gives >5% LESS than oracle
+  (bad deal for user) AND when DEX gives >10% MORE than oracle (stale oracle
+  or manipulated route that could expose the vault to sandwich attacks)
+- **Default thresholds**: 5% worse than oracle → blocked; 10% better than oracle → blocked
+- **Possible outcomes**:
+  1. `allowed: true` — divergence within threshold
+  2. `allowed: false, code: 'BLOCKED'` — divergence exceeds threshold
+  3. `allowed: false, code: 'INVALID_QUOTE'` — non-zero input but zero expected output
+  4. `allowed: true, code: 'NO_PRICE_FEED'` — `hasPriceFeed()` returned false for a token (graceful degradation)
+  5. `allowed: true, code: 'ORACLE_ERROR'` — unexpected oracle revert or vault has no EOracle extension (graceful degradation)
+- **Oracle revert classification**: On `convertTokenAmount` revert, `hasPriceFeed(tokenIn)` and `hasPriceFeed(tokenOut)` are called.
+  If any returns false → `NO_PRICE_FEED`. If `hasPriceFeed` itself reverts (vault has no EOracle) or feeds exist but call still fails → `ORACLE_ERROR`.
+  Never use fragile string-matching on error messages for security-critical classification.
+- **Opt-out**: KV key `swap-shield-disabled:{operator}:{vault}` with 600s TTL
+- **TWAP suggestion**: When blocked, the error message suggests splitting the trade
+  into a TWAP order to reduce price impact
+
+#### Configurable slippage
+
+Slippage is no longer hardcoded. Resolution priority:
+1. Per-request `slippageBps` in the body (from frontend settings)
+2. Stored operator preference in KV (`slippage:{operatorAddress}`)
+3. Default: 100 bps (1%)
+
+Clamped to [10, 500] bps (0.1% to 5%). The LLM CANNOT set slippage directly —
+only the operator via the `set_default_slippage` tool or frontend settings.
+
 ### 3. Auth model — three independent layers
 
 ```
@@ -166,9 +212,10 @@ These files contain security-critical logic. Changes require extra care:
 | File | What it guards |
 |------|---------------|
 | `src/routes/chat.ts` | Auth gate, execution mode resolution |
-| `src/llm/client.ts` | NAV shield pre-check for all swap calldata |
+| `src/llm/client.ts` | NAV shield pre-check + Swap Shield for all swap calldata |
 | `src/services/execution.ts` | 7-point validation, NAV shield at broadcast |
 | `src/services/navGuard.ts` | NAV shield simulation and threshold check |
+| `src/services/swapShield.ts` | Oracle price comparison, slippage storage, opt-out |
 | `src/services/auth.ts` | Signature verification, vault ownership |
 | `src/services/delegation.ts` | On-chain delegation state |
 | `src/services/agentWallet.ts` | CDP Server Wallet (per-vault agent EOA via Coinbase) |
@@ -303,6 +350,7 @@ src/
     auth.ts             ← Signature verification + vault ownership
     execution.ts        ← 7-point validation + NAV shield + broadcast
     navGuard.ts         ← NAV shield simulation (10% threshold)
+    swapShield.ts       ← Oracle price comparison, slippage storage, opt-out
     delegation.ts       ← Delegation state management
     agentWallet.ts      ← CDP Server Wallet (per-vault agent EOA via Coinbase)
     strategy.ts         ← Cron strategies (manual default, autonomous opt-in)

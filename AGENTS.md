@@ -264,8 +264,24 @@ on the vault's Net Asset Value per unit:
   bypassed, or circumvented by any API caller
 
 ### 5. Slippage Protection
-Default slippage tolerance: 1% (100 basis points). Combined with the NAV shield,
-this provides two layers of price protection.
+Default slippage tolerance: 1% (100 basis points), configurable by the operator
+(0.1%–5%). Combined with the NAV shield, this provides two layers of price
+protection.
+
+### 6. Swap Shield (Oracle Price Protection)
+Before every swap calldata is built, the system compares the DEX API quote
+against the on-chain BackgeoOracle TWAP price:
+
+- Uses the vault's `convertTokenAmount()` — a 5-minute TWAP oracle
+- If the DEX quote is >5% worse than the oracle price → **swap BLOCKED**
+- If the DEX quote is >10% better than the oracle price → **swap BLOCKED**
+- Catches bad routes, stale liquidity, excessive price impact, API compromise,
+  stale oracle conditions, and manipulated routes
+- Graceful degradation: when the oracle has no price feed, the swap proceeds
+  with a warning (does NOT block)
+- The operator can temporarily disable it (10-minute TTL) for known high-impact trades
+- The shield auto-re-enables after the timeout expires
+- Independent of the NAV shield — both run on every swap
 
 ---
 
@@ -277,6 +293,7 @@ Even a fully authenticated agent with delegation access CANNOT:
 |--------|---------|
 | Drain vault assets to external address | `withdraw` and `transferOwnership` selectors are never delegated |
 | Execute trades that lose > 10% NAV | NAV shield blocks pre-broadcast |
+| Execute swaps with >5% oracle divergence when Swap Shield is enabled | Swap Shield compares DEX quote vs TWAP oracle; this block does not apply during an active operator opt-out window |
 | Bypass slippage protection | Slippage is enforced in swap calldata building |
 | Call arbitrary contract functions | Selector whitelist — only approved vault functions |
 | Send transactions to non-vault contracts | Target address must equal vault address |

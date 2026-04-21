@@ -654,6 +654,43 @@
         </div>
       </div>
 
+      <!-- Trading section -->
+      <div class="settings-section">
+        <h4>Trading</h4>
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+          <div>
+            <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Default Slippage</label>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <select id="slippage-select" onchange="onSlippageChange()" style="flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;">
+                <option value="10">0.1%</option>
+                <option value="25">0.25%</option>
+                <option value="50">0.5%</option>
+                <option value="100" selected>1% (default)</option>
+                <option value="200">2%</option>
+                <option value="300">3%</option>
+                <option value="500">5%</option>
+                <option value="custom">Custom…</option>
+              </select>
+              <input id="slippage-custom" type="number" min="0.1" max="5" step="0.1" placeholder="%" style="display: none; width: 80px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;" onchange="onSlippageCustomChange()" />
+            </div>
+          </div>
+          <div>
+            <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Swap Shield (Oracle Protection)</label>
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <label class="testnet-toggle" title="Oracle-based price protection. Blocks swaps where DEX quote is &gt;5% worse OR &gt;10% better than the TWAP oracle price.">
+                <input type="checkbox" id="swap-shield-toggle" checked onchange="onSwapShieldToggle()" />
+                <span class="toggle-track"></span>
+                <span id="swap-shield-label">Enabled</span>
+              </label>
+              <span id="swap-shield-timer" style="font-size: 12px; color: var(--muted); display: none;"></span>
+            </div>
+            <span style="font-size: 12px; color: var(--muted); margin-top: 4px; display: block;">
+              Compares DEX quotes against on-chain TWAP oracle. Disable temporarily for large trades with known impact.
+            </span>
+          </div>
+        </div>
+      </div>
+
       <!-- Delegation section -->
       <div class="settings-section">
         <h4>Delegation</h4>
@@ -1027,6 +1064,178 @@
       { id: 11155111, name: 'Sepolia' },
     ];
 
+    /* ================================================================
+       Trading Settings (slippage, swap shield)
+       ================================================================ */
+    const SLIPPAGE_STORAGE_KEY = 'rigoblock_slippage_bps';
+    const SLIPPAGE_OVERRIDE_STORAGE_KEY = 'rigoblock_slippage_override_explicit';
+    const SHIELD_STORAGE_KEY = 'rigoblock_swap_shield';
+    const DEFAULT_SLIPPAGE_BPS = 100;
+    const MIN_SLIPPAGE_BPS = 10;
+    const MAX_SLIPPAGE_BPS = 500;
+
+    function getSlippageBps() {
+      const stored = localStorage.getItem(SLIPPAGE_STORAGE_KEY);
+      if (!stored) return DEFAULT_SLIPPAGE_BPS;
+      const parsed = parseInt(stored, 10);
+      if (!Number.isFinite(parsed) || parsed < MIN_SLIPPAGE_BPS || parsed > MAX_SLIPPAGE_BPS) {
+        return DEFAULT_SLIPPAGE_BPS;
+      }
+      return parsed;
+    }
+
+    function onSlippageChange() {
+      const sel = document.getElementById('slippage-select');
+      const customInput = document.getElementById('slippage-custom');
+      if (sel.value === 'custom') {
+        customInput.style.display = 'block';
+        customInput.focus();
+      } else {
+        customInput.style.display = 'none';
+        localStorage.setItem(SLIPPAGE_STORAGE_KEY, sel.value);
+        localStorage.setItem(SLIPPAGE_OVERRIDE_STORAGE_KEY, 'true');
+      }
+    }
+
+    function onSlippageCustomChange() {
+      const pct = parseFloat(document.getElementById('slippage-custom').value);
+      if (isNaN(pct) || pct < 0.1 || pct > 5) {
+        alert('Slippage must be between 0.1% and 5%.');
+        return;
+      }
+      const bps = Math.round(pct * 100);
+      localStorage.setItem(SLIPPAGE_STORAGE_KEY, String(bps));
+      localStorage.setItem(SLIPPAGE_OVERRIDE_STORAGE_KEY, 'true');
+      // Update select to show "Custom…" with the value
+      const sel = document.getElementById('slippage-select');
+      sel.value = 'custom';
+    }
+
+    async function onSwapShieldToggle() {
+      const toggle = document.getElementById('swap-shield-toggle');
+      const enabled = toggle.checked;
+      const label = document.getElementById('swap-shield-label');
+      const timer = document.getElementById('swap-shield-timer');
+
+      // Require wallet + vault to change shield state server-side
+      if (!connectedAddress || !vaultInput.value.trim()) {
+        toggle.checked = !enabled; // revert
+        appendMessage('system', 'Connect a wallet and enter a vault address before toggling the swap shield.');
+        return;
+      }
+
+      // Persist UI state only after server confirms.
+      const command = enabled ? '__enable_swap_shield__' : '__disable_swap_shield__';
+      toggle.disabled = true;
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: command }],
+            vaultAddress: vaultInput.value.trim(),
+            chainId: currentChainId,
+            operatorAddress: connectedAddress,
+            authSignature, authTimestamp,
+          }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+
+        if (enabled) {
+          label.textContent = 'Enabled';
+          label.style.color = '';
+          timer.style.display = 'none';
+          localStorage.removeItem(SHIELD_STORAGE_KEY);
+          if (shieldTimerInterval) { clearInterval(shieldTimerInterval); shieldTimerInterval = null; }
+        } else {
+          label.textContent = 'Disabled (10 min)';
+          label.style.color = 'var(--warn)';
+          const expiry = Date.now() + 600000;
+          localStorage.setItem(SHIELD_STORAGE_KEY, String(expiry));
+          startShieldTimer(expiry);
+        }
+      } catch (err) {
+        // Revert checkbox and keep previous UI state when server-side toggle fails.
+        toggle.checked = !enabled;
+        appendMessage('system', `Failed to ${enabled ? 'enable' : 'disable'} swap shield: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        toggle.disabled = false;
+      }
+    }
+
+    function startShieldTimer(expiry) {
+      const timer = document.getElementById('swap-shield-timer');
+      timer.style.display = 'inline';
+      const update = () => {
+        const remaining = Math.max(0, expiry - Date.now());
+        if (remaining <= 0) {
+          timer.style.display = 'none';
+          document.getElementById('swap-shield-toggle').checked = true;
+          document.getElementById('swap-shield-label').textContent = 'Enabled';
+          document.getElementById('swap-shield-label').style.color = '';
+          localStorage.removeItem(SHIELD_STORAGE_KEY);
+          clearInterval(shieldTimerInterval);
+          shieldTimerInterval = null;
+          // Re-enable server-side
+          if (connectedAddress && vaultInput.value.trim()) {
+            fetch('/api/chat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                messages: [{ role: 'user', content: '__enable_swap_shield__' }],
+                vaultAddress: vaultInput.value.trim(),
+                chainId: currentChainId,
+                operatorAddress: connectedAddress,
+                authSignature, authTimestamp,
+              }),
+            }).catch(() => {});
+          }
+          return;
+        }
+        const mins = Math.floor(remaining / 60000);
+        const secs = Math.floor((remaining % 60000) / 1000);
+        timer.textContent = `(${mins}:${secs.toString().padStart(2, '0')} remaining)`;
+      };
+      update();
+      if (shieldTimerInterval) clearInterval(shieldTimerInterval);
+      shieldTimerInterval = setInterval(update, 1000);
+    }
+    let shieldTimerInterval = null;
+
+    function restoreTradeSettings() {
+      // Restore slippage
+      const bps = getSlippageBps();
+      const sel = document.getElementById('slippage-select');
+      const customInput = document.getElementById('slippage-custom');
+      const option = sel.querySelector(`option[value="${bps}"]`);
+      if (option) {
+        sel.value = String(bps);
+        customInput.style.display = 'none';
+      } else {
+        sel.value = 'custom';
+        customInput.style.display = 'block';
+        customInput.value = (bps / 100).toString();
+      }
+
+      // Restore swap shield state
+      const shieldExpiry = localStorage.getItem(SHIELD_STORAGE_KEY);
+      if (shieldExpiry) {
+        const expiry = parseInt(shieldExpiry, 10);
+        if (expiry > Date.now()) {
+          document.getElementById('swap-shield-toggle').checked = false;
+          document.getElementById('swap-shield-label').textContent = 'Disabled (10 min)';
+          document.getElementById('swap-shield-label').style.color = 'var(--warn)';
+          startShieldTimer(expiry);
+        } else {
+          localStorage.removeItem(SHIELD_STORAGE_KEY);
+        }
+      }
+    }
+
     function toggleTestnet() {
       const on = document.getElementById('testnet-toggle').checked;
       localStorage.setItem('rigoblock_testnet', on);
@@ -1086,12 +1295,29 @@
         dd.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:24px;">No saved vaults yet.</div>';
         return;
       }
-      dd.innerHTML = vaults.map(v => `
-        <div class="saved-vault-item" onclick="loadVault('${v.address}')">
-          <span class="vault-label">${v.name || v.address.slice(0,6) + '…' + v.address.slice(-4)}</span>
-          <button class="remove-vault" onclick="event.stopPropagation(); removeVault('${v.address}')">&times;</button>
-        </div>
-      `).join('');
+      dd.innerHTML = '';
+      for (const v of vaults) {
+        const item = document.createElement('div');
+        item.className = 'saved-vault-item';
+        item.addEventListener('click', () => loadVault(v.address));
+
+        const label = document.createElement('span');
+        label.className = 'vault-label';
+        label.textContent = v.name || `${v.address.slice(0,6)}…${v.address.slice(-4)}`;
+
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'remove-vault';
+        removeBtn.type = 'button';
+        removeBtn.innerHTML = '&times;';
+        removeBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          removeVault(v.address);
+        });
+
+        item.appendChild(label);
+        item.appendChild(removeBtn);
+        dd.appendChild(item);
+      }
     }
 
     function loadVault(address) {
@@ -1428,7 +1654,8 @@
       return html;
     }
 
-    function escapeHtml(str) {
+    function escapeHtml(value) {
+      const str = String(value ?? '');
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
@@ -1529,6 +1756,12 @@
           chainId,
           ...getAiRequestParams(),
         };
+        // Only send per-request slippage when user explicitly overrides from UI.
+        // Otherwise backend resolves from verified request -> KV -> default.
+        const hasExplicitUiSlippageOverride = localStorage.getItem(SLIPPAGE_OVERRIDE_STORAGE_KEY) === 'true';
+        if (hasExplicitUiSlippageOverride) {
+          chatBody.slippageBps = getSlippageBps();
+        }
         // Always send operatorAddress when connected — needed for calldata building
         // (pool deployment, swaps, etc.) regardless of vault ownership.
         if (connectedAddress) {
@@ -1571,24 +1804,35 @@
             localStorage.removeItem(AUTH_STORAGE_KEY);
             await signAuthMessage();
             if (authSignature) {
+              const retryBody = {
+                ...chatBody,
+                authSignature,
+                authTimestamp,
+              };
               const retryRes = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 signal: controller.signal,
-                body: JSON.stringify({
-                  messages: conversationHistory,
-                  vaultAddress: effectiveVault,
-                  chainId,
-                  operatorAddress: connectedAddress,
-                  authSignature,
-                  authTimestamp,
-                  executionMode,
-                  stream: true,
-                  ...getAiRequestParams(),
-                }),
+                body: JSON.stringify(retryBody),
               });
               if (retryRes.ok) {
-                const retryData = await retryRes.json();
+                const retryType = retryRes.headers.get('content-type') || '';
+                let retryData = null;
+                if (retryType.includes('text/event-stream')) {
+                  const raw = await retryRes.text();
+                  for (const line of raw.split('\n')) {
+                    if (!line.startsWith('data: ')) continue;
+                    try {
+                      const event = JSON.parse(line.slice(6));
+                      if (event.type === 'done' && event.response) {
+                        retryData = event.response;
+                      }
+                    } catch { /* ignore malformed retry SSE chunks */ }
+                  }
+                } else {
+                  retryData = await retryRes.json().catch(() => null);
+                }
+                if (!retryData) throw new Error('Retry succeeded but returned no response payload');
                 typingEl.remove();
                 handleChatResponse(retryData);
                 return;
@@ -1740,9 +1984,11 @@
             if ((hasToolErrors || hasPlanBlocks) && finalResponse.reply) {
               const replyLower = (finalResponse.reply || '').toLowerCase();
               const isErrorEcho = replyLower.startsWith('error:') ||
+                replyLower.startsWith('⚠️') ||
                 replyLower.includes('insufficient') ||
                 replyLower.includes('revert') ||
                 replyLower.includes('sync failed') ||
+                replyLower.includes('blocked') ||
                 replyLower.includes('failed');
               if (isErrorEcho) finalResponse.reply = '';
             }
@@ -1913,7 +2159,7 @@
       const gasDisplay = tx.gas ? parseInt(tx.gas, 16).toLocaleString() : 'auto';
       const dataLength = tx.data ? (tx.data.length - 2) / 2 : 0;
       document.getElementById('tx-details').innerHTML = `
-        <div class="row"><span class="label">To (vault)</span><span class="value">${tx.to}</span></div>
+        <div class="row"><span class="label">To (vault)</span><span class="value">${escapeHtml(tx.to)}</span></div>
         <div class="row"><span class="label">Chain</span><span class="value">${CHAIN_NAMES[tx.chainId] || tx.chainId}</span></div>
         <div class="row"><span class="label">Value</span><span class="value">0 (vault uses own balance)</span></div>
         <div class="row"><span class="label">Gas limit</span><span class="value">${gasDisplay}</span></div>
@@ -2267,10 +2513,10 @@
           if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.code === 'METHOD_NOT_ALLOWED' || err.fallbackToManual) {
             container.innerHTML = '';
             const manualMsg = document.createElement('div');
-            manualMsg.style.cssText = 'color:var(--warning,orange);font-size:24px;margin-bottom:16px;';
+            manualMsg.style.cssText = 'color:var(--muted);font-size:13px;margin-bottom:12px;';
             manualMsg.textContent = err.code === 'METHOD_NOT_ALLOWED'
-              ? 'This function selector is not delegated — re-setup delegation or sign from your wallet:'
-              : 'Delegation not active on this chain — sign from your wallet instead:';
+              ? 'This selector is not delegated — sign manually:'
+              : 'Sign with your wallet to execute:';
             container.appendChild(manualMsg);
             // Re-render as manual tx card inline
             const actionsDiv = document.createElement('div');
@@ -2331,7 +2577,7 @@
     function rejectDelegatedExecution(btn) {
       const container = btn.closest('.delegated-confirm');
       container.innerHTML = '<div style="color:var(--muted);font-size:24px;">Execution cancelled.</div>';
-      appendMessage('system', 'Delegated execution cancelled by operator.');
+      appendMessage('system', 'Execution cancelled.');
     }
 
     /* ================================================================
@@ -2433,9 +2679,9 @@
             if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.code === 'METHOD_NOT_ALLOWED' || err.fallbackToManual) {
               if (rowStatusEl) rowStatusEl.textContent = '⚠️';
               const reason = err.code === 'METHOD_NOT_ALLOWED'
-                ? 'Function selector not delegated'
-                : `Delegation not active on chain ${tx.chainId}`;
-              appendMessage('system', `${reason} — sign remaining transactions from your wallet:`);
+                ? 'Selector not delegated'
+                : `Sign remaining transactions with your wallet`;
+              appendMessage('system', reason);
               for (let j = i; j < txList.length; j++) {
                 showManualTxCard(txList[j]);
               }
@@ -2491,8 +2737,10 @@
 
       const hash = r.txHash;
       const shortHash = hash ? `${hash.slice(0,10)}…${hash.slice(-6)}` : '—';
-      const explorerLink = r.explorerUrl
-        ? `<a href="${r.explorerUrl}" target="_blank" rel="noopener">${shortHash} ↗</a>`
+      // Only allow https explorer URLs — validate scheme to prevent javascript: injection.
+      const safeExplorerUrl = (r.explorerUrl && /^https:\/\//i.test(r.explorerUrl)) ? r.explorerUrl : null;
+      const explorerLink = safeExplorerUrl
+        ? `<a href="${safeExplorerUrl}" target="_blank" rel="noopener">${shortHash} ↗</a>`
         : shortHash;
 
       const statusIcon = isConfirmed ? '✅' : (isReverted ? '❌' : '⏳');
@@ -2592,14 +2840,32 @@
       for (const { info, provider } of discoveredProviders) {
         const el = document.createElement('div');
         el.className = 'wallet-option';
-        el.innerHTML = `
-          <img src="${info.icon}" alt="${info.name}" onerror="this.style.display='none'" />
-          <div>
-            <div class="wallet-name">${info.name}</div>
-            <div class="wallet-rdns">${info.rdns}</div>
-          </div>
-        `;
-        el.onclick = () => connectWithProvider(provider, info.name);
+
+        // Only allow safe URL schemes for wallet icons — EIP-6963 provider
+        // metadata is untrusted (comes from browser extensions), so a
+        // `javascript:` or `data:text/html` icon src could execute arbitrary code.
+        const iconSrc = String(info.icon ?? '');
+        const safeIconSchemes = /^(https?:\/\/|data:image\/)/i;
+        if (iconSrc && safeIconSchemes.test(iconSrc)) {
+          const img = document.createElement('img');
+          img.src = iconSrc;
+          img.alt = String(info.name ?? '');
+          img.onerror = function() { this.style.display = 'none'; };
+          el.appendChild(img);
+        }
+
+        const infoDiv = document.createElement('div');
+        const nameDiv = document.createElement('div');
+        nameDiv.className = 'wallet-name';
+        nameDiv.textContent = String(info.name ?? '');
+        const rdnsDiv = document.createElement('div');
+        rdnsDiv.className = 'wallet-rdns';
+        rdnsDiv.textContent = String(info.rdns ?? '');
+        infoDiv.appendChild(nameDiv);
+        infoDiv.appendChild(rdnsDiv);
+        el.appendChild(infoDiv);
+
+        el.addEventListener('click', () => connectWithProvider(provider, String(info.name ?? '')));
         list.appendChild(el);
       }
     }
@@ -3194,7 +3460,9 @@
         botLinkEl.style.display = '';
         statusEl.innerHTML = '<span style="color: var(--success);">Code generated! Click the button to open Telegram and pair automatically.</span>';
       } catch (err) {
-        statusEl.innerHTML = `<span style="color: var(--error);">Error: ${err.message}</span>`;
+        // Use textContent to avoid injecting error message markup into the DOM.
+        statusEl.textContent = `Error: ${err.message || err}`;
+        statusEl.style.color = 'var(--error)';
         genBtn.textContent = 'Retry';
         genBtn.disabled = false;
       }
@@ -3255,13 +3523,26 @@
 
         const setupData = await setupRes.json();
 
-        // Show agent wallet info
+        const rawAgentAddr = String(setupData.agentAddress || "");
+        // Show agent wallet info using DOM APIs — avoids inline-onclick injection risk
+        // because escapeHtml does not escape single-quotes.
         const infoEl = document.getElementById('delegation-agent-info');
         infoEl.innerHTML = `
-          <div class="row"><span class="label">Agent Wallet</span><span class="value copyable-addr" onclick="copyToClipboard('${setupData.agentAddress}')" title="Click to copy">${setupData.agentAddress}</span></div>
-          <div class="row"><span class="label">Vault</span><span class="value">${vault.slice(0,6)}…${vault.slice(-4)}</span></div>
+          <div class="row" id="delegation-agent-row"></div>
+          <div class="row"><span class="label">Vault</span><span class="value">${escapeHtml(vault.slice(0,6))}…${escapeHtml(vault.slice(-4))}</span></div>
           <div class="row"><span class="label">Chain</span><span class="value">${CHAIN_NAMES[currentChainId] || currentChainId}</span></div>
         `;
+        const agentRow = document.getElementById('delegation-agent-row');
+        const agentLabel = document.createElement('span');
+        agentLabel.className = 'label';
+        agentLabel.textContent = 'Agent Wallet';
+        const agentValue = document.createElement('span');
+        agentValue.className = 'value copyable-addr';
+        agentValue.title = 'Click to copy';
+        agentValue.textContent = rawAgentAddr;
+        agentValue.addEventListener('click', () => copyToClipboard(rawAgentAddr));
+        agentRow.appendChild(agentLabel);
+        agentRow.appendChild(agentValue);
         infoEl.style.display = '';
 
         // ── Step 2: Ensure wallet is on the correct chain ──
@@ -3524,6 +3805,9 @@
     (function initDelegation() {
       setTimeout(() => refreshDelegationStatus(), 600);
     })();
+
+    // Restore trading settings from localStorage
+    restoreTradeSettings();
 
     /* ================================================================
        Pool Onboarding — show/hide based on vault input
