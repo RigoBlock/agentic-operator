@@ -1590,6 +1590,16 @@ export async function executeToolCall(
         throw new Error("Wallet not connected. Connect your wallet first.");
       }
 
+      // Reject the zero address — the frontend uses it as a sentinel when no
+      // vault has been selected. Building calldata against 0x000...0 would
+      // waste a Swap Shield oracle call and produce an unusable transaction.
+      const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+      if (!ctx.vaultAddress || ctx.vaultAddress.toLowerCase() === ZERO_ADDRESS) {
+        throw new Error(
+          "No vault selected. Please select or deploy a smart pool before swapping.",
+        );
+      }
+
       // Auto-switch chain if specified
       let chainSwitched: number | undefined;
       if (args.chain) {
