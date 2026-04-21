@@ -101,6 +101,7 @@ chat.post("/", async (c) => {
       chainId: body.chainId,
       operatorAddress: body.operatorAddress as Address | undefined,
       operatorVerified,
+      isBrowserRequest,
       executionMode,
       aiApiKey: body.aiApiKey,
       aiModel: body.aiModel,
@@ -159,9 +160,8 @@ chat.post("/", async (c) => {
               }
             }
 
-            if (response.reply) {
-              send({ type: "text", content: response.reply });
-            }
+            // Don't send reply as 'text' — that would overwrite the streaming plan block.
+            // The reply is included in the 'done' event and rendered by handleChatResponse.
             send({ type: "done", response });
           } catch (err) {
             const message = sanitizeError(err instanceof Error ? err.message : "Internal error");

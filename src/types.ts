@@ -119,7 +119,7 @@ export interface ChatRequest {
   /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
   aiBaseUrl?: string;
   /** Workers AI orchestration mode: DeepSeek-only (default) or DeepSeek + Llama fast follow-up */
-  routingMode?: "deepseek_only" | "hybrid_fast_followup";
+  routingMode?: "deepseek_only" | "llama_only" | "hybrid_fast_followup";
   /** Optional per-request context snippets (e.g. selected markdown excerpts) injected into runtime prompt */
   contextDocs?: string[];
   /**
@@ -293,6 +293,10 @@ export interface RequestContext {
   operatorAddress?: Address;
   /** True only when operator auth signature has been verified on-chain */
   operatorVerified?: boolean;
+  /** True when the request originates from the browser (same-origin). Used to
+   * gate vault-transaction tools: browser callers without auth are blocked (sign in),
+   * while x402 agents without auth are allowed in manual mode (Tier 1 AGENTS.md). */
+  isBrowserRequest?: boolean;
   /** Execution mode for this request */
   executionMode?: ExecutionMode;
   /** User-provided AI API key (overrides server OPENAI_API_KEY) */
@@ -302,7 +306,7 @@ export interface RequestContext {
   /** AI provider base URL */
   aiBaseUrl?: string;
   /** Workers AI orchestration mode */
-  routingMode?: "deepseek_only" | "hybrid_fast_followup";
+  routingMode?: "deepseek_only" | "llama_only" | "hybrid_fast_followup";
   /** Optional per-request context snippets injected into runtime prompt */
   contextDocs?: string[];
   /** Default slippage tolerance in basis points. Resolved from: request body → KV → 100; only integer values are honored and effective value is clamped to [10, 500]. */

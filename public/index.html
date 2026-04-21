@@ -113,7 +113,7 @@
 
     /* ── Chat ───────────────────────────────────────────── */
     #chat {
-      flex: 1; overflow-y: auto; padding: 20px 24px;
+      flex: 1; overflow-y: auto; overflow-x: hidden; padding: 20px 24px;
       display: flex; flex-direction: column; gap: 14px;
     }
     .msg {
@@ -154,7 +154,10 @@
       background: var(--bg); font-weight: 600; font-size: 13px; color: var(--muted);
     }
     .msg.assistant .msg-content td { font-size: 13px; }
-    .msg.assistant .msg-content { overflow-x: auto; }
+    .msg.assistant .msg-content pre,
+    .msg.assistant .msg-content table {
+      overflow-x: auto;
+    }
 
     /* ── Suggestion chips ───────────────────────────────── */
     .suggestions {
@@ -188,7 +191,7 @@
     .reasoning-content {
       padding: 0 12px 10px; font-size: 13px; line-height: 1.6;
       color: var(--muted); white-space: pre-wrap; word-break: break-word;
-      max-height: 300px; overflow-y: auto; display: block;
+      max-height: 300px; overflow-y: auto; overflow-x: hidden; display: block;
     }
     .reasoning-content.open { display: block; }
     .model-trace {
@@ -329,7 +332,7 @@
       #input-area textarea { font-size: 16px; padding: 8px 10px; }
     }
 
-    /* ── Desktop: narrow centered chat ───────────────── */
+    /* ── Desktop: narrow centered chat ─────────────── */
     @media (min-width: 1200px) {
       body {
         width: 55%; max-width: 800px; margin: 0 auto;
@@ -1801,7 +1804,7 @@
             appendMessage('system', 'Session expired, re-authenticating…');
             authSignature = null;
             authTimestamp = null;
-            localStorage.removeItem(AUTH_STORAGE_KEY);
+            localStorage.removeItem(authKey(connectedAddress));
             await signAuthMessage();
             if (authSignature) {
               const retryBody = {
@@ -1872,7 +1875,7 @@
                   if (!reasoningEl) {
                     reasoningEl = document.createElement('div');
                     reasoningEl.className = 'reasoning-block';
-                    reasoningEl.style.cssText = 'margin-top:6px;font-size:0.82em;opacity:0.75;max-height:300px;overflow-y:auto;border-left:2px solid #a78bfa;padding-left:8px;';
+                    reasoningEl.style.cssText = 'margin-top:6px;font-size:0.82em;opacity:0.75;max-height:300px;overflow-y:auto;overflow-x:hidden;border-left:2px solid #a78bfa;padding-left:8px;';
                     const label = document.createElement('div');
                     label.textContent = '\uD83E\uDDE0 Agent reasoning:';
                     label.style.cssText = 'font-weight:600;margin-bottom:4px;color:#a78bfa;';
@@ -1922,16 +1925,21 @@
                     updateTypingStatus(`${event.name} done`);
                   }
                 } else if (event.type === 'text') {
-                  // Show the agent's thinking/plan text in real time
+                  // Show the agent's thinking/plan text in real time.
+                  // Filter out any tool call JSON — only human-readable text belongs here.
                   const planText = String(event.content || '').trim();
-                  if (planText) {
+                  const isToolCallJson =
+                    /<tool_call>/i.test(planText) ||
+                    /\{\s*"type"\s*:\s*"function"/i.test(planText) ||
+                    (/\{/.test(planText) && /"name"\s*:/.test(planText) && /"(?:parameters|arguments)"\s*:/.test(planText));
+                  if (planText && !isToolCallJson) {
                     // Reuse existing plan block (overwrite) — prevents duplicate plan display
                     // when DeepSeek text + Llama retry produce the same or similar content.
                     let planEl = typingEl.querySelector('.plan-block');
                     if (!planEl) {
                       planEl = document.createElement('div');
                       planEl.className = 'plan-block';
-                      planEl.style.cssText = 'margin-top:6px;font-size:0.85em;opacity:0.85;border-left:2px solid #60a5fa;padding-left:8px;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto;';
+                      planEl.style.cssText = 'margin-top:6px;font-size:0.85em;opacity:0.85;border-left:2px solid #60a5fa;padding-left:8px;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto;overflow-x:hidden;';
                       const label = document.createElement('div');
                       label.textContent = '\uD83D\uDCAC Agent plan:';
                       label.style.cssText = 'font-weight:600;margin-bottom:2px;color:#60a5fa;font-size:0.92em;';
@@ -2927,8 +2935,15 @@
         } else {
           authSignature = null;
           authTimestamp = null;
-          appendMessage('system', `Account switched. Signing authentication…`);
-          signAuthMessage();
+          // Only auto-prompt for signature if this tab is currently active.
+          // accountsChanged fires from any tab — don't interrupt the user
+          // when they switched accounts while looking at a different page.
+          if (document.visibilityState === 'visible') {
+            appendMessage('system', `Account switched. Signing authentication…`);
+            signAuthMessage();
+          } else {
+            appendMessage('system', `Account switched to ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)}. Sign in to authenticate.`);
+          }
         }
         // validateVault() now handles delegation refresh (skips if non-owner)
         if (vaultInput.value.trim().length === 42) {
@@ -2961,14 +2976,16 @@
      * Sign a human-readable auth message proving wallet ownership.
      * Wallet-wide — not tied to any specific vault or chain.
      */
-    const AUTH_STORAGE_KEY = 'rigoblock_auth';
+    const AUTH_STORAGE_PREFIX = 'rigoblock_auth_';
+    /** Returns the per-address localStorage key for auth caching */
+    function authKey(addr) { return AUTH_STORAGE_PREFIX + (addr || '').toLowerCase(); }
 
     /** Try to restore a cached auth signature from localStorage */
     function restoreCachedAuth() {
       try {
-        const cached = JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || 'null');
+        const cached = JSON.parse(localStorage.getItem(authKey(connectedAddress)) || 'null');
         if (!cached) return false;
-        // Must match the currently connected address and be < 24h old
+        // Sanity-check address matches (key is address-scoped but double-check)
         if (cached.address?.toLowerCase() !== connectedAddress?.toLowerCase()) return false;
         if (Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return false; // 23h to add margin
         authSignature = cached.signature;
@@ -2998,8 +3015,9 @@
         });
         authSignature = sig;
         authTimestamp = ts;
-        // Cache in localStorage
-        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
+        // Cache in localStorage keyed by address — switching accounts never overwrites
+        // another address's cached signature, so switching A→B→A doesn't require re-signing A.
+        localStorage.setItem(authKey(connectedAddress), JSON.stringify({
           address: connectedAddress,
           signature: sig,
           timestamp: ts,
@@ -3023,7 +3041,8 @@
       authSignature = null;
       authTimestamp = null;
       providerListenersAttached = false;
-      localStorage.removeItem(AUTH_STORAGE_KEY);
+      // Don't remove per-address auth entries on disconnect — they'll be reused on reconnect.
+      // Only clear the in-memory state so the current session is de-authenticated.
       localStorage.removeItem('rigoblock_last_provider');
       document.getElementById('wallet-addr').textContent = '';
       document.getElementById('connect-btn').textContent = 'Connect Wallet';
@@ -3051,31 +3070,32 @@
 
       // ── Auto-reconnect: silently restore previous session on page reload ──
       const savedRdns = localStorage.getItem('rigoblock_last_provider');
-      const savedAuth = localStorage.getItem(AUTH_STORAGE_KEY);
       if (savedRdns && !connectedAddress) {
         try {
           // ── External wallet (MetaMask etc.) auto-reconnect ──
-          if (!savedAuth) return;
-          const cached = JSON.parse(savedAuth);
-          if (!cached || Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return;
           const match = discoveredProviders.find(p => p.info.rdns === savedRdns);
           const provider = match ? match.provider : (savedRdns === 'injected' ? window.ethereum : null);
           if (!provider) return;
           const accounts = await provider.request({ method: 'eth_accounts' });
-          if (accounts.length > 0 && accounts[0].toLowerCase() === cached.address?.toLowerCase()) {
-            activeProvider = provider;
-            connectedAddress = accounts[0];
-            authSignature = cached.signature;
-            authTimestamp = cached.timestamp;
-            document.getElementById('wallet-addr').textContent =
-              connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
-            document.getElementById('connect-btn').textContent = 'Disconnect';
-            document.getElementById('connect-btn').classList.add('active');
-            appendMessage('system', `Reconnected: ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)} ✓`);
-            if (vaultInput.value.trim().length === 42) validateVault();
-            if (executionMode === 'delegated') refreshDelegationStatus();
-            attachProviderListeners(provider);
-          }
+          if (accounts.length === 0) return;
+          const addr = accounts[0];
+          const savedAuth = localStorage.getItem(authKey(addr));
+          if (!savedAuth) return;
+          const cached = JSON.parse(savedAuth);
+          if (!cached || Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return;
+          if (addr.toLowerCase() !== cached.address?.toLowerCase()) return;
+          activeProvider = provider;
+          connectedAddress = addr;
+          authSignature = cached.signature;
+          authTimestamp = cached.timestamp;
+          document.getElementById('wallet-addr').textContent =
+            connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
+          document.getElementById('connect-btn').textContent = 'Disconnect';
+          document.getElementById('connect-btn').classList.add('active');
+          appendMessage('system', `Reconnected: ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)} ✓`);
+          if (vaultInput.value.trim().length === 42) validateVault();
+          if (executionMode === 'delegated') refreshDelegationStatus();
+          attachProviderListeners(provider);
         } catch { /* silent — auto-reconnect is best-effort */ }
       }
     }, 500);

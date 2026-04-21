@@ -11,12 +11,6 @@
  * For Rigoblock vaults, the calldata is sent to the vault address
  * (the vault's A0xRouter adapter routes it through AllowanceHolder internally).
  *
- * WARNING: The A0xRouter adapter is not yet deployed on most vaults.
- * Swaps will revert on-chain if the vault lacks the adapter. The default
- * DEX is Uniswap (uses the proven AUniswapRouter adapter). 0x must be
- * explicitly requested. Additionally, 0x quotes expire in ~2 minutes,
- * which is too short for Telegram's Execute-button workflow.
- *
  * Reference: https://docs.0x.org/docs/0x-swap-api/introduction
  */
 
