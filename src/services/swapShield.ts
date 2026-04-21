@@ -336,6 +336,11 @@ export async function checkSwapPrice(
   // divergenceBps = (oracleAmount - dexExpectedOut) * 10000 / oracleAmount
   //   > 0  => DEX gives less than oracle (potentially bad)
   //   < 0  => DEX gives more than oracle (potentially suspiciously favorable)
+  //
+  // NOTE: divergenceBps is kept for display/logging only (truncated toward zero is fine for
+  // human-readable output). The actual threshold checks below use cross-multiplication to avoid
+  // integer-division truncation — e.g., 5.009% would truncate to 5.00% bps and bypass the 5%
+  // block if we compared the divided result directly.
   const divergenceBps =
     ((oracleAmountRaw - dexExpectedOutRaw) * 10000n) / oracleAmountRaw;
   const divergencePctDisplay = formatBpsAsPct(divergenceBps);
@@ -351,8 +356,13 @@ export async function checkSwapPrice(
     `(max=${normalizedMaxDivergencePct}%)`,
   );
 
-  // ── Enforce threshold ──
-  if (divergenceBps > maxDivergenceBps) {
+  // ── Enforce threshold (cross-multiplication — no division, no truncation) ──
+  // Equivalent to divergenceBps > maxDivergenceBps, but exact:
+  //   (oracle - dex) * 10000 > maxDivBps * oracle
+  if (
+    oracleAmountRaw > dexExpectedOutRaw &&
+    (oracleAmountRaw - dexExpectedOutRaw) * 10000n > maxDivergenceBps * oracleAmountRaw
+  ) {
     console.warn(
       `[SwapShield] ✗ BLOCKED: DEX quote diverges ${divergencePctDisplay}% from oracle ` +
       `(max allowed: ${normalizedMaxDivergencePct}%)`,
@@ -375,10 +385,11 @@ export async function checkSwapPrice(
 
   // Block if DEX is suspiciously favorable (>10% better than oracle)
   // This catches stale oracle prices or manipulated DEX routes.
-  if (divergenceBps < 0n) {
+  // Cross-multiplication: (dex - oracle) * 10000 > maxFavorableDivBps * oracle
+  if (dexExpectedOutRaw > oracleAmountRaw) {
     const favorableBps = -divergenceBps;
     const favorablePctDisplay = formatBpsAsPct(favorableBps);
-    if (favorableBps > maxFavorableDivergenceBps) {
+    if ((dexExpectedOutRaw - oracleAmountRaw) * 10000n > maxFavorableDivergenceBps * oracleAmountRaw) {
       console.warn(
         `[SwapShield] ✗ BLOCKED: DEX quote ${favorablePctDisplay}% BETTER than oracle — ` +
         `likely stale oracle or manipulated route`,
