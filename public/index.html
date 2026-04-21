@@ -2159,7 +2159,7 @@
       const gasDisplay = tx.gas ? parseInt(tx.gas, 16).toLocaleString() : 'auto';
       const dataLength = tx.data ? (tx.data.length - 2) / 2 : 0;
       document.getElementById('tx-details').innerHTML = `
-        <div class="row"><span class="label">To (vault)</span><span class="value">${tx.to}</span></div>
+        <div class="row"><span class="label">To (vault)</span><span class="value">${escapeHtml(tx.to)}</span></div>
         <div class="row"><span class="label">Chain</span><span class="value">${CHAIN_NAMES[tx.chainId] || tx.chainId}</span></div>
         <div class="row"><span class="label">Value</span><span class="value">0 (vault uses own balance)</span></div>
         <div class="row"><span class="label">Gas limit</span><span class="value">${gasDisplay}</span></div>
@@ -2737,8 +2737,10 @@
 
       const hash = r.txHash;
       const shortHash = hash ? `${hash.slice(0,10)}…${hash.slice(-6)}` : '—';
-      const explorerLink = r.explorerUrl
-        ? `<a href="${r.explorerUrl}" target="_blank" rel="noopener">${shortHash} ↗</a>`
+      // Only allow https explorer URLs — validate scheme to prevent javascript: injection.
+      const safeExplorerUrl = (r.explorerUrl && /^https:\/\//i.test(r.explorerUrl)) ? r.explorerUrl : null;
+      const explorerLink = safeExplorerUrl
+        ? `<a href="${safeExplorerUrl}" target="_blank" rel="noopener">${shortHash} ↗</a>`
         : shortHash;
 
       const statusIcon = isConfirmed ? '✅' : (isReverted ? '❌' : '⏳');
@@ -2838,14 +2840,32 @@
       for (const { info, provider } of discoveredProviders) {
         const el = document.createElement('div');
         el.className = 'wallet-option';
-        el.innerHTML = `
-          <img src="${escapeHtml(info.icon)}" alt="${escapeHtml(info.name)}" onerror="this.style.display='none'" />
-          <div>
-            <div class="wallet-name">${escapeHtml(info.name)}</div>
-            <div class="wallet-rdns">${escapeHtml(info.rdns)}</div>
-          </div>
-        `;
-        el.onclick = () => connectWithProvider(provider, info.name);
+
+        // Only allow safe URL schemes for wallet icons — EIP-6963 provider
+        // metadata is untrusted (comes from browser extensions), so a
+        // `javascript:` or `data:text/html` icon src could execute arbitrary code.
+        const iconSrc = String(info.icon ?? '');
+        const safeIconSchemes = /^(https?:\/\/|data:image\/)/i;
+        if (iconSrc && safeIconSchemes.test(iconSrc)) {
+          const img = document.createElement('img');
+          img.src = iconSrc;
+          img.alt = String(info.name ?? '');
+          img.onerror = function() { this.style.display = 'none'; };
+          el.appendChild(img);
+        }
+
+        const infoDiv = document.createElement('div');
+        const nameDiv = document.createElement('div');
+        nameDiv.className = 'wallet-name';
+        nameDiv.textContent = String(info.name ?? '');
+        const rdnsDiv = document.createElement('div');
+        rdnsDiv.className = 'wallet-rdns';
+        rdnsDiv.textContent = String(info.rdns ?? '');
+        infoDiv.appendChild(nameDiv);
+        infoDiv.appendChild(rdnsDiv);
+        el.appendChild(infoDiv);
+
+        el.addEventListener('click', () => connectWithProvider(provider, String(info.name ?? '')));
         list.appendChild(el);
       }
     }
@@ -3440,7 +3460,9 @@
         botLinkEl.style.display = '';
         statusEl.innerHTML = '<span style="color: var(--success);">Code generated! Click the button to open Telegram and pair automatically.</span>';
       } catch (err) {
-        statusEl.innerHTML = `<span style="color: var(--error);">Error: ${err.message}</span>`;
+        // Use textContent to avoid injecting error message markup into the DOM.
+        statusEl.textContent = `Error: ${err.message || err}`;
+        statusEl.style.color = 'var(--error)';
         genBtn.textContent = 'Retry';
         genBtn.disabled = false;
       }
