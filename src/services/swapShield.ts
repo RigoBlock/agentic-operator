@@ -3,7 +3,7 @@
  *
  * Compares DEX API quotes against on-chain oracle (BackgeoOracle) TWAP prices
  * via the vault's `convertTokenAmount()` extension. Blocks swaps where the DEX
- * quote diverges more than MAX_DIVERGENCE_PCT from the oracle price.
+ * quote diverges more than the configured `maxDivergencePct` threshold from the oracle price.
  *
  * ## How it works
  *
@@ -19,8 +19,8 @@
  * The vault's EOracle extension:
  * - Handles ETH routing automatically (any ERC-20 → any ERC-20 via ETH)
  * - Uses a 5-minute TWAP window (capped at oracle cardinality)
- * - Guaranteed coverage for all tokens the vault can hold (the pool cannot
- *   own a token without a price feed)
+ * - Guaranteed coverage for tokens acquired via supported vault flows;
+ *   tokens sent to the vault externally may still lack a price feed
  * - Single eth_call vs. manual PoolKey construction + observe() + tick math
  *
  * Direct oracle access (BackgeoOracle.observe()) can be added later for EOA

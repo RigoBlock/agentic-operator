@@ -123,7 +123,7 @@ RULE: The Swap Shield compares DEX API quotes against the on-chain BackgeoOracle
   (bad deal for user) AND when DEX gives >10% MORE than oracle (stale oracle
   or manipulated route that could expose the vault to sandwich attacks)
 - **Default thresholds**: 5% worse than oracle → blocked; 10% better than oracle → blocked
-- **Three outcomes**:
+- **Possible outcomes**:
   1. `allowed: true` — divergence within threshold
   2. `allowed: false, code: 'BLOCKED'` — divergence exceeds threshold
   3. `allowed: false, code: 'INVALID_QUOTE'` — non-zero input but zero expected output
