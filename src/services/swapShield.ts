@@ -148,6 +148,20 @@ export async function checkSwapPrice(
 ): Promise<SwapShieldResult> {
   void _slippageBps;
 
+  // Negative inputs are never valid for a swap quote — reject as INVALID_QUOTE
+  // rather than trying to reason about signed amounts downstream.
+  if (amountInRaw < 0n || dexExpectedOutRaw < 0n) {
+    return {
+      allowed: false,
+      verified: false,
+      oracleAmount: "0",
+      dexAmount: dexExpectedOutRaw < 0n ? dexExpectedOutRaw.toString() : dexExpectedOutRaw.toString(),
+      divergencePct: "0",
+      code: "INVALID_QUOTE",
+      reason: "Invalid quote — negative input or expected output amount.",
+    };
+  }
+
   // Skip only for zero input amounts
   if (amountInRaw === 0n) {
     return {
@@ -184,7 +198,7 @@ export async function checkSwapPrice(
     return {
       allowed: true,
       verified: false,
-      oracleAmount: amountInRaw.toString(),
+      oracleAmount: "0",       // sentinel: no oracle comparison performed
       dexAmount: dexExpectedOutRaw.toString(),
       divergencePct: "0",
       reason: "Same token (wrap/unwrap) — skipping oracle check",
@@ -205,8 +219,28 @@ export async function checkSwapPrice(
 
     oracleAmountRaw = result as bigint;
 
-    // Handle negative amounts (shouldn't happen for positive inputs, but be safe)
-    if (oracleAmountRaw < 0n) oracleAmountRaw = -oracleAmountRaw;
+    // convertTokenAmount returns int256, but for a positive input amount the
+    // output should always be non-negative. A negative return indicates an
+    // unexpected condition (e.g. overflow, adapter bug) — fail CLOSED to
+    // ORACLE_ERROR rather than silently flip the sign, which could bypass
+    // the divergence threshold if the semantics are inverted.
+    if (oracleAmountRaw < 0n) {
+      console.error(
+        `[SwapShield] convertTokenAmount returned a negative amount (${oracleAmountRaw}) ` +
+        `for positive input ${amountInRaw} on chain ${chainId} — treating as ORACLE_ERROR`,
+      );
+      return {
+        allowed: true,
+        verified: false,
+        oracleAmount: "0",
+        dexAmount: dexExpectedOutRaw.toString(),
+        divergencePct: "0",
+        code: "ORACLE_ERROR",
+        reason:
+          `Oracle returned an invalid (negative) amount on chain ${chainId}. ` +
+          `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
+      };
+    }
 
     console.log(
       `[SwapShield] Oracle: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
@@ -354,7 +388,9 @@ export async function checkSwapPrice(
         verified: true,
         oracleAmount: oracleAmountRaw.toString(),
         dexAmount: dexExpectedOutRaw.toString(),
-        divergencePct: `-${favorablePctDisplay}`,
+        // divergencePctDisplay already carries the leading minus for negative bps;
+        // using it directly avoids a double-sign like "--20.00".
+        divergencePct: divergencePctDisplay,
         code: "BLOCKED",
         reason:
           `⚠️ Swap Shield blocked: the DEX quote is ${favorablePctDisplay}% better than the oracle price. ` +

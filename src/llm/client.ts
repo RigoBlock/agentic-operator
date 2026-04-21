@@ -4217,9 +4217,23 @@ async function runSwapShield(
       tokenOutAddr = await resolveTokenAddress(ctx.chainId, intent.tokenOut) as Address;
     } catch (error) {
       throw new Error(
-        `Swap Shield cannot run: token address resolution failed — ${sanitizeError(error)}`,
+        `Swap Shield cannot run: token address resolution failed — ${sanitizeError(error instanceof Error ? error.message : String(error))}`,
       );
     }
+  }
+
+  // Guard BigInt() so malformed DEX responses surface as clear errors rather
+  // than the generic "Cannot convert X to a BigInt" SyntaxError.
+  let sellRawBig: bigint;
+  let buyRawBig: bigint;
+  try {
+    sellRawBig = BigInt(sellAmountRaw);
+    buyRawBig = BigInt(buyAmountRaw);
+  } catch {
+    throw new Error(
+      "Swap Shield cannot run: DEX quote returned a malformed amount (not a valid integer). " +
+      "Please retry — if this persists, switch DEX (0x ↔ uniswap).",
+    );
   }
 
   const result = await checkSwapPrice(
@@ -4227,8 +4241,8 @@ async function runSwapShield(
     ctx.chainId,
     tokenInAddr,
     tokenOutAddr,
-    BigInt(sellAmountRaw),
-    BigInt(buyAmountRaw),
+    sellRawBig,
+    buyRawBig,
     intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
     env.ALCHEMY_API_KEY,
   );
@@ -4241,9 +4255,17 @@ async function runSwapShield(
     // Build a context-specific error with guidance
     const sellSymbol = intent.tokenIn;
     const buySymbol = intent.tokenOut;
-    const sellAmt = intent.amountIn || formatUnits(BigInt(sellAmountRaw), sellDecimals);
+    const sellAmt = intent.amountIn || formatUnits(sellRawBig, sellDecimals);
     const divergence = parseFloat(result.divergencePct);
     const isFavorable = Number.isFinite(divergence) && divergence < 0;
+    // Display the absolute magnitude with an explicit direction word to avoid
+    // awkward phrasings like "diverges -20.00%" in the favorable case.
+    const magnitudePct = Number.isFinite(divergence)
+      ? Math.abs(divergence).toFixed(2)
+      : result.divergencePct;
+    const directionClause = isFavorable
+      ? `is ${magnitudePct}% better than the on-chain oracle price`
+      : `is ${magnitudePct}% worse than the on-chain oracle price`;
     const thresholdText = isFavorable
       ? "10% better-than-oracle safety threshold"
       : "5% safety threshold";
@@ -4269,7 +4291,7 @@ async function runSwapShield(
         disableShieldOption;
     throw new Error(
       `⚠️ Swap Shield blocked this trade.\n\n` +
-      `The DEX quote diverges ${result.divergencePct}% from the on-chain oracle price, ` +
+      `The DEX quote ${directionClause}, ` +
       `exceeding the ${thresholdText}.\n\n` +
       `${explanation}\n\n` +
       `${options}`,
@@ -4690,7 +4712,7 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
   if (chainWithDexMatch) {
     const possibleChain = chainWithDexMatch[1].trim().toLowerCase();
     // Accept any chain alias that resolveChainArg understands (supports
-    // multi-word names like "bnb chain" / "ethereum mainnet").
+    // multi-word names like "bnb chain" / "bnb smart chain").
     try {
       const resolved = resolveChainArg(possibleChain);
       chain = resolved.name.toLowerCase();

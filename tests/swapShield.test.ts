@@ -230,6 +230,74 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(mockReadContract).not.toHaveBeenCalled();
   });
 
+  it("rejects negative DEX expected output as INVALID_QUOTE without hitting the oracle", async () => {
+    const result = await checkSwapPrice(
+      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      1n * 10n ** 18n,
+      -1n,
+      100,
+      ALCHEMY_KEY,
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("INVALID_QUOTE");
+    expect(mockReadContract).not.toHaveBeenCalled();
+  });
+
+  it("rejects negative input amount as INVALID_QUOTE without hitting the oracle", async () => {
+    const result = await checkSwapPrice(
+      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      -1n,
+      100n,
+      100,
+      ALCHEMY_KEY,
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("INVALID_QUOTE");
+    expect(mockReadContract).not.toHaveBeenCalled();
+  });
+
+  it("treats negative oracle return as ORACLE_ERROR (fail closed, no sign flip)", async () => {
+    // If convertTokenAmount somehow returns a negative int256 for a positive
+    // input, we must NOT silently flip the sign — doing so could bypass the
+    // divergence threshold. Degrade gracefully to ORACLE_ERROR instead.
+    mockReadContract.mockResolvedValueOnce(-1000n * 10n ** 18n);
+
+    const result = await checkSwapPrice(
+      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      1n * 10n ** 18n,
+      500n * 10n ** 18n,
+      100,
+      ALCHEMY_KEY,
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("ORACLE_ERROR");
+  });
+
+  it("emits consistent negative divergencePct for favorable block (no double sign)", async () => {
+    // Oracle 1000, DEX 1200 → 20% favorable, blocked.
+    // divergencePct must be "-20.00" — never "--20.00".
+    mockReadContract.mockResolvedValue(1000n * 10n ** 18n);
+
+    const result = await checkSwapPrice(
+      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      1n * 10n ** 18n,
+      1200n * 10n ** 18n,
+      100,
+      ALCHEMY_KEY,
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe("BLOCKED");
+    // Must carry exactly one leading minus — never "--20.00".
+    expect(result.divergencePct).toBe("-20.00");
+  });
+
   it("skips check for zero amounts", async () => {
     const result = await checkSwapPrice(
       VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
