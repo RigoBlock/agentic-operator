@@ -86,6 +86,14 @@ describe("client security helpers", () => {
     expect(parsed?.args.dex).toBe("0x");
   });
 
+  it("fast-path swap parses chain + DEX with 'with' keyword", () => {
+    const parsed = tryFastPathSwap("sell 1 ETH for USDC on base with 0x");
+    expect(parsed).not.toBeNull();
+    expect(parsed?.name).toBe("build_vault_swap");
+    expect(parsed?.args.chain).toBe("base");
+    expect(parsed?.args.dex).toBe("0x");
+  });
+
   it("fast-path swap parses DEX modifier followed by chain suffix", () => {
     const parsed = tryFastPathSwap("sell 1 ETH for USDC using 0x on base");
     expect(parsed).not.toBeNull();

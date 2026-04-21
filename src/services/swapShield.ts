@@ -212,7 +212,8 @@ export async function checkSwapPrice(
       `[SwapShield] Oracle: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
       `(chain=${chainId})`,
     );
-  } catch {
+  } catch (convertErr) {
+    const convertErrMsg = convertErr instanceof Error ? convertErr.message : String(convertErr);
     // convertTokenAmount reverted. Use hasPriceFeed to distinguish:
     //   • Feed genuinely absent    → NO_PRICE_FEED (graceful degradation)
     //   • Vault has no EOracle ext → ORACLE_ERROR
@@ -257,13 +258,16 @@ export async function checkSwapPrice(
       // hasPriceFeed returned true but convertTokenAmount still reverted —
       // unexpected condition (e.g. cardinality too low, pool not initialized).
       console.error(
-        `[SwapShield] convertTokenAmount reverted despite feeds reporting available on chain ${chainId}`,
+        `[SwapShield] convertTokenAmount reverted despite feeds reporting available on chain ${chainId}: ` +
+        convertErrMsg.slice(0, 200),
       );
-    } catch {
+    } catch (feedErr) {
       // hasPriceFeed itself reverted — vault likely does not implement EOracle extension,
       // or the RPC is down / wrong chain. Both cases should NOT be treated as missing feed.
+      const feedErrMsg = feedErr instanceof Error ? feedErr.message : String(feedErr);
       console.error(
-        `[SwapShield] hasPriceFeed call failed — vault may not implement EOracle on chain ${chainId}`,
+        `[SwapShield] hasPriceFeed call failed — vault may not implement EOracle on chain ${chainId}: ` +
+        feedErrMsg.slice(0, 200),
       );
     }
 

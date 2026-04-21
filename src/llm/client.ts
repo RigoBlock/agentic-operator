@@ -756,9 +756,9 @@ ${executionModeNote}${contextDocsBlock}`;
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      // For tool calls that produced informative errors (balance, revert, NAV),
+      // For tool calls that produced informative errors (balance, revert, NAV, auth),
       // return the error directly — falling through to DeepSeek would hallucinate.
-      const isInformativeError = /insufficient|revert|blocked|failed|not found|not bridgeable|no bridgeable/i.test(errMsg);
+      const isInformativeError = /insufficient|revert|blocked|failed|not found|not bridgeable|no bridgeable|wallet not connected|operator authentication required|not the vault owner|requires.*authentication|authenticate/i.test(errMsg);
       if (isInformativeError) {
         console.warn(`[LLM] Immediate fast-path informative error, returning directly: ${errMsg}`);
         const friendlyMsg = friendlyError(sanitizeError(errMsg));
@@ -2039,7 +2039,10 @@ export async function executeToolCall(
         if (isNaN(num) || num <= 0) {
           throw new Error("Invalid slippage value. Provide a positive number (e.g., '0.5%', '50bps', or '0.5').");
         }
-        bps = Math.round(num);
+        if (!Number.isInteger(num)) {
+          throw new Error(`Non-integer bps value '${raw}' is ambiguous — did you mean ${Math.round(num)}bps or ${num}%? Use the '%' suffix for percentages.`);
+        }
+        bps = num;
       } else if (plainMatch) {
         const num = parseFloat(plainMatch[1]);
         if (isNaN(num) || num <= 0) {
@@ -4678,10 +4681,12 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
   // Extract chain modifier — appears either as the final suffix OR before a DEX modifier:
   //   "sell 1 ETH for USDC on base"             → chain=base
   //   "sell 1 ETH for USDC on base using 0x"    → chain=base, DEX suffix preserved
+  //   "sell 1 ETH for USDC on base with 0x"     → chain=base, DEX suffix preserved
   //   "sell 1 ETH for USDC using 0x on base"    → chain=base, DEX suffix preserved
   let chain: string | undefined;
-  // Pattern: "on <chain> [using/via <dex>]" — chain comes before optional DEX suffix
-  const chainWithDexMatch = m.match(/\s+on\s+([a-z0-9 ]+?)(?=\s+(?:using|via)\s+[a-z0-9x]+\s*$|\s*$)/i);
+  // Pattern: "on <chain> [using/via/with/on <dex>]" — chain comes before optional DEX suffix.
+  // Lookahead covers all DEX-modifier keywords supported by dexMatch below.
+  const chainWithDexMatch = m.match(/\s+on\s+([a-z0-9 ]+?)(?=\s+(?:using|via|with|on)\s+[a-z0-9x]+\s*$|\s*$)/i);
   if (chainWithDexMatch) {
     const possibleChain = chainWithDexMatch[1].trim().toLowerCase();
     // Accept any chain alias that resolveChainArg understands (supports
