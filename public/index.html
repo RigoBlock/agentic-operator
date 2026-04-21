@@ -677,7 +677,7 @@
           <div>
             <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Swap Shield (Oracle Protection)</label>
             <div style="display: flex; align-items: center; gap: 10px;">
-              <label class="testnet-toggle" title="Oracle-based price protection. Blocks swaps where DEX quote diverges >5% from TWAP oracle.">
+              <label class="testnet-toggle" title="Oracle-based price protection. Blocks swaps where DEX quote is &gt;5% worse OR &gt;10% better than the TWAP oracle price.">
                 <input type="checkbox" id="swap-shield-toggle" checked onchange="onSwapShieldToggle()" />
                 <span class="toggle-track"></span>
                 <span id="swap-shield-label">Enabled</span>
@@ -1654,7 +1654,8 @@
       return html;
     }
 
-    function escapeHtml(str) {
+    function escapeHtml(value) {
+      const str = String(value ?? '');
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 

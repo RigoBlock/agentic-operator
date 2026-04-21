@@ -155,7 +155,7 @@ export async function checkSwapPrice(
       allowed: false,
       verified: false,
       oracleAmount: "0",
-      dexAmount: dexExpectedOutRaw < 0n ? dexExpectedOutRaw.toString() : dexExpectedOutRaw.toString(),
+      dexAmount: dexExpectedOutRaw.toString(),
       divergencePct: "0",
       code: "INVALID_QUOTE",
       reason: "Invalid quote — negative input or expected output amount.",
