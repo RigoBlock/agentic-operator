@@ -1674,7 +1674,7 @@ export async function executeToolCall(
         // ── Swap Shield — oracle price check ──
         // Pass addresses already resolved by the 0x API so we avoid a
         // redundant resolver round-trip and never skip the check on transient failures.
-        await runSwapShield(
+        const shieldWarning0x = await runSwapShield(
           env, ctx, intent,
           zxQuote.sellAmount, zxQuote.decimalsIn,
           zxQuote.buyAmount,
@@ -1746,6 +1746,7 @@ export async function executeToolCall(
           `Slippage: ${intent.slippageBps ? intent.slippageBps / 100 : 1}%`,
           `Chain: ${chainName}`,
           `Gas limit: ${parseInt(zxGas, 16)}`,
+          ...(shieldWarning0x ? [shieldWarning0x] : []),
         ].join("\n");
 
         // Enforce NAV shield before returning unsigned calldata on direct tool calls.
@@ -1770,7 +1771,7 @@ export async function executeToolCall(
           "Cannot validate swap price. Please retry.",
         );
       }
-      await runSwapShield(
+      const shieldWarningUni = await runSwapShield(
         env, ctx, intent,
         quote.quote.input.amount, quote.decimalsIn,
         quote.quote.output.amount,
@@ -1905,6 +1906,7 @@ export async function executeToolCall(
         `Slippage: ${intent.slippageBps ? intent.slippageBps / 100 : 1}%`,
         `Chain: ${chainName}`,
         `Gas limit: ${parseInt(uniGas, 16)}`,
+        ...(shieldWarningUni ? [shieldWarningUni] : []),
       ].join("\n");
 
       // Enforce NAV shield before returning unsigned calldata on direct tool calls.
@@ -4189,7 +4191,7 @@ async function runSwapShield(
   buyAmountRaw: string,
   resolvedTokenIn?: Address,
   resolvedTokenOut?: Address,
-): Promise<void> {
+): Promise<string | undefined> {
   // Check opt-out
   if (isVerifiedOperatorContext(ctx) && env.KV) {
     const disabled = await isSwapShieldDisabled(
@@ -4298,9 +4300,15 @@ async function runSwapShield(
     );
   }
 
-  // Log non-blocking results
+  // Log non-blocking results and surface a warning to the caller so it can
+  // be appended to the swap-ready message. process.emitWarning() is not
+  // available in Cloudflare Workers — returning the string is the correct pattern.
   if (result.code === "NO_PRICE_FEED" || result.code === "ORACLE_ERROR") {
-    console.warn(`[SwapShield] Non-blocking: ${result.reason}`);
+    const warning =
+      `⚠️ Swap Shield: quote was not oracle-verified (${result.code}). ` +
+      (result.reason ?? "Oracle check unavailable — proceeding without oracle protection.");
+    console.warn(`[SwapShield] Non-blocking: ${warning}`);
+    return warning;
   }
 }
 
