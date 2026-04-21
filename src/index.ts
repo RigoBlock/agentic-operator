@@ -151,8 +151,97 @@ app.get("/api/health", (c) =>
       paidRoutes: {
         "POST /api/chat": "$0.01",
         "GET /api/quote": "$0.002",
+        "POST /api/tools/*": "$0.002",
       },
     },
+  }),
+);
+
+// ── Agent discovery ───────────────────────────────────────────────────
+
+// robots.txt — allow AI crawlers, point to sitemap and API
+app.get("/robots.txt", (c) => {
+  c.header("content-type", "text/plain");
+  return c.text(
+    [
+      "User-agent: *",
+      "Allow: /",
+      "",
+      "# AI agents and crawlers welcome",
+      "User-agent: GPTBot",
+      "Allow: /",
+      "",
+      "User-agent: Claude-Web",
+      "Allow: /",
+      "",
+      "User-agent: PerplexityBot",
+      "Allow: /",
+      "",
+      "User-agent: anthropic-ai",
+      "Allow: /",
+      "",
+      "Sitemap: https://trader.rigoblock.com/sitemap.xml",
+    ].join("\n"),
+  );
+});
+
+// ai-plugin.json (OpenAI-style plugin manifest — used by many agent frameworks)
+app.get("/.well-known/ai-plugin.json", (c) =>
+  c.json({
+    schema_version: "v1",
+    name_for_human: "Rigoblock Trading Agent",
+    name_for_model: "rigoblock_trading_agent",
+    description_for_human:
+      "AI-powered DeFi trading for Rigoblock smart vaults. Swap, bridge, LP, stake, and manage positions across 7 chains.",
+    description_for_model:
+      "DeFi trading agent for Rigoblock smart pool vaults. Provides: " +
+      "swap calldata via Uniswap and 0x, cross-chain bridges via Across, " +
+      "Uniswap v4 LP management, GMX perpetuals, GRG staking, vault deployment, " +
+      "and aggregated NAV across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain. " +
+      "All vault-modifying operations require operator authentication and are protected by a 10% NAV shield. " +
+      "Payment: $0.01 USDC per chat request, $0.002 per quote/tool call, via x402 on Base.",
+    auth: {
+      type: "none",
+    },
+    api: {
+      type: "openapi",
+      url: "https://trader.rigoblock.com/openapi.json",
+    },
+    logo_url: "https://trader.rigoblock.com/favicon.ico",
+    contact_email: "info@rigoblock.com",
+    legal_info_url: "https://rigoblock.com",
+  }),
+);
+
+// x402 discovery — machine-readable list of paid endpoints
+app.get("/.well-known/x402.json", (c) =>
+  c.json({
+    version: 2,
+    payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
+    network: "eip155:8453",
+    asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    assetName: "USDC",
+    facilitator: "https://api.cdp.coinbase.com/platform/v2/x402",
+    endpoints: [
+      {
+        path: "/api/chat",
+        method: "POST",
+        price: "$0.01",
+        description: "AI-powered DeFi chat — natural language to swap/bridge/LP calldata",
+      },
+      {
+        path: "/api/quote",
+        method: "GET",
+        price: "$0.002",
+        description: "DEX price quote across 7 chains (Uniswap + 0x aggregator)",
+      },
+      {
+        path: "/api/tools/{toolName}",
+        method: "POST",
+        price: "$0.002",
+        description: "Direct tool invocation without LLM — get_swap_quote, get_vault_info, build_vault_swap, etc.",
+      },
+    ],
   }),
 );
 

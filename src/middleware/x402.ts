@@ -63,33 +63,74 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     ],
     description:
-      "AI-powered trading assistant for Rigoblock vaults. Supports swaps (Uniswap, 0x), " +
-      "perpetual positions (GMX), cross-chain bridging (Across), pool deployment, and " +
-      "delegated execution. Protected by STAR (Stupid Transaction Automated Rejector).",
+      "AI-powered DeFi trading agent for Rigoblock smart vaults. Natural language to safe swap/bridge " +
+      "calldata or delegated execution. Supports Uniswap, 0x, GMX perpetuals, Across bridging, " +
+      "Uniswap v4 LP, GRG staking, and pool deployment across 7 chains. Protected by NAV Shield " +
+      "(10% max loss cap), Swap Shield (oracle price comparison), and 7-point execution validation.",
     mimeType: "application/json",
-    extensions: declareDiscoveryExtension({
-      bodyType: "json",
-      input: {
-        messages: "Array of {role, content} chat messages",
-        vaultAddress: "Rigoblock vault contract address (0x…)",
-        chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
-        operatorAddress: "Operator wallet address (optional)",
-        executionMode: "manual | delegated (optional, default: manual)",
-      },
-      output: {
-        example: {
-          reply: "I'll swap 1 ETH → USDC on Arbitrum via 0x…",
-          suggestions: ["Check balance", "Swap ETH to USDC"],
-          transaction: {
-            to: "0xVaultAddress",
-            data: "0xcalldata…",
-            value: "0x0",
-            chainId: 42161,
-            description: "Swap 1 ETH → 3,456.78 USDC via 0x",
+    // Raw bazaar extension: mirrors the GET/query format that CDP Bazaar indexes
+    // successfully. Using queryParams field (like /api/quote) with a permissive
+    // method schema so validation passes regardless of what enrichDeclaration sets.
+    // Background: createBodyDiscoveryExtension uses enum:["POST","PUT","PATCH"] which
+    // CDP's indexer appears to silently reject. GET query-style extensions ARE indexed
+    // (confirmed: both /api/quote here and x402-api.aubr.ai/api/chat which uses
+    // method:"GET" even for a POST endpoint).
+    extensions: {
+      bazaar: {
+        info: {
+          input: {
+            type: "http",
+            method: "POST",
+            queryParams: {
+              messages: "Array of {role, content} chat messages",
+              vaultAddress: "Rigoblock vault contract address (0x...)",
+              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
+              executionMode: "manual | delegated (default: manual)",
+              confirmExecution: "Set to true for auto-execute in delegated mode",
+              operatorAddress: "Vault owner wallet address (optional)",
+              authSignature: "EIP-191 signature signed by operatorAddress (optional)",
+            },
+          },
+          output: {
+            type: "json",
+            example: {
+              reply: "I'll swap 1 ETH for USDC on Arbitrum via 0x",
+              transaction: {
+                to: "0xVaultAddress",
+                data: "0xcalldata",
+                value: "0x0",
+                chainId: 42161,
+              },
+            },
           },
         },
+        schema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            input: {
+              type: "object",
+              properties: {
+                type: { type: "string", const: "http" },
+                method: { type: "string" },
+                queryParams: { type: "object" },
+              },
+              required: ["type"],
+              additionalProperties: false,
+            },
+            output: {
+              type: "object",
+              properties: {
+                type: { type: "string" },
+                example: { type: "object" },
+              },
+              required: ["type"],
+            },
+          },
+          required: ["input"],
+        },
       },
-    }),
+    },
   },
   "GET /api/quote": {
     accepts: [
@@ -100,23 +141,23 @@ const PROTECTED_ROUTES: RoutesConfig = {
         network: BASE_NETWORK,
       },
     ],
-    description: "DEX price quotes from Uniswap and 0x aggregator across all supported chains.",
+    description: "DEX price quotes from Uniswap and 0x aggregator across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).",
     mimeType: "application/json",
     extensions: declareDiscoveryExtension({
       input: {
-        sell: "Token to sell (ETH, USDC, WBTC, … or contract address)",
-        buy: "Token to buy (ETH, USDC, WBTC, … or contract address)",
+        sell: "Token to sell (ETH, USDC, WBTC, or contract address)",
+        buy: "Token to buy (ETH, USDC, WBTC, or contract address)",
         amount: "Amount to sell (human-readable, e.g. '1' for 1 ETH)",
         chain: "Chain name or ID (e.g. 'base', '8453', 'arbitrum', '42161')",
       },
       output: {
         example: {
-          sell: "ETH",
-          buy: "USDC",
-          amountIn: "1.0",
-          amountOut: "3456.78",
-          priceImpact: "0.03%",
-          source: "uniswap",
+          sell: "1 ETH",
+          buy: "2079.54 USDC",
+          price: "1 ETH = 2079.54 USDC",
+          routing: "CLASSIC",
+          gasFeeUSD: "0.0024",
+          gasLimit: "394000",
           chainId: 8453,
         },
       },
@@ -132,9 +173,69 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     ],
     description:
-      "Direct tool invocation without LLM. Call specific DeFi tools by name " +
-      "(get_swap_quote, build_vault_swap, get_vault_info, etc.).",
+      "Direct DeFi tool invocation without LLM overhead. POST to /api/tools/{toolName} with arguments. " +
+      "Read-only tools ($0.002): get_swap_quote, get_vault_info, get_token_balance, get_pool_info, " +
+      "get_lp_positions, gmx_get_positions, gmx_get_markets, check_delegation_status, " +
+      "get_crosschain_quote, get_aggregated_nav, get_rebalance_plan, list_twap_orders, " +
+      "list_strategies, list_nav_syncs. " +
+      "Vault-action tools require operator auth signature (build_vault_swap, build_lp_add, " +
+      "build_lp_remove, gmx_open_position, bridge_tokens, stake_grg, etc.).",
     mimeType: "application/json",
+    extensions: {
+      bazaar: {
+        info: {
+          input: {
+            type: "http",
+            method: "POST",
+            queryParams: {
+              toolName: "Tool name as URL path segment (e.g. get_swap_quote, get_vault_info, build_vault_swap)",
+              arguments: "Tool-specific arguments object (see tool name for required fields)",
+              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
+              vaultAddress: "Rigoblock vault address (required for vault-specific tools)",
+              operatorAddress: "Vault owner address (required for action tools in delegated mode)",
+              authSignature: "EIP-191 signature by operatorAddress (required for delegated execution)",
+            },
+          },
+          output: {
+            type: "json",
+            example: {
+              result: {
+                sell: "1 ETH",
+                buy: "2079.54 USDC",
+                price: "1 ETH = 2079.54 USDC",
+                routing: "CLASSIC",
+                chainId: 8453,
+              },
+            },
+          },
+        },
+        schema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            input: {
+              type: "object",
+              properties: {
+                type: { type: "string", const: "http" },
+                method: { type: "string" },
+                queryParams: { type: "object" },
+              },
+              required: ["type"],
+              additionalProperties: false,
+            },
+            output: {
+              type: "object",
+              properties: {
+                type: { type: "string" },
+                example: { type: "object" },
+              },
+              required: ["type"],
+            },
+          },
+          required: ["input"],
+        },
+      },
+    },
   },
 };
 
