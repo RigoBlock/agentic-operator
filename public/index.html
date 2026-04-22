@@ -4055,5 +4055,56 @@
     }
 
   </script>
+
+  <script>
+    // WebMCP — expose site tools to AI agents via the browser (WebMCP API).
+    // See https://webmachinelearning.github.io/webmcp/
+    (function () {
+      if (!navigator.modelContext) return;
+      const ac = new AbortController();
+      navigator.modelContext.registerTool({
+        name: 'get_swap_quote',
+        description: 'Get a DEX price quote for a token swap on a given chain. Returns sell/buy amounts, routing, and gas estimate.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sell: { type: 'string', description: 'Token to sell (symbol or address, e.g. "ETH")' },
+            buy: { type: 'string', description: 'Token to buy (symbol or address, e.g. "USDC")' },
+            amount: { type: 'string', description: 'Amount to sell in human-readable form (e.g. "1")' },
+            chain: { type: 'string', description: 'Chain name or ID (e.g. "base", "arbitrum", "8453"). Defaults to Base.' },
+          },
+          required: ['sell', 'buy', 'amount'],
+        },
+        execute: async ({ sell, buy, amount, chain }) => {
+          const params = new URLSearchParams({ sell, buy, amount });
+          if (chain) params.set('chain', chain);
+          const res = await fetch(`/api/quote?${params}`);
+          return res.json();
+        },
+        signal: ac.signal,
+      });
+      navigator.modelContext.registerTool({
+        name: 'get_vault_info',
+        description: 'Get information about a Rigoblock smart pool vault: NAV, balances, owner, and delegation status.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vaultAddress: { type: 'string', description: 'Vault contract address (0x...)' },
+            chainId: { type: 'number', description: 'EVM chain ID (e.g. 8453 for Base)' },
+          },
+          required: ['vaultAddress', 'chainId'],
+        },
+        execute: async (args) => {
+          const res = await fetch('/api/tools/get_vault_info', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ arguments: args, chainId: args.chainId, vaultAddress: args.vaultAddress }),
+          });
+          return res.json();
+        },
+        signal: ac.signal,
+      });
+    })();
+  </script>
 </body>
 </html>

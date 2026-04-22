@@ -164,6 +164,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
     }),
   },
   "POST /api/tools/*": {
+    resource: "https://trader.rigoblock.com/api/tools",
     accepts: [
       {
         scheme: "exact",
@@ -173,13 +174,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     ],
     description:
-      "Direct DeFi tool invocation without LLM overhead. POST to /api/tools/{toolName} with arguments. " +
-      "Read-only tools ($0.002): get_swap_quote, get_vault_info, get_token_balance, get_pool_info, " +
-      "get_lp_positions, gmx_get_positions, gmx_get_markets, check_delegation_status, " +
-      "get_crosschain_quote, get_aggregated_nav, get_rebalance_plan, list_twap_orders, " +
-      "list_strategies, list_nav_syncs. " +
-      "Vault-action tools require operator auth signature (build_vault_swap, build_lp_add, " +
-      "build_lp_remove, gmx_open_position, bridge_tokens, stake_grg, etc.).",
+      "Direct DeFi tool invocation. POST to /api/tools/{toolName} with arguments object.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -188,12 +183,10 @@ const PROTECTED_ROUTES: RoutesConfig = {
             type: "http",
             method: "POST",
             queryParams: {
-              toolName: "Tool name as URL path segment (e.g. get_swap_quote, get_vault_info, build_vault_swap)",
-              arguments: "Tool-specific arguments object (see tool name for required fields)",
+              toolName: "Tool name (e.g. get_swap_quote, get_vault_info, build_vault_swap)",
+              arguments: "Tool arguments object",
               chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
-              vaultAddress: "Rigoblock vault address (required for vault-specific tools)",
-              operatorAddress: "Vault owner address (required for action tools in delegated mode)",
-              authSignature: "EIP-191 signature by operatorAddress (required for delegated execution)",
+              vaultAddress: "Rigoblock vault address (optional)",
             },
           },
           output: {
@@ -203,7 +196,6 @@ const PROTECTED_ROUTES: RoutesConfig = {
                 sell: "1 ETH",
                 buy: "2079.54 USDC",
                 price: "1 ETH = 2079.54 USDC",
-                routing: "CLASSIC",
                 chainId: 8453,
               },
             },
@@ -261,6 +253,22 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
   // Exempt own-frontend requests from payment
   server.onProtectedRequest(async (ctx) => {
     const adapter = ctx.adapter;
+    // Diagnostic: log paymentPayload structure for debugging CDP verify failures
+    const paymentSig = adapter.getHeader("payment-signature");
+    if (paymentSig) {
+      try {
+        const decoded = JSON.parse(atob(paymentSig));
+        console.log("[x402] paymentPayload keys:", {
+          path: adapter.getPath(),
+          x402Version: decoded.x402Version,
+          topLevelKeys: Object.keys(decoded).sort(),
+          hasAccepted: !!decoded.accepted,
+          acceptedKeys: decoded.accepted ? Object.keys(decoded.accepted).sort() : [],
+          extensionsKeys: decoded.extensions ? Object.keys(decoded.extensions) : [],
+          payloadKeys: decoded.payload ? Object.keys(decoded.payload).sort() : [],
+        });
+      } catch { /* ignore decode errors */ }
+    }
     const secFetchSite = adapter.getHeader("sec-fetch-site");
     if (secFetchSite === "same-origin") {
       return { grantAccess: true };
@@ -359,6 +367,16 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
 
     if (result.type === "payment-error") {
       const { status, headers, body, isHtml } = result.response;
+      // Log the error reason so we can see it in wrangler tail
+      const hasPaymentSig = !!adapter.getHeader("payment-signature");
+      if (hasPaymentSig) {
+        // Payment was provided but rejected — log details
+        console.error("[x402] Payment rejected", {
+          path: adapter.getPath(),
+          error: (body as Record<string, unknown>)?.error,
+          status,
+        });
+      }
       for (const [k, v] of Object.entries(headers)) {
         c.header(k, v);
       }

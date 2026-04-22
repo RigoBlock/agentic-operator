@@ -18,6 +18,9 @@ export type AppVariables = {
 
 // ── Environment bindings ──────────────────────────────────────────────
 export interface Env {
+  // Static assets binding (serves ./public directory; used to proxy / with custom headers)
+  ASSETS: Fetcher;
+
   // KV namespace (stores per-user vault lists, delegation config, agent wallets)
   KV: KVNamespace;
 

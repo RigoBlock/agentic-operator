@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RigoBlock Agent Trader API",
-    "description": "AI-powered DeFi trading API for autonomous agents. All endpoints are protected by the x402 payment protocol \u2014 no API key required. Agents pay per request in USDC on Base.\n\n## x402 Payment Flow\n1. Agent makes a request \u2192 server responds `402 Payment Required` with a payment payload\n2. Agent pays in **USDC on Base** (chain ID 8453) via `api.cdp.coinbase.com`\n3. Agent retries with the `X-Payment` header \u2192 receives structured data\n\n**Payment:** USDC on Base (eip155:8453) \u2014 CDP facilitator\n\n**Integration guide:** https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md",
+    "description": "AI-powered DeFi trading API for autonomous agents. Protected by the x402 v2 payment protocol — pay per request in USDC on Base mainnet, no API key required.\n\n## x402 v2 Payment Flow\n1. Make a request → server responds `402 Payment Required` with `PAYMENT-REQUIRED` header (base64-encoded requirements)\n2. Sign an EIP-3009 USDC transfer authorization on Base (chain 8453)\n3. Retry with `PAYMENT-SIGNATURE` header → receive structured data + `PAYMENT-RESPONSE` settlement receipt\n\n**Use the [@x402/core](https://www.npmjs.com/package/@x402/core) SDK** — it handles payment flow automatically.\n\n**Payment:** USDC on Base (eip155:8453) — CDP facilitator at api.cdp.coinbase.com\n\n**Integration guide & agent-to-agent architecture:** https://trader.rigoblock.com/AGENTS.md\n\n**Supported chains:** Ethereum (1), Base (8453), Arbitrum (42161), Optimism (10), Polygon (137), BNB (56), Unichain (130)",
     "version": "1.0.0",
     "contact": {
       "name": "RigoBlock",
@@ -25,7 +25,7 @@
       "get": {
         "operationId": "getDexQuote",
         "summary": "Get DEX swap quote",
-        "description": "Returns the best swap quote aggregated across 150+ liquidity sources via 0x (default) or routed through Uniswap V2/V3/V4. No vault or wallet context required \u2014 any agent can call this endpoint.\n\n**Price:** $0.002 USDC per request (paid via x402)",
+        "description": "Returns the best swap quote aggregated across Uniswap v2/v3/v4 and 0x (150+ liquidity sources) for a given token pair and amount on any of the 7 supported chains. No vault, wallet, or operator context required — any agent can call this endpoint with a /usr/bin/bash.002 USDC payment.\n\n**Price:** /usr/bin/bash.002 USDC per request (x402, eip155:8453)\n\n**Typical use:** Price discovery, trade sizing, yield comparison, arbitrage detection.\n\n**Example:** `GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base`",
         "tags": [
           "Quotes"
         ],
@@ -34,7 +34,7 @@
             "name": "sell",
             "in": "query",
             "required": true,
-            "description": "Token to sell \u2014 ticker symbol (e.g. `ETH`) or ERC-20 contract address.",
+            "description": "Token to sell — ticker symbol (e.g. `ETH`) or ERC-20 contract address.",
             "schema": {
               "type": "string",
               "example": "ETH"
@@ -44,7 +44,7 @@
             "name": "buy",
             "in": "query",
             "required": true,
-            "description": "Token to buy \u2014 ticker symbol (e.g. `USDC`) or ERC-20 contract address.",
+            "description": "Token to buy — ticker symbol (e.g. `USDC`) or ERC-20 contract address.",
             "schema": {
               "type": "string",
               "example": "USDC"
@@ -92,22 +92,22 @@
               }
             }
           },
+          "400": {
+            "description": "Bad request — missing or invalid parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "402": {
             "description": "Payment required (x402). Pay in USDC on Base and retry with `X-Payment` header.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/X402PaymentRequired"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request \u2014 missing or invalid parameters",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -124,7 +124,7 @@
       "post": {
         "operationId": "agentChat",
         "summary": "AI-powered DeFi agent chat",
-        "description": "Natural language DeFi interface for autonomous agents. Send a message describing a trading intent and receive swap calldata, position summaries, or market analysis \u2014 ready for on-chain execution.\n\n**Price:** $0.01 USDC per request (paid via x402)",
+        "description": "Natural language DeFi interface. Send a message describing a trading intent and receive signed-ready swap calldata, position summaries, bridge transactions, or market analysis. The agent internally uses DeepSeek R1 for reasoning and Llama 3.3 70B for tool execution.\n\n**Price:** /usr/bin/bash.01 USDC per request (x402, eip155:8453)\n\n**Supported operations (one per request):**\n- Swap tokens via Uniswap v4 or 0x aggregator\n- Bridge tokens cross-chain via Across Protocol\n- Add/remove Uniswap v4 LP positions\n- Open/close GMX perpetual positions\n- Stake/unstake GRG governance tokens\n- Deploy and fund Rigoblock smart pool vaults\n- Query vault NAV, token balances, active positions\n- Create/manage automated trading strategies\n\n**Execution modes:**\n-  (default): Returns unsigned calldata — operator signs and broadcasts\n- : Agent wallet executes on-chain directly (requires operator auth + on-chain delegation)\n\n**Safety:** Every transaction passes NAV shield (≤10% loss), Swap Shield (oracle price check), 7-point execution validation, and on-chain selector whitelist.",
         "tags": [
           "Agent"
         ],
@@ -158,6 +158,16 @@
               }
             }
           },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "402": {
             "description": "Payment required (x402). Pay in USDC on Base and retry with `X-Payment` header.",
             "content": {
@@ -167,9 +177,185 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "x402": []
+          }
+        ]
+      }
+    },
+    "/api/tools/{toolName}": {
+      "post": {
+        "operationId": "invokeTool",
+        "summary": "Invoke a DeFi tool directly",
+        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Price:** /usr/bin/bash.002 USDC per request (x402, eip155:8453)\n\n**Read-only tools (no auth needed):**\n, , , , , , , , , , , , , \n\n**Vault-action tools (require operator auth):**\n, , , , , , , , \n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
+        "tags": [
+          "Tools"
+        ],
+        "parameters": [
+          {
+            "name": "toolName",
+            "in": "path",
+            "required": true,
+            "description": "Tool name to invoke",
+            "schema": {
+              "type": "string",
+              "example": "get_swap_quote",
+              "enum": [
+                "get_swap_quote",
+                "get_vault_info",
+                "get_token_balance",
+                "get_pool_info",
+                "get_lp_positions",
+                "gmx_get_positions",
+                "gmx_get_markets",
+                "check_delegation_status",
+                "get_crosschain_quote",
+                "get_aggregated_nav",
+                "get_rebalance_plan",
+                "list_twap_orders",
+                "list_strategies",
+                "list_nav_syncs",
+                "build_vault_swap",
+                "build_lp_add",
+                "build_lp_remove",
+                "gmx_open_position",
+                "bridge_tokens",
+                "stake_grg",
+                "equalize_nav",
+                "create_twap_order",
+                "setup_delegation"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "arguments"
+                ],
+                "properties": {
+                  "arguments": {
+                    "type": "object",
+                    "description": "Tool-specific arguments. Structure depends on toolName.",
+                    "example": {
+                      "sellToken": "ETH",
+                      "buyToken": "USDC",
+                      "amount": "1"
+                    }
+                  },
+                  "chainId": {
+                    "type": "integer",
+                    "description": "EVM chain ID",
+                    "default": 8453,
+                    "enum": [
+                      1,
+                      10,
+                      56,
+                      137,
+                      130,
+                      8453,
+                      42161
+                    ]
+                  },
+                  "vaultAddress": {
+                    "type": "string",
+                    "description": "Rigoblock vault address (required for vault-specific tools)",
+                    "example": "0xYourVaultAddress"
+                  },
+                  "operatorAddress": {
+                    "type": "string",
+                    "description": "Vault owner address (required for vault-action tools in delegated mode)",
+                    "example": "0xOperatorWallet"
+                  },
+                  "authSignature": {
+                    "type": "string",
+                    "description": "EIP-191 signature by operatorAddress over the auth message (required for vault-action tools)",
+                    "example": "0x..."
+                  },
+                  "authTimestamp": {
+                    "type": "integer",
+                    "description": "Unix timestamp (ms) when authSignature was created. Valid for 24 hours.",
+                    "example": 1741700000000
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tool result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "object",
+                      "description": "Tool-specific result object"
+                    }
+                  }
+                },
+                "example": {
+                  "result": {
+                    "sell": "1 ETH",
+                    "buy": "2079.54 USDC",
+                    "price": "1 ETH = 2079.54 USDC",
+                    "routing": "CLASSIC",
+                    "gasFeeUSD": "0.002",
+                    "chainId": 8453
+                  }
+                }
+              }
+            }
           },
           "400": {
-            "description": "Bad request",
+            "description": "Bad request — missing or invalid arguments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Operator authentication required for this tool",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "x402 payment required",
+            "headers": {
+              "PAYMENT-REQUIRED": {
+                "description": "Base64-encoded payment requirements",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/X402PaymentRequired"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown tool name",
             "content": {
               "application/json": {
                 "schema": {
@@ -193,7 +379,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Payment",
-        "description": "x402 payment header. Flow:\n1. Make the request without this header \u2192 receive `402 Payment Required`\n2. Submit USDC payment on Base (chain 8453) via `api.cdp.coinbase.com`\n3. Retry the request with this header set to the payment receipt\n\nSee https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md for full integration."
+        "description": "x402 payment header. Flow:\n1. Make the request without this header → receive `402 Payment Required`\n2. Submit USDC payment on Base (chain 8453) via `api.cdp.coinbase.com`\n3. Retry the request with this header set to the payment receipt\n\nSee https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md for full integration."
       }
     },
     "schemas": {
@@ -301,7 +487,10 @@
           "routingMode": {
             "type": "string",
             "description": "Workers AI orchestration mode.",
-            "enum": ["deepseek_only", "hybrid_fast_followup"],
+            "enum": [
+              "deepseek_only",
+              "hybrid_fast_followup"
+            ],
             "default": "deepseek_only"
           },
           "chain": {
@@ -462,11 +651,15 @@
   "tags": [
     {
       "name": "Quotes",
-      "description": "DEX price quotes \u2014 no wallet or vault context required"
+      "description": "DEX price quotes — no wallet or vault context required"
     },
     {
       "name": "Agent",
-      "description": "AI-powered DeFi agent interface \u2014 natural language to calldata"
+      "description": "AI-powered DeFi agent interface — natural language to calldata"
+    },
+    {
+      "name": "Tools",
+      "description": "Direct tool invocation without LLM overhead — structured input/output"
     }
   ]
 }
