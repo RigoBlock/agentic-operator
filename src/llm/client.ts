@@ -147,7 +147,6 @@ const VAULT_TX_TOOLS = new Set<string>([
   "collect_lp_fees",
   "burn_position",
   "fund_pool",
-  "deploy_smart_pool",
   "setup_delegation",
   "revoke_delegation",
   "revoke_selectors",

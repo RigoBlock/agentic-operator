@@ -6,7 +6,7 @@ metadata: {"homepage":"https://trader.rigoblock.com"}
 
 # Rigoblock DeFi Operator
 
-You have access to DeFi trading on Rigoblock smart pool vaults via two HTTP
+You have access to DeFi trading on Rigoblock smart pool vaults via HTTP
 endpoints at `https://trader.rigoblock.com`. All calls are paid with USDC
 on Base via the x402 protocol.
 
@@ -180,9 +180,9 @@ The agent decides *what* to do. Your wallet manages *who* signs. The API ensures
 The agent specifies `chainId` per request — there is no default chain. Every
 `/api/chat` call includes the target chain explicitly.
 
-## The Two Endpoints
+## Endpoints
 
-All DeFi operations go through just **two** HTTP endpoints:
+The API exposes three HTTP endpoints:
 
 ### 1. `GET /api/quote` — Price Quotes (read-only)
 
@@ -254,6 +254,25 @@ X-PAYMENT: <x402-payment-header>
 ```
 
 Cost: **$0.01** per call (USDC on Base).
+
+### 3. `POST /api/tools/{toolName}` — Direct Tool Invocation (optional)
+
+Bypasses the LLM and calls a specific tool directly. Useful for programmatic
+agents that want structured JSON responses without paying for LLM processing.
+Read-only tools (e.g. `get_swap_quote`, `get_vault_info`) work with just x402.
+Vault-modifying tools require operator auth for delegated execution.
+
+```
+POST https://trader.rigoblock.com/api/tools/get_swap_quote
+X-PAYMENT: <x402-payment-header>
+Content-Type: application/json
+
+{ "arguments": { "sell": "ETH", "buy": "USDC", "amount": "1" }, "chainId": 8453 }
+
+→ 200: { "tool": "get_swap_quote", "message": "...", ... }
+```
+
+Cost: **$0.002** per call (USDC on Base, same as `/api/quote`).
 
 ### x402 Payment (USDC on Base)
 

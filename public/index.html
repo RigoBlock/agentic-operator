@@ -4076,9 +4076,13 @@
           required: ['sell', 'buy', 'amount'],
         },
         execute: async ({ sell, buy, amount, chain }) => {
-          const params = new URLSearchParams({ sell, buy, amount });
-          if (chain) params.set('chain', chain);
-          const res = await fetch(`/api/quote?${params}`);
+          const args = { sell, buy, amount };
+          if (chain) args.chain = chain;
+          const res = await fetch('/api/tools/get_swap_quote', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ arguments: args, chainId: 8453 }),
+          });
           return res.json();
         },
         signal: ac.signal,

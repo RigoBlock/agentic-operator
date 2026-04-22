@@ -79,10 +79,9 @@ tools.post("/:toolName", async (c) => {
       throw new AuthError("Authentication required", 401);
     }
 
-    // Non-read-only tools require at least operator auth or browser origin
-    if (!READ_ONLY_TOOLS.has(toolName) && !operatorVerified && !isBrowserRequest) {
-      return c.json({ error: `Tool '${toolName}' requires operator authentication` }, 403);
-    }
+    // x402 agents (non-browser, no operator auth) are allowed to call vault-tx tools in manual mode.
+    // They receive unsigned calldata and sign it themselves. executeToolCall enforces the per-tool
+    // auth checks (OPERATOR_VERIFIED_TOOLS, browser gate) — no early rejection needed here.
 
     const executionMode: ExecutionMode =
       body.executionMode === "delegated" && operatorVerified ? "delegated" : "manual";
