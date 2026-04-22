@@ -92,6 +92,7 @@ tools.post("/:toolName", async (c) => {
       chainId: body.chainId,
       operatorAddress: body.operatorAddress as Address | undefined,
       operatorVerified,
+      isBrowserRequest,
       executionMode,
     };
 

@@ -514,6 +514,7 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
           vaultAddress: order.vaultAddress as Address,
           chainId: order.chainId,
           operatorAddress: order.operatorAddress as Address,
+          isBrowserRequest: false,
           executionMode: order.autoExecute ? "delegated" : "manual",
         };
 

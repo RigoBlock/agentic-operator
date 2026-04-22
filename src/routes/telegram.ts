@@ -647,6 +647,7 @@ async function handleMessage(
     chainId: vault.chainId,
     operatorAddress: vault.operatorAddress || user.operatorAddress,
     operatorVerified: true,
+    isBrowserRequest: false,
     executionMode,
     aiModel: modelPref === "deepseek" ? "deepseek" : undefined,
   };
@@ -968,6 +969,7 @@ async function handleCallbackQuery(
       chainId: rec.chainId,
       operatorAddress: (rec.operatorAddress) as Address,
       operatorVerified: true,
+      isBrowserRequest: false,
       executionMode: "delegated",
     };
 

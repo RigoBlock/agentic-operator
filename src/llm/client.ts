@@ -99,6 +99,11 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   swap_tokens: "build_vault_swap",
   execute_swap: "build_vault_swap",
   trade: "build_vault_swap",
+  build_lp_add: "add_liquidity",
+  build_lp_remove: "remove_liquidity",
+  bridge_tokens: "crosschain_transfer",
+  stake_grg: "grg_stake",
+  equalize_nav: "crosschain_sync",
 };
 
 /**

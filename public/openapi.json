@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RigoBlock Agent Trader API",
-    "description": "AI-powered DeFi trading API for autonomous agents. Protected by the x402 v2 payment protocol — pay per request in USDC on Base mainnet, no API key required.\n\n## x402 v2 Payment Flow\n1. Make a request → server responds `402 Payment Required` with `PAYMENT-REQUIRED` header (base64-encoded requirements)\n2. Sign an EIP-3009 USDC transfer authorization on Base (chain 8453)\n3. Retry with `PAYMENT-SIGNATURE` header → receive structured data + `PAYMENT-RESPONSE` settlement receipt\n\n**Use the [@x402/core](https://www.npmjs.com/package/@x402/core) SDK** — it handles payment flow automatically.\n\n**Payment:** USDC on Base (eip155:8453) — CDP facilitator at api.cdp.coinbase.com\n\n**Integration guide & agent-to-agent architecture:** https://trader.rigoblock.com/AGENTS.md\n\n**Supported chains:** Ethereum (1), Base (8453), Arbitrum (42161), Optimism (10), Polygon (137), BNB (56), Unichain (130)",
+    "description": "AI-powered DeFi trading API for autonomous agents. Protected by the x402 v2 payment protocol — pay per request in USDC on Base mainnet, no API key required.\n\n## x402 v2 Payment Flow\n1. Make a request → server responds `402 Payment Required` and may include a `PAYMENT-REQUIRED` header describing accepted payment requirements\n2. Create the payment payload for USDC on Base (chain 8453), typically with `@x402/core`\n3. Retry with the `X-Payment` header → receive structured data; successful 2xx responses may include a `PAYMENT-RESPONSE` settlement receipt\n\n**Use the [@x402/core](https://www.npmjs.com/package/@x402/core) SDK** — it handles payment flow automatically.\n\n**Payment:** USDC on Base (eip155:8453) — CDP facilitator at api.cdp.coinbase.com\n\n**Integration guide & agent-to-agent architecture:** https://trader.rigoblock.com/AGENTS.md\n\n**Supported chains:** Ethereum (1), Base (8453), Arbitrum (42161), Optimism (10), Polygon (137), BNB (56), Unichain (130)",
     "version": "1.0.0",
     "contact": {
       "name": "RigoBlock",
@@ -25,7 +25,7 @@
       "get": {
         "operationId": "getDexQuote",
         "summary": "Get DEX swap quote",
-        "description": "Returns the best swap quote aggregated across Uniswap v2/v3/v4 and 0x (150+ liquidity sources) for a given token pair and amount on any of the 7 supported chains. No vault, wallet, or operator context required — any agent can call this endpoint with a /usr/bin/bash.002 USDC payment.\n\n**Price:** /usr/bin/bash.002 USDC per request (x402, eip155:8453)\n\n**Typical use:** Price discovery, trade sizing, yield comparison, arbitrage detection.\n\n**Example:** `GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base`",
+        "description": "Returns the best swap quote aggregated across Uniswap v2/v3/v4 and 0x (150+ liquidity sources) for a given token pair and amount on any of the 7 supported chains. No vault, wallet, or operator context required — any agent can call this endpoint with a $0.002 USDC payment.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Typical use:** Price discovery, trade sizing, yield comparison, arbitrage detection.\n\n**Example:** `GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base`",
         "tags": [
           "Quotes"
         ],
@@ -124,7 +124,7 @@
       "post": {
         "operationId": "agentChat",
         "summary": "AI-powered DeFi agent chat",
-        "description": "Natural language DeFi interface. Send a message describing a trading intent and receive signed-ready swap calldata, position summaries, bridge transactions, or market analysis. The agent internally uses DeepSeek R1 for reasoning and Llama 3.3 70B for tool execution.\n\n**Price:** /usr/bin/bash.01 USDC per request (x402, eip155:8453)\n\n**Supported operations (one per request):**\n- Swap tokens via Uniswap v4 or 0x aggregator\n- Bridge tokens cross-chain via Across Protocol\n- Add/remove Uniswap v4 LP positions\n- Open/close GMX perpetual positions\n- Stake/unstake GRG governance tokens\n- Deploy and fund Rigoblock smart pool vaults\n- Query vault NAV, token balances, active positions\n- Create/manage automated trading strategies\n\n**Execution modes:**\n-  (default): Returns unsigned calldata — operator signs and broadcasts\n- : Agent wallet executes on-chain directly (requires operator auth + on-chain delegation)\n\n**Safety:** Every transaction passes NAV shield (≤10% loss), Swap Shield (oracle price check), 7-point execution validation, and on-chain selector whitelist.",
+        "description": "Natural language DeFi interface. Send a message describing a trading intent and receive unsigned swap calldata, position summaries, bridge transactions, or market analysis. The agent internally uses DeepSeek R1 for reasoning and Llama 3.3 70B for tool execution.\n\n**Price:** $0.01 USDC per request (x402, eip155:8453)\n\n**Supported operations (one per request):**\n- Swap tokens via Uniswap v4 or 0x aggregator\n- Bridge tokens cross-chain via Across Protocol\n- Add/remove Uniswap v4 LP positions\n- Open/close GMX perpetual positions\n- Stake/unstake GRG governance tokens\n- Deploy and fund Rigoblock smart pool vaults\n- Query vault NAV, token balances, active positions\n- Create/manage automated trading strategies\n\n**Execution modes:**\n- manual (default): Returns unsigned calldata — operator signs and broadcasts\n- delegated: Agent wallet executes on-chain directly (requires operator auth + on-chain delegation)\n\n**Safety:** Every transaction passes NAV shield (≤10% loss), Swap Shield (oracle price check), 7-point execution validation, and on-chain selector whitelist.",
         "tags": [
           "Agent"
         ],
@@ -190,7 +190,7 @@
       "post": {
         "operationId": "invokeTool",
         "summary": "Invoke a DeFi tool directly",
-        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Price:** /usr/bin/bash.002 USDC per request (x402, eip155:8453)\n\n**Read-only tools (no auth needed):**\n, , , , , , , , , , , , , \n\n**Vault-action tools (require operator auth):**\n, , , , , , , , \n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
+        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Read-only tools:**\n`get_swap_quote`, `get_vault_info`, `get_token_balance`, `get_pool_info`, `get_lp_positions`, `gmx_get_positions`, `gmx_get_markets`, `check_delegation_status`, `get_crosschain_quote`, `get_aggregated_nav`, `get_rebalance_plan`, `verify_bridge_arrival`, `list_twap_orders`, `list_nav_syncs`\n\n**State-changing tools:**\n`build_vault_swap`, `add_liquidity`, `remove_liquidity`, `collect_lp_fees`, `burn_position`, `gmx_open_position`, `gmx_close_position`, `gmx_increase_position`, `gmx_cancel_order`, `gmx_update_order`, `gmx_claim_funding_fees`, `crosschain_transfer`, `crosschain_sync`, `grg_stake`, `grg_unstake`, `grg_undelegate_stake`, `grg_end_epoch`, `grg_claim_rewards`, `deploy_smart_pool`, `fund_pool`, `setup_delegation`, `revoke_delegation`, `revoke_selectors`, `create_twap_order`, `cancel_twap_order`, `create_nav_sync`, `cancel_nav_sync`\n\n**Operator-scoped tools:**\n`list_strategies`, `set_default_slippage`, `disable_swap_shield`, `enable_swap_shield`\n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
         "tags": [
           "Tools"
         ],
@@ -205,28 +205,51 @@
               "example": "get_swap_quote",
               "enum": [
                 "get_swap_quote",
+                "build_vault_swap",
                 "get_vault_info",
                 "get_token_balance",
-                "get_pool_info",
-                "get_lp_positions",
+                "switch_chain",
+                "gmx_open_position",
+                "gmx_close_position",
+                "gmx_increase_position",
                 "gmx_get_positions",
+                "gmx_cancel_order",
+                "gmx_update_order",
+                "gmx_claim_funding_fees",
                 "gmx_get_markets",
+                "setup_delegation",
+                "revoke_delegation",
                 "check_delegation_status",
+                "deploy_smart_pool",
+                "fund_pool",
+                "crosschain_transfer",
+                "crosschain_sync",
                 "get_crosschain_quote",
                 "get_aggregated_nav",
                 "get_rebalance_plan",
-                "list_twap_orders",
                 "list_strategies",
-                "list_nav_syncs",
-                "build_vault_swap",
-                "build_lp_add",
-                "build_lp_remove",
-                "gmx_open_position",
-                "bridge_tokens",
-                "stake_grg",
-                "equalize_nav",
+                "get_pool_info",
+                "add_liquidity",
+                "remove_liquidity",
+                "get_lp_positions",
+                "collect_lp_fees",
+                "burn_position",
+                "grg_stake",
+                "grg_unstake",
+                "grg_undelegate_stake",
+                "grg_end_epoch",
+                "grg_claim_rewards",
+                "revoke_selectors",
+                "verify_bridge_arrival",
+                "set_default_slippage",
+                "disable_swap_shield",
+                "enable_swap_shield",
                 "create_twap_order",
-                "setup_delegation"
+                "cancel_twap_order",
+                "list_twap_orders",
+                "create_nav_sync",
+                "list_nav_syncs",
+                "cancel_nav_sync"
               ]
             }
           }
@@ -243,11 +266,12 @@
                 "properties": {
                   "arguments": {
                     "type": "object",
-                    "description": "Tool-specific arguments. Structure depends on toolName.",
+                    "description": "Tool-specific arguments. For swap tools, provide `tokenIn`, `tokenOut`, and either `amountIn` or `amountOut`. Other tools use different argument shapes.",
+                    "additionalProperties": true,
                     "example": {
-                      "sellToken": "ETH",
-                      "buyToken": "USDC",
-                      "amount": "1"
+                      "tokenIn": "ETH",
+                      "tokenOut": "USDC",
+                      "amountIn": "1"
                     }
                   },
                   "chainId": {
@@ -297,21 +321,37 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "result": {
+                    "tool": {
+                      "type": "string",
+                      "description": "Canonical tool name that handled the request"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable tool result"
+                    },
+                    "transaction": {
                       "type": "object",
-                      "description": "Tool-specific result object"
+                      "description": "Unsigned transaction payload for state-changing tools"
+                    },
+                    "chainSwitch": {
+                      "type": "integer",
+                      "description": "Suggested chain switch, when the tool resolved to a different chain"
+                    },
+                    "suggestions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   }
                 },
                 "example": {
-                  "result": {
-                    "sell": "1 ETH",
-                    "buy": "2079.54 USDC",
-                    "price": "1 ETH = 2079.54 USDC",
-                    "routing": "CLASSIC",
-                    "gasFeeUSD": "0.002",
-                    "chainId": 8453
-                  }
+                  "tool": "get_swap_quote",
+                  "message": "1 ETH -> 2079.54 USDC on Base via 0x.",
+                  "suggestions": [
+                    "Build the swap transaction",
+                    "Try the same quote on Arbitrum"
+                  ]
                 }
               }
             }
@@ -379,7 +419,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Payment",
-        "description": "x402 payment header. Flow:\n1. Make the request without this header → receive `402 Payment Required`\n2. Submit USDC payment on Base (chain 8453) via `api.cdp.coinbase.com`\n3. Retry the request with this header set to the payment receipt\n\nSee https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md for full integration."
+        "description": "x402 payment header. Flow:\n1. Make the request without this header → receive `402 Payment Required` and, for protected routes, a `PAYMENT-REQUIRED` header describing accepted payment requirements\n2. Create the x402 payment payload for USDC on Base (chain 8453), typically via `@x402/core` and the CDP facilitator at `api.cdp.coinbase.com`\n3. Retry the request with this header set to the encoded payment payload\n\nSuccessful 2xx responses may include a `PAYMENT-RESPONSE` settlement receipt. See https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md for full integration."
       }
     },
     "schemas": {
@@ -489,7 +529,8 @@
             "description": "Workers AI orchestration mode.",
             "enum": [
               "deepseek_only",
-              "hybrid_fast_followup"
+              "hybrid_fast_followup",
+              "llama_only"
             ],
             "default": "deepseek_only"
           },

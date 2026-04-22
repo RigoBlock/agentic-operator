@@ -253,22 +253,6 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
   // Exempt own-frontend requests from payment
   server.onProtectedRequest(async (ctx) => {
     const adapter = ctx.adapter;
-    // Diagnostic: log paymentPayload structure for debugging CDP verify failures
-    const paymentSig = adapter.getHeader("payment-signature");
-    if (paymentSig) {
-      try {
-        const decoded = JSON.parse(atob(paymentSig));
-        console.log("[x402] paymentPayload keys:", {
-          path: adapter.getPath(),
-          x402Version: decoded.x402Version,
-          topLevelKeys: Object.keys(decoded).sort(),
-          hasAccepted: !!decoded.accepted,
-          acceptedKeys: decoded.accepted ? Object.keys(decoded.accepted).sort() : [],
-          extensionsKeys: decoded.extensions ? Object.keys(decoded.extensions) : [],
-          payloadKeys: decoded.payload ? Object.keys(decoded.payload).sort() : [],
-        });
-      } catch { /* ignore decode errors */ }
-    }
     const secFetchSite = adapter.getHeader("sec-fetch-site");
     if (secFetchSite === "same-origin") {
       return { grantAccess: true };

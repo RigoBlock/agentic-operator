@@ -299,7 +299,7 @@ export interface RequestContext {
   /** True when the request originates from the browser (same-origin). Used to
    * gate vault-transaction tools: browser callers without auth are blocked (sign in),
    * while x402 agents without auth are allowed in manual mode (Tier 1 AGENTS.md). */
-  isBrowserRequest?: boolean;
+  isBrowserRequest: boolean;
   /** Execution mode for this request */
   executionMode?: ExecutionMode;
   /** User-provided AI API key (overrides server OPENAI_API_KEY) */
