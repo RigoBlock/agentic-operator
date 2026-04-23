@@ -123,7 +123,7 @@ export function isVerifiedOperatorContext(
  * Keep this as the single source of truth instead of scattering checks in
  * individual tool handlers.
  */
-const OPERATOR_VERIFIED_TOOLS = new Set<string>([
+export const OPERATOR_VERIFIED_TOOLS = new Set<string>([
   // Operator-scoped KV mutations
   "set_default_slippage",
   "disable_swap_shield",
@@ -140,7 +140,7 @@ const OPERATOR_VERIFIED_TOOLS = new Set<string>([
  * For x402 agents (non-browser), these are allowed in manual (unsigned) mode —
  * that is the intended Tier 1 use case described in AGENTS.md.
  */
-const VAULT_TX_TOOLS = new Set<string>([
+export const VAULT_TX_TOOLS = new Set<string>([
   "build_vault_swap",
   "add_liquidity",
   "remove_liquidity",
