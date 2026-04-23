@@ -28,7 +28,7 @@ import type {
   RoutesConfig,
 } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
-import { declareDiscoveryExtension, bazaarResourceServerExtension } from "@x402/extensions";
+import { bazaarResourceServerExtension } from "@x402/extensions";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler } from "hono";
 import type { Env, AppVariables } from "../types.js";
@@ -78,6 +78,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
     extensions: {
       bazaar: {
         info: {
+          name: "Rigoblock",
           input: {
             type: "http",
             method: "POST",
@@ -143,25 +144,60 @@ const PROTECTED_ROUTES: RoutesConfig = {
     ],
     description: "DEX price quotes from Uniswap and 0x aggregator across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).",
     mimeType: "application/json",
-    extensions: declareDiscoveryExtension({
-      input: {
-        sell: "Token to sell (ETH, USDC, WBTC, or contract address)",
-        buy: "Token to buy (ETH, USDC, WBTC, or contract address)",
-        amount: "Amount to sell (human-readable, e.g. '1' for 1 ETH)",
-        chain: "Chain name or ID (e.g. 'base', '8453', 'arbitrum', '42161')",
-      },
-      output: {
-        example: {
-          sell: "1 ETH",
-          buy: "2079.54 USDC",
-          price: "1 ETH = 2079.54 USDC",
-          routing: "CLASSIC",
-          gasFeeUSD: "0.0024",
-          gasLimit: "394000",
-          chainId: 8453,
+    extensions: {
+      bazaar: {
+        info: {
+          name: "Rigoblock",
+          input: {
+            type: "http",
+            method: "GET",
+            queryParams: {
+              sell: "Token to sell (ETH, USDC, WBTC, or contract address)",
+              buy: "Token to buy (ETH, USDC, WBTC, or contract address)",
+              amount: "Amount to sell (human-readable, e.g. '1' for 1 ETH)",
+              chain: "Chain name or ID (e.g. 'base', '8453', 'arbitrum', '42161')",
+            },
+          },
+          output: {
+            type: "json",
+            example: {
+              sell: "1 ETH",
+              buy: "2079.54 USDC",
+              price: "1 ETH = 2079.54 USDC",
+              routing: "CLASSIC",
+              gasFeeUSD: "0.0024",
+              gasLimit: "394000",
+              chainId: 8453,
+            },
+          },
+        },
+        schema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            input: {
+              type: "object",
+              properties: {
+                type: { type: "string", const: "http" },
+                method: { type: "string" },
+                queryParams: { type: "object" },
+              },
+              required: ["type"],
+              additionalProperties: false,
+            },
+            output: {
+              type: "object",
+              properties: {
+                type: { type: "string" },
+                example: { type: "object" },
+              },
+              required: ["type"],
+            },
+          },
+          required: ["input"],
         },
       },
-    }),
+    },
   },
   "POST /api/tools/*": {
     resource: "https://trader.rigoblock.com/api/tools",
@@ -179,6 +215,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
     extensions: {
       bazaar: {
         info: {
+          name: "Rigoblock",
           input: {
             type: "http",
             method: "POST",
@@ -314,8 +351,10 @@ export function isExemptBrowserRequest(getHeader: (name: string) => string | und
   if (origin && EXEMPT_ORIGINS.has(origin)) return true;
   const referer = getHeader("referer");
   if (referer) {
-    for (const o of EXEMPT_ORIGINS) {
-      if (referer.startsWith(o)) return true;
+    try {
+      if (EXEMPT_ORIGINS.has(new URL(referer).origin)) return true;
+    } catch {
+      // Ignore malformed Referer values
     }
   }
   return false;

@@ -1,11 +1,15 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "RigoBlock Agent Trader API",
+    "title": "Rigoblock",
+    "x-logo": {
+      "url": "https://trader.rigoblock.com/favicon.ico",
+      "altText": "Rigoblock"
+    },
     "description": "AI-powered DeFi trading API for autonomous agents. Protected by the x402 v2 payment protocol — pay per request in USDC on Base mainnet, no API key required.\n\n## x402 v2 Payment Flow\n1. Make a request → server responds `402 Payment Required` and may include a `PAYMENT-REQUIRED` header describing accepted payment requirements\n2. Create the payment payload for USDC on Base (chain 8453), typically with `@x402/core`\n3. Retry with the `X-Payment` header → receive structured data; successful 2xx responses may include a `PAYMENT-RESPONSE` settlement receipt\n\n**Use the [@x402/core](https://www.npmjs.com/package/@x402/core) SDK** — it handles payment flow automatically.\n\n**Payment:** USDC on Base (eip155:8453) — CDP facilitator at api.cdp.coinbase.com\n\n**Integration guide & agent-to-agent architecture:** https://github.com/RigoBlock/agentic-operator/blob/main/AGENTS.md\n\n**Supported chains:** Ethereum (1), Base (8453), Arbitrum (42161), Optimism (10), Polygon (137), BNB (56), Unichain (130)",
     "version": "1.0.0",
     "contact": {
-      "name": "RigoBlock",
+      "name": "Rigoblock",
       "url": "https://rigoblock.com",
       "email": "gab@rigoblock.com"
     },

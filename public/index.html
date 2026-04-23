@@ -362,6 +362,51 @@
       background: rgba(139,148,158,0.1); color: var(--muted);
       border: 1px solid rgba(139,148,158,0.2);
     }
+    /* Per-chain chain chips — compact grid under the badge row */
+    .delegation-chain-chips {
+      display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; width: 100%;
+    }
+    .chain-chip {
+      font-size: 11px; padding: 2px 7px; border-radius: 999px;
+      display: inline-flex; align-items: center; gap: 4px;
+      background: rgba(255,255,255,0.04); color: var(--muted);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .chain-chip.active {
+      background: rgba(35,134,54,0.1); color: var(--success);
+      border-color: rgba(35,134,54,0.2);
+    }
+    .chain-chip .cc-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+    /* Chain checkbox grid in delegation modal */
+    .chain-checkbox-grid {
+      display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px;
+    }
+    .chain-check-item {
+      display: flex; align-items: center; gap: 5px; padding: 4px 10px;
+      border-radius: 6px; background: rgba(255,255,255,0.04);
+      cursor: pointer; user-select: none; font-size: 13px;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .chain-check-item.already-active {
+      opacity: 0.55; cursor: default;
+    }
+    .chain-check-item input[type=checkbox] { cursor: pointer; }
+    /* Multi-chain setup progress */
+    .chain-progress-list {
+      display: flex; flex-direction: column; gap: 6px; margin: 10px 0; font-size: 13px;
+    }
+    .chain-progress-row {
+      display: flex; align-items: center; gap: 8px; padding: 4px 0;
+    }
+    .chain-progress-row .cpr-icon { width: 16px; text-align: center; flex-shrink: 0; }
+    .chain-progress-row .cpr-name { min-width: 80px; }
+    .chain-progress-row .cpr-status { color: var(--muted); font-size: 12px; }
+    .chain-progress-row.cpr-done .cpr-icon { color: var(--success); }
+    .chain-progress-row.cpr-done .cpr-name { color: var(--success); }
+    .chain-progress-row.cpr-active .cpr-icon { color: var(--accent); }
+    .chain-progress-row.cpr-error .cpr-icon { color: var(--error); }
+    .chain-progress-row.cpr-error .cpr-name { color: var(--error); }
+    .chain-progress-row.cpr-pending .cpr-name { color: var(--muted); }
     .delegation-status .dot {
       width: 10px; height: 10px; border-radius: 50%; display: inline-block;
     }
@@ -712,6 +757,8 @@
           <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
           <button id="telegram-pair-btn" class="btn-delegation telegram" onclick="openTelegramPairing()" style="display:none;" title="Control this pool from Telegram">⬡ Telegram</button>
           <button id="telegram-reset-btn" class="btn-delegation danger" onclick="resetTelegramPairing()" style="display:none;" title="Reset Telegram pairing and conversation state">↻ Reset</button>
+          <!-- Per-chain active status pills — shown once any chain is set up -->
+          <div id="delegation-chain-chips" class="delegation-chain-chips" style="display:none;"></div>
         </div>
       </div>
     </div>
@@ -734,13 +781,19 @@
 
       <div class="delegation-step">
         <h4><span class="step-num">1</span> Agent Wallet</h4>
-        <p>A dedicated wallet will be created for the agent to execute transactions on your behalf. Its keys are encrypted and stored securely.</p>
+        <p>A dedicated wallet will be created for the agent to execute transactions on your behalf. Its keys are managed securely by Coinbase CDP.</p>
         <div id="delegation-agent-info" class="delegation-info" style="display:none;"></div>
       </div>
 
       <div class="delegation-step">
-        <h4><span class="step-num">2</span> Delegated Functions</h4>
-        <p>You’ll send a transaction to your vault calling <code>updateDelegation()</code> which grants the agent permission to call specific trading functions:</p>
+        <h4><span class="step-num">2</span> Select Chains</h4>
+        <p>Choose which chains to activate delegation on. You'll confirm one transaction per chain in your wallet.</p>
+        <div id="delegation-chain-checkboxes" class="chain-checkbox-grid"></div>
+      </div>
+
+      <div class="delegation-step">
+        <h4><span class="step-num">3</span> Delegated Functions</h4>
+        <p>Each chain transaction calls <code>updateDelegation()</code> granting the agent permission to:</p>
         <ul id="delegation-caveats" class="caveat-list">
           <li>Uniswap execute / modifyLiquidities</li>
           <li>0x Aggregator execute</li>
@@ -748,15 +801,27 @@
         </ul>
       </div>
 
-      <div class="delegation-step">
-        <h4><span class="step-num">3</span> Confirm Transaction</h4>
-        <p>Sign and send the delegation transaction from your wallet. You can revoke at any time by calling <code>revokeAllDelegations(agentAddress)</code>.</p>
-      </div>
-
-      <div id="delegation-setup-status" style="font-size: 24px; margin-bottom: 20px;"></div>
+      <div id="delegation-setup-status" style="font-size: 14px; margin-bottom: 8px;"></div>
+      <div id="delegation-chain-progress" class="chain-progress-list" style="display:none;"></div>
       <div class="tx-actions">
         <button class="btn-cancel" onclick="closeModal('delegation-modal')">Cancel</button>
         <button class="btn-confirm" id="delegation-confirm-btn" onclick="startDelegationSetup()">Set Up Agent</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Revoke delegation modal -->
+  <div id="revoke-modal" class="modal-overlay">
+    <div class="modal-content">
+      <button class="modal-close" onclick="closeModal('revoke-modal')">&times;</button>
+      <h3>Revoke Delegation</h3>
+      <p style="color:var(--muted);font-size:14px;margin-bottom:12px;">Select which chains to revoke. You will confirm one transaction per chain in your wallet.</p>
+      <div id="revoke-chain-checkboxes" class="chain-checkbox-grid"></div>
+      <div id="revoke-setup-status" style="font-size:14px;margin-bottom:8px;"></div>
+      <div id="revoke-chain-progress" class="chain-progress-list" style="display:none;"></div>
+      <div class="tx-actions">
+        <button class="btn-cancel" onclick="closeModal('revoke-modal')">Cancel</button>
+        <button class="btn-confirm" id="revoke-confirm-btn" style="background:var(--error);" onclick="executeRevoke()">Revoke</button>
       </div>
     </div>
   </div>
@@ -3189,11 +3254,15 @@
       const sponsorToggle = document.getElementById('sponsor-toggle');
 
 
-      if (!state || (!state.enabled && !state.isActiveOnChain)) {
+      const anyDelegated = state && state.agentAddress && (state.delegatedChains || []).length > 0;
+
+      if (!state || (!state.enabled && !state.isActiveOnChain && !anyDelegated)) {
+        // Completely not set up — no agent wallet at all
         badge.className = 'delegation-status inactive';
-        statusText.textContent = state?.agentAddress ? 'Not active on this chain' : 'Not set up';
+        statusText.textContent = 'Not set up';
         setupBtn.style.display = '';
-        setupBtn.textContent = state?.agentAddress ? 'Set Up on This Chain' : 'Set Up Delegation';
+        setupBtn.textContent = 'Set Up Delegation';
+        setupBtn.title = '';
         setupBtn.onclick = () => openDelegationSetup();
         revokeBtn.style.display = 'none';
         if (telegramBtn) telegramBtn.style.display = 'none';
@@ -3207,38 +3276,43 @@
       } else {
         // Use on-chain status if available, fall back to KV status
         const isOnChain = state.isActiveOnChain != null ? state.isActiveOnChain : (state.isActiveInKV || false);
-        badge.className = `delegation-status ${isOnChain ? 'active' : 'stale'}`;
 
         let missingCount = 0;
         if (isOnChain) {
-          // Check if some selectors are missing (partial delegation)
           const onChain = state.onChainStatus;
           missingCount = onChain?.undelegatedSelectors?.length || 0;
           if (missingCount > 0) {
-            statusText.textContent = `Active (${missingCount} selector${missingCount > 1 ? 's' : ''} missing)`;
             badge.className = 'delegation-status stale';
+            statusText.textContent = `Active (${missingCount} selector${missingCount > 1 ? 's' : ''} missing)`;
           } else {
+            badge.className = 'delegation-status active';
             statusText.textContent = 'Active';
           }
         } else {
-          // Not active on current chain — chain name is already in the chain badge
-          statusText.textContent = 'Not set up on this chain';
+          // Agent exists, active on other chains but not this one — chips show per-chain detail
+          badge.className = 'delegation-status active';
+          statusText.textContent = 'Active';
         }
 
-        // Show setup when not active, OR when selectors are missing (additive update)
+        // Setup button: shown when not on current chain, or selectors are missing
         if (!isOnChain) {
           setupBtn.style.display = '';
-          setupBtn.textContent = 'Set Up on This Chain';
+          setupBtn.textContent = 'Delegate';
+          setupBtn.title = 'Set up delegation on additional chains';
           setupBtn.onclick = () => openDelegationSetup();
         } else if (missingCount > 0) {
           setupBtn.style.display = '';
           setupBtn.textContent = `Update (${missingCount} new)`;
-          setupBtn.title = `${missingCount} new function selector${missingCount > 1 ? 's are' : ' is'} available — click to add them to your delegation without revoking`;
+          setupBtn.title = `${missingCount} new function selector${missingCount > 1 ? 's are' : ' is'} available`;
           setupBtn.onclick = () => openDelegationSetup();
         } else {
           setupBtn.style.display = 'none';
         }
-        revokeBtn.style.display = isOnChain ? '' : 'none';
+
+        // Revoke button: visible whenever any chain has delegation
+        revokeBtn.style.display = anyDelegated ? '' : 'none';
+        revokeBtn.textContent = 'Revoke';
+        revokeBtn.onclick = () => openRevokeModal();
         if (telegramBtn) telegramBtn.style.display = isOnChain ? '' : 'none';
         if (telegramResetBtn) telegramResetBtn.style.display = isOnChain ? '' : 'none';
 
@@ -3300,6 +3374,28 @@
           setupBtn.textContent = 'Re-delegate to New Agent';
         } else if (existingWarn) {
           existingWarn.remove();
+        }
+      }
+
+      // Per-chain delegation chips — show which chains are active
+      const chipsEl = document.getElementById('delegation-chain-chips');
+      if (chipsEl) {
+        if (state && state.agentAddress) {
+          // Build a set of chains known to be active from delegatedChains (KV)
+          const activeChainSet = new Set(state.delegatedChains || []);
+          // Apply on-chain verified status for current chain
+          if (state.isActiveOnChain !== undefined) {
+            if (state.isActiveOnChain) activeChainSet.add(currentChainId);
+            else activeChainSet.delete(currentChainId);
+          }
+          chipsEl.innerHTML = MAINNET_CHAINS_LIST.map(function(c) {
+            const isActive = activeChainSet.has(c.id);
+            return '<span class="chain-chip' + (isActive ? ' active' : '') + '">' +
+              '<span class="cc-dot"></span>' + c.name + '</span>';
+          }).join('');
+          chipsEl.style.display = '';
+        } else {
+          chipsEl.style.display = 'none';
         }
       }
 
@@ -3505,193 +3601,394 @@
       // Reset modal state
       document.getElementById('delegation-agent-info').style.display = 'none';
       document.getElementById('delegation-setup-status').textContent = '';
+      document.getElementById('delegation-chain-progress').style.display = 'none';
+      document.getElementById('delegation-chain-progress').innerHTML = '';
       const confirmBtn = document.getElementById('delegation-confirm-btn');
       confirmBtn.disabled = false;
       confirmBtn.textContent = 'Set Up Agent';
       confirmBtn.onclick = startDelegationSetup; // restore handler (overwritten on success)
+
+      // Populate chain selection — pre-check chains not yet active, grey-out active ones.
+      const activeSet = new Set(delegationState?.delegatedChains || []);
+      const grid = document.getElementById('delegation-chain-checkboxes');
+      if (grid) {
+        grid.innerHTML = MAINNET_CHAINS_LIST.map(function(c) {
+          const alreadyActive = activeSet.has(c.id);
+          return '<label class="chain-check-item' + (alreadyActive ? ' already-active' : '') + '">' +
+            '<input type="checkbox" value="' + c.id + '"' +
+            (alreadyActive ? ' disabled' : ' checked') + '>' +
+            c.name + (alreadyActive ? ' ✓' : '') +
+            '</label>';
+        }).join('');
+      }
+
       document.getElementById('delegation-modal').classList.add('visible');
     }
 
     async function startDelegationSetup() {
       const vault = vaultInput.value.trim();
       const statusEl = document.getElementById('delegation-setup-status');
+      const progressEl = document.getElementById('delegation-chain-progress');
       const confirmBtn = document.getElementById('delegation-confirm-btn');
 
+      // Collect selected chains from checkboxes
+      const checked = document.querySelectorAll('#delegation-chain-checkboxes input[type=checkbox]:checked:not([disabled])');
+      const selectedChains = Array.from(checked).map(function(cb) { return parseInt(cb.value); });
+      if (selectedChains.length === 0) {
+        statusEl.style.color = 'var(--warn)';
+        statusEl.textContent = 'Select at least one chain.';
+        return;
+      }
+
       confirmBtn.disabled = true;
-      confirmBtn.textContent = 'Setting up…';
       statusEl.style.color = 'var(--accent)';
-      statusEl.textContent = 'Creating agent wallet…';
+      statusEl.textContent = '';
 
-      try {
-        // ── Step 1: Call setup endpoint to get unsigned updateDelegation() tx ──
-        const setupRes = await fetch('/api/delegation/setup', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            operatorAddress: connectedAddress,
-            vaultAddress: vault,
-            chainId: currentChainId,
-            authSignature,
-            authTimestamp,
-          }),
-        });
+      // Build per-chain progress rows
+      progressEl.innerHTML = selectedChains.map(function(chainId) {
+        return '<div class="chain-progress-row cpr-pending" id="cpr-' + chainId + '">' +
+          '<span class="cpr-icon">○</span>' +
+          '<span class="cpr-name">' + (CHAIN_NAMES[chainId] || chainId) + '</span>' +
+          '<span class="cpr-status" id="cpr-s-' + chainId + '">Pending</span>' +
+          '</div>';
+      }).join('');
+      progressEl.style.display = '';
 
-        if (!setupRes.ok) {
-          const err = await setupRes.json().catch(() => ({}));
-          throw new Error(err.error || `HTTP ${setupRes.status}`);
-        }
+      let anySuccess = false;
+      let firstAgentAddress = null;
 
-        const setupData = await setupRes.json();
+      for (let ci = 0; ci < selectedChains.length; ci++) {
+        const chainId = selectedChains[ci];
+        const row = document.getElementById('cpr-' + chainId);
+        const rowStatus = document.getElementById('cpr-s-' + chainId);
 
-        const rawAgentAddr = String(setupData.agentAddress || "");
-        // Show agent wallet info using DOM APIs — avoids inline-onclick injection risk
-        // because escapeHtml does not escape single-quotes.
-        const infoEl = document.getElementById('delegation-agent-info');
-        infoEl.innerHTML = `
-          <div class="row" id="delegation-agent-row"></div>
-          <div class="row"><span class="label">Vault</span><span class="value">${escapeHtml(vault.slice(0,6))}…${escapeHtml(vault.slice(-4))}</span></div>
-          <div class="row"><span class="label">Chain</span><span class="value">${CHAIN_NAMES[currentChainId] || currentChainId}</span></div>
-        `;
-        const agentRow = document.getElementById('delegation-agent-row');
-        const agentLabel = document.createElement('span');
-        agentLabel.className = 'label';
-        agentLabel.textContent = 'Agent Wallet';
-        const agentValue = document.createElement('span');
-        agentValue.className = 'value copyable-addr';
-        agentValue.title = 'Click to copy';
-        agentValue.textContent = rawAgentAddr;
-        agentValue.addEventListener('click', () => copyToClipboard(rawAgentAddr));
-        agentRow.appendChild(agentLabel);
-        agentRow.appendChild(agentValue);
-        infoEl.style.display = '';
+        row.className = 'chain-progress-row cpr-active';
+        row.querySelector('.cpr-icon').textContent = '…';
+        rowStatus.textContent = 'Creating wallet…';
 
-        // ── Step 2: Ensure wallet is on the correct chain ──
-        statusEl.textContent = 'Checking chain…';
-        confirmBtn.textContent = 'Checking…';
-
-        const targetChainHex = '0x' + currentChainId.toString(16);
         try {
-          const walletChainHex = await activeProvider.request({ method: 'eth_chainId' });
-          if (walletChainHex !== targetChainHex) {
-            statusEl.textContent = `Switching to ${CHAIN_NAMES[currentChainId] || 'chain ' + currentChainId}…`;
-            await activeProvider.request({
-              method: 'wallet_switchEthereumChain',
-              params: [{ chainId: targetChainHex }],
-            });
-            await new Promise(r => setTimeout(r, 500));
-          }
-        } catch (switchErr) {
-          if (switchErr.code === 4001) {
-            throw new Error('Chain switch rejected. You must be on the target chain to send the delegation transaction.');
-          }
-          if (switchErr.code === 4902) {
-            throw new Error(`Chain ${currentChainId} not configured in your wallet. Please add it manually.`);
-          }
-          throw new Error('Failed to switch chain: ' + (switchErr.message || switchErr));
-        }
-
-        // ── Step 3: Send the updateDelegation() transaction ──
-        statusEl.textContent = 'Approve delegation transaction in your wallet…';
-        confirmBtn.textContent = 'Waiting for wallet…';
-
-        const tx = setupData.transaction;
-        let txHash;
-        try {
-          // Estimate gas dynamically — delegation methods accept dynamic arrays,
-          // so gas usage varies with the number of selectors being delegated.
-          const estimatedGas = await activeProvider.request({
-            method: 'eth_estimateGas',
-            params: [{
-              from: connectedAddress,
-              to: tx.to,
-              data: tx.data,
-              value: '0x0',
-            }],
+          // ── Step 1: Backend setup → get unsigned updateDelegation() tx ──
+          const setupRes = await fetch('/api/delegation/setup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              operatorAddress: connectedAddress,
+              vaultAddress: vault,
+              chainId: chainId,
+              authSignature,
+              authTimestamp,
+            }),
           });
-          // Add 20% buffer over the estimate
-          const gasWithBuffer = '0x' + Math.ceil(parseInt(estimatedGas, 16) * 1.2).toString(16);
-          console.log('[Delegation] Estimated gas:', parseInt(estimatedGas, 16), '→ with buffer:', parseInt(gasWithBuffer, 16));
-
-          txHash = await activeProvider.request({
-            method: 'eth_sendTransaction',
-            params: [{
-              from: connectedAddress,
-              to: tx.to,
-              data: tx.data,
-              value: '0x0',
-              gas: gasWithBuffer,
-            }],
-          });
-        } catch (sendErr) {
-          if (sendErr.code === 4001 || sendErr.message?.includes('rejected') || sendErr.message?.includes('denied')) {
-            throw new Error('Delegation transaction rejected by user');
+          if (!setupRes.ok) {
+            const err = await setupRes.json().catch(function() { return {}; });
+            throw new Error(err.error || 'HTTP ' + setupRes.status);
           }
-          throw new Error('Transaction failed: ' + sendErr.message);
-        }
+          const setupData = await setupRes.json();
 
-        console.log('[Delegation] updateDelegation() tx sent:', txHash);
-        statusEl.textContent = 'Transaction submitted. Waiting for confirmation…';
+          // Show agent wallet once (same address across all chains for this vault)
+          if (!firstAgentAddress && setupData.agentAddress) {
+            firstAgentAddress = String(setupData.agentAddress);
+            const infoEl = document.getElementById('delegation-agent-info');
+            infoEl.innerHTML = '<div class="row" id="delegation-agent-row"></div>' +
+              '<div class="row"><span class="label">Vault</span><span class="value">' +
+              escapeHtml(vault.slice(0,6)) + '…' + escapeHtml(vault.slice(-4)) + '</span></div>';
+            const agentRow = document.getElementById('delegation-agent-row');
+            const agentLabel = document.createElement('span');
+            agentLabel.className = 'label';
+            agentLabel.textContent = 'Agent Wallet';
+            const agentValue = document.createElement('span');
+            agentValue.className = 'value copyable-addr';
+            agentValue.title = 'Click to copy';
+            agentValue.textContent = firstAgentAddress;
+            agentValue.addEventListener('click', function() { copyToClipboard(firstAgentAddress); });
+            agentRow.appendChild(agentLabel);
+            agentRow.appendChild(agentValue);
+            infoEl.style.display = '';
+          }
 
-        // ── Step 4: Wait for transaction receipt ──
-        let confirmed = false;
-        for (let i = 0; i < 60; i++) {
-          await new Promise(r => setTimeout(r, 2000));
+          // ── Step 2: Switch wallet to this chain ──
+          rowStatus.textContent = 'Switching chain…';
+          const targetHex = '0x' + chainId.toString(16);
           try {
-            const receipt = await activeProvider.request({
-              method: 'eth_getTransactionReceipt',
-              params: [txHash],
-            });
-            if (receipt && receipt.status === '0x1') {
-              confirmed = true;
-              break;
-            } else if (receipt && receipt.status === '0x0') {
-              throw new Error('Delegation transaction reverted on-chain');
+            const walletChainHex = await activeProvider.request({ method: 'eth_chainId' });
+            if (walletChainHex !== targetHex) {
+              await activeProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: targetHex }] });
+              await new Promise(function(r) { setTimeout(r, 500); });
             }
-          } catch (e) {
-            if (e.message.includes('reverted')) throw e;
+          } catch (switchErr) {
+            if (switchErr.code === 4001) throw new Error('Chain switch rejected');
+            if (switchErr.code === 4902) throw new Error('Chain not in wallet — add ' + (CHAIN_NAMES[chainId] || chainId) + ' manually');
+            throw new Error('Switch failed: ' + (switchErr.message || switchErr));
           }
+
+          // ── Step 2b: Verify vault exists on this chain ──
+          rowStatus.textContent = 'Checking vault…';
+          try {
+            const code = await activeProvider.request({ method: 'eth_getCode', params: [vault, 'latest'] });
+            if (!code || code === '0x' || code === '0x0') {
+              throw new Error('No smart pool on ' + (CHAIN_NAMES[chainId] || chainId) + ' — deploy the pool first');
+            }
+          } catch (codeErr) {
+            // Re-throw vault-not-found errors; ignore RPC hiccups (contract check is advisory)
+            if (codeErr.message && codeErr.message.includes('deploy the pool first')) throw codeErr;
+            console.warn('[Delegation] eth_getCode failed on chain', chainId, codeErr.message);
+          }
+
+          // ── Step 3: Send updateDelegation() transaction ──
+          rowStatus.textContent = 'Sign in wallet…';
+          const tx = setupData.transaction;
+          let txHash;
+          try {
+            const estimatedGas = await activeProvider.request({
+              method: 'eth_estimateGas',
+              params: [{ from: connectedAddress, to: tx.to, data: tx.data, value: '0x0' }],
+            });
+            const gasWithBuffer = '0x' + Math.ceil(parseInt(estimatedGas, 16) * 1.2).toString(16);
+            txHash = await activeProvider.request({
+              method: 'eth_sendTransaction',
+              params: [{ from: connectedAddress, to: tx.to, data: tx.data, value: '0x0', gas: gasWithBuffer }],
+            });
+          } catch (sendErr) {
+            if (sendErr.code === 4001 || (sendErr.message && (sendErr.message.includes('rejected') || sendErr.message.includes('denied')))) {
+              throw new Error('Rejected by user');
+            }
+            throw new Error('Send failed: ' + sendErr.message);
+          }
+
+          // ── Step 4: Wait for receipt ──
+          rowStatus.textContent = 'Confirming…';
+          let confirmed = false;
+          for (let i = 0; i < 60; i++) {
+            await new Promise(function(r) { setTimeout(r, 2000); });
+            try {
+              const receipt = await activeProvider.request({ method: 'eth_getTransactionReceipt', params: [txHash] });
+              if (receipt && receipt.status === '0x1') { confirmed = true; break; }
+              if (receipt && receipt.status === '0x0') throw new Error('Transaction reverted on-chain');
+            } catch (e) {
+              if (e.message && e.message.includes('reverted')) throw e;
+            }
+          }
+          if (!confirmed) throw new Error('Not confirmed after 2 min');
+
+          // ── Step 5: Notify backend ──
+          rowStatus.textContent = 'Saving…';
+          await fetch('/api/delegation/confirm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              operatorAddress: connectedAddress,
+              vaultAddress: vault,
+              chainId: chainId,
+              authSignature,
+              authTimestamp,
+              txHash,
+            }),
+          });
+
+          row.className = 'chain-progress-row cpr-done';
+          row.querySelector('.cpr-icon').textContent = '✓';
+          rowStatus.textContent = 'Active';
+          anySuccess = true;
+
+        } catch (err) {
+          row.className = 'chain-progress-row cpr-error';
+          row.querySelector('.cpr-icon').textContent = '✕';
+          rowStatus.textContent = err.message.slice(0, 60);
+          // Continue with remaining chains even if one fails
         }
-        if (!confirmed) {
-          throw new Error('Transaction not confirmed after 2 minutes. Check block explorer.');
-        }
+      }
 
-        statusEl.textContent = 'Transaction confirmed! Saving to backend…';
-
-        // ── Step 5: Confirm with backend (store txHash + delegated selectors) ──
-        const confirmRes = await fetch('/api/delegation/confirm', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            operatorAddress: connectedAddress,
-            vaultAddress: vault,
-            chainId: currentChainId,
-            authSignature,
-            authTimestamp,
-            txHash,
-          }),
-        });
-
-        if (!confirmRes.ok) {
-          const err = await confirmRes.json().catch(() => ({}));
-          throw new Error(err.error || 'Confirmation failed');
-        }
-
+      // Final status
+      if (anySuccess) {
         statusEl.style.color = 'var(--success)';
-        statusEl.textContent = '✓ Delegation active! The agent can now execute vault functions.';
+        statusEl.textContent = '✓ Delegation set up! The agent can now execute vault functions.';
         confirmBtn.textContent = 'Done';
-        confirmBtn.onclick = () => closeModal('delegation-modal');
+        confirmBtn.onclick = function() { closeModal('delegation-modal'); };
         confirmBtn.disabled = false;
-
-        appendMessage('system',
-          `Agent delegation active on ${CHAIN_NAMES[currentChainId] || 'chain ' + currentChainId}. Agent: ${setupData.agentAddress.slice(0,6)}…${setupData.agentAddress.slice(-4)}`
-        );
-
-        // Refresh status
+        if (firstAgentAddress) {
+          appendMessage('system', 'Agent delegation active. Agent: ' + firstAgentAddress.slice(0,6) + '…' + firstAgentAddress.slice(-4));
+        }
         refreshDelegationStatus();
-
-      } catch (err) {
+      } else {
         statusEl.style.color = 'var(--error)';
-        statusEl.textContent = `Error: ${err.message}`;
+        statusEl.textContent = 'Setup failed on all selected chains.';
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Retry';
+      }
+    }
+
+    function openRevokeModal() {
+      if (!delegationState || !delegationState.agentAddress) return;
+
+      // Populate checkboxes with only chains that have active delegation
+      const activeChainSet = new Set(delegationState.delegatedChains || []);
+      // Apply on-chain verified status for current chain
+      if (delegationState.isActiveOnChain !== undefined) {
+        if (delegationState.isActiveOnChain) activeChainSet.add(currentChainId);
+        else activeChainSet.delete(currentChainId);
+      }
+
+      const grid = document.getElementById('revoke-chain-checkboxes');
+      if (grid) {
+        const activeChains = MAINNET_CHAINS_LIST.filter(function(c) { return activeChainSet.has(c.id); });
+        if (activeChains.length === 0) {
+          grid.innerHTML = '<p style="color:var(--muted);font-size:13px;">No active delegations found.</p>';
+        } else {
+          grid.innerHTML = activeChains.map(function(c) {
+            return '<label class="chain-check-item">' +
+              '<input type="checkbox" value="' + c.id + '" checked>' +
+              c.name + '</label>';
+          }).join('');
+        }
+      }
+
+      // Reset progress/status
+      const statusEl = document.getElementById('revoke-setup-status');
+      if (statusEl) { statusEl.textContent = ''; statusEl.style.color = ''; }
+      const progressEl = document.getElementById('revoke-chain-progress');
+      if (progressEl) { progressEl.style.display = 'none'; progressEl.innerHTML = ''; }
+      const confirmBtn = document.getElementById('revoke-confirm-btn');
+      if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Revoke'; }
+
+      document.getElementById('revoke-modal').classList.add('visible');
+    }
+
+    async function executeRevoke() {
+      const vault = vaultInput.value.trim();
+      if (!connectedAddress || !vault) return;
+
+      const statusEl = document.getElementById('revoke-setup-status');
+      const progressEl = document.getElementById('revoke-chain-progress');
+      const confirmBtn = document.getElementById('revoke-confirm-btn');
+
+      // Collect selected chains
+      const checked = document.querySelectorAll('#revoke-chain-checkboxes input[type=checkbox]:checked');
+      const selectedChains = Array.from(checked).map(function(cb) { return parseInt(cb.value); });
+      if (selectedChains.length === 0) {
+        statusEl.style.color = 'var(--warn)';
+        statusEl.textContent = 'Select at least one chain.';
+        return;
+      }
+
+      confirmBtn.disabled = true;
+      statusEl.style.color = '';
+      statusEl.textContent = '';
+
+      // Build per-chain progress rows
+      progressEl.innerHTML = selectedChains.map(function(chainId) {
+        return '<div class="chain-progress-row cpr-pending" id="rcpr-' + chainId + '">' +
+          '<span class="cpr-icon">○</span>' +
+          '<span class="cpr-name">' + (CHAIN_NAMES[chainId] || chainId) + '</span>' +
+          '<span class="cpr-status" id="rcpr-s-' + chainId + '">Pending</span>' +
+          '</div>';
+      }).join('');
+      progressEl.style.display = '';
+
+      let anySuccess = false;
+
+      for (let ci = 0; ci < selectedChains.length; ci++) {
+        const chainId = selectedChains[ci];
+        const row = document.getElementById('rcpr-' + chainId);
+        const rowStatus = document.getElementById('rcpr-s-' + chainId);
+
+        row.className = 'chain-progress-row cpr-active';
+        row.querySelector('.cpr-icon').textContent = '…';
+        rowStatus.textContent = 'Calling backend…';
+
+        try {
+          // ── Step 1: Backend revoke → get unsigned revokeAllDelegations() tx ──
+          const res = await fetch('/api/delegation/revoke', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              operatorAddress: connectedAddress,
+              vaultAddress: vault,
+              chainId: chainId,
+              authSignature,
+              authTimestamp,
+            }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(function() { return {}; });
+            throw new Error(err.error || 'HTTP ' + res.status);
+          }
+          const data = await res.json();
+
+          if (data.transaction) {
+            // ── Step 2: Switch wallet to this chain ──
+            rowStatus.textContent = 'Switching chain…';
+            const targetHex = '0x' + chainId.toString(16);
+            try {
+              const walletChainHex = await activeProvider.request({ method: 'eth_chainId' });
+              if (walletChainHex !== targetHex) {
+                await activeProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: targetHex }] });
+                await new Promise(function(r) { setTimeout(r, 500); });
+              }
+            } catch (switchErr) {
+              if (switchErr.code === 4001) throw new Error('Chain switch rejected');
+              throw new Error('Switch failed: ' + (switchErr.message || switchErr));
+            }
+
+            // ── Step 3: Send revokeAllDelegations() transaction ──
+            rowStatus.textContent = 'Sign in wallet…';
+            const tx = data.transaction;
+            let txHash;
+            try {
+              const estimatedGas = await activeProvider.request({
+                method: 'eth_estimateGas',
+                params: [{ from: connectedAddress, to: tx.to, data: tx.data, value: '0x0' }],
+              });
+              const gasWithBuffer = '0x' + Math.ceil(parseInt(estimatedGas, 16) * 1.2).toString(16);
+              txHash = await activeProvider.request({
+                method: 'eth_sendTransaction',
+                params: [{ from: connectedAddress, to: tx.to, data: tx.data, value: '0x0', gas: gasWithBuffer }],
+              });
+            } catch (sendErr) {
+              if (sendErr.code === 4001 || (sendErr.message && (sendErr.message.includes('rejected') || sendErr.message.includes('denied')))) {
+                throw new Error('Rejected by user');
+              }
+              throw new Error('Send failed: ' + sendErr.message);
+            }
+
+            // ── Step 4: Wait for receipt ──
+            rowStatus.textContent = 'Confirming…';
+            let confirmed = false;
+            for (let i = 0; i < 30; i++) {
+              await new Promise(function(r) { setTimeout(r, 2000); });
+              try {
+                const receipt = await activeProvider.request({ method: 'eth_getTransactionReceipt', params: [txHash] });
+                if (receipt && receipt.status === '0x1') { confirmed = true; break; }
+                if (receipt && receipt.status === '0x0') throw new Error('Transaction reverted on-chain');
+              } catch (e) {
+                if (e.message && e.message.includes('reverted')) throw e;
+              }
+            }
+            if (!confirmed) throw new Error('Not confirmed after 60s');
+          }
+
+          row.className = 'chain-progress-row cpr-done';
+          row.querySelector('.cpr-icon').textContent = '✓';
+          rowStatus.textContent = 'Revoked';
+          anySuccess = true;
+
+        } catch (err) {
+          row.className = 'chain-progress-row cpr-error';
+          row.querySelector('.cpr-icon').textContent = '✕';
+          rowStatus.textContent = err.message.slice(0, 60);
+        }
+      }
+
+      // Final status
+      if (anySuccess) {
+        statusEl.style.color = 'var(--success)';
+        statusEl.textContent = '✓ Delegation revoked.';
+        confirmBtn.textContent = 'Done';
+        confirmBtn.onclick = function() { closeModal('revoke-modal'); };
+        confirmBtn.disabled = false;
+        refreshDelegationStatus();
+      } else {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = 'Revocation failed on all selected chains.';
         confirmBtn.disabled = false;
         confirmBtn.textContent = 'Retry';
       }
