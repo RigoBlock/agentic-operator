@@ -530,13 +530,10 @@
           },
           "routingMode": {
             "type": "string",
-            "description": "Workers AI orchestration mode.",
+            "description": "Force Llama-only routing, skipping the default DeepSeek reasoning pass. Omit for default DeepSeek-first orchestration.",
             "enum": [
-              "deepseek_only",
-              "hybrid_fast_followup",
               "llama_only"
-            ],
-            "default": "deepseek_only"
+            ]
           },
           "chain": {
             "type": "string",

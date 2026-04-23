@@ -15,9 +15,9 @@ import { Hono } from "hono";
 import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode, StreamEvent } from "../types.js";
 import { processChat } from "../llm/client.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
+
 import { sanitizeError } from "../config.js";
 import { executeTxList, formatOutcomesMarkdown, ExecutionError } from "../services/execution.js";
-import { isExemptBrowserRequest } from "../middleware/x402.js";
 import type { Address } from "viem";
 
 const chat = new Hono<{ Bindings: Env; Variables: AppVariables }>();
@@ -37,22 +37,22 @@ chat.post("/", async (c) => {
     const resolvedVaultAddress: Address = (body.vaultAddress || ZERO_ADDRESS) as Address;
 
     // ── Auth gate ──
-    // x402 payment = API access fee. Operator auth = vault authorization.
-    // These are independent. An x402 request CAN also include operator auth.
-    //   - x402 paid + no auth → manual mode only (unsigned tx data)
-    //   - x402 paid + auth    → manual or delegated (full access)
-    //   - browser (exempt) + auth → manual or delegated (full access)
-    //   - browser (exempt) + no auth → manual mode only (read-only, non-owner viewing a vault)
-    // Delegated execution ALWAYS requires proven vault ownership.
+    // x402 payment = API access fee (external agents). Operator auth = vault authorization.
+    // Session token (X-Rigoblock-Session, set by browserVerified middleware) = verified browser.
+    //
+    //   x402 + no auth         → manual mode (unsigned tx data)
+    //   x402 + auth (owner)    → manual or delegated
+    //   session + no auth      → manual mode (browser user, no vault specified)
+    //   session + auth (owner) → manual or delegated
+    //   auth only, non-owner   → 403
+    //   no x402, no session    → 401
+    //
+    // Delegated execution ALWAYS requires proven vault ownership (operatorVerified).
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
     let operatorVerified = false;
-
-    // Detect browser-origin requests via Origin/Referer (server-verifiable signals).
-    // sec-fetch-site is intentionally NOT used — it is client-controlled and spoofable.
-    const isBrowserRequest = isExemptBrowserRequest(c.req.header.bind(c.req));
+    const isBrowserRequest = c.get("browserVerified") ?? false;
 
     if (hasAuthCredentials) {
-      // Auth credentials provided — verify regardless of x402 status
       await verifyOperatorAuth({
         operatorAddress: body.operatorAddress || "",
         vaultAddress: body.vaultAddress,
@@ -63,10 +63,8 @@ chat.post("/", async (c) => {
       });
       operatorVerified = true;
     } else if (!c.get("x402Paid") && !isBrowserRequest) {
-      // No auth + no x402 payment + not browser → reject
       throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
     }
-    // else: x402 paid or browser without auth → allowed in manual mode only (below)
 
     // ── Resolve execution mode ──
     // Delegated execution REQUIRES proven vault ownership. No exceptions.

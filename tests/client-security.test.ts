@@ -7,8 +7,9 @@ function makeCtx(overrides: Partial<RequestContext> = {}): RequestContext {
   return {
     vaultAddress: "0x0000000000000000000000000000000000000000",
     chainId: 8453,
+    isBrowserRequest: false,
     ...overrides,
-  } as RequestContext;
+  };
 }
 
 function makeKV(value: string | null): KVNamespace {

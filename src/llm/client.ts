@@ -92,7 +92,7 @@ const POOL_ERROR_SELECTORS: Record<string, string> = {
  * Workers AI (Llama) sometimes calls "swap" instead of "build_vault_swap",
  * "quote" instead of "get_swap_quote", etc.
  */
-const TOOL_NAME_ALIASES: Record<string, string> = {
+export const TOOL_NAME_ALIASES: Record<string, string> = {
   swap: "build_vault_swap",
   quote: "get_swap_quote",
   get_quote: "get_swap_quote",

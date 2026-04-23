@@ -14,7 +14,7 @@
 
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import type { Env } from "./types.js";
+import type { Env, AppVariables } from "./types.js";
 import { chat } from "./routes/chat.js";
 import { quote } from "./routes/quote.js";
 import { delegation } from "./routes/delegation.js";
@@ -25,13 +25,15 @@ import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
 import { createX402Middleware } from "./middleware/x402.js";
+import { generateSessionToken, verifySessionToken, SESSION_HEADER } from "./utils/session.js";
+import { isExemptBrowserRequest } from "./middleware/x402.js";
 import { runAllSkills } from "./skills/index.js";
 import { getTwapEvents } from "./skills/twap.js";
 import { processChat } from "./llm/client.js";
 import { ensureWebhookRegistered, getWebhookSecret } from "./services/telegram.js";
 import type { Address } from "viem";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 // ── Middleware ─────────────────────────────────────────────────────────
 app.use("*", cors());
@@ -46,7 +48,47 @@ app.use("*", async (c, next) => {
 // Own-user requests (browser UI, Telegram webhook) are exempt.
 app.use("*", createX402Middleware());
 
+// Browser session middleware — runs after x402.
+// When SESSION_SECRET is set (production): validates X-Rigoblock-Session HMAC token.
+// When SESSION_SECRET is absent (dev): falls back to Origin/Referer check.
+// Sets c.var.browserVerified for routes to consume.
+app.use("/api/*", async (c, next) => {
+  if (c.env.SESSION_SECRET) {
+    const token = c.req.header(SESSION_HEADER);
+    if (token && await verifySessionToken(token, c.env.SESSION_SECRET)) {
+      c.set("browserVerified", true);
+    }
+  } else {
+    if (isExemptBrowserRequest(c.req.header.bind(c.req))) {
+      c.set("browserVerified", true);
+    }
+  }
+  await next();
+});
+
 // ── API Routes ────────────────────────────────────────────────────────
+
+// Session token endpoint — issues HMAC-signed tokens to browser clients.
+// Rate-limited per IP (20/hour) to limit abuse; token expires in 1 hour.
+// External agents without x402 cannot benefit from these tokens because
+// GET /api/session itself is not x402-protected — the cost is the rate limit.
+app.get("/api/session", async (c) => {
+  if (!c.env.SESSION_SECRET) {
+    return c.json({ token: null }, 200);
+  }
+  const ip = c.req.header("cf-connecting-ip");
+  if (ip && c.env.KV) {
+    const rlKey = `session-rl:${ip}`;
+    const count = parseInt((await c.env.KV.get(rlKey)) ?? "0");
+    if (count >= 20) {
+      return c.json({ error: "Rate limit exceeded." }, 429);
+    }
+    await c.env.KV.put(rlKey, String(count + 1), { expirationTtl: 3600 });
+  }
+  const token = await generateSessionToken(c.env.SESSION_SECRET);
+  return c.json({ token, expiresIn: 3600 });
+});
+
 app.route("/api/chat", chat);
 app.route("/api/quote", quote);
 app.route("/api/tools", toolsRoute);

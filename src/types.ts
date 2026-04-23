@@ -14,6 +14,9 @@ export type ExecutionMode = "manual" | "delegated";
 export type AppVariables = {
   /** Set to true by x402 middleware when payment is verified */
   x402Paid: boolean;
+  /** Set to true by session middleware when a valid X-Rigoblock-Session token is present
+   *  (or Origin/Referer match in dev environments where SESSION_SECRET is not configured) */
+  browserVerified: boolean;
 };
 
 // ── Environment bindings ──────────────────────────────────────────────
@@ -41,6 +44,9 @@ export interface Env {
   CDP_API_KEY_ID: string;             // Coinbase Developer Platform API key ID
   CDP_API_KEY_SECRET: string;  // Coinbase Developer Platform API key secret
   CDP_WALLET_SECRET: string;   // Coinbase Developer Platform wallet secret (agent wallet signing)
+  /** HMAC secret for browser session tokens. When set, X-Rigoblock-Session header is
+   *  required for browser access instead of the spoofable Origin/Referer fallback. */
+  SESSION_SECRET?: string;
 }
 
 // ── Telegram types ────────────────────────────────────────────────────
@@ -121,9 +127,9 @@ export interface ChatRequest {
   aiModel?: string;
   /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
   aiBaseUrl?: string;
-  /** Workers AI orchestration mode: "deepseek_only", "llama_only", or "hybrid_fast_followup"
-   *  (default: DeepSeek first, then Llama fast follow-up unless explicitly set to Llama-only) */
-  routingMode?: "deepseek_only" | "llama_only" | "hybrid_fast_followup";
+  /** Force Llama-only routing (skips DeepSeek reasoning pass). Omit to use the default
+   *  DeepSeek-first orchestration. */
+  routingMode?: "llama_only";
   /** Optional per-request context snippets (e.g. selected markdown excerpts) injected into runtime prompt */
   contextDocs?: string[];
   /**
@@ -309,8 +315,9 @@ export interface RequestContext {
   aiModel?: string;
   /** AI provider base URL */
   aiBaseUrl?: string;
-  /** Workers AI orchestration mode */
-  routingMode?: "deepseek_only" | "llama_only" | "hybrid_fast_followup";
+  /** Force Llama-only routing (skips DeepSeek reasoning pass). Omit to use the default
+   *  DeepSeek-first orchestration (DeepSeek for reasoning, Llama for tool execution). */
+  routingMode?: "llama_only";
   /** Optional per-request context snippets injected into runtime prompt */
   contextDocs?: string[];
   /** Default slippage tolerance in basis points. Resolved from: request body → KV → 100; only integer values are honored and effective value is clamped to [10, 500]. */

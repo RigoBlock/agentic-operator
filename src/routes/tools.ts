@@ -12,10 +12,9 @@
 
 import { Hono } from "hono";
 import type { Env, AppVariables, RequestContext, ExecutionMode } from "../types.js";
-import { executeToolCall } from "../llm/client.js";
+import { executeToolCall, TOOL_NAME_ALIASES } from "../llm/client.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { sanitizeError } from "../config.js";
-import { isExemptBrowserRequest } from "../middleware/x402.js";
 import type { Address } from "viem";
 
 const tools = new Hono<{ Bindings: Env; Variables: AppVariables }>();
@@ -45,7 +44,7 @@ tools.post("/:toolName", async (c) => {
 
     // Auth gate — same model as chat.ts
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
-    const isBrowserRequest = isExemptBrowserRequest(c.req.header.bind(c.req));
+    const isBrowserRequest = c.get("browserVerified") ?? false;
     let operatorVerified = false;
 
     if (hasAuthCredentials) {
@@ -78,10 +77,11 @@ tools.post("/:toolName", async (c) => {
       executionMode,
     };
 
+    const canonicalName = TOOL_NAME_ALIASES[toolName] ?? toolName;
     const result = await executeToolCall(c.env, ctx, toolName, body.arguments);
 
     return c.json({
-      tool: toolName,
+      tool: canonicalName,
       message: result.message,
       transaction: result.transaction,
       chainSwitch: result.chainSwitch,

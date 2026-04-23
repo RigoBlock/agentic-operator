@@ -32,6 +32,7 @@ import { bazaarResourceServerExtension } from "@x402/extensions";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler } from "hono";
 import type { Env, AppVariables } from "../types.js";
+import { verifySessionToken, SESSION_HEADER } from "../utils/session.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
 
@@ -287,22 +288,31 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
 
   const server = new x402HTTPResourceServer(resourceServer, PROTECTED_ROUTES);
 
-  // Exempt own-frontend requests from payment
+  // Exempt own-frontend requests from payment.
+  // When SESSION_SECRET is set (production): validate HMAC session token.
+  // When SESSION_SECRET is absent (dev): fall back to Origin/Referer headers.
   server.onProtectedRequest(async (ctx) => {
     const adapter = ctx.adapter;
 
+    if (env.SESSION_SECRET) {
+      const token = adapter.getHeader(SESSION_HEADER);
+      if (token && await verifySessionToken(token, env.SESSION_SECRET)) {
+        return { grantAccess: true };
+      }
+      // No valid session token → proceed to payment flow
+      return;
+    }
+
+    // Dev fallback: Origin/Referer (spoofable, acceptable for local development)
     const origin = adapter.getHeader("origin");
     if (origin && EXEMPT_ORIGINS.has(origin)) {
       return { grantAccess: true };
     }
-
     const referer = adapter.getHeader("referer");
     if (referer) {
-      for (const o of EXEMPT_ORIGINS) {
-        if (referer.startsWith(o)) {
-          return { grantAccess: true };
-        }
-      }
+      try {
+        if (EXEMPT_ORIGINS.has(new URL(referer).origin)) return { grantAccess: true };
+      } catch { /* ignore malformed */ }
     }
     // Continue to payment flow
   });
@@ -338,13 +348,16 @@ function honoAdapter(c: { req: { header(name: string): string | undefined; metho
 // ── Middleware factory ─────────────────────────────────────────────────
 
 /**
- * Returns true if the request originates from one of our own frontends.
- * Used by routes to determine whether to allow unauthenticated manual-mode access
- * (browser users viewing a vault they don't own) without requiring x402 payment.
+ * Returns true if the request appears to originate from one of our own frontends.
+ * Used by routes to allow unauthenticated manual-mode access (browser users viewing
+ * a vault they don't own) without requiring x402 payment.
  *
- * Uses Origin and Referer headers — both are set by browsers for cross-origin and
- * same-origin requests respectively. sec-fetch-site is intentionally NOT used
- * because it is client-controlled and trivially spoofable.
+ * ⚠️  Origin and Referer are client-supplied headers and CAN be spoofed by any
+ * non-browser HTTP client. The consequence of spoofing is financial (free API calls),
+ * NOT a security issue — delegated vault execution still requires a valid EIP-191
+ * operator signature + on-chain ownership verification. A proper server-verifiable
+ * mechanism (httpOnly session cookie minted by the Worker, or Cloudflare Access JWT)
+ * would close this gap; until then this function is a browser-convention heuristic.
  */
 export function isExemptBrowserRequest(getHeader: (name: string) => string | undefined): boolean {
   const origin = getHeader("origin");
