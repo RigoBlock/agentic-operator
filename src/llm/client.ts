@@ -1464,15 +1464,6 @@ ${executionModeNote}${contextDocsBlock}`;
 // ── Gas estimation helper ─────────────────────────────────────────────
 
 /**
- * Fallback gas limits when on-chain estimation fails.
- *
- * IMPORTANT: RigoBlock vault proxy adds significant overhead on top of the
- * raw DEX swap gas — adapter routing, on-chain checks, and (for the first
- * swap of a given token) an ERC-20 approval via the vault's internal
- * approval logic. For tokenized stocks (XAUT, PAXG, etc.) the token
- * contracts themselves have extra transfer hooks that increase gas further.
- *
-/**
  * Estimate gas for an unsigned transaction via eth_estimateGas.
  * Returns a hex string gas limit with a 20% safety buffer.
  *
@@ -1579,13 +1570,29 @@ async function preCheckNavImpact(
   ctx: RequestContext,
   tx: UnsignedTransaction,
 ): Promise<string> {
-  if (!ctx.operatorAddress) return '';
-  // Skip simulation if the caller is not the verified vault owner.
-  // The simulation runs as operatorAddress — if that address isn't authorized
-  // to call the vault, every simulation would produce a misleading revert
-  // ("unknown reason") that has nothing to do with the trade itself.
-  // The delegated-mode broadcast check in execution.ts is the real hard stop.
-  if (!ctx.operatorVerified) return '';
+  const ZERO = "0x0000000000000000000000000000000000000000";
+  if (!ctx.vaultAddress || ctx.vaultAddress === ZERO) return '';
+
+  // Determine who to simulate as — must be the actual vault owner.
+  // Verified callers: use their address (already proven to be the owner via signature).
+  // Unverified callers: read owner() on-chain rather than trusting the caller-supplied
+  // operatorAddress, which could be wrong and would produce misleading simulation reverts.
+  let simulationSender: Address;
+  if (ctx.operatorVerified && ctx.operatorAddress) {
+    simulationSender = ctx.operatorAddress as Address;
+  } else {
+    try {
+      const vaultClient = getClient(tx.chainId, env.ALCHEMY_API_KEY);
+      simulationSender = await vaultClient.readContract({
+        address: ctx.vaultAddress as Address,
+        abi: RIGOBLOCK_VAULT_ABI,
+        functionName: "owner",
+      }) as Address;
+    } catch {
+      // RPC error reading vault owner — skip NAV pre-check; delegated path has a hard stop
+      return '';
+    }
+  }
 
   try {
     const result = await checkNavImpact(
@@ -1594,7 +1601,7 @@ async function preCheckNavImpact(
       BigInt(tx.value || "0x0"),
       tx.chainId,
       env.ALCHEMY_API_KEY,
-      ctx.operatorAddress as Address,
+      simulationSender,
       env.KV,
     );
 
@@ -1869,6 +1876,7 @@ export async function executeToolCall(
         if (priceLine) descParts.push(priceLine);
 
         let zxGas: string;
+        let zxGasFallbackWarning = '';
         try {
           zxGas = await estimateGas(
             ctx.chainId, ctx.vaultAddress as Address,
@@ -1876,12 +1884,13 @@ export async function executeToolCall(
             ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
           );
         } catch (gasErr) {
-          // Gas estimation failed — use a safe fallback and warn.
+          // Gas estimation failed — use a safe fallback and surface a warning.
           // The vault may still execute on-chain (simulation context can differ from
           // production: approvals, adapter state, price impact at execution time).
           zxGas = '0x' + (800_000).toString(16);
-          console.warn(`[build_vault_swap 0x] estimateGas failed, using fallback 800k:`,
-            gasErr instanceof Error ? gasErr.message : gasErr);
+          const errMsg = gasErr instanceof Error ? gasErr.message : String(gasErr);
+          zxGasFallbackWarning = `⚠️ Gas estimation failed (${errMsg.slice(0, 120)}). Using fallback 800k — transaction may still revert on-chain.`;
+          console.warn(`[build_vault_swap 0x] estimateGas failed, using fallback 800k:`, gasErr instanceof Error ? gasErr.message : gasErr);
         }
 
         const transaction: UnsignedTransaction = {
@@ -1918,6 +1927,7 @@ export async function executeToolCall(
           `Chain: ${chainName}`,
           `Gas limit: ${parseInt(zxGas, 16)}`,
           ...(shieldWarning0x ? [shieldWarning0x] : []),
+          ...(zxGasFallbackWarning ? [zxGasFallbackWarning] : []),
         ].join("\n");
 
         // NAV shield pre-check — warn if simulation fails, block if NAV drops > 10%.
@@ -2038,6 +2048,7 @@ export async function executeToolCall(
 
       // 7. Build the unsigned transaction for the frontend
       let uniGas: string;
+      let uniGasFallbackWarning = '';
       try {
         uniGas = await estimateGas(
           ctx.chainId, ctx.vaultAddress as Address,
@@ -2045,9 +2056,11 @@ export async function executeToolCall(
           ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
         );
       } catch (gasErr) {
-        // Fallback to Uniswap API's own gas estimate + vault overhead
+        // Fallback to Uniswap API's own gas estimate + vault overhead and surface a warning.
         const fallback = calculateVaultGasLimit(quote.quote.gasUseEstimate);
         uniGas = '0x' + fallback.toString(16);
+        const errMsg = gasErr instanceof Error ? gasErr.message : String(gasErr);
+        uniGasFallbackWarning = `⚠️ Gas estimation failed (${errMsg.slice(0, 120)}). Using Uniswap API estimate — transaction may still revert on-chain.`;
         console.warn(`[build_vault_swap uni] estimateGas failed, using uniswap estimate fallback:`,
           gasErr instanceof Error ? gasErr.message : gasErr);
       }
@@ -2088,6 +2101,7 @@ export async function executeToolCall(
         `Chain: ${chainName}`,
         `Gas limit: ${parseInt(uniGas, 16)}`,
         ...(shieldWarningUni ? [shieldWarningUni] : []),
+        ...(uniGasFallbackWarning ? [uniGasFallbackWarning] : []),
       ].join("\n");
 
       // NAV shield pre-check — warn if simulation fails, block if NAV drops > 10%.
@@ -4547,17 +4561,16 @@ function sanitizeSwapArgs(
   const corrected = { ...args };
   const multiSwap = isMultiSwapMessage(msg);
 
-  // ── 1. Force DEX to 0x unless user explicitly said "uniswap" ──
+  // ── 1. Force DEX based on explicit user intent ──
   // Both A0xRouter and AUniswapRouter adapters are deployed on Rigoblock vaults.
   // 0x is the default because it aggregates across DEXes for better prices.
   //
   // LLMs have a strong training-data bias toward "uniswap" and will set
   // dex="uniswap" even when the system prompt says 0x is the default.
-  // We override the LLM's choice here unless the user EXPLICITLY typed "uniswap".
+  // We therefore force the DEX here: use Uniswap only when the user
+  // EXPLICITLY typed "uniswap"; otherwise default to 0x.
   const userSaidUniswap = /\buniswap\b/i.test(userMessage);
-  if (!userSaidUniswap) {
-    corrected.dex = "0x";
-  }
+  corrected.dex = userSaidUniswap ? "uniswap" : "0x";
 
   // ── 2. Extract amount and direction from user message ──
   // SKIP for multi-swap messages — the regex only matches the first occurrence

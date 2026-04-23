@@ -121,7 +121,8 @@ export interface ChatRequest {
   aiModel?: string;
   /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
   aiBaseUrl?: string;
-  /** Workers AI orchestration mode: DeepSeek-only (default) or DeepSeek + Llama fast follow-up */
+  /** Workers AI orchestration mode: "deepseek_only", "llama_only", or "hybrid_fast_followup"
+   *  (default: DeepSeek first, then Llama fast follow-up unless explicitly set to Llama-only) */
   routingMode?: "deepseek_only" | "llama_only" | "hybrid_fast_followup";
   /** Optional per-request context snippets (e.g. selected markdown excerpts) injected into runtime prompt */
   contextDocs?: string[];

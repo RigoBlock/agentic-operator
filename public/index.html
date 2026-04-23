@@ -4068,15 +4068,18 @@
         inputSchema: {
           type: 'object',
           properties: {
-            sell: { type: 'string', description: 'Token to sell (symbol or address, e.g. "ETH")' },
-            buy: { type: 'string', description: 'Token to buy (symbol or address, e.g. "USDC")' },
-            amount: { type: 'string', description: 'Amount to sell in human-readable form (e.g. "1")' },
+            tokenIn: { type: 'string', description: 'Token to sell (symbol or address, e.g. "ETH")' },
+            tokenOut: { type: 'string', description: 'Token to buy (symbol or address, e.g. "USDC")' },
+            amountIn: { type: 'string', description: 'Amount to sell in human-readable form (e.g. "1"). Provide amountIn or amountOut, not both.' },
+            amountOut: { type: 'string', description: 'Exact amount to receive (e.g. "100"). Provide amountIn or amountOut, not both.' },
             chain: { type: 'string', description: 'Chain name or ID (e.g. "base", "arbitrum", "8453"). Defaults to Base.' },
           },
-          required: ['sell', 'buy', 'amount'],
+          required: ['tokenIn', 'tokenOut'],
         },
-        execute: async ({ sell, buy, amount, chain }) => {
-          const args = { sell, buy, amount };
+        execute: async ({ tokenIn, tokenOut, amountIn, amountOut, chain }) => {
+          const args = { tokenIn, tokenOut };
+          if (amountIn) args.amountIn = amountIn;
+          if (amountOut) args.amountOut = amountOut;
           if (chain) args.chain = chain;
           const res = await fetch('/api/tools/get_swap_quote', {
             method: 'POST',

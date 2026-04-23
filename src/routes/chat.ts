@@ -17,6 +17,7 @@ import { processChat } from "../llm/client.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { sanitizeError } from "../config.js";
 import { executeTxList, formatOutcomesMarkdown, ExecutionError } from "../services/execution.js";
+import { isExemptBrowserRequest } from "../middleware/x402.js";
 import type { Address } from "viem";
 
 const chat = new Hono<{ Bindings: Env; Variables: AppVariables }>();
@@ -46,8 +47,9 @@ chat.post("/", async (c) => {
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
     let operatorVerified = false;
 
-    // Detect browser-origin requests (same-origin or Telegram exempt)
-    const isBrowserRequest = c.req.header("sec-fetch-site") === "same-origin";
+    // Detect browser-origin requests via Origin/Referer (server-verifiable signals).
+    // sec-fetch-site is intentionally NOT used — it is client-controlled and spoofable.
+    const isBrowserRequest = isExemptBrowserRequest(c.req.header.bind(c.req));
 
     if (hasAuthCredentials) {
       // Auth credentials provided — verify regardless of x402 status

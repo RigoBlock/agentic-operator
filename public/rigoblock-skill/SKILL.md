@@ -267,7 +267,7 @@ POST https://trader.rigoblock.com/api/tools/get_swap_quote
 X-PAYMENT: <x402-payment-header>
 Content-Type: application/json
 
-{ "arguments": { "sell": "ETH", "buy": "USDC", "amount": "1" }, "chainId": 8453 }
+{ "arguments": { "tokenIn": "ETH", "tokenOut": "USDC", "amountIn": "1" }, "chainId": 8453 }
 
 → 200: { "tool": "get_swap_quote", "message": "...", ... }
 ```

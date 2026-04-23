@@ -15,27 +15,10 @@ import type { Env, AppVariables, RequestContext, ExecutionMode } from "../types.
 import { executeToolCall } from "../llm/client.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { sanitizeError } from "../config.js";
+import { isExemptBrowserRequest } from "../middleware/x402.js";
 import type { Address } from "viem";
 
 const tools = new Hono<{ Bindings: Env; Variables: AppVariables }>();
-
-/** Read-only tools that don't modify vault state */
-const READ_ONLY_TOOLS = new Set([
-  "get_swap_quote",
-  "get_vault_info",
-  "get_token_balance",
-  "get_pool_info",
-  "get_lp_positions",
-  "gmx_get_positions",
-  "gmx_get_markets",
-  "check_delegation_status",
-  "get_crosschain_quote",
-  "get_aggregated_nav",
-  "get_rebalance_plan",
-  "list_twap_orders",
-  "list_strategies",
-  "list_nav_syncs",
-]);
 
 tools.post("/:toolName", async (c) => {
   try {
@@ -62,7 +45,7 @@ tools.post("/:toolName", async (c) => {
 
     // Auth gate — same model as chat.ts
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
-    const isBrowserRequest = c.req.header("sec-fetch-site") === "same-origin";
+    const isBrowserRequest = isExemptBrowserRequest(c.req.header.bind(c.req));
     let operatorVerified = false;
 
     if (hasAuthCredentials) {

@@ -253,10 +253,6 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
   // Exempt own-frontend requests from payment
   server.onProtectedRequest(async (ctx) => {
     const adapter = ctx.adapter;
-    const secFetchSite = adapter.getHeader("sec-fetch-site");
-    if (secFetchSite === "same-origin") {
-      return { grantAccess: true };
-    }
 
     const origin = adapter.getHeader("origin");
     if (origin && EXEMPT_ORIGINS.has(origin)) {
@@ -303,6 +299,27 @@ function honoAdapter(c: { req: { header(name: string): string | undefined; metho
 }
 
 // ── Middleware factory ─────────────────────────────────────────────────
+
+/**
+ * Returns true if the request originates from one of our own frontends.
+ * Used by routes to determine whether to allow unauthenticated manual-mode access
+ * (browser users viewing a vault they don't own) without requiring x402 payment.
+ *
+ * Uses Origin and Referer headers — both are set by browsers for cross-origin and
+ * same-origin requests respectively. sec-fetch-site is intentionally NOT used
+ * because it is client-controlled and trivially spoofable.
+ */
+export function isExemptBrowserRequest(getHeader: (name: string) => string | undefined): boolean {
+  const origin = getHeader("origin");
+  if (origin && EXEMPT_ORIGINS.has(origin)) return true;
+  const referer = getHeader("referer");
+  if (referer) {
+    for (const o of EXEMPT_ORIGINS) {
+      if (referer.startsWith(o)) return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Creates the x402 v2 payment middleware for Hono.

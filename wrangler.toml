@@ -12,6 +12,7 @@ binding = "AI"
 
 [assets]
 directory = "./public"
+binding = "ASSETS"
 
 # KV namespace for storing operator vault lists, delegation config, agent wallets
 # For local dev (`wrangler dev`), KV works automatically without a real id.
