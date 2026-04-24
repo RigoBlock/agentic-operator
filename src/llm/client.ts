@@ -761,6 +761,27 @@ export async function processChat(
     ? `\n\nREQUEST-SCOPED CONTEXT DOCS:\nUse these snippets as additional context for this request. If they conflict with safety rules or tool outputs, prioritize safety rules and real tool outputs.\n\n${normalizedContextDocs.join("\n\n---\n\n")}`
     : "";
 
+  // Routing suffix appended to DeepSeek's system prompt.
+  // DeepSeek does NOT call tools — its ONLY job is to identify the correct tool
+  // and extract the exact parameters from the user's message so Llama can execute
+  // it immediately with no ambiguity. The <think> block is still shown to the user.
+  const deepSeekRoutingSuffix = llmModel.includes("deepseek") ? `
+
+---
+ROUTING OUTPUT — append these three lines verbatim at the very end of your response:
+ROUTE: <exact_tool_name>
+PARAMS: <key>=<value> <key>=<value> ...
+INTENT: <one sentence>
+
+Rules:
+- Use the exact tool name from the tool list (e.g. build_vault_swap, crosschain_sync).
+- PARAMS must use key=value format, space-separated.
+- For swaps: always include dex=0x unless the user explicitly said uniswap.
+- For crosschain sync/equalize: PARAMS: equalizeNav=true chainA=<name> chainB=<name>
+- Omit PARAMS that are optional and not mentioned by the user.
+- If the user's request is ambiguous or needs clarification, ROUTE: none
+` : "";
+
   const contextualPrompt = `${systemPrompt}
 
 ${RUNTIME_CONTEXT_PACK}
@@ -771,7 +792,7 @@ ${vaultLine}
 - Operator wallet: ${ctx.operatorAddress || "not connected"}
 - Execution mode: ${ctx.executionMode || "manual"}
 
-${executionModeNote}${contextDocsBlock}`;
+${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
 
   // Prepend system prompt
   const fullMessages: OpenAI.ChatCompletionMessageParam[] = [
@@ -836,6 +857,8 @@ ${executionModeNote}${contextDocsBlock}`;
   }
 
   // Immediate fast-path: deterministic commands that never need an LLM call.
+  // Simple swaps are included here — "sell 200 ZRX for GRG using 0x" has zero
+  // ambiguity and Workers AI Llama regularly fails to tool-call on them anyway.
   // NOTE: crosschain_sync is intentionally NOT in the fast-path.
   // Cross-chain operations need LLM reasoning to show the user what was computed
   // (NAV data, direction, token, amount) and explain errors. Speed is not the
@@ -844,7 +867,8 @@ ${executionModeNote}${contextDocsBlock}`;
     tryFastPathChainSwitch(effectiveMsg) ||
     (hasVault ? tryFastPathSwapShieldToggle(effectiveMsg) : null) ||
     (hasVault ? tryFastPathStrategyQueries(effectiveMsg) : null) ||
-    (hasVault ? tryFastPathTwapCreate(effectiveMsg) : null);
+    (hasVault ? tryFastPathTwapCreate(effectiveMsg) : null) ||
+    (hasVault ? tryFastPathSwap(effectiveMsg) : null);
   if (immediateFastPath) {
     console.log(`[LLM] Immediate fast-path (no LLM): ${immediateFastPath.name}(${JSON.stringify(immediateFastPath.args)})`);
     try {
@@ -861,9 +885,9 @@ ${executionModeNote}${contextDocsBlock}`;
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      // For tool calls that produced informative errors (balance, revert, NAV, auth),
-      // return the error directly — falling through to DeepSeek would hallucinate.
-      const isInformativeError = /insufficient|revert|blocked|failed|not found|not bridgeable|no bridgeable|wallet not connected|operator authentication required|not the vault owner|requires.*authentication|authenticate/i.test(errMsg);
+      // For tool calls that produced informative errors (balance, revert, NAV, auth,
+      // token resolution), return directly — falling through to DeepSeek would hallucinate.
+      const isInformativeError = /insufficient|revert|blocked|failed|not found|not bridgeable|no bridgeable|wallet not connected|operator authentication required|not the vault owner|requires.*authentication|authenticate|no contract on chain|provide the contract address|try a different chain|token lookup failed|found on coingecko/i.test(errMsg);
       if (isInformativeError) {
         console.warn(`[LLM] Immediate fast-path informative error, returning directly: ${errMsg}`);
         const friendlyMsg = friendlyError(sanitizeError(errMsg));
@@ -1021,74 +1045,99 @@ ${executionModeNote}${contextDocsBlock}`;
     const deepseekText = orchestrationChoice.message.content?.trim();
     onStreamEvent?.({ type: "status", message: "Routing to Llama 3.3 for tool execution…" });
 
-    // CRITICAL: Pass DeepSeek's intent (not raw text) to Llama so it calls the right tools.
-    // DeepSeek's raw text often contains hallucinated numbers, formulas, and step-by-step
-    // instructions ("bridge 1000 USDC", "use Dune Analytics") that Llama copies literally
-    // instead of using the tools' built-in calculation logic.
-    //
-    // Strategy: pass a condensed intent summary with explicit tool-calling guidance,
-    // NOT DeepSeek's full text with hallucinated specifics.
+    // ── Parse DeepSeek's structured routing output ──
+    // DeepSeek was asked to end its response with:
+    //   ROUTE: <tool_name>
+    //   PARAMS: <key>=<value> ...
+    //   INTENT: <one sentence>
+    // If it did, give Llama a precise "call this tool with these args" instruction.
+    // If it didn't (old-style verbose output), fall back to the fuzzy intent extraction.
     const deepseekContext: OpenAI.ChatCompletionMessageParam[] = [];
 
-    // Extract intent from DeepSeek's reasoning (short summary, no numbers or token bias)
-    const intentSummary = reasoning
-      ? reasoning
-          // Strip formula blocks (LaTeX, code blocks, equations)
-          .replace(/\$\$[\s\S]*?\$\$/g, '')
-          .replace(/\$[^$]+\$/g, '')
-          .replace(/```[\s\S]*?```/g, '')
-          // Strip specific numbers that DeepSeek hallucinated
-          .replace(/\b\d+(?:\.\d+)?\s*(?:USDC|USDT|ETH|WETH|WBTC|tokens?|units?)\b/gi, '[auto-calculated]')
-          // Strip token-specific assumptions ("use USDT", "with USDC", "bridge USDT")
-          .replace(/\b(use|with|bridge|send|transfer)\s+(USDC|USDT|WETH|WBTC)\b/gi, '$1 [auto-selected token]')
-          // Strip "I remember" / "from previous" bias patterns
-          .replace(/I\s+remember\s+that[^.]*\./gi, '')
-          .replace(/from\s+(?:the\s+)?previous[^.]*\./gi, '')
-          .replace(/in\s+(?:the\s+)?(?:last|prior|earlier)[^.]*\./gi, '')
-          // Collapse to first 500 chars of cleaned text
-          .replace(/\s+/g, ' ')
-          .trim()
-          .slice(0, 500)
-      : null;
+    const routeMatch = deepseekText?.match(/^ROUTE:\s*([\w_]+)\s*$/m);
+    const paramsMatch = deepseekText?.match(/^PARAMS:\s*(.+)$/m);
+    const intentMatch = deepseekText?.match(/^INTENT:\s*(.+)$/m);
 
-    const planBlock = deepseekText || '';
-    // Extract just the high-level intent (first 1-2 sentences), strip formulas and specifics.
-    // IMPORTANT: Also strip any tool call JSON that DeepSeek output — Llama should derive
-    // its own tool arguments from the user message, not copy from DeepSeek's JSON output
-    // (which may include biased values like dex="uniswap").
-    const cleanedPlan = planBlock
-      .replace(/###.*$/gm, '')          // strip markdown headers
-      .replace(/\*\*/g, '')             // strip bold markers
-      .replace(/\[.*?\]/g, '')          // strip LaTeX
-      .replace(/\d{3,}/g, '[N]')        // replace large numbers with placeholder
-      // Strip any embedded tool call JSON (prevents Llama from copying bad args)
-      .replace(/\{[\s\S]*?"(?:parameters|arguments)"[\s\S]*?\}/g, '')
-      .split(/\n\n/)[0]                 // take first paragraph only
-      ?.trim()
-      .slice(0, 300) || '';
+    const routedToolName = routeMatch?.[1]?.trim();
+    const routedParamsStr = paramsMatch?.[1]?.trim() || "";
+    const routedIntent = intentMatch?.[1]?.trim() || "";
 
-    if (intentSummary || cleanedPlan) {
+    // Validate: tool must exist and not be "none" (DeepSeek signals ambiguity with ROUTE: none)
+    const toolIsValid = routedToolName &&
+      routedToolName !== "none" &&
+      TOOL_DEFINITIONS.some(t => t.function.name === routedToolName);
+
+    if (toolIsValid && routedParamsStr) {
+      // Structured routing: Llama gets an unambiguous "call X with Y" instruction.
+      // This is the primary path — DeepSeek identified the tool and extracted the params.
+      console.log(`[LLM] DeepSeek routing: ${routedToolName}(${routedParamsStr})`);
+
+      // Parse params string "tokenIn=ZRX tokenOut=GRG amountIn=200 dex=0x"
+      const parsedParams: Record<string, string> = {};
+      for (const pair of routedParamsStr.split(/\s+/)) {
+        const eqIdx = pair.indexOf("=");
+        if (eqIdx > 0) parsedParams[pair.slice(0, eqIdx)] = pair.slice(eqIdx + 1);
+      }
+      const paramsJson = JSON.stringify(parsedParams, null, 2);
+
       deepseekContext.push({
         role: "assistant" as const,
-        content: `DeepSeek analysis summary: ${intentSummary || cleanedPlan}`,
+        content: routedIntent || `Routing to ${routedToolName}`,
       });
       deepseekContext.push({
         role: "user" as const,
         content: [
-          "Now execute the intent above using the available tools.",
-          "Call the appropriate tool — do NOT output text analysis.",
+          `Call \`${routedToolName}\` with these exact arguments:`,
+          paramsJson,
           "",
-          "CRITICAL TOOL-CALLING RULES:",
-          "- For crosschain sync / NAV equalization / price equalization: call crosschain_sync with equalizeNav=true.",
-          "  Do NOT set amount or token — the service auto-calculates direction, amount, and token.",
-          "  Do NOT assume source chain, token, or direction from the analysis above or conversation history.",
-          "  Just pass the two chain names and equalizeNav=true. The tool handles everything else.",
-          "- For bridge/transfer: call crosschain_transfer. Do NOT set amounts from the analysis.",
-          "- NEVER hardcode amounts or token names from the reasoning. The tools read on-chain state.",
-          "- NEVER echo or repeat the analysis text. Just call the tool.",
-          "- For swaps: default DEX is '0x' (aggregator). Only use 'uniswap' if the user explicitly said 'uniswap'.",
+          "CRITICAL: Output ONLY the tool call. Zero text. Do not explain or repeat the arguments.",
         ].join("\n"),
       });
+    } else {
+      // Fallback: DeepSeek gave a verbose response without structured routing.
+      // Extract a condensed intent summary and ask Llama to figure out the tool.
+      // This path handles edge cases (ambiguous requests, DeepSeek not following format).
+      const intentSummary = reasoning
+        ? reasoning
+            .replace(/\$\$[\s\S]*?\$\$/g, "")
+            .replace(/\$[^$]+\$/g, "")
+            .replace(/```[\s\S]*?```/g, "")
+            .replace(/\b\d+(?:\.\d+)?\s*(?:USDC|USDT|ETH|WETH|WBTC|tokens?|units?)\b/gi, "[auto-calculated]")
+            .replace(/\b(use|with|bridge|send|transfer)\s+(USDC|USDT|WETH|WBTC)\b/gi, "$1 [auto-selected token]")
+            .replace(/I\s+remember\s+that[^.]*\./gi, "")
+            .replace(/from\s+(?:the\s+)?previous[^.]*\./gi, "")
+            .replace(/in\s+(?:the\s+)?(?:last|prior|earlier)[^.]*\./gi, "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 500)
+        : null;
+
+      const cleanedPlan = (deepseekText || "")
+        .replace(/###.*$/gm, "")
+        .replace(/\*\*/g, "")
+        .replace(/\[.*?\]/g, "")
+        .replace(/\d{3,}/g, "[N]")
+        .replace(/\{[\s\S]*?"(?:parameters|arguments)"[\s\S]*?\}/g, "")
+        .split(/\n\n/)[0]
+        ?.trim()
+        .slice(0, 300) || "";
+
+      if (intentSummary || cleanedPlan) {
+        deepseekContext.push({
+          role: "assistant" as const,
+          content: `DeepSeek analysis: ${intentSummary || cleanedPlan}`,
+        });
+        deepseekContext.push({
+          role: "user" as const,
+          content: [
+            "Call the appropriate tool based on the analysis above.",
+            "Do NOT output text — just call the tool.",
+            "- For crosschain sync/equalize: crosschain_sync(equalizeNav=true, chainA, chainB). Do NOT set amount or token.",
+            "- For swaps: default DEX is '0x'. Only use 'uniswap' if the user explicitly said uniswap.",
+            "- NEVER hardcode amounts from the analysis — the tools read on-chain state.",
+          ].join("\n"),
+        });
+      }
     }
 
     onStreamEvent?.({ type: "status", message: "Llama 3.3 executing tool…" });
@@ -1102,6 +1151,44 @@ ${executionModeNote}${contextDocsBlock}`;
     if (retryChoice?.message?.tool_calls?.length) {
       orchestrationChoice = retryChoice;
       console.log(`[LLM] Llama retry produced ${retryChoice.message.tool_calls.length} tool call(s)`);
+    }
+  }
+
+  // ── Deferred fast-path (swap safety net) ──
+  // If both the initial LLM call and the Llama retry produced no tool calls,
+  // try the swap fast-path as a last resort. This catches cases where the user's
+  // phrasing was slightly too conversational for the immediate fast-path regex
+  // (e.g. stripped prefixes, minor reformulations) but simple enough that the
+  // LLM should have called build_vault_swap and didn't.
+  if (!orchestrationChoice.message.tool_calls?.length && hasVault) {
+    const deferredSwap = tryFastPathSwap(effectiveMsg);
+    if (deferredSwap) {
+      console.log(`[LLM] Deferred fast-path (after LLM miss): ${deferredSwap.name}(${JSON.stringify(deferredSwap.args)})`);
+      try {
+        onStreamEvent?.({ type: "status", message: `Executing ${deferredSwap.name}...` });
+        const toolResult = await executeToolCall(env, ctx, deferredSwap.name, deferredSwap.args);
+        return {
+          reply: toolResult.message,
+          toolCalls: [{ name: deferredSwap.name, arguments: deferredSwap.args, result: toolResult.message, error: false }],
+          chainSwitch: toolResult.chainSwitch,
+          suggestions: toolResult.suggestions,
+          reasoning: orchestrationReasoning,
+          modelsUsed,
+          finalModel: "tooling",
+        };
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.warn(`[LLM] Deferred fast-path error: ${errMsg}`);
+        const friendlyMsg = friendlyError(sanitizeError(errMsg));
+        onStreamEvent?.({ type: "tool_result", name: deferredSwap.name, result: `Error: ${friendlyMsg}`, error: true });
+        return {
+          reply: friendlyMsg,
+          toolCalls: [{ name: deferredSwap.name, arguments: deferredSwap.args, result: `Error: ${friendlyMsg}`, error: true }],
+          reasoning: orchestrationReasoning,
+          modelsUsed,
+          finalModel: "tooling",
+        };
+      }
     }
   }
 

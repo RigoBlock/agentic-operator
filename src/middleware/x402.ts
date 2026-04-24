@@ -143,7 +143,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
         network: BASE_NETWORK,
       },
     ],
-    description: "DEX price quotes from Uniswap and 0x aggregator across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).",
+    description: "DEX price quotes from Uniswap across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).",
     mimeType: "application/json",
     extensions: {
       bazaar: {

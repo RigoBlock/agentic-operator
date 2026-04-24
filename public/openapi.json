@@ -29,7 +29,7 @@
       "get": {
         "operationId": "getDexQuote",
         "summary": "Get DEX swap quote",
-        "description": "Returns the best swap quote aggregated across Uniswap v2/v3/v4 and 0x (150+ liquidity sources) for a given token pair and amount on any of the 7 supported chains. No vault, wallet, or operator context required — any agent can call this endpoint with a $0.002 USDC payment.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Typical use:** Price discovery, trade sizing, yield comparison, arbitrage detection.\n\n**Example:** `GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base`",
+        "description": "Returns a swap quote sourced from Uniswap liquidity for a given token pair and amount on any of the 7 supported chains. No vault, wallet, or operator context required — any agent can call this endpoint with a $0.002 USDC payment.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Typical use:** Price discovery, trade sizing, yield comparison, arbitrage detection.\n\n**Example:** `GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base`",
         "tags": [
           "Quotes"
         ],

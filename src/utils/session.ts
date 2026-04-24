@@ -8,7 +8,7 @@
  * An agent CAN call GET /api/session to obtain a token, but that endpoint is
  * IP-rate-limited (20/hour), making automated abuse expensive to scale.
  *
- * Token format: {timestamp_b36}.{nonce_b36}.{hmac_hex}
+ * Token format: {timestamp_b36}.{nonce_hex}.{hmac_hex}
  */
 
 export const SESSION_HEADER = "x-rigoblock-session";

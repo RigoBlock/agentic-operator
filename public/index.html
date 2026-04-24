@@ -1843,6 +1843,10 @@
 
       const updateTypingStatus = (msg) => { typingContent.textContent = msg; };
 
+      // Ensure session token is ready before the first API call (guards the race window
+      // between page load and the 500ms init timer completing).
+      await ensureSessionToken();
+
       // 2-minute timeout — matches the Worker cpu_ms limit
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 120000);
