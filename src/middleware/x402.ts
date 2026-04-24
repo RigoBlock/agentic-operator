@@ -55,6 +55,7 @@ const EXEMPT_ORIGINS = new Set([
 
 const PROTECTED_ROUTES: RoutesConfig = {
   "POST /api/chat": {
+    resource: "https://trader.rigoblock.com/api/chat",
     accepts: [
       {
         scheme: "exact",
@@ -135,6 +136,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
     },
   },
   "GET /api/quote": {
+    resource: "https://trader.rigoblock.com/api/quote",
     accepts: [
       {
         scheme: "exact",

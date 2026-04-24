@@ -874,9 +874,18 @@ ${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
     try {
       onStreamEvent?.({ type: "status", message: `Executing ${immediateFastPath.name}...` });
       const toolResult = await executeToolCall(env, ctx, immediateFastPath.name, immediateFastPath.args);
+      // Outer NAV shield for tools that don't self-check (build_vault_swap already sets navShieldChecked)
+      let fastPathReply = toolResult.message;
+      if (toolResult.transaction && !toolResult.transaction.navShieldChecked && toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress?.toLowerCase()) {
+        const navWarn = await preCheckNavImpact(env, ctx, toolResult.transaction);
+        toolResult.transaction.navShieldChecked = true;
+        if (navWarn) fastPathReply += '\n' + navWarn;
+      }
       return {
-        reply: toolResult.message,
-        toolCalls: [{ name: immediateFastPath.name, arguments: immediateFastPath.args, result: toolResult.message, error: false }],
+        reply: fastPathReply,
+        toolCalls: [{ name: immediateFastPath.name, arguments: immediateFastPath.args, result: fastPathReply, error: false }],
+        transaction: toolResult.transaction,
+        transactions: toolResult.transaction ? [toolResult.transaction] : undefined,
         chainSwitch: toolResult.chainSwitch,
         suggestions: toolResult.suggestions,
         reasoning: fastPathReasoning,
@@ -1167,9 +1176,17 @@ ${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
       try {
         onStreamEvent?.({ type: "status", message: `Executing ${deferredSwap.name}...` });
         const toolResult = await executeToolCall(env, ctx, deferredSwap.name, deferredSwap.args);
+        let deferredReply = toolResult.message;
+        if (toolResult.transaction && !toolResult.transaction.navShieldChecked && toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress?.toLowerCase()) {
+          const navWarn = await preCheckNavImpact(env, ctx, toolResult.transaction);
+          toolResult.transaction.navShieldChecked = true;
+          if (navWarn) deferredReply += '\n' + navWarn;
+        }
         return {
-          reply: toolResult.message,
-          toolCalls: [{ name: deferredSwap.name, arguments: deferredSwap.args, result: toolResult.message, error: false }],
+          reply: deferredReply,
+          toolCalls: [{ name: deferredSwap.name, arguments: deferredSwap.args, result: deferredReply, error: false }],
+          transaction: toolResult.transaction,
+          transactions: toolResult.transaction ? [toolResult.transaction] : undefined,
           chainSwitch: toolResult.chainSwitch,
           suggestions: toolResult.suggestions,
           reasoning: orchestrationReasoning,
