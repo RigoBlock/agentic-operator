@@ -17,7 +17,8 @@ const EXPIRY_MS = 60 * 60 * 1000; // 1 hour
 
 export async function generateSessionToken(secret: string): Promise<string> {
   const ts = Date.now().toString(36);
-  const nonce = Math.random().toString(36).slice(2);
+  const nonceBytes = crypto.getRandomValues(new Uint8Array(16));
+  const nonce = Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
   const payload = `${ts}.${nonce}`;
   const key = await crypto.subtle.importKey(
     "raw", new TextEncoder().encode(secret),

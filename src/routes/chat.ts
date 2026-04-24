@@ -84,10 +84,17 @@ chat.post("/", async (c) => {
       }
     }
 
-    // Filter to valid messages
+    // Filter to valid messages and enforce per-message length limit (8 KB).
+    // Prevents context flooding and excessively expensive LLM calls.
+    const MAX_MSG_CHARS = 8_000;
     const allMessages = body.messages.filter(
       (m) => m.role && m.content && typeof m.content === "string",
     );
+
+    const oversized = allMessages.find((m) => (m.content as string).length > MAX_MSG_CHARS);
+    if (oversized) {
+      return c.json({ error: `Message too long (max ${MAX_MSG_CHARS} characters per message).` }, 400);
+    }
 
     if (allMessages.length === 0) {
       return c.json({ error: "No valid messages provided" }, 400);

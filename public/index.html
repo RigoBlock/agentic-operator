@@ -685,8 +685,8 @@
         <div id="ai-routing-row">
           <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Server Model</label>
           <select id="ai-routing-mode" style="width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;">
-            <option value="">Llama 3.3 70B (default — best tool calling)</option>
-            <option value="deepseek_only">DeepSeek R1 (reasoning mode — slower, chain-of-thought)</option>
+            <option value="">DeepSeek R1 + Llama 3.3 (default — reasoning + tool calling)</option>
+            <option value="llama_only">Llama 3.3 only (faster, skips reasoning)</option>
           </select>
         </div>
         <div id="ai-key-row" style="display: none;">
@@ -929,7 +929,7 @@
       </label>
     </div>
     <div id="input-wrapper">
-      <textarea id="input" placeholder="Ask anything, e.g. Swap 0.5 ETH for USDT" rows="1"></textarea>
+      <textarea id="input" placeholder="Ask anything, e.g. Swap 0.5 ETH for USDT" rows="1" maxlength="8000"></textarea>
       <button id="send" onclick="sendMessage()" title="Send">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M12 19V5M5 12l7-7 7 7" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -962,14 +962,26 @@
     let multiStepActive = false; // true when agent response indicates a multi-step plan
 
     // ── Session token (minted by /api/session — browser identity, not spoofable) ──
+    let sessionTokenTimer = null;
+    let sessionTokenInflight = null;
     async function fetchSessionToken() {
       try {
         const res = await fetch('/api/session');
         if (res.ok) {
           const data = await res.json();
           sessionToken = data.token || null;
+          if (sessionToken) {
+            // Refresh 5 minutes before the 1-hour expiry
+            if (sessionTokenTimer) clearTimeout(sessionTokenTimer);
+            sessionTokenTimer = setTimeout(ensureSessionToken, 55 * 60 * 1000);
+          }
         }
       } catch { /* best-effort — fallback to Origin header in dev */ }
+    }
+    async function ensureSessionToken() {
+      if (sessionTokenInflight) return sessionTokenInflight;
+      sessionTokenInflight = fetchSessionToken().finally(() => { sessionTokenInflight = null; });
+      return sessionTokenInflight;
     }
     function apiHeaders(extra) {
       const h = Object.assign({ 'Content-Type': 'application/json' }, extra);
@@ -1039,9 +1051,8 @@
       try {
         const stored = localStorage.getItem(AI_SETTINGS_KEY);
         const parsed = stored ? JSON.parse(stored) : { provider: 'server', apiKey: '', model: '', routingMode: '' };
-        // v2 migration: old default was 'deepseek_only'; reset to '' (Llama) unless the user
-        // explicitly chose DeepSeek after the model switch (detected by a version flag).
-        if (parsed.routingMode === 'deepseek_only' && !parsed._v2) {
+        // Migration: 'deepseek_only' is no longer a valid value; map to '' (default hybrid).
+        if (parsed.routingMode === 'deepseek_only' || parsed.routingMode === 'hybrid_fast_followup') {
           parsed.routingMode = '';
           localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify({ ...parsed, _v2: true }));
         }
@@ -1084,9 +1095,9 @@
       } else {
         aiSettings.apiKey = '';
         aiSettings.model = '';
-        document.getElementById('ai-status').textContent = aiSettings.routingMode === 'deepseek_only'
-          ? 'Using Workers AI DeepSeek R1 — reasoning mode, slower but chain-of-thought. No API key needed.'
-          : 'Using Workers AI Llama 3.3 70B — best tool calling, fast responses. No API key needed.';
+        document.getElementById('ai-status').textContent = aiSettings.routingMode === 'llama_only'
+          ? 'Using Workers AI Llama 3.3 70B only — fastest responses, no reasoning pass. No API key needed.'
+          : 'Using Workers AI DeepSeek R1 + Llama 3.3 — reasoning then tool calling. No API key needed.';
       }
       saveAiSettings();
     }
@@ -1832,9 +1843,9 @@
 
       const updateTypingStatus = (msg) => { typingContent.textContent = msg; };
 
-      // 50-second timeout to prevent infinite hangs
+      // 2-minute timeout — matches the Worker cpu_ms limit
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 50000);
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
 
       try {
         const chatBody = {
@@ -2102,7 +2113,7 @@
       } catch (err) {
         typingEl.remove();
         const msg = err.name === 'AbortError'
-          ? 'Request timed out after 50 seconds. The agent may be overloaded — please try again.'
+          ? 'Request timed out after 2 minutes. The agent may be overloaded — please try again.'
           : `Error: ${err.message}`;
         appendMessage('system', msg);
       } finally {
@@ -3151,7 +3162,7 @@
 
     // Legacy fallback after a brief delay + auto-reconnect
     setTimeout(async () => {
-      fetchSessionToken(); // fire-and-forget — populates sessionToken before first API call
+      await ensureSessionToken(); // await so sessionToken is set before first API call
 
       if (discoveredProviders.length === 0 && window.ethereum) {
         discoveredProviders.push({
@@ -4424,7 +4435,7 @@
           if (chain) args.chain = chain;
           const res = await fetch('/api/tools/get_swap_quote', {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers: apiHeaders(),
             body: JSON.stringify({ arguments: args, chainId: 8453 }),
           });
           return res.json();
@@ -4445,7 +4456,7 @@
         execute: async (args) => {
           const res = await fetch('/api/tools/get_vault_info', {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers: apiHeaders(),
             body: JSON.stringify({ arguments: args, chainId: args.chainId, vaultAddress: args.vaultAddress }),
           });
           return res.json();
