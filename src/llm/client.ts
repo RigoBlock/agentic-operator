@@ -30,6 +30,7 @@ import {
   checkDelegationOnChain,
   buildDefaultSelectors,
   getDelegationConfig,
+  revokeDelegationOnChain,
 } from "../services/delegation.js";
 import { getAgentWalletInfo } from "../services/agentWallet.js";
 import {
@@ -294,10 +295,11 @@ async function callWorkersAI(
     content: m.content === null ? "" : m.content,
   }));
 
-  // For DeepSeek R1: use higher max_tokens to allow full chain-of-thought reasoning.
-  // Default Workers AI token limit can truncate reasoning mid-thought, causing the
-  // model to produce incomplete plans. DeepSeek R1 needs more tokens for <think> blocks.
+  // For DeepSeek R1 and Kimi K2.6: use higher max_tokens to allow full
+  // chain-of-thought reasoning. Default Workers AI token limit can truncate reasoning
+  // mid-thought, causing the model to produce incomplete plans.
   const isDeepSeek = model.includes('deepseek');
+  const isKimi = model.includes('kimi') || model.includes('moonshotai');
 
   // ── Streaming mode (all models when callback provided) ──
   // Streams tokens in real-time so the user sees progress immediately.
@@ -488,11 +490,11 @@ async function callWorkersAI(
     } as any;
   }
 
-  // ── Non-streaming path (Llama, or DeepSeek without reasoning callback) ──
+  // ── Non-streaming path (Llama, or reasoning models without reasoning callback) ──
   const result = await (ai as any).run(model, {
     messages: sanitizedMessages as any,
     ...(tools ? { tools: tools as any } : {}),
-    max_tokens: isDeepSeek ? 16384 : 4096,
+    max_tokens: (isDeepSeek || isKimi) ? 16384 : 4096,
   });
 
   let hasToolCalls = Array.isArray(result.tool_calls) && result.tool_calls.length > 0;
@@ -649,12 +651,12 @@ export async function processChat(
   // Priority: 1) User-provided key → 2) Workers AI binding (zero-config) → 3) Server OpenAI key
   // Like MetaMask's default RPC: works out of the box, but users can bring their own key.
   //
-  // Dual-model Workers AI strategy:
-  //   - DeepSeek R1 (32B): primary reasoning model — handles initial request analysis,
-  //     complex decisions, and strategy planning. Produces <think> reasoning traces.
-  //   - Llama 3.3 70B: fast tool-calling model — used for follow-up calls after tool
-  //     results come back (formatting, next-step decisions). Faster for simple tasks.
-  const DEEPSEEK_MODEL = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b";
+  // Workers AI strategy:
+  //   - Kimi K2.6 (1T param MoE, 262k context): primary model — handles reasoning,
+  //     tool calling, and multi-step planning natively in a single call. No handoff needed.
+  //   - Llama 3.3 70B: fast model used for orchestration follow-ups after tool results.
+  const KIMI_MODEL = "@cf/moonshotai/kimi-k2.6";
+  const DEEPSEEK_MODEL = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b"; // legacy — not used as default
   const LLAMA_FAST_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
   let openai: OpenAI | null = null;
@@ -679,23 +681,16 @@ export async function processChat(
   } else if (env.AI) {
     // Workers AI via binding (default — no API key needed, zero-config)
     //
-    // Dual-model orchestration strategy (Workers AI default):
-    //   1. DeepSeek R1 reasons first — streams <think> tokens in real-time so the user
-    //      sees the planning process before any tool is called.
-    //   2. If DeepSeek produces no structured tool calls → hand off to Llama 3.3 70B
-    //      for reliable tool execution (the DeepSeek→Llama handoff below).
-    //   3. Orchestration follow-ups always use Llama (fast, low-latency).
+    // Kimi K2.6 as primary: natively handles reasoning + tool calling in one call.
+    // No DeepSeek→Llama handoff needed — Kimi reliably produces structured tool_calls.
+    // Orchestration follow-ups use Llama 3.3 70B for speed (simple formatting/next-step).
     //
-    // This uses each model for what it's best at:
-    //   DeepSeek R1: intent understanding, reasoning, multi-step planning
-    //   Llama 3.3 70B: structured tool calling, fast follow-ups
-    //
-    // Override: ctx.aiModel === "llama" or ctx.routingMode === "llama_only" skips DeepSeek.
+    // Override: ctx.aiModel === "llama" or ctx.routingMode === "llama_only" skips Kimi.
     useBinding = true;
     llmModel = (ctx.aiModel === "llama" || (ctx.routingMode as string) === "llama_only")
       ? LLAMA_FAST_MODEL
-      : DEEPSEEK_MODEL; // DeepSeek reasons first by default
-    fastModel = LLAMA_FAST_MODEL; // always Llama for tool execution and follow-ups
+      : KIMI_MODEL; // Kimi K2.6 as default (reasoning + native function calling)
+    fastModel = LLAMA_FAST_MODEL; // always Llama for follow-ups
   } else if (env.OPENAI_API_KEY) {
     // Fallback to server OpenAI key
     openai = new OpenAI({ apiKey: env.OPENAI_API_KEY, timeout: 45_000 });
@@ -923,6 +918,7 @@ ${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
   console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
   // User-friendly model label for status messages
   const modelLabel = llmModel.includes('deepseek') ? 'DeepSeek R1 (reasoning)'
+    : llmModel.includes('kimi') || llmModel.includes('moonshotai') ? 'Kimi K2.6'
     : llmModel.includes('llama') ? 'Llama 3.3' : llmModel.split('/').pop() || llmModel;
   onStreamEvent?.({ type: "status", message: `Thinking (${modelLabel})…` });
   // For DeepSeek: stream reasoning tokens in real-time so the user sees thinking progress
@@ -984,21 +980,15 @@ ${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
   //   DeepSeek → Llama: when DeepSeek reasons but doesn't call tools (existing path below)
   let orchestrationChoice = choice;
 
-  // ── Llama → DeepSeek escalation ──
-  // If Llama returned no tool calls and gave an unhelpful response ("lacking details",
-  // "provide more information", etc.), escalate to DeepSeek R1 for reasoning.
-  // DeepSeek understands complex intents (crosschain sync, multi-step plans) that
-  // Llama can't handle alone. Its reasoning is then handed to Llama for tool execution.
+  // ── Llama → DeepSeek escalation (legacy path for llama_only mode) ──
+  // If Llama was explicitly selected (ctx.aiModel === "llama") and returned no tool calls,
+  // escalate to DeepSeek R1 for reasoning. The default path uses Kimi K2.6 which handles
+  // both reasoning and tool calling natively — no escalation needed.
   //
-  // This is the robust alternative to regex pattern matching: instead of trying to
-  // predict which requests need reasoning, we let Llama try first and escalate on failure.
-  //
-  // LOOP GUARD: The entire escalation path is bounded to at most 3 LLM calls:
+  // LOOP GUARD: bounded to at most 3 LLM calls:
   //   Call 1: Llama (fast) — initial attempt
   //   Call 2: DeepSeek (reasoning) — escalation (only if Llama was unhelpful)
   //   Call 3: Llama (fast retry) — tool execution with DeepSeek's context
-  // After that, we proceed to the orchestration loop or return directly.
-  // No further escalation is possible because `escalatedToDeepSeek` prevents re-entry.
   let escalatedToDeepSeek = false;
   if (
     !orchestrationChoice.message.tool_calls?.length &&
@@ -3015,6 +3005,12 @@ export async function executeToolCall(
         ctx.vaultAddress as Address,
         ctx.chainId,
       );
+
+      // Clear KV delegation state so the UI reflects the revocation immediately
+      // after the user broadcasts the on-chain tx. It's safe to clear before broadcast:
+      // KV saying "not delegated" just means the agent won't attempt auto-execution
+      // until delegation is explicitly re-set up.
+      await revokeDelegationOnChain(env.KV, ctx.vaultAddress as string, ctx.chainId).catch(() => {});
 
       const gas = await estimateGas(
         ctx.chainId, ctx.vaultAddress as Address,

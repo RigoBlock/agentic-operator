@@ -60,7 +60,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.01",
+        price: "$0.015",
         network: BASE_NETWORK,
       },
     ],

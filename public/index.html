@@ -1498,6 +1498,11 @@
       clearTimeout(validateTimer);
       const v = vaultInput.value.trim();
       if (v.length === 42 && v.startsWith('0x')) {
+        // Clear stale delegation state immediately so the UI doesn't show the
+        // previous vault's delegation while the async validateVault fetch is in flight.
+        delegationState = null;
+        executionMode = 'manual';
+        updateDelegationUI(null);
         validateTimer = setTimeout(validateVault, 600);
       } else {
         document.getElementById('vault-status').textContent = '';
@@ -3864,13 +3869,16 @@
     function openRevokeModal() {
       if (!delegationState || !delegationState.agentAddress) return;
 
-      // Populate checkboxes with only chains that have active delegation
-      const activeChainSet = new Set(delegationState.delegatedChains || []);
-      // Apply on-chain verified status for current chain
-      if (delegationState.isActiveOnChain !== undefined) {
-        if (delegationState.isActiveOnChain) activeChainSet.add(currentChainId);
-        else activeChainSet.delete(currentChainId);
-      }
+      // Build the set of chains that have active delegation.
+      // Use DelegationConfig activeChains as primary (correctly updated on revoke),
+      // plus AgentWalletInfo delegatedChains as fallback.
+      // Only ADD to the set from isActiveOnChain — never remove — to avoid false
+      // negatives from transient RPC failures or stale on-chain check results.
+      const activeChainSet = new Set([
+        ...(delegationState.activeChains || []),
+        ...(delegationState.delegatedChains || []),
+      ]);
+      if (delegationState.isActiveOnChain) activeChainSet.add(currentChainId);
 
       const grid = document.getElementById('revoke-chain-checkboxes');
       if (grid) {
@@ -3900,6 +3908,13 @@
     async function executeRevoke() {
       const vault = vaultInput.value.trim();
       if (!connectedAddress || !vault) return;
+
+      // Ensure operator is authenticated before calling the backend.
+      // The revoke endpoint requires a valid authSignature to verify vault ownership.
+      if (!authSignature) {
+        const auth = await signAuthMessage();
+        if (!auth) return; // user rejected the auth signature
+      }
 
       const statusEl = document.getElementById('revoke-setup-status');
       const progressEl = document.getElementById('revoke-chain-progress');

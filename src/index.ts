@@ -191,7 +191,7 @@ app.get("/api/health", (c) =>
       ],
       payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
       paidRoutes: {
-        "POST /api/chat": "$0.01",
+        "POST /api/chat": "$0.015",
         "GET /api/quote": "$0.002",
         "POST /api/tools/*": "$0.002",
       },
@@ -227,7 +227,7 @@ app.get("/api", (c) => {
       discoveryUrl: "https://trader.rigoblock.com/.well-known/x402.json",
       openApiUrl: "https://trader.rigoblock.com/openapi.json",
       endpoints: {
-        "POST /api/chat": { price: "$0.01", description: "Natural language DeFi agent — swap/bridge/LP/stake calldata" },
+        "POST /api/chat": { price: "$0.015", description: "Natural language DeFi agent — swap/bridge/LP/stake calldata" },
         "GET /api/quote": { price: "$0.002", description: "DEX price quote across 7 chains" },
         "POST /api/tools/{toolName}": { price: "$0.002", description: "Direct tool invocation — structured input/output" },
       },
@@ -330,7 +330,7 @@ app.get("/.well-known/ai-plugin.json", (c) =>
       "Uniswap v4 LP management, GMX perpetuals, GRG staking, vault deployment, " +
       "and aggregated NAV across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain. " +
       "All vault-modifying operations require operator authentication and are protected by a 10% NAV shield. " +
-      "Payment: $0.01 USDC per chat request, $0.002 per quote/tool call, via x402 on Base.",
+      "Payment: $0.015 USDC per chat request, $0.002 per quote/tool call, via x402 on Base.",
     auth: {
       type: "none",
     },
@@ -357,7 +357,7 @@ app.get("/.well-known/x402.json", (c) =>
       {
         path: "/api/chat",
         method: "POST",
-        price: "$0.01",
+        price: "$0.015",
         description: "AI-powered DeFi chat — natural language to swap/bridge/LP calldata",
       },
       {

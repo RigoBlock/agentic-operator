@@ -40,6 +40,7 @@ vi.mock("../src/services/agentWallet.js", () => ({
   createAgentWallet: vi.fn().mockResolvedValue({ address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
   getAgentWalletInfo: vi.fn().mockResolvedValue({ address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
   markChainDelegated: vi.fn().mockResolvedValue(undefined),
+  unmarkChainDelegated: vi.fn().mockResolvedValue(undefined),
   deleteAgentWallet: vi.fn().mockResolvedValue(undefined),
 }));
 
