@@ -282,6 +282,7 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
     vaultAddress: config.vaultAddress as Address,
     chainId: reference.chainId,
     operatorAddress: config.operatorAddress as Address,
+    isBrowserRequest: false,
     executionMode: "delegated",
     operatorVerified: true,
   };

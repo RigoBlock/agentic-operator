@@ -250,6 +250,25 @@ export async function markChainDelegated(
 }
 
 /**
+ * Remove a chain from the agent wallet's delegated-chains list.
+ * Call this when delegation is revoked on a chain so KV stays in sync.
+ */
+export async function unmarkChainDelegated(
+  kv: KVNamespace,
+  vaultAddress: string,
+  chainId: number,
+): Promise<void> {
+  const info = await getAgentWalletInfo(kv, vaultAddress);
+  if (!info) return; // nothing to do if wallet doesn't exist
+
+  const idx = info.delegatedChains.indexOf(chainId);
+  if (idx !== -1) {
+    info.delegatedChains.splice(idx, 1);
+    await kv.put(walletInfoKey(vaultAddress), JSON.stringify(info));
+  }
+}
+
+/**
  * Check if an agent wallet exists and has delegation on a given chain.
  */
 export async function isDelegatedOnChain(

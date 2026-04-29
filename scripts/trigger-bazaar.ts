@@ -86,10 +86,12 @@ async function paidRequest(
     if (newPayHdr) {
       try {
         const decoded = JSON.parse(Buffer.from(newPayHdr, "base64").toString());
+        console.log("  payment-required error:", decoded?.error ?? "?");
         console.log("  payment-required resource:", decoded?.resource?.url ?? "?");
         console.log("  payment-required accepts:", JSON.stringify(decoded?.accepts?.[0]).slice(0, 200));
       } catch { /* ignore */ }
     }
+    console.log("  payment-payload accepted:", JSON.stringify((paymentPayload as any).accepted).slice(0, 200));
     console.log("Fix: check Worker logs with: wrangler tail");
     return;
   }
@@ -141,8 +143,11 @@ async function main() {
   // 3. Trigger GET /api/quote — registers the quote endpoint in Bazaar.
   await paidRequest(httpClient, "GET", QUOTE_URL);
 
-  // CDP rate-limits rapid consecutive payments from the same wallet — wait between each.
-  await new Promise((r) => setTimeout(r, 3000));
+  // Wait for quote settlement to be mined (Base: 2s blocks). EIP-2612 permit nonces are
+  // sequential on-chain — if settlement for nonce N is still pending when the next payment
+  // is created with nonce N+1, the CDP facilitator may reject nonce N+1 as a race.
+  // 8s gives 4 block confirmations of headroom.
+  await new Promise((r) => setTimeout(r, 8000));
 
   // 4. Trigger POST /api/chat — registers the full trading chat in Bazaar.
   //    IMPORTANT: use a message that doesn't invoke any tools (no network calls
@@ -155,13 +160,21 @@ async function main() {
     chainId: 8453,
   });
 
-  // CDP rate-limits rapid consecutive payments — wait between each.
-  await new Promise((r) => setTimeout(r, 3000));
+  // Wait for chat settlement to be mined before creating tools payment.
+  await new Promise((r) => setTimeout(r, 8000));
 
   // 5. Trigger POST /api/tools/* — registers the direct tool invocation endpoint.
   //    Use get_swap_quote (read-only, fast) with a well-known token pair.
+  //    NOTE: Total spend is ~$0.014 USDC (quote $0.002 + chat $0.01 + tools $0.002).
+  //    Ensure your wallet has at least $0.02 USDC on Base mainnet.
   await paidRequest(httpClient, "POST", TOOLS_URL, {
-    arguments: { sell: "ETH", buy: "USDC", amount: "1", chain: "base" },
+    arguments: {
+      tokenIn: "ETH",
+      tokenOut: "USDC",
+      amountIn: "1",
+      chain: "base",
+    },
+    vaultAddress: "0x0000000000000000000000000000000000000000",
     chainId: 8453,
   });
 

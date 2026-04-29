@@ -106,7 +106,7 @@ export interface RigoblockClientConfig {
   authSignature?: string;
   authTimestamp?: number;
   executionMode: "manual" | "delegated";
-  routingMode?: "deepseek_only" | "hybrid_fast_followup";
+  routingMode?: "llama_only";
 }
 
 export interface ChatOptions {

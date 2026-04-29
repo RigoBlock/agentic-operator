@@ -98,7 +98,7 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
 
 /** Map domains to their tool names — used to filter tool definitions. */
 export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
-  swap: ["get_swap_quote", "build_vault_swap", "set_default_slippage", "disable_swap_shield", "enable_swap_shield"],
+  swap: ["get_swap_quote", "build_vault_swap", "set_default_slippage", "disable_swap_shield", "enable_swap_shield", "refresh_oracle_feed"],
   gmx: [
     "gmx_open_position", "gmx_close_position", "gmx_increase_position",
     "gmx_get_positions", "gmx_cancel_order", "gmx_update_order",
@@ -161,7 +161,7 @@ You can ONLY do what your tools allow. You CANNOT:
 - Provide real-time price feeds (only swap quotes via DEX)
 - Manage token approvals or allowances directly
 - Interact with lending protocols (Aave, Compound, etc.)
-- Interact with any DeFi protocol other than Uniswap (spot + LP), 0x (spot), GMX (perps), Across (bridge), and Rigoblock Staking (GRG)
+- Interact with any DeFi protocol other than Uniswap (spot + LP + oracle pool via refresh_oracle_feed), 0x (spot), GMX (perps), Across (bridge), and Rigoblock Staking (GRG)
 
 WHEN THE USER ASKS FOR SOMETHING YOU CANNOT DO:
 - Be HONEST. Say clearly that you don't have a tool for that specific request.
@@ -221,8 +221,24 @@ export const DOMAIN_PROMPTS: Record<DomainKey, string> = {
 - CRITICAL: Auto-switches chains. Do NOT call switch_chain before a swap.
 - Only use switch_chain when the user wants to change chain WITHOUT a swap.
 
-SWAP SHIELD (Oracle Protection):
-Every swap is automatically checked against the on-chain BackgeoOracle TWAP price.
+BACKGEOORACLE AND ORACLE POOL SWAPS:
+The BackgeoOracle is a Uniswap V4 hook. Every ERC-20 token has an oracle-specific V4 pool:
+  PoolKey = { currency0=ETH(address(0)), currency1=<token>, fee=0, tickSpacing=32767, hooks=oracle_address }
+The hook address is part of the pool key — NOT a separate routing parameter.
+Swapping on this oracle pool triggers the afterSwap hook and records a new TWAP price observation.
+This IS a real Uniswap V4 pool you can swap on via the Universal Router. The calldata is
+already built correctly in the refresh_oracle_feed tool: it encodes the full pool key (including
+hooks=oracle_address) inside the V4 SWAP_EXACT_IN_SINGLE params.
+
+USE refresh_oracle_feed when the user:
+- Says "swap X ETH for TOKEN using BackgeoOracle" / "using the oracle hook" / "on the oracle pool"
+- Says "refresh oracle", "fix oracle feed", "update TWAP", "oracle divergence"
+- The Swap Shield blocks a vault swap with favorable-divergence (stale oracle signal)
+
+REQUIRED ARGS: token (the ERC-20, e.g. "USDC"), amountEth (from user message, e.g. "0.001").
+If amountEth is not in the message, ask: "How much ETH would you like to swap on the oracle pool?"
+NEVER say this is impossible. The encoding is done — just call the tool.
+The returned transaction goes to the Universal Router (operator's personal wallet), NOT the vault.
 The check is asymmetric and two-sided:
 - If the DEX quote is more than 5% WORSE than the oracle price, the swap is BLOCKED.
   This catches bad routes, stale liquidity, and excessive price impact.

@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SLIPPAGE_BPS } from "../src/services/swapShield.js";
-import { resolveSlippage, tryFastPathSwap, isVerifiedOperatorContext } from "../src/llm/client.js";
+import { resolveSlippage, tryFastPathSwap, isVerifiedOperatorContext, VAULT_TX_TOOLS, OPERATOR_VERIFIED_TOOLS } from "../src/llm/client.js";
 import type { RequestContext } from "../src/types.js";
 
 function makeCtx(overrides: Partial<RequestContext> = {}): RequestContext {
   return {
     vaultAddress: "0x0000000000000000000000000000000000000000",
     chainId: 8453,
+    isBrowserRequest: false,
     ...overrides,
-  } as RequestContext;
+  };
 }
 
 function makeKV(value: string | null): KVNamespace {
@@ -100,5 +101,40 @@ describe("client security helpers", () => {
     expect(parsed?.name).toBe("build_vault_swap");
     expect(parsed?.args.chain).toBe("base");
     expect(parsed?.args.dex).toBe("0x");
+  });
+});
+
+describe("tool auth category membership", () => {
+  // deploy_smart_pool calls the factory (permissionless, no existing vault needed).
+  // It must NOT be gated by vault ownership auth — the caller becomes the vault owner.
+  it("deploy_smart_pool is not in VAULT_TX_TOOLS", () => {
+    expect(VAULT_TX_TOOLS.has("deploy_smart_pool")).toBe(false);
+  });
+
+  it("deploy_smart_pool is not in OPERATOR_VERIFIED_TOOLS", () => {
+    expect(OPERATOR_VERIFIED_TOOLS.has("deploy_smart_pool")).toBe(false);
+  });
+
+  // Read-only / informational tools must never require operator auth
+  it("get_swap_quote is not in VAULT_TX_TOOLS", () => {
+    expect(VAULT_TX_TOOLS.has("get_swap_quote")).toBe(false);
+  });
+
+  it("get_vault_info is not in VAULT_TX_TOOLS", () => {
+    expect(VAULT_TX_TOOLS.has("get_vault_info")).toBe(false);
+  });
+
+  // Operator-only KV mutations must require operator verification
+  it("set_default_slippage is in OPERATOR_VERIFIED_TOOLS", () => {
+    expect(OPERATOR_VERIFIED_TOOLS.has("set_default_slippage")).toBe(true);
+  });
+
+  it("disable_swap_shield is in OPERATOR_VERIFIED_TOOLS", () => {
+    expect(OPERATOR_VERIFIED_TOOLS.has("disable_swap_shield")).toBe(true);
+  });
+
+  // Vault tx tools must require auth for browser callers
+  it("build_vault_swap is in VAULT_TX_TOOLS", () => {
+    expect(VAULT_TX_TOOLS.has("build_vault_swap")).toBe(true);
   });
 });

@@ -38,6 +38,7 @@ import {
   getAgentWalletInfo,
   createAgentWallet,
   markChainDelegated,
+  unmarkChainDelegated,
 } from "./agentWallet.js";
 import { getClient } from "./vault.js";
 
@@ -426,6 +427,9 @@ export async function revokeDelegation(
 ): Promise<void> {
   const config = await getDelegationConfig(kv, vaultAddress);
   if (config) {
+    // Clear all chains from AgentWalletInfo.delegatedChains before wiping DelegationConfig
+    const chainIds = Object.keys(config.chains || {}).map(Number);
+    await Promise.all(chainIds.map(id => unmarkChainDelegated(kv, vaultAddress, id).catch(() => {})));
     config.enabled = false;
     config.chains = {};
     await kv.put(delegationConfigKey(vaultAddress), JSON.stringify(config));
@@ -449,6 +453,9 @@ export async function revokeDelegationOnChain(
   if (Object.keys(config.chains || {}).length === 0) {
     config.enabled = false;
   }
+
+  // Also clear AgentWalletInfo.delegatedChains so the UI reflects the revocation immediately
+  await unmarkChainDelegated(kv, vaultAddress, chainId).catch(() => {});
 
   await kv.put(delegationConfigKey(vaultAddress), JSON.stringify(config));
   console.log(

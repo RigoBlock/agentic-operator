@@ -13,11 +13,14 @@ The Rigoblock Agentic Operator exposes two x402-gated endpoints:
 | Endpoint | Method | Price | What it returns |
 |----------|--------|-------|-----------------|
 | `/api/quote` | GET | $0.002 USDC | DEX price quote (no vault context needed) |
-| `/api/chat` | POST | $0.01 USDC | AI-powered DeFi response (swap calldata, positions, analysis) |
+| `/api/chat` | POST | up to $0.10 USDC (billed by actual usage, typical $0.003–$0.015) | AI-powered DeFi response (swap calldata, positions, analysis) |
 
 Payments are in USDC on **Base mainnet** (`eip155:8453`) via the
-[x402 protocol](https://x402.org). The CDP facilitator at
-`api.cdp.coinbase.com` handles verification and settlement.
+[x402 protocol](https://x402.org) (`upto` scheme for `/api/chat`, `exact` scheme for
+`/api/quote`). The CDP facilitator at `api.cdp.coinbase.com` handles verification
+and settlement. Callers authorise up to $0.10 for `/api/chat` but are only charged
+the actual inference cost — simple queries cost ~$0.003, complex multi-tool chains
+cost up to $0.015.
 
 ---
 
@@ -44,10 +47,7 @@ Content-Type: application/json
 {
   "messages": [{"role": "user", "content": "swap 1 ETH for USDC on Base"}],
   "vaultAddress": "0xYourVault",
-  "chainId": 8453,
-  "aiApiKey": "sk-or-...",
-  "aiModel": "anthropic/claude-sonnet-4",
-  "aiBaseUrl": "https://openrouter.ai/api/v1"
+  "chainId": 8453
 }
 
 → 200: {
@@ -136,11 +136,15 @@ The signature is valid for 24 hours from `authTimestamp`.
 
 ## AI Model Selection
 
-By default, the service uses **Workers AI (DeepSeek R1 + Llama 3.3 70B)** — zero-config,
-no API key needed, included in the x402 price. DeepSeek R1 handles reasoning and
-decision-making; Llama 3.3 70B handles fast follow-up responses after tool execution.
-Agents can bring their own LLM
-provider by including these optional fields in the `/api/chat` request body:
+The service uses **Workers AI (Kimi K2.6)** by default — zero-config,
+no API key needed, included in the x402 price. Kimi K2.6 is a 1-trillion-parameter
+MoE model that natively handles both reasoning and tool calling in a single call,
+with a 262k token context window.
+
+Agents that need a specific model or provider can override inference by including
+these **optional** fields in the `/api/chat` request body. This is an advanced
+option — the default Kimi K2.6 model is recommended for most use cases and is
+what all x402 usage pricing is based on:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -149,13 +153,12 @@ provider by including these optional fields in the `/api/chat` request body:
 | `aiBaseUrl` | string | Provider base URL (e.g. `"https://openrouter.ai/api/v1"`) |
 
 **Resolution priority:**
-1. **User-provided key** (`aiApiKey` + `aiModel` + `aiBaseUrl`) — agent's own provider
-2. **Workers AI binding** — DeepSeek R1 reasoning + Llama 3.3 70B fast (default)
+1. **Workers AI binding** — Kimi K2.6 (reasoning + native function calling, **default**)
+2. **User-provided key** (`aiApiKey` + `aiModel` + `aiBaseUrl`) — agent's own provider
 3. **Server OpenAI key** — server fallback
 
-This is like MetaMask's default RPC: it works out of the box, but you can bring
-your own. The tool definitions, safety layers, and system prompt are the same
-regardless of which LLM processes the request.
+The tool definitions, safety layers, and system prompt are the same regardless of
+which LLM processes the request.
 
 ---
 
@@ -202,7 +205,7 @@ provides the safe DeFi execution layer.
 ## Security Model
 
 ### What the x402 payment wallet CAN do:
-- Pay for API access ($0.002–$0.01 per call)
+- Pay for API access ($0.002–$0.10 per call)
 - Receive unsigned transaction data
 - Query prices, positions, and vault info
 - Get natural language DeFi analysis
@@ -432,6 +435,7 @@ and returns a result (quote, unsigned transaction, analytics summary, etc.).
 | **Cross-chain bridge** | Transfer tokens (Across Protocol), sync NAV, get bridge quote, aggregated NAV, rebalance plan |
 | **Vault management** | Get info, check token balance, deploy pool, fund pool (mint) |
 | **Delegation** | Setup, revoke all, revoke specific selectors, check status |
+| **TWAP orders** | Create, cancel, list — scheduled slice execution with Swap Shield + NAV shield on every slice |
 | **Strategies** | Create (manual or autonomous), remove, list automated strategies |
 | **Chain** | Switch active chain |
 
@@ -578,3 +582,48 @@ Via the chat interface (browser or API):
 The `autoExecute` parameter controls the mode:
 - `autoExecute: true` → autonomous (execute immediately)
 - `autoExecute: false` (default) → manual (notify and wait for confirmation)
+
+---
+
+## TWAP Orders
+
+TWAP (Time-Weighted Average Price) orders split a large swap into N equal-sized
+slices executed at regular time intervals, reducing price impact on the DEX.
+Unlike LLM strategies, TWAP execution is **deterministic** — no LLM judgment
+at slice time, just mechanical execution of the pre-configured plan.
+
+### Safety Guarantees on Every TWAP Slice
+
+Every slice passes through the **full safety stack** — identical to manually
+triggered swaps:
+
+1. **Swap Shield** — compares DEX quote against on-chain BackgeoOracle TWAP price.
+   Blocks if DEX is >5% worse or >10% better than oracle.
+2. **NAV shield pre-check** — simulates post-swap NAV before returning calldata.
+   Blocks if NAV would drop >10%.
+3. **NAV shield at broadcast** (autonomous mode) — runs again before CDP signs.
+4. **Slippage protection** — 1% default, configurable by operator.
+5. **Auto-pause** — pauses after 3 consecutive failures.
+
+TWAP slices **cannot** bypass the shields even if the operator explicitly
+requests it. Each slice is treated as a fresh independent operation.
+
+### Managing TWAP Orders via Chat
+
+```
+# Create a sell-side TWAP
+"Sell 1 ETH in 5 slices of 0.2 ETH every 10 minutes on Base, auto-execute"
+
+# Create a buy-side TWAP
+"Buy 100 GRG with ETH, 20 per slice, every 5 minutes, dex 0x"
+
+# List all orders
+"List my TWAP orders"
+
+# Cancel a specific order
+"Cancel TWAP order 3"
+```
+
+For full technical specifications including data model, KV schema, execution
+context, and DEX integrator requirements, see
+[content/twap-orders.md](content/twap-orders.md).

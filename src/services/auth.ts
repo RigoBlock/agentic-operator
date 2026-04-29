@@ -99,6 +99,15 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   if (cachedExpiry && Date.now() < cachedExpiry) {
     return; // ownership recently verified
   }
+  // Negative cache: confirmed non-owners skip the RPC fan-out
+  const nonOwnerKey = `nonowner:${cacheKey}`;
+  const cachedNonOwner = ownershipCache.get(nonOwnerKey);
+  if (cachedNonOwner && Date.now() < cachedNonOwner) {
+    throw new AuthError(
+      `Access denied: ${operatorAddress.slice(0, 6)}…${operatorAddress.slice(-4)} is not the owner of vault ${vaultAddress.slice(0, 6)}…${vaultAddress.slice(-4)} on any supported chain.`,
+      403,
+    );
+  }
 
   // 4. Check vault ownership — preferred chain first, then the rest in parallel.
   //    This avoids 8 parallel RPC calls when the vault is on the selected chain.
@@ -132,6 +141,7 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   const isOwnerOnAny = results.some(Boolean);
 
   if (!isOwnerOnAny) {
+    ownershipCache.set(nonOwnerKey, Date.now() + OWNERSHIP_CACHE_TTL_MS);
     throw new AuthError(
       `Access denied: ${operatorAddress.slice(0, 6)}…${operatorAddress.slice(-4)} is not the owner of vault ${vaultAddress.slice(0, 6)}…${vaultAddress.slice(-4)} on any supported chain. Only the vault operator can use this assistant.`,
       403,
@@ -140,6 +150,37 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
 
   // Cache successful verification
   ownershipCache.set(cacheKey, Date.now() + OWNERSHIP_CACHE_TTL_MS);
+}
+
+/**
+ * Verify an EIP-191 wallet signature without checking vault ownership.
+ * Used for non-owner browser users: proves they have a real wallet (anti-spam),
+ * but grants only manual-mode read access (no delegated execution, no KV mutations).
+ */
+export async function verifyWalletSignature(params: {
+  address: string;
+  signature: string;
+  timestamp: number;
+}): Promise<void> {
+  const { address, signature, timestamp } = params;
+  if (!address || !signature || !timestamp) {
+    throw new AuthError("Wallet signature required.", 401);
+  }
+  const now = Date.now();
+  if (now - timestamp > AUTH_EXPIRY_MS) {
+    throw new AuthError("Session expired. Please sign again.", 401);
+  }
+  if (timestamp > now + 60_000) {
+    throw new AuthError("Invalid timestamp.", 401);
+  }
+  const message = buildAuthMessage(address);
+  try {
+    const valid = await verifyMessage({ address: address as Address, message, signature: signature as `0x${string}` });
+    if (!valid) throw new AuthError("Signature verification failed.", 403);
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+    throw new AuthError("Invalid signature format.", 401);
+  }
 }
 
 /**

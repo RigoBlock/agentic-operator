@@ -14,24 +14,27 @@
 
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import type { Env } from "./types.js";
+import type { Env, AppVariables } from "./types.js";
 import { chat } from "./routes/chat.js";
 import { quote } from "./routes/quote.js";
 import { delegation } from "./routes/delegation.js";
 import { gasPolicy } from "./routes/gasPolicy.js";
 import { telegram } from "./routes/telegram.js";
 import { tools as toolsRoute } from "./routes/tools.js";
+import { oracle } from "./routes/oracle.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
 import { createX402Middleware } from "./middleware/x402.js";
+import { generateSessionToken, verifySessionToken, SESSION_HEADER } from "./utils/session.js";
+import { isExemptBrowserRequest } from "./middleware/x402.js";
 import { runAllSkills } from "./skills/index.js";
 import { getTwapEvents } from "./skills/twap.js";
 import { processChat } from "./llm/client.js";
 import { ensureWebhookRegistered, getWebhookSecret } from "./services/telegram.js";
 import type { Address } from "viem";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 // ── Middleware ─────────────────────────────────────────────────────────
 app.use("*", cors());
@@ -46,9 +49,50 @@ app.use("*", async (c, next) => {
 // Own-user requests (browser UI, Telegram webhook) are exempt.
 app.use("*", createX402Middleware());
 
+// Browser session middleware — runs after x402.
+// When SESSION_SECRET is set (production): validates X-Rigoblock-Session HMAC token.
+// When SESSION_SECRET is absent (dev): falls back to Origin/Referer check.
+// Sets c.var.browserVerified for routes to consume.
+app.use("/api/*", async (c, next) => {
+  if (c.env.SESSION_SECRET) {
+    const token = c.req.header(SESSION_HEADER);
+    if (token && await verifySessionToken(token, c.env.SESSION_SECRET)) {
+      c.set("browserVerified", true);
+    }
+  } else {
+    if (isExemptBrowserRequest(c.req.header.bind(c.req))) {
+      c.set("browserVerified", true);
+    }
+  }
+  await next();
+});
+
 // ── API Routes ────────────────────────────────────────────────────────
+
+// Session token endpoint — issues HMAC-signed tokens to browser clients.
+// Rate-limited per IP (20/hour) to limit abuse; token expires in 1 hour.
+// External agents without x402 cannot benefit from these tokens because
+// GET /api/session itself is not x402-protected — the cost is the rate limit.
+app.get("/api/session", async (c) => {
+  if (!c.env.SESSION_SECRET) {
+    return c.json({ token: null }, 200);
+  }
+  const ip = c.req.header("cf-connecting-ip");
+  if (ip && c.env.KV) {
+    const rlKey = `session-rl:${ip}`;
+    const count = parseInt((await c.env.KV.get(rlKey)) ?? "0");
+    if (count >= 20) {
+      return c.json({ error: "Rate limit exceeded." }, 429);
+    }
+    await c.env.KV.put(rlKey, String(count + 1), { expirationTtl: 3600 });
+  }
+  const token = await generateSessionToken(c.env.SESSION_SECRET);
+  return c.json({ token, expiresIn: 3600 });
+});
+
 app.route("/api/chat", chat);
 app.route("/api/quote", quote);
+app.route("/api/oracle", oracle);
 app.route("/api/tools", toolsRoute);
 app.route("/api/delegation", delegation);
 app.route("/api/gas-policy", gasPolicy);
@@ -149,7 +193,7 @@ app.get("/api/health", (c) =>
       ],
       payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
       paidRoutes: {
-        "POST /api/chat": "$0.01",
+        "POST /api/chat": "up to $0.10 (billed by usage, ~$0.003-$0.015)",
         "GET /api/quote": "$0.002",
         "POST /api/tools/*": "$0.002",
       },
@@ -159,7 +203,90 @@ app.get("/api/health", (c) =>
 
 // ── Agent discovery ───────────────────────────────────────────────────
 
-// robots.txt — allow AI crawlers, point to sitemap and API
+// GET /api — returns 402 so x402 scanners detect our payment-gated API.
+// Describes available paid endpoints; any agent can use this as an entry point.
+app.get("/api", (c) => {
+  c.header(
+    "PAYMENT-REQUIRED",
+    Buffer.from(
+      JSON.stringify({
+        x402Version: 2,
+        error: "Payment required to access this API",
+        resource: { url: "https://trader.rigoblock.com/api", description: "Rigoblock Agentic Operator API", mimeType: "application/json" },
+        accepts: [
+          { scheme: "exact", network: "eip155:8453", amount: "2000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37", maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" } },
+        ],
+      }),
+    ).toString("base64"),
+  );
+  return c.json(
+    {
+      x402Version: 2,
+      error: "Payment required",
+      description:
+        "Rigoblock Agentic Operator — AI-powered DeFi trading for smart vaults. " +
+        "Pay per request in USDC on Base. See /.well-known/x402.json for endpoint list.",
+      discoveryUrl: "https://trader.rigoblock.com/.well-known/x402.json",
+      openApiUrl: "https://trader.rigoblock.com/openapi.json",
+      endpoints: {
+        "POST /api/chat": { price: "up to $0.10 (billed by usage)", description: "Natural language DeFi agent — swap/bridge/LP/stake calldata" },
+        "GET /api/quote": { price: "$0.002", description: "DEX price quote across 7 chains" },
+        "POST /api/tools/{toolName}": { price: "$0.002", description: "Direct tool invocation — structured input/output" },
+      },
+      accepts: [
+        { scheme: "exact", network: "eip155:8453", amount: "2000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37", maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" } },
+      ],
+    },
+    402,
+  );
+});
+
+// Homepage — serves index.html with Link headers for RFC 8288 agent discovery.
+// The [assets] binding would serve it silently without headers; we intercept
+// here so agents receive machine-readable API pointers on every page load.
+app.get("/", async (c) => {
+  const response = await c.env.ASSETS.fetch(c.req.raw);
+  const headers = new Headers(response.headers);
+  headers.set(
+    "Link",
+    [
+      '</openapi.json>; rel="service-desc"',
+      '</.well-known/ai-plugin.json>; rel="describedby"',
+      '</.well-known/api-catalog>; rel="api-catalog"',
+      '</sitemap.xml>; rel="sitemap"',
+    ].join(", "),
+  );
+  return new Response(response.body, { status: response.status, headers });
+});
+
+// sitemap.xml — lists canonical public URLs for crawlers and agents
+app.get("/sitemap.xml", (c) => {
+  c.header("content-type", "application/xml; charset=utf-8");
+  return c.body(
+    [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<urlset xmlns="https://www.sitemaps.org/schemas/sitemap/0.9">',
+      "  <url>",
+      "    <loc>https://trader.rigoblock.com/</loc>",
+      "    <changefreq>weekly</changefreq>",
+      "    <priority>1.0</priority>",
+      "  </url>",
+      "  <url>",
+      "    <loc>https://trader.rigoblock.com/openapi.json</loc>",
+      "    <changefreq>monthly</changefreq>",
+      "    <priority>0.8</priority>",
+      "  </url>",
+      "  <url>",
+      "    <loc>https://trader.rigoblock.com/.well-known/ai-plugin.json</loc>",
+      "    <changefreq>monthly</changefreq>",
+      "    <priority>0.8</priority>",
+      "  </url>",
+      "</urlset>",
+    ].join("\n"),
+  );
+});
+
+// robots.txt — allow AI crawlers, point to sitemap and API, declare content signals
 app.get("/robots.txt", (c) => {
   c.header("content-type", "text/plain");
   return c.text(
@@ -180,6 +307,12 @@ app.get("/robots.txt", (c) => {
       "User-agent: anthropic-ai",
       "Allow: /",
       "",
+      "# Content Signals — declare AI content usage preferences (contentsignals.org)",
+      "# search=yes: allow search indexing",
+      "# ai-input=yes: agents may use this service as a data source",
+      "# ai-train=no: do not use our content to train AI models",
+      "Content-Signal: ai-train=no, search=yes, ai-input=yes",
+      "",
       "Sitemap: https://trader.rigoblock.com/sitemap.xml",
     ].join("\n"),
   );
@@ -199,7 +332,7 @@ app.get("/.well-known/ai-plugin.json", (c) =>
       "Uniswap v4 LP management, GMX perpetuals, GRG staking, vault deployment, " +
       "and aggregated NAV across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain. " +
       "All vault-modifying operations require operator authentication and are protected by a 10% NAV shield. " +
-      "Payment: $0.01 USDC per chat request, $0.002 per quote/tool call, via x402 on Base.",
+      "Payment: up to $0.10 USDC per chat request (billed by inference usage, ~$0.003–$0.015), $0.002 per quote/tool call, via x402 on Base.",
     auth: {
       type: "none",
     },
@@ -226,7 +359,7 @@ app.get("/.well-known/x402.json", (c) =>
       {
         path: "/api/chat",
         method: "POST",
-        price: "$0.01",
+        price: "up to $0.10 (billed by usage, ~$0.003-$0.015)",
         description: "AI-powered DeFi chat — natural language to swap/bridge/LP calldata",
       },
       {
@@ -240,6 +373,151 @@ app.get("/.well-known/x402.json", (c) =>
         method: "POST",
         price: "$0.002",
         description: "Direct tool invocation without LLM — get_swap_quote, get_vault_info, build_vault_swap, etc.",
+      },
+    ],
+  }),
+);
+
+// api-catalog — RFC 9727 / RFC 9264 linkset format (Content-Type: application/linkset+json)
+app.get("/.well-known/api-catalog", (c) => {
+  c.header("content-type", "application/linkset+json");
+  return c.json({
+    linkset: [
+      {
+        anchor: "https://trader.rigoblock.com",
+        "service-desc": [
+          { href: "https://trader.rigoblock.com/openapi.json", type: "application/openapi+json" },
+        ],
+        "service-doc": [
+          { href: "https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md" },
+        ],
+        describedby: [
+          { href: "https://trader.rigoblock.com/.well-known/ai-plugin.json", type: "application/json" },
+        ],
+      },
+      {
+        anchor: "https://trader.rigoblock.com/api/chat",
+        "service-desc": [
+          { href: "https://trader.rigoblock.com/openapi.json" },
+        ],
+        type: [{ href: "https://trader.rigoblock.com/.well-known/x402.json" }],
+      },
+      {
+        anchor: "https://trader.rigoblock.com/api/quote",
+        "service-desc": [
+          { href: "https://trader.rigoblock.com/openapi.json" },
+        ],
+      },
+      {
+        anchor: "https://trader.rigoblock.com/api/tools",
+        "service-desc": [
+          { href: "https://trader.rigoblock.com/openapi.json" },
+        ],
+      },
+    ],
+  });
+});
+
+// MCP Server Card — minimal card for MCP-compatible agent discovery
+app.get("/.well-known/mcp/server-card.json", (c) =>
+  c.json({
+    serverInfo: {
+      name: "Rigoblock Trading Agent",
+      version: "0.7.0",
+      description:
+        "AI-powered DeFi trading for Rigoblock smart vaults. Swap, bridge, LP, stake, and manage positions across 7 chains.",
+    },
+    transport: {
+      endpoint: "https://trader.rigoblock.com/api/chat",
+      protocol: "http",
+    },
+    capabilities: ["tools"],
+    payment: {
+      scheme: "x402",
+      network: "eip155:8453",
+      price: "$0.01 USDC per request",
+    },
+  }),
+);
+
+// OAuth Protected Resource metadata (RFC 9728) — describes how to authenticate.
+// Note: this service uses x402 (USDC micropayments) instead of OAuth bearer tokens.
+// This stub exists for agent compatibility frameworks that probe /.well-known/oauth-protected-resource.
+app.get("/.well-known/oauth-protected-resource", (c) =>
+  c.json({
+    resource: "https://trader.rigoblock.com",
+    authorization_servers: [],
+    bearer_methods_supported: [],
+    resource_documentation: "https://trader.rigoblock.com/.well-known/ai-plugin.json",
+    resource_policy_uri: "https://trader.rigoblock.com/.well-known/x402.json",
+    x402: {
+      description:
+        "This resource uses x402 micropayments (USDC on Base) instead of OAuth bearer tokens.",
+      discovery_url: "https://trader.rigoblock.com/.well-known/x402.json",
+    },
+  }),
+);
+
+// OAuth 2.0 Authorization Server Metadata (RFC 8414) — discovery stub for agent frameworks.
+// This service does NOT use OAuth bearer tokens; it uses x402 micropayments.
+// Returning a valid RFC 8414 document prevents 404s from confusing agent frameworks
+// that probe this endpoint before deciding how to authenticate. The document
+// accurately describes the available grant types (none, since payment is via x402).
+app.get("/.well-known/oauth-authorization-server", (c) =>
+  c.json({
+    issuer: "https://trader.rigoblock.com",
+    authorization_endpoint: "https://trader.rigoblock.com/.well-known/oauth-authorization-server",
+    token_endpoint: "https://trader.rigoblock.com/.well-known/oauth-authorization-server",
+    jwks_uri: "https://trader.rigoblock.com/.well-known/oauth-authorization-server",
+    grant_types_supported: [],
+    response_types_supported: [],
+    token_endpoint_auth_methods_supported: [],
+    scopes_supported: [],
+    x402: {
+      description:
+        "This service uses x402 micropayments (USDC on Base) instead of OAuth. " +
+        "See /.well-known/x402.json for endpoint pricing and payment instructions.",
+      discovery_url: "https://trader.rigoblock.com/.well-known/x402.json",
+    },
+  }),
+);
+
+// OpenID Connect Discovery (OIDC Core 1.0 §4) — discovery stub for agent frameworks.
+// Same rationale as oauth-authorization-server above: valid JSON prevents 404 confusion.
+app.get("/.well-known/openid-configuration", (c) =>
+  c.json({
+    issuer: "https://trader.rigoblock.com",
+    authorization_endpoint: "https://trader.rigoblock.com/.well-known/openid-configuration",
+    token_endpoint: "https://trader.rigoblock.com/.well-known/openid-configuration",
+    jwks_uri: "https://trader.rigoblock.com/.well-known/openid-configuration",
+    response_types_supported: [],
+    subject_types_supported: ["public"],
+    id_token_signing_alg_values_supported: [],
+    grant_types_supported: [],
+    x402: {
+      description:
+        "This service uses x402 micropayments (USDC on Base) instead of OpenID Connect. " +
+        "See /.well-known/x402.json for endpoint pricing and payment instructions.",
+      discovery_url: "https://trader.rigoblock.com/.well-known/x402.json",
+    },
+  }),
+);
+
+// Agent Skills Discovery index (RFC v0.2.0) — machine-readable list of reusable agent skills.
+// See https://github.com/cloudflare/agent-skills-discovery-rfc
+app.get("/.well-known/agent-skills/index.json", (c) =>
+  c.json({
+    $schema: "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+    skills: [
+      {
+        name: "rigoblock-trading",
+        type: "skill-md",
+        description:
+          "DeFi trading skill for Rigoblock smart vaults: swaps, bridges, LP, staking, NAV queries " +
+          "across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, and Unichain via x402 payments.",
+        url: "https://trader.rigoblock.com/rigoblock-skill/SKILL.md",
+        digest:
+          "sha256:acc3fd047093b12c5e16860b5f3ae15d457c0a8b041151ac80170d23730aec75",
       },
     ],
   }),

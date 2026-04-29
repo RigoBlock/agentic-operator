@@ -1,16 +1,21 @@
 /**
- * x402 v2 Payment Middleware
+ * x402 Payment Middleware
  *
  * Gates premium API endpoints behind x402 micropayments (USDC on Base mainnet).
  * Own-user requests (browser UI, Telegram) are exempt via the onProtectedRequest hook.
- * External AI agents pay per call using the x402 v2 protocol.
+ * External AI agents pay per call using the x402 protocol.
  *
  * Pricing:
- *   POST /api/chat  → $0.01  (LLM-powered trading chat)
- *   GET  /api/quote → $0.002 (DEX price quote)
+ *   POST /api/chat  → upto $0.10 USDC (actual cost billed; ~$0.003–$0.015 typical)
+ *   GET  /api/quote → exact $0.002 USDC (DEX price quote)
  *
- * Uses @x402/core v2 SDK with ExactEvmScheme (server-side) and the CDP
- * facilitator at api.cdp.coinbase.com for Base mainnet support.
+ * The /api/chat endpoint uses the "upto" scheme — clients authorise up to $0.10
+ * but are only charged the actual inference cost (determined by token usage).
+ * The Settlement-Overrides response header carries the exact dollar amount back
+ * to the x402 facilitator. Callers never pay more than $0.10 per call.
+ *
+ * Uses @x402/core SDK with ExactEvmScheme (quotes) and UptoEvmScheme (chat).
+ * CDP facilitator at api.cdp.coinbase.com handles verification and settlement.
  * Bazaar discovery metadata is declared via @x402/extensions declareDiscoveryExtension.
  *
  * @see https://docs.cdp.coinbase.com/x402/quickstart-for-sellers
@@ -20,6 +25,7 @@ import {
   x402ResourceServer,
   x402HTTPResourceServer,
   HTTPFacilitatorClient,
+  SETTLEMENT_OVERRIDES_HEADER,
 } from "@x402/core/server";
 import type {
   HTTPAdapter,
@@ -28,10 +34,12 @@ import type {
   RoutesConfig,
 } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
-import { declareDiscoveryExtension, bazaarResourceServerExtension } from "@x402/extensions";
+import { UptoEvmScheme } from "@x402/evm/upto/server";
+import { bazaarResourceServerExtension } from "@x402/extensions";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler } from "hono";
 import type { Env, AppVariables } from "../types.js";
+import { verifySessionToken, SESSION_HEADER } from "../utils/session.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
 
@@ -54,11 +62,12 @@ const EXEMPT_ORIGINS = new Set([
 
 const PROTECTED_ROUTES: RoutesConfig = {
   "POST /api/chat": {
+    resource: "https://trader.rigoblock.com/api/chat",
     accepts: [
       {
-        scheme: "exact",
+        scheme: "upto",
         payTo: PAY_TO,
-        price: "$0.01",
+        price: "$0.10",
         network: BASE_NETWORK,
       },
     ],
@@ -78,6 +87,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
     extensions: {
       bazaar: {
         info: {
+          name: "Rigoblock",
           input: {
             type: "http",
             method: "POST",
@@ -133,6 +143,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
     },
   },
   "GET /api/quote": {
+    resource: "https://trader.rigoblock.com/api/quote",
     accepts: [
       {
         scheme: "exact",
@@ -141,29 +152,65 @@ const PROTECTED_ROUTES: RoutesConfig = {
         network: BASE_NETWORK,
       },
     ],
-    description: "DEX price quotes from Uniswap and 0x aggregator across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).",
+    description: "DEX price quotes from Uniswap across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).",
     mimeType: "application/json",
-    extensions: declareDiscoveryExtension({
-      input: {
-        sell: "Token to sell (ETH, USDC, WBTC, or contract address)",
-        buy: "Token to buy (ETH, USDC, WBTC, or contract address)",
-        amount: "Amount to sell (human-readable, e.g. '1' for 1 ETH)",
-        chain: "Chain name or ID (e.g. 'base', '8453', 'arbitrum', '42161')",
-      },
-      output: {
-        example: {
-          sell: "1 ETH",
-          buy: "2079.54 USDC",
-          price: "1 ETH = 2079.54 USDC",
-          routing: "CLASSIC",
-          gasFeeUSD: "0.0024",
-          gasLimit: "394000",
-          chainId: 8453,
+    extensions: {
+      bazaar: {
+        info: {
+          name: "Rigoblock",
+          input: {
+            type: "http",
+            method: "GET",
+            queryParams: {
+              sell: "Token to sell (ETH, USDC, WBTC, or contract address)",
+              buy: "Token to buy (ETH, USDC, WBTC, or contract address)",
+              amount: "Amount to sell (human-readable, e.g. '1' for 1 ETH)",
+              chain: "Chain name or ID (e.g. 'base', '8453', 'arbitrum', '42161')",
+            },
+          },
+          output: {
+            type: "json",
+            example: {
+              sell: "1 ETH",
+              buy: "2079.54 USDC",
+              price: "1 ETH = 2079.54 USDC",
+              routing: "CLASSIC",
+              gasFeeUSD: "0.0024",
+              gasLimit: "394000",
+              chainId: 8453,
+            },
+          },
+        },
+        schema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            input: {
+              type: "object",
+              properties: {
+                type: { type: "string", const: "http" },
+                method: { type: "string" },
+                queryParams: { type: "object" },
+              },
+              required: ["type"],
+              additionalProperties: false,
+            },
+            output: {
+              type: "object",
+              properties: {
+                type: { type: "string" },
+                example: { type: "object" },
+              },
+              required: ["type"],
+            },
+          },
+          required: ["input"],
         },
       },
-    }),
+    },
   },
-  "POST /api/tools/*": {
+  "POST /api/oracle/refresh": {
+    resource: "https://trader.rigoblock.com/api/oracle/refresh",
     accepts: [
       {
         scheme: "exact",
@@ -173,27 +220,98 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     ],
     description:
-      "Direct DeFi tool invocation without LLM overhead. POST to /api/tools/{toolName} with arguments. " +
-      "Read-only tools ($0.002): get_swap_quote, get_vault_info, get_token_balance, get_pool_info, " +
-      "get_lp_positions, gmx_get_positions, gmx_get_markets, check_delegation_status, " +
-      "get_crosschain_quote, get_aggregated_nav, get_rebalance_plan, list_twap_orders, " +
-      "list_strategies, list_nav_syncs. " +
-      "Vault-action tools require operator auth signature (build_vault_swap, build_lp_add, " +
-      "build_lp_remove, gmx_open_position, bridge_tokens, stake_grg, etc.).",
+      "Build an unsigned OPERATOR EOA transaction that swaps ETH on the BackgeoOracle's " +
+      "dedicated Uniswap V4 pool to create a fresh price observation and fix a stale TWAP feed. " +
+      "Use when the Swap Shield blocks a trade due to oracle price divergence.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
         info: {
+          name: "Rigoblock",
           input: {
             type: "http",
             method: "POST",
             queryParams: {
-              toolName: "Tool name as URL path segment (e.g. get_swap_quote, get_vault_info, build_vault_swap)",
-              arguments: "Tool-specific arguments object (see tool name for required fields)",
+              token: "ERC-20 token symbol or address whose oracle feed is stale (e.g. 'GRG', 'USDC')",
+              amountEth: "Amount of ETH to swap (e.g. '0.001'). Larger converges TWAP faster.",
+              chainId: "EVM chain ID where the oracle pool lives (e.g. 42161, 8453)",
+            },
+          },
+          output: {
+            type: "json",
+            example: {
+              transaction: {
+                to: "0xUniversalRouter",
+                data: "0xcalldata",
+                value: "0x38d7ea4c68000",
+                chainId: 42161,
+                gas: "0x61a80",
+                description: "Oracle pool refresh: swap 0.001 ETH → GRG on BackgeoOracle V4 pool",
+              },
+              poolInfo: {
+                oracle: "0x3043e182047F8696dFE483535785ed1C3681baC4",
+                currency0: "0x0000000000000000000000000000000000000000",
+                currency1: "0x4De83a33d0d24B9d3C33A67A844A72b41d2E8e86",
+                tokenSymbol: "GRG",
+                poolId: "0xabc...",
+                cardinality: 1,
+              },
+            },
+          },
+        },
+        schema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            input: {
+              type: "object",
+              properties: {
+                type: { type: "string", const: "http" },
+                method: { type: "string" },
+                queryParams: { type: "object" },
+              },
+              required: ["type"],
+              additionalProperties: false,
+            },
+            output: {
+              type: "object",
+              properties: {
+                type: { type: "string" },
+                example: { type: "object" },
+              },
+              required: ["type"],
+            },
+          },
+          required: ["input"],
+        },
+      },
+    },
+  },
+  "POST /api/tools/*": {
+    resource: "https://trader.rigoblock.com/api/tools",
+    accepts: [
+      {
+        scheme: "exact",
+        payTo: PAY_TO,
+        price: "$0.002",
+        network: BASE_NETWORK,
+      },
+    ],
+    description:
+      "Direct DeFi tool invocation. POST to /api/tools/{toolName} with arguments object.",
+    mimeType: "application/json",
+    extensions: {
+      bazaar: {
+        info: {
+          name: "Rigoblock",
+          input: {
+            type: "http",
+            method: "POST",
+            queryParams: {
+              toolName: "Tool name (e.g. get_swap_quote, get_vault_info, build_vault_swap)",
+              arguments: "Tool arguments object",
               chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
-              vaultAddress: "Rigoblock vault address (required for vault-specific tools)",
-              operatorAddress: "Vault owner address (required for action tools in delegated mode)",
-              authSignature: "EIP-191 signature by operatorAddress (required for delegated execution)",
+              vaultAddress: "Rigoblock vault address (optional)",
             },
           },
           output: {
@@ -203,7 +321,6 @@ const PROTECTED_ROUTES: RoutesConfig = {
                 sell: "1 ETH",
                 buy: "2079.54 USDC",
                 price: "1 ETH = 2079.54 USDC",
-                routing: "CLASSIC",
                 chainId: 8453,
               },
             },
@@ -254,30 +371,36 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
 
   const resourceServer = new x402ResourceServer([cdpFacilitator])
     .register(BASE_NETWORK, new ExactEvmScheme())
+    .register(BASE_NETWORK, new UptoEvmScheme())
     .registerExtension(bazaarResourceServerExtension);
 
   const server = new x402HTTPResourceServer(resourceServer, PROTECTED_ROUTES);
 
-  // Exempt own-frontend requests from payment
+  // Exempt own-frontend requests from payment.
+  // When SESSION_SECRET is set (production): validate HMAC session token.
+  // When SESSION_SECRET is absent (dev): fall back to Origin/Referer headers.
   server.onProtectedRequest(async (ctx) => {
     const adapter = ctx.adapter;
-    const secFetchSite = adapter.getHeader("sec-fetch-site");
-    if (secFetchSite === "same-origin") {
-      return { grantAccess: true };
+
+    if (env.SESSION_SECRET) {
+      const token = adapter.getHeader(SESSION_HEADER);
+      if (token && await verifySessionToken(token, env.SESSION_SECRET)) {
+        return { grantAccess: true };
+      }
+      // No valid session token → proceed to payment flow
+      return;
     }
 
+    // Dev fallback: Origin/Referer (spoofable, acceptable for local development)
     const origin = adapter.getHeader("origin");
     if (origin && EXEMPT_ORIGINS.has(origin)) {
       return { grantAccess: true };
     }
-
     const referer = adapter.getHeader("referer");
     if (referer) {
-      for (const o of EXEMPT_ORIGINS) {
-        if (referer.startsWith(o)) {
-          return { grantAccess: true };
-        }
-      }
+      try {
+        if (EXEMPT_ORIGINS.has(new URL(referer).origin)) return { grantAccess: true };
+      } catch { /* ignore malformed */ }
     }
     // Continue to payment flow
   });
@@ -311,6 +434,32 @@ function honoAdapter(c: { req: { header(name: string): string | undefined; metho
 }
 
 // ── Middleware factory ─────────────────────────────────────────────────
+
+/**
+ * Returns true if the request appears to originate from one of our own frontends.
+ * Used by routes to allow unauthenticated manual-mode access (browser users viewing
+ * a vault they don't own) without requiring x402 payment.
+ *
+ * ⚠️  Origin and Referer are client-supplied headers and CAN be spoofed by any
+ * non-browser HTTP client. The consequence of spoofing is financial (free API calls),
+ * NOT a security issue — delegated vault execution still requires a valid EIP-191
+ * operator signature + on-chain ownership verification. A proper server-verifiable
+ * mechanism (httpOnly session cookie minted by the Worker, or Cloudflare Access JWT)
+ * would close this gap; until then this function is a browser-convention heuristic.
+ */
+export function isExemptBrowserRequest(getHeader: (name: string) => string | undefined): boolean {
+  const origin = getHeader("origin");
+  if (origin && EXEMPT_ORIGINS.has(origin)) return true;
+  const referer = getHeader("referer");
+  if (referer) {
+    try {
+      if (EXEMPT_ORIGINS.has(new URL(referer).origin)) return true;
+    } catch {
+      // Ignore malformed Referer values
+    }
+  }
+  return false;
+}
 
 /**
  * Creates the x402 v2 payment middleware for Hono.
@@ -359,6 +508,16 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
 
     if (result.type === "payment-error") {
       const { status, headers, body, isHtml } = result.response;
+      // Log the error reason so we can see it in wrangler tail
+      const hasPaymentSig = !!adapter.getHeader("payment-signature");
+      if (hasPaymentSig) {
+        // Payment was provided but rejected — log details
+        console.error("[x402] Payment rejected", {
+          path: adapter.getPath(),
+          error: (body as Record<string, unknown>)?.error,
+          status,
+        });
+      }
       for (const [k, v] of Object.entries(headers)) {
         c.header(k, v);
       }
@@ -382,12 +541,16 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
       return;
     }
 
-    // Settle the payment after a successful response
+    // Settle the payment after a successful response.
+    // For upto-scheme routes (/api/chat), the route sets a Settlement-Overrides header
+    // with the actual inference cost, which the SDK reads from responseHeaders and uses
+    // as the settlement amount (always <= maxAmountRequired).
+    const responseHeaders = Object.fromEntries(c.res.headers.entries());
     const settleResult = await server.processSettlement(
       paymentPayload,
       paymentRequirements,
       declaredExtensions,
-      { request: context },
+      { request: context, responseHeaders },
     );
 
     if (settleResult.success) {

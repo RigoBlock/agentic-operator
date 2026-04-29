@@ -12,12 +12,42 @@
  */
 
 import { Hono } from "hono";
-import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode, StreamEvent } from "../types.js";
+import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode, StreamEvent, ChatMessage } from "../types.js";
 import { processChat } from "../llm/client.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
+
 import { sanitizeError } from "../config.js";
 import { executeTxList, formatOutcomesMarkdown, ExecutionError } from "../services/execution.js";
 import type { Address } from "viem";
+
+/**
+ * Estimate inference cost for x402 upto-scheme settlement.
+ *
+ * Uses a simple token estimate: input chars / 4 ≈ input tokens,
+ * output chars / 4 ≈ output tokens. Pricing is $1.50/M input +
+ * $5.00/M output (covers Kimi K2.6 cost with ~50% margin).
+ * Clamped to [$0.003, $0.10] — the min covers overhead and the
+ * max must be <= the upto scheme's maxAmountRequired.
+ *
+ * Returns a dollar string like "$0.0047" for use in Settlement-Overrides header.
+ */
+function estimateInferenceCost(
+  inputMessages: ChatMessage[],
+  response: ChatResponse,
+): string {
+  const inputChars = inputMessages.reduce(
+    (s, m) => s + (typeof m.content === "string" ? m.content.length : 0),
+    0,
+  );
+  const outputChars =
+    (response.reply?.length || 0) +
+    (response.toolCalls?.reduce((s, tc) => s + JSON.stringify(tc).length, 0) || 0);
+
+  const inputKTokens = inputChars / 4000;
+  const outputKTokens = outputChars / 4000;
+  const cost = Math.max(0.003, Math.min(0.10, inputKTokens * 0.0015 + outputKTokens * 0.005));
+  return `$${cost.toFixed(4)}`;
+}
 
 const chat = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
@@ -36,21 +66,22 @@ chat.post("/", async (c) => {
     const resolvedVaultAddress: Address = (body.vaultAddress || ZERO_ADDRESS) as Address;
 
     // ── Auth gate ──
-    // x402 payment = API access fee. Operator auth = vault authorization.
-    // These are independent. An x402 request CAN also include operator auth.
-    //   - x402 paid + no auth → manual mode only (unsigned tx data)
-    //   - x402 paid + auth    → manual or delegated (full access)
-    //   - browser (exempt) + auth → manual or delegated (full access)
-    //   - browser (exempt) + no auth → manual mode only (read-only, non-owner viewing a vault)
-    // Delegated execution ALWAYS requires proven vault ownership.
+    // x402 payment = API access fee (external agents). Operator auth = vault authorization.
+    // Session token (X-Rigoblock-Session, set by browserVerified middleware) = verified browser.
+    //
+    //   x402 + no auth         → manual mode (unsigned tx data)
+    //   x402 + auth (owner)    → manual or delegated
+    //   session + no auth      → manual mode (browser user, no vault specified)
+    //   session + auth (owner) → manual or delegated
+    //   auth only, non-owner   → 403
+    //   no x402, no session    → 401
+    //
+    // Delegated execution ALWAYS requires proven vault ownership (operatorVerified).
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
     let operatorVerified = false;
-
-    // Detect browser-origin requests (same-origin or Telegram exempt)
-    const isBrowserRequest = c.req.header("sec-fetch-site") === "same-origin";
+    const isBrowserRequest = c.get("browserVerified") ?? false;
 
     if (hasAuthCredentials) {
-      // Auth credentials provided — verify regardless of x402 status
       await verifyOperatorAuth({
         operatorAddress: body.operatorAddress || "",
         vaultAddress: body.vaultAddress,
@@ -61,10 +92,8 @@ chat.post("/", async (c) => {
       });
       operatorVerified = true;
     } else if (!c.get("x402Paid") && !isBrowserRequest) {
-      // No auth + no x402 payment + not browser → reject
       throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
     }
-    // else: x402 paid or browser without auth → allowed in manual mode only (below)
 
     // ── Resolve execution mode ──
     // Delegated execution REQUIRES proven vault ownership. No exceptions.
@@ -84,10 +113,17 @@ chat.post("/", async (c) => {
       }
     }
 
-    // Filter to valid messages
+    // Filter to valid messages and enforce per-message length limit (8 KB).
+    // Prevents context flooding and excessively expensive LLM calls.
+    const MAX_MSG_CHARS = 8_000;
     const allMessages = body.messages.filter(
       (m) => m.role && m.content && typeof m.content === "string",
     );
+
+    const oversized = allMessages.find((m) => (m.content as string).length > MAX_MSG_CHARS);
+    if (oversized) {
+      return c.json({ error: `Message too long (max ${MAX_MSG_CHARS} characters per message).` }, 400);
+    }
 
     if (allMessages.length === 0) {
       return c.json({ error: "No valid messages provided" }, 400);
@@ -101,6 +137,7 @@ chat.post("/", async (c) => {
       chainId: body.chainId,
       operatorAddress: body.operatorAddress as Address | undefined,
       operatorVerified,
+      isBrowserRequest,
       executionMode,
       aiApiKey: body.aiApiKey,
       aiModel: body.aiModel,
@@ -159,9 +196,8 @@ chat.post("/", async (c) => {
               }
             }
 
-            if (response.reply) {
-              send({ type: "text", content: response.reply });
-            }
+            // Don't send reply as 'text' — that would overwrite the streaming plan block.
+            // The reply is included in the 'done' event and rendered by handleChatResponse.
             send({ type: "done", response });
           } catch (err) {
             const message = sanitizeError(err instanceof Error ? err.message : "Internal error");
@@ -221,6 +257,14 @@ chat.post("/", async (c) => {
 
         response.reply = formatOutcomesMarkdown(outcomes);
       }
+    }
+
+    // Set Settlement-Overrides header so the x402 upto-scheme middleware
+    // settles for the actual inference cost rather than the full $0.10 max.
+    // Only set for x402-paid requests (external agents). Browser sessions are
+    // exempt from x402 and don't go through upto settlement.
+    if (c.get("x402Paid")) {
+      c.header("Settlement-Overrides", JSON.stringify({ amount: estimateInferenceCost(messages, response) }));
     }
 
     return c.json(response);
