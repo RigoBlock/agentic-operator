@@ -676,17 +676,17 @@
         <div>
           <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Provider</label>
           <select id="ai-provider" onchange="onAiProviderChange()" style="width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;">
-            <option value="server">Llama 3.3 70B (default)</option>
+            <option value="server">Kimi K2.6 (default, via Workers AI)</option>
             <option value="openrouter">OpenRouter (100+ models)</option>
             <option value="anthropic">Anthropic (direct)</option>
             <option value="openai">OpenAI (direct)</option>
           </select>
         </div>
         <div id="ai-routing-row">
-          <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Server Model</label>
+          <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Routing Mode</label>
           <select id="ai-routing-mode" style="width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;">
-            <option value="">DeepSeek R1 + Llama 3.3 (default — reasoning + tool calling)</option>
-            <option value="llama_only">Llama 3.3 only (faster, skips reasoning)</option>
+            <option value="">Kimi K2.6 (default — reasoning + tool calling)</option>
+            <option value="llama_only">Llama 3.3 only (faster, no reasoning)</option>
           </select>
         </div>
         <div id="ai-key-row" style="display: none;">
@@ -1096,8 +1096,8 @@
         aiSettings.apiKey = '';
         aiSettings.model = '';
         document.getElementById('ai-status').textContent = aiSettings.routingMode === 'llama_only'
-          ? 'Using Workers AI Llama 3.3 70B only — fastest responses, no reasoning pass. No API key needed.'
-          : 'Using Workers AI DeepSeek R1 + Llama 3.3 — reasoning then tool calling. No API key needed.';
+          ? 'Using Workers AI Llama 3.3 70B only — fastest responses, no reasoning. No API key needed.'
+          : 'Using Workers AI Kimi K2.6 — native reasoning + tool calling. No API key needed.';
       }
       saveAiSettings();
     }
@@ -2329,6 +2329,7 @@
             to: pendingTx.to,
             data: pendingTx.data,
             gas: pendingTx.gas,
+            value: pendingTx.value || '0x0',
           }],
         });
 
@@ -2494,6 +2495,7 @@
             to: tx.to,
             data: tx.data,
             gas: tx.gas,
+            value: tx.value || '0x0',
           }],
         });
 

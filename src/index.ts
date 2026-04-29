@@ -21,6 +21,7 @@ import { delegation } from "./routes/delegation.js";
 import { gasPolicy } from "./routes/gasPolicy.js";
 import { telegram } from "./routes/telegram.js";
 import { tools as toolsRoute } from "./routes/tools.js";
+import { oracle } from "./routes/oracle.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
@@ -91,6 +92,7 @@ app.get("/api/session", async (c) => {
 
 app.route("/api/chat", chat);
 app.route("/api/quote", quote);
+app.route("/api/oracle", oracle);
 app.route("/api/tools", toolsRoute);
 app.route("/api/delegation", delegation);
 app.route("/api/gas-policy", gasPolicy);
@@ -191,7 +193,7 @@ app.get("/api/health", (c) =>
       ],
       payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
       paidRoutes: {
-        "POST /api/chat": "$0.015",
+        "POST /api/chat": "up to $0.10 (billed by usage, ~$0.003-$0.015)",
         "GET /api/quote": "$0.002",
         "POST /api/tools/*": "$0.002",
       },
@@ -227,7 +229,7 @@ app.get("/api", (c) => {
       discoveryUrl: "https://trader.rigoblock.com/.well-known/x402.json",
       openApiUrl: "https://trader.rigoblock.com/openapi.json",
       endpoints: {
-        "POST /api/chat": { price: "$0.015", description: "Natural language DeFi agent — swap/bridge/LP/stake calldata" },
+        "POST /api/chat": { price: "up to $0.10 (billed by usage)", description: "Natural language DeFi agent — swap/bridge/LP/stake calldata" },
         "GET /api/quote": { price: "$0.002", description: "DEX price quote across 7 chains" },
         "POST /api/tools/{toolName}": { price: "$0.002", description: "Direct tool invocation — structured input/output" },
       },
@@ -330,7 +332,7 @@ app.get("/.well-known/ai-plugin.json", (c) =>
       "Uniswap v4 LP management, GMX perpetuals, GRG staking, vault deployment, " +
       "and aggregated NAV across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain. " +
       "All vault-modifying operations require operator authentication and are protected by a 10% NAV shield. " +
-      "Payment: $0.015 USDC per chat request, $0.002 per quote/tool call, via x402 on Base.",
+      "Payment: up to $0.10 USDC per chat request (billed by inference usage, ~$0.003–$0.015), $0.002 per quote/tool call, via x402 on Base.",
     auth: {
       type: "none",
     },
@@ -357,7 +359,7 @@ app.get("/.well-known/x402.json", (c) =>
       {
         path: "/api/chat",
         method: "POST",
-        price: "$0.015",
+        price: "up to $0.10 (billed by usage, ~$0.003-$0.015)",
         description: "AI-powered DeFi chat — natural language to swap/bridge/LP calldata",
       },
       {

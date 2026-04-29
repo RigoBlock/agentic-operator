@@ -76,6 +76,7 @@ import {
   MIN_SLIPPAGE_BPS,
   MAX_SLIPPAGE_BPS,
 } from "../services/swapShield.js";
+import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
 // These appear as 4-byte hex prefixes in "execution reverted" messages.
@@ -322,6 +323,9 @@ async function callWorkersAI(
     let reasoning = '';
     // Throttle reasoning events: emit at most every 150ms to avoid flooding the SSE pipe
     let lastEmitTime = 0;
+    // Collect native tool_call deltas (OpenAI streaming format)
+    // index → {id, name, arguments}
+    const deltaToolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
 
     while (true) {
       const { done, value } = await reader.read();
@@ -338,7 +342,24 @@ async function callWorkersAI(
 
         try {
           const json = JSON.parse(trimmed.slice(6));
-          const token: string = json.response || '';
+
+          // Collect native tool_call deltas (Kimi K2.6 uses OpenAI structured format)
+          const deltaToolCalls = json.choices?.[0]?.delta?.tool_calls;
+          if (Array.isArray(deltaToolCalls)) {
+            for (const tc of deltaToolCalls) {
+              const idx: number = tc.index ?? 0;
+              if (!deltaToolCallMap.has(idx)) {
+                deltaToolCallMap.set(idx, { id: tc.id || '', name: '', arguments: '' });
+              }
+              const entry = deltaToolCallMap.get(idx)!;
+              if (tc.id) entry.id = tc.id;
+              if (tc.function?.name) entry.name += tc.function.name;
+              if (tc.function?.arguments) entry.arguments += tc.function.arguments;
+            }
+          }
+
+          // Workers AI uses json.response (legacy) or json.choices[0].delta.content (OpenAI-compat)
+          const token: string = json.response || json.choices?.[0]?.delta?.content || '';
           if (!token) continue;
           fullText += token;
 
@@ -412,8 +433,28 @@ async function callWorkersAI(
       }
     }
 
+    // Prefer native delta tool_calls over text-embedded extraction.
+    // Kimi K2.6 returns structured tool_calls in the streaming delta —
+    // these are more reliable than the regex text-extraction fallback.
+    if (deltaToolCallMap.size > 0) {
+      const assembled = Array.from(deltaToolCallMap.entries())
+        .sort(([a], [b]) => a - b)
+        .map(([, tc]) => ({
+          id: tc.id || `call_stream_${Date.now()}`,
+          type: 'function' as const,
+          function: { name: tc.name, arguments: tc.arguments || '{}' },
+        }))
+        .filter(tc => tc.function.name.length > 0);
+      if (assembled.length > 0) {
+        console.log(`[Workers AI streaming] Using ${assembled.length} native delta tool_call(s): ${assembled.map(t => t.function.name).join(', ')}`);
+        hasToolCalls = true;
+        toolCalls = assembled;
+        textContent = null; // discard text — native tool_calls take precedence
+      }
+    }
+
     // Extract text-embedded tool calls (same logic as non-streaming path)
-    if (textContent) {
+    if (!hasToolCalls && !hasToolCalls && textContent) {
       const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
       const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
       const isValidTool = (n: string) => validTools.includes(n) || validTools.includes(TOOL_NAME_ALIASES[n] || '');
@@ -497,9 +538,16 @@ async function callWorkersAI(
     max_tokens: (isDeepSeek || isKimi) ? 16384 : 4096,
   });
 
-  let hasToolCalls = Array.isArray(result.tool_calls) && result.tool_calls.length > 0;
-  let toolCalls = hasToolCalls ? result.tool_calls : undefined;
-  let textContent: string | null = typeof result.response === 'string' ? result.response : null;
+  // Workers AI returns text in different fields depending on model:
+  // - Legacy format (Llama, DeepSeek): result.response (string)
+  // - OpenAI-compat format (Kimi K2.6, newer models): result.choices[0].message.content
+  const rawToolCalls = result.tool_calls ?? result.choices?.[0]?.message?.tool_calls;
+  let hasToolCalls = Array.isArray(rawToolCalls) && rawToolCalls.length > 0;
+  let toolCalls = hasToolCalls ? rawToolCalls : undefined;
+  const rawText = (typeof result.response === 'string' && result.response)
+    ? result.response
+    : (typeof result.choices?.[0]?.message?.content === 'string' ? result.choices[0].message.content : null);
+  let textContent: string | null = rawText;
 
   // Resolve tool name aliases in structured tool_calls (e.g. "swap" → "build_vault_swap").
   // If ALL tool_calls have unknown names even after aliasing, discard them and try
@@ -712,8 +760,10 @@ export async function processChat(
       // When streamReasoning is true AND we have an onStreamEvent callback,
       // pass it to callWorkersAI so tokens stream in real-time.
       // DeepSeek → 'reasoning' events (from <think> blocks)
-      // Llama → 'text' events (any output before the tool call)
-      const reasoningCallback = (streamReasoning && onStreamEvent)
+      // Kimi / Llama → 'text' events (any analysis/plan text before the tool call)
+      const isStreamingModel = params.model.includes('deepseek') ||
+        params.model.includes('kimi') || params.model.includes('moonshotai');
+      const reasoningCallback = ((streamReasoning || isStreamingModel) && onStreamEvent)
         ? (accumulated: string) => onStreamEvent({
             type: params.model.includes('deepseek') ? 'reasoning' : 'text',
             content: accumulated,
@@ -2390,6 +2440,48 @@ export async function executeToolCall(
       );
       return {
         message: "✅ Swap Shield re-enabled. All swaps will be checked against oracle prices.",
+      };
+    }
+
+    case "refresh_oracle_feed": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      const tokenArg = args.token as string;
+      if (!tokenArg) {
+        throw new Error("'token' is required. Specify the token symbol whose oracle feed is stale (e.g., 'GRG', 'USDC').");
+      }
+
+      const amountEth = args.amountEth as string;
+      if (!amountEth) {
+        throw new Error(
+          "Please specify how much ETH you want to swap on the oracle pool (e.g., '0.001' or '0.01'). " +
+          "Larger amounts move the price more aggressively and converge the TWAP faster.",
+        );
+      }
+
+      // Auto-switch chain if provided
+      let oracleChainSwitched: number | undefined;
+      if (args.chain) {
+        const requestedChain = resolveChainId(args.chain as string);
+        if (requestedChain !== ctx.chainId) {
+          ctx.chainId = requestedChain;
+          oracleChainSwitched = requestedChain;
+        }
+      }
+
+      const result = await buildOraclePoolSwapTx(
+        tokenArg,
+        amountEth,
+        ctx.chainId,
+        env.ALCHEMY_API_KEY,
+      );
+
+      return {
+        message: result.message,
+        transaction: result.transaction,
+        chainSwitch: oracleChainSwitched,
       };
     }
 
@@ -4584,11 +4676,17 @@ async function runSwapShield(
           : `(use with caution — you accept full price impact risk)\n`)
       : `3. **Disable shield** — requires operator authentication; sign in as the vault owner first ` +
         `then say "disable swap shield"\n`;
+    const refreshOracleOption = isFavorable
+      ? `4. **Refresh oracle feed** — say "refresh oracle feed for ${sellSymbol} with 0.001 ETH" to ` +
+        `swap a tiny amount of ETH on the BackgeoOracle pool from your operator wallet, creating a ` +
+        `new price observation. The TWAP will converge toward market price over ~5 minutes.\n`
+      : "";
     const options = isFavorable
       ? `Options:\n` +
         `1. **Retry later** — wait for pricing to normalize and request a fresh quote\n` +
         `2. **Verify route** — compare venues or try a different swap path\n` +
-        disableShieldOption
+        disableShieldOption +
+        refreshOracleOption
       : `Options:\n` +
         `1. **Split with TWAP** — create a TWAP order to execute ${sellAmt} ${sellSymbol} → ${buySymbol} ` +
         `in smaller slices over time, reducing price impact\n` +

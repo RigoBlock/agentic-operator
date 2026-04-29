@@ -1,16 +1,21 @@
 /**
- * x402 v2 Payment Middleware
+ * x402 Payment Middleware
  *
  * Gates premium API endpoints behind x402 micropayments (USDC on Base mainnet).
  * Own-user requests (browser UI, Telegram) are exempt via the onProtectedRequest hook.
- * External AI agents pay per call using the x402 v2 protocol.
+ * External AI agents pay per call using the x402 protocol.
  *
  * Pricing:
- *   POST /api/chat  → $0.01  (LLM-powered trading chat)
- *   GET  /api/quote → $0.002 (DEX price quote)
+ *   POST /api/chat  → upto $0.10 USDC (actual cost billed; ~$0.003–$0.015 typical)
+ *   GET  /api/quote → exact $0.002 USDC (DEX price quote)
  *
- * Uses @x402/core v2 SDK with ExactEvmScheme (server-side) and the CDP
- * facilitator at api.cdp.coinbase.com for Base mainnet support.
+ * The /api/chat endpoint uses the "upto" scheme — clients authorise up to $0.10
+ * but are only charged the actual inference cost (determined by token usage).
+ * The Settlement-Overrides response header carries the exact dollar amount back
+ * to the x402 facilitator. Callers never pay more than $0.10 per call.
+ *
+ * Uses @x402/core SDK with ExactEvmScheme (quotes) and UptoEvmScheme (chat).
+ * CDP facilitator at api.cdp.coinbase.com handles verification and settlement.
  * Bazaar discovery metadata is declared via @x402/extensions declareDiscoveryExtension.
  *
  * @see https://docs.cdp.coinbase.com/x402/quickstart-for-sellers
@@ -20,6 +25,7 @@ import {
   x402ResourceServer,
   x402HTTPResourceServer,
   HTTPFacilitatorClient,
+  SETTLEMENT_OVERRIDES_HEADER,
 } from "@x402/core/server";
 import type {
   HTTPAdapter,
@@ -28,6 +34,7 @@ import type {
   RoutesConfig,
 } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
+import { UptoEvmScheme } from "@x402/evm/upto/server";
 import { bazaarResourceServerExtension } from "@x402/extensions";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler } from "hono";
@@ -58,9 +65,9 @@ const PROTECTED_ROUTES: RoutesConfig = {
     resource: "https://trader.rigoblock.com/api/chat",
     accepts: [
       {
-        scheme: "exact",
+        scheme: "upto",
         payTo: PAY_TO,
-        price: "$0.015",
+        price: "$0.10",
         network: BASE_NETWORK,
       },
     ],
@@ -202,6 +209,84 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     },
   },
+  "POST /api/oracle/refresh": {
+    resource: "https://trader.rigoblock.com/api/oracle/refresh",
+    accepts: [
+      {
+        scheme: "exact",
+        payTo: PAY_TO,
+        price: "$0.002",
+        network: BASE_NETWORK,
+      },
+    ],
+    description:
+      "Build an unsigned OPERATOR EOA transaction that swaps ETH on the BackgeoOracle's " +
+      "dedicated Uniswap V4 pool to create a fresh price observation and fix a stale TWAP feed. " +
+      "Use when the Swap Shield blocks a trade due to oracle price divergence.",
+    mimeType: "application/json",
+    extensions: {
+      bazaar: {
+        info: {
+          name: "Rigoblock",
+          input: {
+            type: "http",
+            method: "POST",
+            queryParams: {
+              token: "ERC-20 token symbol or address whose oracle feed is stale (e.g. 'GRG', 'USDC')",
+              amountEth: "Amount of ETH to swap (e.g. '0.001'). Larger converges TWAP faster.",
+              chainId: "EVM chain ID where the oracle pool lives (e.g. 42161, 8453)",
+            },
+          },
+          output: {
+            type: "json",
+            example: {
+              transaction: {
+                to: "0xUniversalRouter",
+                data: "0xcalldata",
+                value: "0x38d7ea4c68000",
+                chainId: 42161,
+                gas: "0x61a80",
+                description: "Oracle pool refresh: swap 0.001 ETH → GRG on BackgeoOracle V4 pool",
+              },
+              poolInfo: {
+                oracle: "0x3043e182047F8696dFE483535785ed1C3681baC4",
+                currency0: "0x0000000000000000000000000000000000000000",
+                currency1: "0x4De83a33d0d24B9d3C33A67A844A72b41d2E8e86",
+                tokenSymbol: "GRG",
+                poolId: "0xabc...",
+                cardinality: 1,
+              },
+            },
+          },
+        },
+        schema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            input: {
+              type: "object",
+              properties: {
+                type: { type: "string", const: "http" },
+                method: { type: "string" },
+                queryParams: { type: "object" },
+              },
+              required: ["type"],
+              additionalProperties: false,
+            },
+            output: {
+              type: "object",
+              properties: {
+                type: { type: "string" },
+                example: { type: "object" },
+              },
+              required: ["type"],
+            },
+          },
+          required: ["input"],
+        },
+      },
+    },
+  },
   "POST /api/tools/*": {
     resource: "https://trader.rigoblock.com/api/tools",
     accepts: [
@@ -286,6 +371,7 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
 
   const resourceServer = new x402ResourceServer([cdpFacilitator])
     .register(BASE_NETWORK, new ExactEvmScheme())
+    .register(BASE_NETWORK, new UptoEvmScheme())
     .registerExtension(bazaarResourceServerExtension);
 
   const server = new x402HTTPResourceServer(resourceServer, PROTECTED_ROUTES);
@@ -455,12 +541,16 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
       return;
     }
 
-    // Settle the payment after a successful response
+    // Settle the payment after a successful response.
+    // For upto-scheme routes (/api/chat), the route sets a Settlement-Overrides header
+    // with the actual inference cost, which the SDK reads from responseHeaders and uses
+    // as the settlement amount (always <= maxAmountRequired).
+    const responseHeaders = Object.fromEntries(c.res.headers.entries());
     const settleResult = await server.processSettlement(
       paymentPayload,
       paymentRequirements,
       declaredExtensions,
-      { request: context },
+      { request: context, responseHeaders },
     );
 
     if (settleResult.success) {

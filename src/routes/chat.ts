@@ -12,13 +12,42 @@
  */
 
 import { Hono } from "hono";
-import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode, StreamEvent } from "../types.js";
+import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode, StreamEvent, ChatMessage } from "../types.js";
 import { processChat } from "../llm/client.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 
 import { sanitizeError } from "../config.js";
 import { executeTxList, formatOutcomesMarkdown, ExecutionError } from "../services/execution.js";
 import type { Address } from "viem";
+
+/**
+ * Estimate inference cost for x402 upto-scheme settlement.
+ *
+ * Uses a simple token estimate: input chars / 4 ≈ input tokens,
+ * output chars / 4 ≈ output tokens. Pricing is $1.50/M input +
+ * $5.00/M output (covers Kimi K2.6 cost with ~50% margin).
+ * Clamped to [$0.003, $0.10] — the min covers overhead and the
+ * max must be <= the upto scheme's maxAmountRequired.
+ *
+ * Returns a dollar string like "$0.0047" for use in Settlement-Overrides header.
+ */
+function estimateInferenceCost(
+  inputMessages: ChatMessage[],
+  response: ChatResponse,
+): string {
+  const inputChars = inputMessages.reduce(
+    (s, m) => s + (typeof m.content === "string" ? m.content.length : 0),
+    0,
+  );
+  const outputChars =
+    (response.reply?.length || 0) +
+    (response.toolCalls?.reduce((s, tc) => s + JSON.stringify(tc).length, 0) || 0);
+
+  const inputKTokens = inputChars / 4000;
+  const outputKTokens = outputChars / 4000;
+  const cost = Math.max(0.003, Math.min(0.10, inputKTokens * 0.0015 + outputKTokens * 0.005));
+  return `$${cost.toFixed(4)}`;
+}
 
 const chat = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
@@ -228,6 +257,14 @@ chat.post("/", async (c) => {
 
         response.reply = formatOutcomesMarkdown(outcomes);
       }
+    }
+
+    // Set Settlement-Overrides header so the x402 upto-scheme middleware
+    // settles for the actual inference cost rather than the full $0.10 max.
+    // Only set for x402-paid requests (external agents). Browser sessions are
+    // exempt from x402 and don't go through upto settlement.
+    if (c.get("x402Paid")) {
+      c.header("Settlement-Overrides", JSON.stringify({ amount: estimateInferenceCost(messages, response) }));
     }
 
     return c.json(response);
