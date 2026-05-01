@@ -13,10 +13,10 @@ export type ExecutionMode = "manual" | "delegated";
 // ── Hono context variables (set by middleware, read by routes) ─────────
 export type AppVariables = {
   /** Set to true by x402 middleware when payment is verified */
-  x402Paid: boolean;
+  x402Paid?: boolean;
   /** Set to true by session middleware when a valid X-Rigoblock-Session token is present
    *  (or Origin/Referer match in dev environments where SESSION_SECRET is not configured) */
-  browserVerified: boolean;
+  browserVerified?: boolean;
 };
 
 // ── Environment bindings ──────────────────────────────────────────────

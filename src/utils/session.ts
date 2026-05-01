@@ -55,7 +55,7 @@ export async function verifySessionToken(token: string, secret: string): Promise
     const firstDot = payload.indexOf(".");
     if (firstDot < 0) return false;
     const tsMs = parseInt(payload.slice(0, firstDot), 36);
-    if (isNaN(tsMs) || Date.now() - tsMs > EXPIRY_MS) return false;
+    if (isNaN(tsMs) || tsMs > Date.now() + 60_000 || Date.now() - tsMs > EXPIRY_MS) return false;
     const { verify: key } = await getKeys(secret);
     const sigBytes = new Uint8Array(sigHex.match(/../g)!.map((h) => parseInt(h, 16)));
     return await crypto.subtle.verify("HMAC", key, sigBytes, encoder.encode(payload));
