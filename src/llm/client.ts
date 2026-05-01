@@ -92,8 +92,8 @@ const POOL_ERROR_SELECTORS: Record<string, string> = {
 
 /**
  * Map hallucinated LLM tool names to the correct canonical tool name.
- * Workers AI (Llama) sometimes calls "swap" instead of "build_vault_swap",
- * "quote" instead of "get_swap_quote", etc.
+ * Models (especially smaller/quantized ones) sometimes call "swap" instead of
+ * "build_vault_swap", "quote" instead of "get_swap_quote", etc.
  */
 export const TOOL_NAME_ALIASES: Record<string, string> = {
   swap: "build_vault_swap",
@@ -308,6 +308,7 @@ async function callWorkersAI(
   // ── Streaming mode (all models when callback provided) ──
   // Streams tokens in real-time so the user sees progress immediately.
   // DeepSeek: emits reasoning tokens from inside <think>…</think> blocks.
+  // Kimi K2.6: emits native delta tool_calls; plain-text replies stream as text tokens.
   // Llama: emits all text tokens (any analysis before the tool call JSON).
   if (onReasoningToken) {
     const stream = await (ai as any).run(model, {
@@ -393,8 +394,9 @@ async function callWorkersAI(
               }
             }
           } else {
-            // Non-DeepSeek (Llama): emit text tokens until tool-call JSON starts.
-            // Two detection layers:
+            // Non-DeepSeek models (Kimi K2.6, Llama, etc.): emit text tokens until
+            // tool-call JSON starts. Kimi typically uses native delta tool_calls
+            // (handled above), but falls through here for plain-text responses.
             //   1. fullText starts with '{' — Llama jumped straight to JSON (common).
             //      lastEmitTime=0 means the very first token emits immediately, so we
             //      must check this BEFORE the 150ms throttle would show partial JSON.
@@ -534,7 +536,7 @@ async function callWorkersAI(
     } as any;
   }
 
-  // ── Non-streaming path (Llama, or reasoning models without reasoning callback) ──
+  // ── Non-streaming path (all models when no streaming callback provided) ──
   const result = await (ai as any).run(model, {
     messages: sanitizedMessages as any,
     ...(tools ? { tools: tools as any } : {}),
@@ -733,7 +735,7 @@ export async function processChat(
     // Workers AI via binding (default — no API key needed, zero-config)
     //
     // Kimi K2.6 as primary: natively handles reasoning + tool calling in one call.
-    // No DeepSeek→Llama handoff needed — Kimi reliably produces structured tool_calls.
+    // No Kimi/DeepSeek→Llama handoff needed — Kimi reliably produces structured tool_calls.
     // Orchestration follow-ups use Llama 3.3 70B for speed (simple formatting/next-step).
     //
     // Override: ctx.aiModel === "llama" or ctx.routingMode === "llama_only" skips Kimi.

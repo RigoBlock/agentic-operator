@@ -16,6 +16,7 @@
  */
 
 import { Hono } from "hono";
+import { parseUnits } from "viem";
 import type { Env, AppVariables } from "../types.js";
 import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
 import { sanitizeError, resolveChainId } from "../config.js";
@@ -71,10 +72,14 @@ oracle.post("/refresh", async (c) => {
     );
   }
 
-  // Validate amountEth is a positive number
-  const parsedAmount = parseFloat(amountEth);
-  if (isNaN(parsedAmount) || parsedAmount <= 0) {
-    return c.json({ error: "amountEth must be a positive number (e.g. '0.001')" }, 400);
+  // Validate amountEth: parseFloat accepts "0.01abc" → 0.01 and "1e-3" → 0.001,
+  // both of which later fail inside buildOraclePoolSwapTx/parseUnits with a 500.
+  // Validate strictly with parseUnits so those cases return a clear 400.
+  try {
+    const parsed = parseUnits(amountEth, 18);
+    if (parsed <= 0n) throw new Error("non-positive");
+  } catch {
+    return c.json({ error: "amountEth must be a positive decimal number (e.g. '0.001'). Scientific notation is not supported." }, 400);
   }
 
   try {
@@ -92,6 +97,7 @@ oracle.post("/refresh", async (c) => {
       msg.includes("not available on chain") ||
       msg.includes("ETH/WETH does not need") ||
       msg.includes("cardinality = 0") ||
+      msg.includes("Invalid decimal") ||
       msg.includes("Token") ||
       msg.includes("not found");
     return c.json({ error: msg }, isClientError ? 400 : 500);

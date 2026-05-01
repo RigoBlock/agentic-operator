@@ -151,7 +151,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
         network: BASE_NETWORK,
       },
     ],
-    description: "DEX price quotes from Uniswap across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).",
+    description: "Rigoblock price oracle — DEX price quotes from Uniswap across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -221,7 +221,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
     description:
       "Build an unsigned OPERATOR EOA transaction that swaps ETH on the BackgeoOracle's " +
       "dedicated Uniswap V4 pool to create a fresh price observation and fix a stale TWAP feed. " +
-      "Use when the Swap Shield blocks a trade due to oracle price divergence.",
+      "Use when the Rigoblock Swap Shield blocks a trade due to oracle price divergence.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -297,7 +297,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     ],
     description:
-      "Direct DeFi tool invocation. POST to /api/tools/{toolName} with arguments object.",
+      "Rigoblock direct DeFi tool invocation. POST to /api/tools/{toolName} with arguments object.",
     mimeType: "application/json",
     extensions: {
       bazaar: {

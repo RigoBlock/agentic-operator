@@ -18,7 +18,7 @@ import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { publicActions } from "viem";
 import { x402Client, x402HTTPClient } from "@x402/core/client";
-import { ExactEvmScheme, toClientEvmSigner } from "@x402/evm";
+import { ExactEvmScheme, UptoEvmScheme, toClientEvmSigner } from "@x402/evm";
 
 const BASE_URL = "https://trader.rigoblock.com";
 const QUOTE_URL = `${BASE_URL}/api/quote?sell=ETH&buy=USDC&amount=1&chain=base`;
@@ -135,9 +135,10 @@ async function main() {
 
   const signer = toClientEvmSigner(account, walletClient);
 
-  // 2. Build x402 v2 client
+  // 2. Build x402 v2 client — register both exact (quote, tools) and upto (chat) schemes
   const client = new x402Client();
   client.register("eip155:8453", new ExactEvmScheme(signer));
+  client.register("eip155:8453", new UptoEvmScheme(signer));
   const httpClient = new x402HTTPClient(client);
 
   // 3. Trigger GET /api/quote — registers the quote endpoint in Bazaar.
@@ -180,7 +181,8 @@ async function main() {
 
   console.log("\n" + "=".repeat(60));
   console.log("Done. Check Bazaar listings:");
-  console.log("https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources");
+  console.log("  curl 'https://api.cdp.coinbase.com/platform/v2/x402/discovery/search?query=rigoblock' | jq '.'")
+  console.log("  https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources");
 
   // Force exit — viem keeps HTTP handles alive, preventing clean shutdown
   process.exit(0);

@@ -153,37 +153,6 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
 }
 
 /**
- * Verify an EIP-191 wallet signature without checking vault ownership.
- * Used for non-owner browser users: proves they have a real wallet (anti-spam),
- * but grants only manual-mode read access (no delegated execution, no KV mutations).
- */
-export async function verifyWalletSignature(params: {
-  address: string;
-  signature: string;
-  timestamp: number;
-}): Promise<void> {
-  const { address, signature, timestamp } = params;
-  if (!address || !signature || !timestamp) {
-    throw new AuthError("Wallet signature required.", 401);
-  }
-  const now = Date.now();
-  if (now - timestamp > AUTH_EXPIRY_MS) {
-    throw new AuthError("Session expired. Please sign again.", 401);
-  }
-  if (timestamp > now + 60_000) {
-    throw new AuthError("Invalid timestamp.", 401);
-  }
-  const message = buildAuthMessage(address);
-  try {
-    const valid = await verifyMessage({ address: address as Address, message, signature: signature as `0x${string}` });
-    if (!valid) throw new AuthError("Signature verification failed.", 403);
-  } catch (err) {
-    if (err instanceof AuthError) throw err;
-    throw new AuthError("Invalid signature format.", 401);
-  }
-}
-
-/**
  * Custom error with HTTP status code.
  */
 export class AuthError extends Error {
