@@ -194,7 +194,7 @@
       "post": {
         "operationId": "invokeTool",
         "summary": "Invoke a DeFi tool directly",
-        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Read-only tools:**\n`get_swap_quote`, `get_vault_info`, `get_token_balance`, `get_pool_info`, `get_lp_positions`, `gmx_get_positions`, `gmx_get_markets`, `check_delegation_status`, `get_crosschain_quote`, `get_aggregated_nav`, `get_rebalance_plan`, `verify_bridge_arrival`, `list_twap_orders`, `list_nav_syncs`\n\n**State-changing tools:**\n`build_vault_swap`, `add_liquidity`, `remove_liquidity`, `collect_lp_fees`, `burn_position`, `gmx_open_position`, `gmx_close_position`, `gmx_increase_position`, `gmx_cancel_order`, `gmx_update_order`, `gmx_claim_funding_fees`, `crosschain_transfer`, `crosschain_sync`, `grg_stake`, `grg_unstake`, `grg_undelegate_stake`, `grg_end_epoch`, `grg_claim_rewards`, `deploy_smart_pool`, `fund_pool`, `setup_delegation`, `revoke_delegation`, `revoke_selectors`, `create_twap_order`, `cancel_twap_order`, `create_nav_sync`, `cancel_nav_sync`\n\n**Operator-scoped tools:**\n`list_strategies`, `set_default_slippage`, `disable_swap_shield`, `enable_swap_shield`\n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
+        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Read-only tools:**\n`get_swap_quote`, `get_vault_info`, `get_token_balance`, `get_pool_info`, `get_lp_positions`, `gmx_get_positions`, `gmx_get_markets`, `check_delegation_status`, `get_crosschain_quote`, `get_aggregated_nav`, `get_rebalance_plan`, `verify_bridge_arrival`, `list_twap_orders`, `list_nav_syncs`\n\n**State-changing tools:**\n`build_vault_swap`, `add_liquidity`, `remove_liquidity`, `collect_lp_fees`, `burn_position`, `gmx_open_position`, `gmx_close_position`, `gmx_increase_position`, `gmx_cancel_order`, `gmx_update_order`, `gmx_claim_funding_fees`, `crosschain_transfer`, `crosschain_sync`, `grg_stake`, `grg_unstake`, `grg_undelegate_stake`, `grg_end_epoch`, `grg_claim_rewards`, `deploy_smart_pool`, `fund_pool`, `create_twap_order`, `cancel_twap_order`, `create_nav_sync`, `cancel_nav_sync`\n\n**Operator-scoped tools (require operatorVerified):**\n`setup_delegation`, `revoke_delegation`, `revoke_selectors`, `list_strategies`, `set_default_slippage`, `disable_swap_shield`, `enable_swap_shield`\n\n**Oracle tools:**\n`refresh_oracle_feed`\n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
         "tags": [
           "Tools"
         ],
@@ -253,7 +253,8 @@
                 "list_twap_orders",
                 "create_nav_sync",
                 "list_nav_syncs",
-                "cancel_nav_sync"
+                "cancel_nav_sync",
+                "refresh_oracle_feed"
               ]
             }
           }

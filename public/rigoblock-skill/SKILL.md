@@ -16,7 +16,7 @@ Use `curl`, `fetch`, `requests`, or any HTTP client your runtime provides.
 ## Wallet Requirements
 
 You need **your own wallet** — any EVM wallet that can:
-1. Hold USDC on Base (for x402 API payments — $0.002–$0.01 per call)
+1. Hold USDC on Base (for x402 API payments — $0.002–$0.10 per call, billed by usage)
 2. Sign EIP-191 messages (for operator authentication in delegated mode)
 
 Use whatever wallet SDK you prefer: viem, ethers.js, CDP, web3.py, etc.
@@ -253,7 +253,7 @@ X-PAYMENT: <x402-payment-header>
 → { "reply": "Executed: swapped ...", "executionResult": { "txHash": "0x...", "confirmed": true } }
 ```
 
-Cost: **$0.01** per call (USDC on Base).
+Cost: **up to $0.10** per call, billed by usage via x402 (USDC on Base). Typical cost: $0.003–$0.015.
 
 ### 3. `POST /api/tools/{toolName}` — Direct Tool Invocation (optional)
 

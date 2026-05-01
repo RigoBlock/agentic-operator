@@ -71,11 +71,22 @@ app.use("/api/*", async (c, next) => {
 
 // Session token endpoint — issues HMAC-signed tokens to browser clients.
 // Rate-limited per IP (20/hour) to limit abuse; token expires in 1 hour.
-// External agents without x402 cannot benefit from these tokens because
-// GET /api/session itself is not x402-protected — the cost is the rate limit.
+// Restricted to known frontend origins so automated agents cannot bypass x402
+// by fetching a session token and including it in paid-endpoint requests.
 app.get("/api/session", async (c) => {
   if (!c.env.SESSION_SECRET) {
     return c.json({ token: null }, 200);
+  }
+  // Only issue tokens to requests from known frontend origins.
+  // Automated agents (curl, SDKs, etc.) send no Origin header and are rejected.
+  const origin = c.req.header("origin");
+  const referer = c.req.header("referer");
+  const ALLOWED: Set<string> = new Set(["https://trader.rigoblock.com", "http://localhost:8787", "http://localhost:3000"]);
+  const fromFrontend =
+    (origin && ALLOWED.has(origin)) ||
+    (referer && (() => { try { return ALLOWED.has(new URL(referer).origin); } catch { return false; } })());
+  if (!fromFrontend) {
+    return c.json({ error: "Session tokens are only issued to the Rigoblock frontend." }, 403);
   }
   const ip = c.req.header("cf-connecting-ip");
   if (ip && c.env.KV) {
@@ -215,6 +226,7 @@ app.get("/api", (c) => {
         resource: { url: "https://trader.rigoblock.com/api", description: "Rigoblock Agentic Operator API", mimeType: "application/json" },
         accepts: [
           { scheme: "exact", network: "eip155:8453", amount: "2000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37", maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" } },
+          { scheme: "upto", network: "eip155:8453", maxAmount: "100000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37", maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" } },
         ],
       }),
     ).toString("base64"),
@@ -235,6 +247,7 @@ app.get("/api", (c) => {
       },
       accepts: [
         { scheme: "exact", network: "eip155:8453", amount: "2000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37", maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" } },
+        { scheme: "upto", network: "eip155:8453", maxAmount: "100000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37", maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" } },
       ],
     },
     402,
@@ -435,7 +448,7 @@ app.get("/.well-known/mcp/server-card.json", (c) =>
     payment: {
       scheme: "x402",
       network: "eip155:8453",
-      price: "$0.01 USDC per request",
+      price: "$0.002–$0.10 USDC per request (by endpoint; /api/chat billed by usage via x402 upto scheme)",
     },
   }),
 );

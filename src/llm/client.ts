@@ -133,6 +133,11 @@ export const OPERATOR_VERIFIED_TOOLS = new Set<string>([
   "enable_swap_shield",
   // Strategy visibility is operator-private
   "list_strategies",
+  // Delegation management: these trigger server-side mutations (CDP wallet creation,
+  // KV writes) before the user signs — require ownership proof to prevent abuse.
+  "setup_delegation",
+  "revoke_delegation",
+  "revoke_selectors",
 ]);
 
 /**
@@ -150,9 +155,6 @@ export const VAULT_TX_TOOLS = new Set<string>([
   "collect_lp_fees",
   "burn_position",
   "fund_pool",
-  "setup_delegation",
-  "revoke_delegation",
-  "revoke_selectors",
   "crosschain_transfer",
   "crosschain_sync",
   "gmx_open_position",
@@ -2447,7 +2449,7 @@ export async function executeToolCall(
 
     case "refresh_oracle_feed": {
       if (!ctx.operatorAddress) {
-        throw new Error("Wallet not connected. Connect your wallet first.");
+        throw new AuthError("Wallet not connected. Connect your wallet first.", 401);
       }
 
       const tokenArg = args.token as string;
