@@ -11,12 +11,6 @@
  * For Rigoblock vaults, the calldata is sent to the vault address
  * (the vault's A0xRouter adapter routes it through AllowanceHolder internally).
  *
- * WARNING: The A0xRouter adapter is not yet deployed on most vaults.
- * Swaps will revert on-chain if the vault lacks the adapter. The default
- * DEX is Uniswap (uses the proven AUniswapRouter adapter). 0x must be
- * explicitly requested. Additionally, 0x quotes expire in ~2 minutes,
- * which is too short for Telegram's Execute-button workflow.
- *
  * Reference: https://docs.0x.org/docs/0x-swap-api/introduction
  */
 
@@ -127,7 +121,12 @@ export async function getZeroXQuote(
     chainId: String(chainId),
     sellToken,
     buyToken,
-    taker: taker || "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", // fallback for price-only queries
+    // The zero address (0x000...000) is invalid for 0x API. External agents calling
+    // get_swap_quote without a vault selection pass the zero address sentinel. Fall
+    // back to a known valid address so price-only queries succeed.
+    taker: (taker && taker.toLowerCase() !== "0x0000000000000000000000000000000000000000")
+      ? taker
+      : "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", // vitalik.eth — safe for price-only queries
     // Exclude RFQ liquidity: the Rigoblock vault's A0xRouter adapter only allows
     // on-chain AMM settler actions (UniswapV2/V3/V4, Balancer, Curve, etc.).
     // RFQ fills use a settler action not in the allowlist, so they'd revert.

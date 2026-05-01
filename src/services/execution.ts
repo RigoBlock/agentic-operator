@@ -80,6 +80,14 @@ function parseSimulationRevert(raw: string): string | null {
     return "The swap would result in too much slippage. Try again with a fresh quote or smaller amount.";
   }
 
+  // Agent wallet has no ETH to cover gas (viem local pre-check before eth_call)
+  if (lower.includes("total cost") && lower.includes("exceeds the balance")) {
+    return (
+      "Agent wallet has insufficient ETH for gas. " +
+      "Enable gas sponsorship (Alchemy paymaster) or send a small amount of ETH to the agent wallet."
+    );
+  }
+
   return null;
 }
 

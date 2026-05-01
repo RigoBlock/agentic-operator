@@ -13,17 +13,17 @@
  *   TEST_PRIVATE_KEY=0x... npx tsx scripts/trigger-bazaar.ts
  */
 
-import { createWalletClient, http, type Hex } from "viem";
+import { createWalletClient, http, maxUint256, parseAbi, type Hex } from "viem";
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { publicActions } from "viem";
 import { x402Client, x402HTTPClient } from "@x402/core/client";
-import { ExactEvmScheme, toClientEvmSigner } from "@x402/evm";
+import { ExactEvmScheme, PERMIT2_ADDRESS, UptoEvmScheme, toClientEvmSigner } from "@x402/evm";
 
 const BASE_URL = "https://trader.rigoblock.com";
 const QUOTE_URL = `${BASE_URL}/api/quote?sell=ETH&buy=USDC&amount=1&chain=base`;
 const CHAT_URL = `${BASE_URL}/api/chat`;
-const TOOLS_URL = `${BASE_URL}/api/tools/get_swap_quote`;
+const TOOLS_URL = `${BASE_URL}/api/tools`;
 
 /** Standard headers — use a browser-like UA so Cloudflare Bot Fight Mode doesn't block us. */
 const STANDARD_HEADERS: Record<string, string> = {
@@ -86,10 +86,12 @@ async function paidRequest(
     if (newPayHdr) {
       try {
         const decoded = JSON.parse(Buffer.from(newPayHdr, "base64").toString());
+        console.log("  payment-required error:", decoded?.error ?? "?");
         console.log("  payment-required resource:", decoded?.resource?.url ?? "?");
         console.log("  payment-required accepts:", JSON.stringify(decoded?.accepts?.[0]).slice(0, 200));
       } catch { /* ignore */ }
     }
+    console.log("  payment-payload accepted:", JSON.stringify((paymentPayload as any).accepted).slice(0, 200));
     console.log("Fix: check Worker logs with: wrangler tail");
     return;
   }
@@ -133,41 +135,82 @@ async function main() {
 
   const signer = toClientEvmSigner(account, walletClient);
 
-  // 2. Build x402 v2 client
+  // 2. Build x402 v2 client — register both exact (quote, tools) and upto (chat) schemes
   const client = new x402Client();
   client.register("eip155:8453", new ExactEvmScheme(signer));
+  client.register("eip155:8453", new UptoEvmScheme(signer));
   const httpClient = new x402HTTPClient(client);
 
-  // 3. Trigger GET /api/quote — registers the quote endpoint in Bazaar.
+  // 3. Ensure USDC is approved for the Permit2 contract.
+  //    The upto scheme uses permit2 PermitBatch to sign a spending authorisation.
+  //    Permit2 needs an ERC-20 allowance before it can move USDC on the payer's behalf.
+  //    This approval is a one-time on-chain transaction; subsequent runs skip it.
+  const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  const minAllowance = 100_000n; // $0.10 in µUSDC (the max upto authorisation amount)
+  const erc20Abi = parseAbi([
+    "function allowance(address owner, address spender) view returns (uint256)",
+    "function approve(address spender, uint256 amount) returns (bool)",
+  ]);
+  console.log(`\nChecking USDC permit2 allowance (needed for upto scheme / POST /api/chat)...`);
+  const currentAllowance = await walletClient.readContract({
+    address: USDC_BASE,
+    abi: erc20Abi,
+    functionName: "allowance",
+    args: [account.address, PERMIT2_ADDRESS],
+  });
+  if (currentAllowance < minAllowance) {
+    console.log(`  Allowance ${currentAllowance} µUSDC < ${minAllowance} µUSDC required — approving permit2...`);
+    const hash = await walletClient.writeContract({
+      address: USDC_BASE,
+      abi: erc20Abi,
+      functionName: "approve",
+      args: [PERMIT2_ADDRESS, maxUint256],
+    });
+    console.log(`  Approval tx: ${hash}. Waiting for confirmation...`);
+    await walletClient.waitForTransactionReceipt({ hash });
+    console.log(`  Permit2 approval confirmed.`);
+  } else {
+    console.log(`  Allowance OK (${currentAllowance} µUSDC). No approval needed.`);
+  }
+
+  // 4. Trigger GET /api/quote — registers the quote endpoint in Bazaar.
   await paidRequest(httpClient, "GET", QUOTE_URL);
 
-  // CDP rate-limits rapid consecutive payments from the same wallet — wait between each.
-  await new Promise((r) => setTimeout(r, 3000));
+  // Wait for quote settlement to be mined (Base: 2s blocks). EIP-2612 permit nonces are
+  // sequential on-chain — if settlement for nonce N is still pending when the next payment
+  // is created with nonce N+1, the CDP facilitator may reject nonce N+1 as a race.
+  // 8s gives 4 block confirmations of headroom.
+  await new Promise((r) => setTimeout(r, 8000));
 
-  // 4. Trigger POST /api/chat — registers the full trading chat in Bazaar.
+  // 5. Trigger POST /api/chat — registers the full trading chat in Bazaar.
   //    IMPORTANT: use a message that doesn't invoke any tools (no network calls
   //    to Uniswap/0x/etc.) to guarantee a fast 200 and successful settlement.
   //    "What can you do?" → LLM responds from system prompt, no tools needed.
   //    No operator auth → manual mode only (unsigned tx data, never executes).
+  //    Payment is via upto scheme: authorises up to $0.10 but only charges actual
+  //    inference cost (~$0.003-$0.015). The Settlement-Overrides header on the
+  //    200 response carries the exact billed amount back to the CDP facilitator.
   await paidRequest(httpClient, "POST", CHAT_URL, {
     messages: [{ role: "user", content: "What can you help me with? Briefly describe your capabilities." }],
     vaultAddress: "0x0000000000000000000000000000000000000000",
     chainId: 8453,
   });
 
-  // CDP rate-limits rapid consecutive payments — wait between each.
-  await new Promise((r) => setTimeout(r, 3000));
+  // Wait for chat settlement to be mined before creating tools payment.
+  await new Promise((r) => setTimeout(r, 8000));
 
-  // 5. Trigger POST /api/tools/* — registers the direct tool invocation endpoint.
-  //    Use get_swap_quote (read-only, fast) with a well-known token pair.
-  await paidRequest(httpClient, "POST", TOOLS_URL, {
-    arguments: { sell: "ETH", buy: "USDC", amount: "1", chain: "base" },
-    chainId: 8453,
-  });
+  // 6. Trigger GET /api/tools — registers the direct tool invocation endpoint.
+  //    Uses the GET /api/tools discovery endpoint (returns tools listing).
+  //    This is an exact-URL resource (not a wildcard) so the bazaar extension
+  //    can proactively pre-declare it, same as GET /api/quote.
+  //    NOTE: Total spend is ~$0.012-$0.024 USDC (quote $0.002 + chat ~$0.008 + tools $0.002).
+  //    Ensure your wallet has at least $0.03 USDC on Base mainnet.
+  await paidRequest(httpClient, "GET", TOOLS_URL);
 
   console.log("\n" + "=".repeat(60));
   console.log("Done. Check Bazaar listings:");
-  console.log("https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources");
+  console.log("  curl 'https://api.cdp.coinbase.com/platform/v2/x402/discovery/search?query=rigoblock' | jq '.'")
+  console.log("  https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources");
 
   // Force exit — viem keeps HTTP handles alive, preventing clean shutdown
   process.exit(0);

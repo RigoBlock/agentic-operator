@@ -106,7 +106,8 @@ export interface RigoblockClientConfig {
   authSignature?: string;
   authTimestamp?: number;
   executionMode: "manual" | "delegated";
-  routingMode?: "deepseek_only" | "hybrid_fast_followup";
+  /** Force Llama 3.3 70B fast-model routing, bypassing Kimi K2.6. Useful for testing or when a lightweight fast model is preferred over the default orchestration. */
+  routingMode?: "llama_only";
 }
 
 export interface ChatOptions {

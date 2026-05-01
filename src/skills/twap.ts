@@ -506,14 +506,15 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
         const buyRef = order.buyTokenAddress || order.buyToken;
 
         const toolArgs: Record<string, unknown> = side === "buy"
-          ? { tokenOut: buyRef, tokenIn: sellRef, amountOut: order.sliceAmount, dex: order.dex || "uniswap" }
-          : { tokenIn: sellRef, tokenOut: buyRef, amountIn: order.sliceAmount, dex: order.dex || "uniswap" };
+          ? { tokenOut: buyRef, tokenIn: sellRef, amountOut: order.sliceAmount, dex: order.dex || "0x" }
+          : { tokenIn: sellRef, tokenOut: buyRef, amountIn: order.sliceAmount, dex: order.dex || "0x" };
         toolArgs.chain = chainName;
 
         const ctx: RequestContext = {
           vaultAddress: order.vaultAddress as Address,
           chainId: order.chainId,
           operatorAddress: order.operatorAddress as Address,
+          isBrowserRequest: false,
           executionMode: order.autoExecute ? "delegated" : "manual",
         };
 

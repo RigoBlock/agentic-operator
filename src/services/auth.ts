@@ -99,6 +99,15 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   if (cachedExpiry && Date.now() < cachedExpiry) {
     return; // ownership recently verified
   }
+  // Negative cache: confirmed non-owners skip the RPC fan-out
+  const nonOwnerKey = `nonowner:${cacheKey}`;
+  const cachedNonOwner = ownershipCache.get(nonOwnerKey);
+  if (cachedNonOwner && Date.now() < cachedNonOwner) {
+    throw new AuthError(
+      `Access denied: ${operatorAddress.slice(0, 6)}…${operatorAddress.slice(-4)} is not the owner of vault ${vaultAddress.slice(0, 6)}…${vaultAddress.slice(-4)} on any supported chain.`,
+      403,
+    );
+  }
 
   // 4. Check vault ownership — preferred chain first, then the rest in parallel.
   //    This avoids 8 parallel RPC calls when the vault is on the selected chain.
@@ -132,6 +141,7 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   const isOwnerOnAny = results.some(Boolean);
 
   if (!isOwnerOnAny) {
+    ownershipCache.set(nonOwnerKey, Date.now() + OWNERSHIP_CACHE_TTL_MS);
     throw new AuthError(
       `Access denied: ${operatorAddress.slice(0, 6)}…${operatorAddress.slice(-4)} is not the owner of vault ${vaultAddress.slice(0, 6)}…${vaultAddress.slice(-4)} on any supported chain. Only the vault operator can use this assistant.`,
       403,
