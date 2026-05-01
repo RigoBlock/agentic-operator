@@ -89,7 +89,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
           name: "Rigoblock",
           input: {
             type: "http",
-            method: "POST",
+            method: "GET",
             queryParams: {
               messages: "Array of {role, content} chat messages",
               vaultAddress: "Rigoblock vault contract address (0x...)",
@@ -255,6 +255,65 @@ const PROTECTED_ROUTES: RoutesConfig = {
                 poolId: "0xabc...",
                 cardinality: 1,
               },
+            },
+          },
+        },
+        schema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            input: {
+              type: "object",
+              properties: {
+                type: { type: "string", const: "http" },
+                method: { type: "string" },
+                queryParams: { type: "object" },
+              },
+              required: ["type"],
+              additionalProperties: false,
+            },
+            output: {
+              type: "object",
+              properties: {
+                type: { type: "string" },
+                example: { type: "object" },
+              },
+              required: ["type"],
+            },
+          },
+          required: ["input"],
+        },
+      },
+    },
+  },
+  "GET /api/tools": {
+    resource: "https://trader.rigoblock.com/api/tools",
+    accepts: [
+      {
+        scheme: "exact",
+        payTo: PAY_TO,
+        price: "$0.002",
+        network: BASE_NETWORK,
+      },
+    ],
+    description:
+      "Rigoblock DeFi tool discovery — returns the list of available atomic tools for swap, LP, bridge, staking, and vault management. " +
+      "Each tool is invocable via POST /api/tools/{toolName} with structured arguments.",
+    mimeType: "application/json",
+    extensions: {
+      bazaar: {
+        info: {
+          name: "Rigoblock",
+          input: {
+            type: "http",
+            method: "GET",
+            queryParams: {},
+          },
+          output: {
+            type: "json",
+            example: {
+              description: "Rigoblock direct DeFi tool invocation",
+              tools: ["get_swap_quote", "build_vault_swap", "add_liquidity"],
             },
           },
         },

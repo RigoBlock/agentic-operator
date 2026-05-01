@@ -206,6 +206,7 @@ app.get("/api/health", (c) =>
       paidRoutes: {
         "POST /api/chat": "up to $0.10 (billed by usage, ~$0.003-$0.015)",
         "GET /api/quote": "$0.002",
+        "GET /api/tools": "$0.002",
         "POST /api/tools/*": "$0.002",
       },
     },

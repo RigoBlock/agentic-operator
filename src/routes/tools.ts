@@ -19,6 +19,34 @@ import type { Address } from "viem";
 
 const tools = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
+// GET /api/tools — endpoint discovery (also used for Bazaar registration).
+// Returns the list of available tools so crawlers and agents can discover them.
+// Auth: x402 payment or browser session (same as POST /:toolName).
+tools.get("/", async (c) => {
+  if (!c.get("x402Paid") && !c.get("browserVerified")) {
+    return c.json({ error: "Authentication required. Use x402 payment or a verified browser session." }, 401);
+  }
+  return c.json({
+    description: "Rigoblock direct DeFi tool invocation. POST to /api/tools/{toolName} with arguments object.",
+    usage: "POST /api/tools/{toolName}",
+    price: "$0.002 USDC per call (x402 exact scheme, eip155:8453)",
+    tools: [
+      "get_swap_quote", "build_vault_swap", "get_vault_info", "get_token_balance",
+      "get_pool_info", "add_liquidity", "remove_liquidity", "collect_lp_fees", "burn_position",
+      "get_lp_positions", "gmx_open_position", "gmx_close_position", "gmx_increase_position",
+      "gmx_get_positions", "gmx_cancel_order", "gmx_update_order", "gmx_claim_funding_fees",
+      "gmx_get_markets", "setup_delegation", "revoke_delegation", "check_delegation_status",
+      "deploy_smart_pool", "fund_pool", "crosschain_transfer", "crosschain_sync",
+      "get_crosschain_quote", "get_aggregated_nav", "get_rebalance_plan",
+      "list_strategies", "verify_bridge_arrival", "grg_stake", "grg_unstake",
+      "grg_undelegate_stake", "grg_end_epoch", "grg_claim_rewards", "revoke_selectors",
+      "set_default_slippage", "disable_swap_shield", "enable_swap_shield",
+      "create_twap_order", "cancel_twap_order", "list_twap_orders",
+      "create_nav_sync", "list_nav_syncs", "cancel_nav_sync", "refresh_oracle_feed",
+    ],
+  });
+});
+
 tools.post("/:toolName", async (c) => {
   try {
     const toolName = c.req.param("toolName");
