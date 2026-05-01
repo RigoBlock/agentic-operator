@@ -530,7 +530,7 @@
           },
           "routingMode": {
             "type": "string",
-            "description": "Force Llama-only routing, skipping the default DeepSeek reasoning pass. Omit for default DeepSeek-first orchestration.",
+            "description": "Force Llama-only routing. Omit for the default Kimi K2.6 orchestration.",
             "enum": [
               "llama_only"
             ]

@@ -19,6 +19,7 @@ import { getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay, 
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../services/zeroXTrading.js";
 import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint, getClient } from "../services/vault.js";
 import { resolveTokenAddress, resolveChainId, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, STAKING_PROXY } from "../config.js";
+import { AuthError } from "../services/auth.js";
 import { decodeFunctionData, encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../abi/poolFactory.js";
@@ -454,7 +455,7 @@ async function callWorkersAI(
     }
 
     // Extract text-embedded tool calls (same logic as non-streaming path)
-    if (!hasToolCalls && !hasToolCalls && textContent) {
+    if (!hasToolCalls && textContent) {
       const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
       const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
       const isValidTool = (n: string) => validTools.includes(n) || validTools.includes(TOOL_NAME_ALIASES[n] || '');
@@ -1810,10 +1811,10 @@ export async function executeToolCall(
   // all execution paths (LLM tool calls + immediate/deferred fast-paths).
   if (OPERATOR_VERIFIED_TOOLS.has(resolvedName)) {
     if (!ctx.operatorAddress) {
-      throw new Error("Wallet not connected. Connect your wallet first.");
+      throw new AuthError("Wallet not connected. Connect your wallet first.", 401);
     }
     if (!ctx.operatorVerified) {
-      throw new Error("Operator authentication required. Please verify your wallet first.");
+      throw new AuthError("Operator authentication required. Please verify your wallet first.", 403);
     }
   }
 
@@ -1825,11 +1826,12 @@ export async function executeToolCall(
   // (their connected wallet isn't the vault owner), wasting LLM inference.
   if (ctx.isBrowserRequest && !ctx.operatorVerified && VAULT_TX_TOOLS.has(resolvedName)) {
     if (!ctx.operatorAddress) {
-      throw new Error("Wallet not connected. Connect your wallet to authenticate.");
+      throw new AuthError("Wallet not connected. Connect your wallet to authenticate.", 401);
     }
-    throw new Error(
+    throw new AuthError(
       "Authentication required. Please sign in with your vault operator wallet to build transactions. " +
       "Click the wallet button and sign the authentication message.",
+      403,
     );
   }
 

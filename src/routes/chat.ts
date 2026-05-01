@@ -15,6 +15,7 @@ import { Hono } from "hono";
 import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode, StreamEvent, ChatMessage } from "../types.js";
 import { processChat } from "../llm/client.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
+import { SETTLEMENT_OVERRIDES_HEADER } from "@x402/core/server";
 
 import { sanitizeError } from "../config.js";
 import { executeTxList, formatOutcomesMarkdown, ExecutionError } from "../services/execution.js";
@@ -264,7 +265,7 @@ chat.post("/", async (c) => {
     // Only set for x402-paid requests (external agents). Browser sessions are
     // exempt from x402 and don't go through upto settlement.
     if (c.get("x402Paid")) {
-      c.header("Settlement-Overrides", JSON.stringify({ amount: estimateInferenceCost(messages, response) }));
+      c.header(SETTLEMENT_OVERRIDES_HEADER, JSON.stringify({ amount: estimateInferenceCost(messages, response) }));
     }
 
     return c.json(response);

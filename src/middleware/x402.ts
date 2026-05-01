@@ -25,7 +25,6 @@ import {
   x402ResourceServer,
   x402HTTPResourceServer,
   HTTPFacilitatorClient,
-  SETTLEMENT_OVERRIDES_HEADER,
 } from "@x402/core/server";
 import type {
   HTTPAdapter,

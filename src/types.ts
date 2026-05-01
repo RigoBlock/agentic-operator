@@ -127,8 +127,7 @@ export interface ChatRequest {
   aiModel?: string;
   /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
   aiBaseUrl?: string;
-  /** Force Llama-only routing (skips DeepSeek reasoning pass). Omit to use the default
-   *  DeepSeek-first orchestration. */
+  /** Force Llama-only routing. Omit to use the default orchestration (Kimi K2.6). */
   routingMode?: "llama_only";
   /** Optional per-request context snippets (e.g. selected markdown excerpts) injected into runtime prompt */
   contextDocs?: string[];
@@ -315,8 +314,7 @@ export interface RequestContext {
   aiModel?: string;
   /** AI provider base URL */
   aiBaseUrl?: string;
-  /** Force Llama-only routing (skips DeepSeek reasoning pass). Omit to use the default
-   *  DeepSeek-first orchestration (DeepSeek for reasoning, Llama for tool execution). */
+  /** Force Llama-only routing. Omit to use the default Kimi K2.6 orchestration. */
   routingMode?: "llama_only";
   /** Optional per-request context snippets injected into runtime prompt */
   contextDocs?: string[];
