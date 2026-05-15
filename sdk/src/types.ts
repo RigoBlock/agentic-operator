@@ -114,3 +114,22 @@ export interface ChatOptions {
   /** Optional per-request context snippets (e.g. markdown excerpts) injected server-side */
   contextDocs?: string[];
 }
+
+// ─── Tool Catalog Types ─────────────────────────────────────────────────────
+
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  category: string;
+  parameters: Record<string, unknown>;
+  requiresOperatorAuth: boolean;
+  readOnly: boolean;
+}
+
+export interface ToolCatalogResponse {
+  description: string;
+  usage: string;
+  price: string;
+  toolCount: number;
+  tools: ToolDefinition[];
+}

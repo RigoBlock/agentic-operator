@@ -383,6 +383,12 @@ app.get("/.well-known/x402.json", (c) =>
         description: "DEX price quote across 7 chains (Uniswap + 0x aggregator)",
       },
       {
+        path: "/api/tools",
+        method: "GET",
+        price: "$0.002",
+        description: "Tool discovery — full catalog with parameter schemas for all direct-invocation tools",
+      },
+      {
         path: "/api/tools/{toolName}",
         method: "POST",
         price: "$0.002",
@@ -427,6 +433,7 @@ app.get("/.well-known/api-catalog", (c) => {
         "service-desc": [
           { href: "https://trader.rigoblock.com/openapi.json" },
         ],
+        type: [{ href: "https://trader.rigoblock.com/.well-known/x402.json" }],
       },
     ],
   });
@@ -446,6 +453,10 @@ app.get("/.well-known/mcp/server-card.json", (c) =>
       protocol: "http",
     },
     capabilities: ["tools"],
+    tools: {
+      listEndpoint: "https://trader.rigoblock.com/api/tools",
+      description: "GET /api/tools returns full OpenAI-compatible function schemas for every available tool",
+    },
     payment: {
       scheme: "x402",
       network: "eip155:8453",
@@ -453,6 +464,19 @@ app.get("/.well-known/mcp/server-card.json", (c) =>
     },
   }),
 );
+
+// Dedicated machine-readable tool schema endpoint — alias of GET /api/tools for agents
+// that probe /.well-known/ for structured capability manifests.
+app.get("/.well-known/tools.json", async (c) => {
+  const internalRes = await app.fetch(
+    new Request("https://trader.rigoblock.com/api/tools", {
+      headers: c.req.raw.headers,
+    }),
+    c.env,
+    c.executionCtx,
+  );
+  return internalRes;
+});
 
 // OAuth Protected Resource metadata (RFC 9728) — describes how to authenticate.
 // Note: this service uses x402 (USDC micropayments) instead of OAuth bearer tokens.

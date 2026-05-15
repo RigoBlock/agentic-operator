@@ -190,11 +190,58 @@
         ]
       }
     },
+    "/api/tools": {
+      "get": {
+        "operationId": "listTools",
+        "summary": "List all available DeFi tools with schemas",
+        "description": "Returns a machine-readable catalog of every direct-invocation tool: names, descriptions, parameter schemas, categories, and access requirements.\n\nAutonomous agents should call this endpoint first to discover what operations are available and what arguments each tool expects. The response includes full JSON-Schema parameter definitions compatible with OpenAI function calling.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)",
+        "tags": [
+          "Tools"
+        ],
+        "responses": {
+          "200": {
+            "description": "Tool catalog with full schemas",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolCatalogResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "x402 payment required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/X402PaymentRequired"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "x402": []
+          }
+        ]
+      }
+    },
     "/api/tools/{toolName}": {
       "post": {
         "operationId": "invokeTool",
         "summary": "Invoke a DeFi tool directly",
-        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Read-only tools:**\n`get_swap_quote`, `get_vault_info`, `get_token_balance`, `get_pool_info`, `get_lp_positions`, `gmx_get_positions`, `gmx_get_markets`, `check_delegation_status`, `get_crosschain_quote`, `get_aggregated_nav`, `get_rebalance_plan`, `verify_bridge_arrival`, `list_twap_orders`, `list_nav_syncs`\n\n**State-changing tools:**\n`build_vault_swap`, `add_liquidity`, `remove_liquidity`, `collect_lp_fees`, `burn_position`, `gmx_open_position`, `gmx_close_position`, `gmx_increase_position`, `gmx_cancel_order`, `gmx_update_order`, `gmx_claim_funding_fees`, `crosschain_transfer`, `crosschain_sync`, `grg_stake`, `grg_unstake`, `grg_undelegate_stake`, `grg_end_epoch`, `grg_claim_rewards`, `deploy_smart_pool`, `fund_pool`, `create_twap_order`, `cancel_twap_order`, `create_nav_sync`, `cancel_nav_sync`\n\n**Operator-scoped tools (require operatorVerified):**\n`setup_delegation`, `revoke_delegation`, `revoke_selectors`, `list_strategies`, `set_default_slippage`, `disable_swap_shield`, `enable_swap_shield`\n\n**Oracle tools:**\n`refresh_oracle_feed`\n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
+        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Discover schemas first:** Call `GET /api/tools` to retrieve the full catalog with parameter schemas for every tool.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Read-only tools:**\n`get_swap_quote`, `get_vault_info`, `get_token_balance`, `get_pool_info`, `get_lp_positions`, `gmx_get_positions`, `gmx_get_markets`, `check_delegation_status`, `get_crosschain_quote`, `get_aggregated_nav`, `get_rebalance_plan`, `verify_bridge_arrival`, `list_twap_orders`, `list_nav_syncs`, `list_strategies`, `switch_chain`\n\n**State-changing tools:**\n`build_vault_swap`, `add_liquidity`, `remove_liquidity`, `collect_lp_fees`, `burn_position`, `gmx_open_position`, `gmx_close_position`, `gmx_increase_position`, `gmx_cancel_order`, `gmx_update_order`, `gmx_claim_funding_fees`, `crosschain_transfer`, `crosschain_sync`, `grg_stake`, `grg_unstake`, `grg_undelegate_stake`, `grg_end_epoch`, `grg_claim_rewards`, `deploy_smart_pool`, `fund_pool`, `create_twap_order`, `cancel_twap_order`, `create_nav_sync`, `cancel_nav_sync`\n\n**Operator-scoped tools (require operatorVerified):**\n`setup_delegation`, `revoke_delegation`, `revoke_selectors`, `list_strategies`, `set_default_slippage`, `disable_swap_shield`, `enable_swap_shield`\n\n**Oracle tools:**\n`refresh_oracle_feed`\n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
         "tags": [
           "Tools"
         ],
@@ -674,6 +721,80 @@
                   }
                 }
               }
+            }
+          }
+        }
+      },
+      "ToolDefinition": {
+        "type": "object",
+        "description": "OpenAI-compatible function schema for a single DeFi tool",
+        "required": ["name", "description", "category", "parameters", "requiresOperatorAuth", "readOnly"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Canonical tool name used in POST /api/tools/{toolName}"
+          },
+          "description": {
+            "type": "string",
+            "description": "What the tool does and when to use it"
+          },
+          "category": {
+            "type": "string",
+            "description": "Functional group",
+            "enum": [
+              "Spot Trading",
+              "Vault Info",
+              "GMX Perpetuals",
+              "Uniswap v4 LP",
+              "Cross-Chain",
+              "GRG Staking",
+              "Vault Management",
+              "Delegation",
+              "TWAP Orders",
+              "NAV Sync",
+              "Operator Settings",
+              "Oracle",
+              "Strategy",
+              "Other"
+            ]
+          },
+          "parameters": {
+            "type": "object",
+            "description": "JSON Schema for the tool's arguments object"
+          },
+          "requiresOperatorAuth": {
+            "type": "boolean",
+            "description": "If true, the tool can only be invoked when the request includes a valid operator signature"
+          },
+          "readOnly": {
+            "type": "boolean",
+            "description": "If true, the tool only reads data and never produces transaction calldata"
+          }
+        }
+      },
+      "ToolCatalogResponse": {
+        "type": "object",
+        "required": ["description", "usage", "price", "toolCount", "tools"],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "usage": {
+            "type": "string",
+            "example": "POST /api/tools/{toolName}"
+          },
+          "price": {
+            "type": "string",
+            "example": "$0.002 USDC per call (x402 exact scheme, eip155:8453)"
+          },
+          "toolCount": {
+            "type": "integer",
+            "description": "Total number of tools in the catalog"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolDefinition"
             }
           }
         }

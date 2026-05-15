@@ -12,12 +12,51 @@
 
 import { Hono } from "hono";
 import type { Env, AppVariables, RequestContext, ExecutionMode } from "../types.js";
-import { executeToolCall, TOOL_NAME_ALIASES } from "../llm/client.js";
+import { executeToolCall, TOOL_NAME_ALIASES, OPERATOR_VERIFIED_TOOLS } from "../llm/client.js";
+import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS } from "../llm/tools.js";
+import { getSkillTools } from "../skills/index.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { sanitizeError } from "../config.js";
 import type { Address } from "viem";
 
 const tools = new Hono<{ Bindings: Env; Variables: AppVariables }>();
+
+/** Tools that only read on-chain or off-chain data and do not produce transactions. */
+const READONLY_TOOLS = new Set<string>([
+  "get_swap_quote",
+  "get_vault_info",
+  "get_token_balance",
+  "get_pool_info",
+  "get_lp_positions",
+  "gmx_get_positions",
+  "gmx_get_markets",
+  "check_delegation_status",
+  "get_crosschain_quote",
+  "get_aggregated_nav",
+  "get_rebalance_plan",
+  "verify_bridge_arrival",
+  "list_twap_orders",
+  "list_nav_syncs",
+  "list_strategies",
+  "switch_chain",
+]);
+
+function getToolCategory(name: string): string {
+  if (name.startsWith("get_swap_quote") || name === "build_vault_swap") return "Spot Trading";
+  if (name.startsWith("get_vault_info") || name === "get_token_balance" || name === "switch_chain") return "Vault Info";
+  if (name.startsWith("gmx_")) return "GMX Perpetuals";
+  if (name.startsWith("get_pool_info") || name.startsWith("add_liquidity") || name.startsWith("remove_liquidity") || name.startsWith("collect_lp_fees") || name.startsWith("burn_position") || name.startsWith("get_lp_positions")) return "Uniswap v4 LP";
+  if (name.startsWith("crosschain_") || name.startsWith("get_aggregated_nav") || name.startsWith("get_rebalance_plan") || name.startsWith("verify_bridge_arrival")) return "Cross-Chain";
+  if (name.startsWith("grg_")) return "GRG Staking";
+  if (name === "deploy_smart_pool" || name === "fund_pool") return "Vault Management";
+  if (name.startsWith("setup_delegation") || name.startsWith("revoke_delegation") || name.startsWith("check_delegation_status") || name.startsWith("revoke_selectors")) return "Delegation";
+  if (name.startsWith("create_twap_") || name.startsWith("cancel_twap_") || name.startsWith("list_twap_")) return "TWAP Orders";
+  if (name.startsWith("create_nav_sync") || name.startsWith("list_nav_syncs") || name.startsWith("cancel_nav_sync")) return "NAV Sync";
+  if (name.startsWith("set_default_slippage") || name.startsWith("disable_swap_shield") || name.startsWith("enable_swap_shield")) return "Operator Settings";
+  if (name.startsWith("refresh_oracle_feed")) return "Oracle";
+  if (name.startsWith("list_strategies")) return "Strategy";
+  return "Other";
+}
 
 // GET /api/tools — endpoint discovery (also used for Bazaar registration).
 // Returns the list of available tools so crawlers and agents can discover them.
@@ -26,24 +65,28 @@ tools.get("/", async (c) => {
   if (!c.get("x402Paid") && !c.get("browserVerified")) {
     return c.json({ error: "Authentication required. Use x402 payment or a verified browser session." }, 401);
   }
+
+  // Merge base tool definitions with skill tool definitions for a complete catalog.
+  const allDefs = [...BASE_TOOL_DEFINITIONS, ...getSkillTools()];
+
+  const toolCatalog = allDefs.map((def) => {
+    const name = def.function.name;
+    return {
+      name,
+      description: def.function.description,
+      category: getToolCategory(name),
+      parameters: def.function.parameters,
+      requiresOperatorAuth: OPERATOR_VERIFIED_TOOLS.has(name),
+      readOnly: READONLY_TOOLS.has(name),
+    };
+  });
+
   return c.json({
     description: "Rigoblock direct DeFi tool invocation. POST to /api/tools/{toolName} with arguments object.",
     usage: "POST /api/tools/{toolName}",
     price: "$0.002 USDC per call (x402 exact scheme, eip155:8453)",
-    tools: [
-      "get_swap_quote", "build_vault_swap", "get_vault_info", "get_token_balance",
-      "get_pool_info", "add_liquidity", "remove_liquidity", "collect_lp_fees", "burn_position",
-      "get_lp_positions", "gmx_open_position", "gmx_close_position", "gmx_increase_position",
-      "gmx_get_positions", "gmx_cancel_order", "gmx_update_order", "gmx_claim_funding_fees",
-      "gmx_get_markets", "setup_delegation", "revoke_delegation", "check_delegation_status",
-      "deploy_smart_pool", "fund_pool", "crosschain_transfer", "crosschain_sync",
-      "get_crosschain_quote", "get_aggregated_nav", "get_rebalance_plan",
-      "list_strategies", "verify_bridge_arrival", "grg_stake", "grg_unstake",
-      "grg_undelegate_stake", "grg_end_epoch", "grg_claim_rewards", "revoke_selectors",
-      "set_default_slippage", "disable_swap_shield", "enable_swap_shield",
-      "create_twap_order", "cancel_twap_order", "list_twap_orders",
-      "create_nav_sync", "list_nav_syncs", "cancel_nav_sync", "refresh_oracle_feed",
-    ],
+    toolCount: toolCatalog.length,
+    tools: toolCatalog,
   });
 });
 

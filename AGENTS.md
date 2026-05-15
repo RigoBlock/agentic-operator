@@ -356,6 +356,88 @@ GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base
 
 ---
 
+## The `/api/tools` Endpoint — Programmatic Tool Discovery
+
+For autonomous agents that need structured input/output without LLM overhead.
+
+### `GET /api/tools` — List all tools with schemas
+
+Returns a machine-readable catalog of every direct-invocation tool. Each entry
+includes the tool name, description, parameter schema (JSON-Schema), category,
+and access requirements.
+
+```
+GET /api/tools
+X-PAYMENT: <x402-payment-header>
+
+→ 200: {
+    "toolCount": 41,
+    "tools": [
+      {
+        "name": "get_swap_quote",
+        "description": "Get a price-only quote WITHOUT building a transaction...",
+        "category": "Spot Trading",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tokenIn": { "type": "string", "description": "Token to sell" },
+            "tokenOut": { "type": "string", "description": "Token to buy" },
+            ...
+          },
+          "required": ["tokenIn", "tokenOut"]
+        },
+        "requiresOperatorAuth": false,
+        "readOnly": true
+      },
+      ...
+    ]
+  }
+```
+
+**Why this matters for autonomous agents:** Instead of guessing parameters or
+relying on natural language, an agent can call this endpoint once, cache the
+schemas, and then invoke specific tools directly via `POST /api/tools/{toolName}`.
+
+### `POST /api/tools/{toolName}` — Direct tool invocation
+
+Execute any tool by name with a structured arguments object. No LLM processing.
+
+```
+POST /api/tools/build_vault_swap
+X-PAYMENT: <x402-payment-header>
+Content-Type: application/json
+
+{
+  "arguments": {
+    "tokenIn": "ETH",
+    "tokenOut": "USDC",
+    "amountIn": "1"
+  },
+  "chainId": 8453,
+  "vaultAddress": "0xYourVault"
+}
+
+→ 200: {
+    "tool": "build_vault_swap",
+    "message": "Swap 1 ETH → 2079.54 USDC on Base via 0x.",
+    "transaction": {
+      "to": "0xYourVault",
+      "data": "0x...",
+      "value": "0x0",
+      "chainId": 8453,
+      "description": "Swap 1 ETH → 2079.54 USDC via 0x"
+    }
+  }
+```
+
+**Price:** $0.002 per call (x402 exact scheme, eip155:8453)
+
+**Tool categories:** Spot Trading, Vault Info, GMX Perpetuals, Uniswap v4 LP,
+Cross-Chain, GRG Staking, Vault Management, Delegation, TWAP Orders, NAV Sync,
+Operator Settings, Oracle.
+
+---
+
 ## x402 Client Setup (TypeScript)
 
 ```typescript

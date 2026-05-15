@@ -36,6 +36,60 @@ Stateless price quote. No vault context needed.
 
 ---
 
+## GET /api/tools
+
+Machine-readable tool catalog with full parameter schemas. Autonomous agents
+should call this first to discover what operations are available and what
+arguments each tool expects.
+
+**Response:**
+```json
+{
+  "toolCount": 41,
+  "tools": [
+    {
+      "name": "get_swap_quote",
+      "description": "Get a price-only quote WITHOUT building a transaction...",
+      "category": "Spot Trading",
+      "parameters": { "type": "object", "properties": { ... }, "required": [...] },
+      "requiresOperatorAuth": false,
+      "readOnly": true
+    }
+  ]
+}
+```
+
+**x402 Price:** $0.002 (USDC on Base)
+
+---
+
+## POST /api/tools/{toolName}
+
+Direct tool invocation without LLM overhead. Call `GET /api/tools` first to
+retrieve schemas, then POST to this endpoint with the tool name and arguments.
+
+**Request Body:**
+```json
+{
+  "arguments": { "tokenIn": "ETH", "tokenOut": "USDC", "amountIn": "1" },
+  "chainId": 8453,
+  "vaultAddress": "0xYourVault"
+}
+```
+
+**Response:**
+```json
+{
+  "tool": "build_vault_swap",
+  "message": "Swap 1 ETH → 2079.54 USDC on Base via 0x.",
+  "transaction": { "to": "0x...", "data": "0x...", "chainId": 8453 }
+}
+```
+
+**x402 Price:** $0.002 (USDC on Base)
+
+---
+
 ## POST /api/chat
 
 AI-powered DeFi operations. Each request accepts a single natural-language

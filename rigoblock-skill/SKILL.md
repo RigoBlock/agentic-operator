@@ -180,9 +180,9 @@ The agent decides *what* to do. Your wallet manages *who* signs. The API ensures
 The agent specifies `chainId` per request — there is no default chain. Every
 `/api/chat` call includes the target chain explicitly.
 
-## The Two Endpoints
+## The Three Endpoints
 
-All DeFi operations go through just **two** HTTP endpoints:
+All DeFi operations go through **three** HTTP endpoints:
 
 ### 1. `GET /api/quote` — Price Quotes (read-only)
 
@@ -204,7 +204,35 @@ X-PAYMENT: <x402-payment-header>
 
 Cost: **$0.002** per call (USDC on Base).
 
-### 2. `POST /api/chat` — All Vault Operations
+### 2. `GET /api/tools` — Tool Discovery (read-only)
+
+Returns the full catalog of all direct-invocation tools with OpenAI-compatible
+parameter schemas, categories, and access requirements. Call this first to
+discover what each tool does and what arguments it expects.
+
+```
+GET https://trader.rigoblock.com/api/tools
+X-PAYMENT: <x402-payment-header>
+
+→ 200: {
+    "toolCount": 41,
+    "tools": [
+      {
+        "name": "build_vault_swap",
+        "description": "Build an unsigned swap transaction...",
+        "category": "Spot Trading",
+        "parameters": { "type": "object", "properties": { ... }, "required": [...] },
+        "requiresOperatorAuth": false,
+        "readOnly": false
+      },
+      ...
+    ]
+  }
+```
+
+Cost: **$0.002** per call (USDC on Base).
+
+### 3. `POST /api/chat` — All Vault Operations (Natural Language)
 
 Natural language → DeFi action. This single endpoint handles swaps, LP,
 perps, bridging, vault info — everything. You send a message

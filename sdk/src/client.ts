@@ -16,6 +16,7 @@ import type {
   ChatResponse,
   QuoteParams,
   ChatOptions,
+  ToolCatalogResponse,
 } from "./types.js";
 
 const AUTH_MESSAGE = `Welcome to Rigoblock Operator\n\nSign this message to verify your wallet and access your smart pool assistant.`;
@@ -54,6 +55,17 @@ export class RigoblockClient {
       throw new Error(`Quote failed (${res.status}): ${await res.text()}`);
     }
     return res.json() as Promise<QuoteResponse>;
+  }
+
+  // ─── Tools (GET /api/tools) ────────────────────────────────────────────
+
+  async getTools(): Promise<ToolCatalogResponse> {
+    const url = new URL("/api/tools", this.config.baseUrl);
+    const res = await this.fetchFn(url.toString());
+    if (!res.ok) {
+      throw new Error(`Tool catalog failed (${res.status}): ${await res.text()}`);
+    }
+    return res.json() as Promise<ToolCatalogResponse>;
   }
 
   // ─── Chat (POST /api/chat) ─────────────────────────────────────────────
