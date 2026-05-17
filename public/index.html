@@ -4454,7 +4454,7 @@
           if (amountIn) args.amountIn = amountIn;
           if (amountOut) args.amountOut = amountOut;
           if (chain) args.chain = chain;
-          const res = await fetch('/api/tools/get_swap_quote', {
+          const res = await fetch('/api/tools?toolName=get_swap_quote', {
             method: 'POST',
             headers: apiHeaders(),
             body: JSON.stringify({ arguments: args, chainId: 8453 }),
@@ -4475,7 +4475,7 @@
           required: ['vaultAddress', 'chainId'],
         },
         execute: async (args) => {
-          const res = await fetch('/api/tools/get_vault_info', {
+          const res = await fetch('/api/tools?toolName=get_vault_info', {
             method: 'POST',
             headers: apiHeaders(),
             body: JSON.stringify({ arguments: args, chainId: args.chainId, vaultAddress: args.vaultAddress }),

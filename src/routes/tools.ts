@@ -62,6 +62,14 @@ function getToolCategory(name: string): string {
 // Returns the full catalog with schemas so agents know what each tool does
 // and what arguments to pass. Requires x402 payment (exact scheme, $0.002 USDC).
 tools.get("/", async (c) => {
+  // Local auth guard: if x402 middleware failed to initialize or payment was
+  // skipped, require browser verification. This prevents the paid catalog from
+  // becoming publicly accessible during a facilitator outage.
+  const isBrowserRequest = c.get("browserVerified") ?? false;
+  if (!c.get("x402Paid") && !isBrowserRequest) {
+    throw new AuthError("Authentication required", 401);
+  }
+
   // Merge base tool definitions with skill tool definitions for a complete catalog.
   const allDefs = [...BASE_TOOL_DEFINITIONS, ...getSkillTools()];
 

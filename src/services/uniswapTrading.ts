@@ -173,10 +173,12 @@ export async function getUniswapQuote(
     }
     console.error(`[uniswap] Quote error ${res.status}:`, errText.slice(0, 800));
     console.error(`[uniswap] Request body:`, JSON.stringify(body));
+    const requestDesc = intent.amountOut
+      ? `buy ${intent.amountOut} ${intent.tokenOut} with ${intent.tokenIn}`
+      : `sell ${intent.amountIn} ${intent.tokenIn} for ${intent.tokenOut}`;
     throw new Error(
       `Uniswap quote failed (${res.status}): ${detail}. ` +
-      `Requested ${intent.amountOut ? "buy " + intent.amountOut : "sell " + intent.amountIn} ` +
-      `${intent.tokenOut} with ${intent.tokenIn} on chain ${chainId}. ` +
+      `Requested ${requestDesc} on chain ${chainId}. ` +
       `Note: this error comes directly from the Uniswap Trading API and is unrelated to the Swap Shield. ` +
       `It usually means there is insufficient on-chain liquidity for this exact amount and token pair. ` +
       `Try reducing the amount, switching to 0x, or using a different chain.`,

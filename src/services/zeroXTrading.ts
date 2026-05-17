@@ -258,10 +258,12 @@ export async function getZeroXQuote(
       detail = errText.slice(0, 300) || detail;
     }
     console.error(`[0x] Quote error ${res.status}:`, errText.slice(0, 800));
+    const requestDesc = intent.amountOut
+      ? `buy ${intent.amountOut} ${intent.tokenOut} with ${intent.tokenIn}`
+      : `sell ${intent.amountIn} ${intent.tokenIn} for ${intent.tokenOut}`;
     throw new Error(
       `0x quote failed (${res.status}): ${detail}. ` +
-      `Requested ${intent.amountOut ? "buy " + intent.amountOut : "sell " + intent.amountIn} ` +
-      `${intent.tokenOut} with ${intent.tokenIn} on chain ${chainId}. ` +
+      `Requested ${requestDesc} on chain ${chainId}. ` +
       `If exact-output (buy), the price probe may have failed or returned an extreme rate. ` +
       `Try switching DEX (uniswap) or reducing the amount.`,
     );
