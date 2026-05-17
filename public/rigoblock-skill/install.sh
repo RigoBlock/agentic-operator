@@ -20,6 +20,10 @@ if [[ -f "${SDK_DIR}/package.json" ]]; then
   cd "${SDK_DIR}"
   npm install --no-fund --no-audit 2>/dev/null
   echo "✓ SDK installed"
+else
+  echo "⚠ SDK directory not found at ${SDK_DIR}."
+  echo "  This script must be run from the cloned repository (not the web-served copy)."
+  echo "  Clone the repo and run: ./rigoblock-skill/install.sh"
 fi
 
 echo ""

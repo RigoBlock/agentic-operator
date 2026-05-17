@@ -183,9 +183,9 @@ The agent decides *what* to do. Your wallet manages *who* signs. The API ensures
 The agent specifies `chainId` per request — there is no default chain. Every
 `/api/chat` call includes the target chain explicitly.
 
-## The Three Endpoints
+## The Four Endpoints
 
-All DeFi operations go through **three** HTTP endpoints:
+All DeFi operations go through **four** HTTP endpoints:
 
 ### 1. `GET /api/quote` — Price Quotes (read-only)
 
@@ -235,7 +235,42 @@ X-PAYMENT: <x402-payment-header>
 
 Cost: **$0.002** per call (x402 exact scheme, eip155:8453).
 
-### 3. `POST /api/chat` — All Vault Operations (Natural Language)
+### 3. `POST /api/tools?toolName={name}` — Direct Tool Invocation
+
+Invoke any tool directly with structured arguments. No LLM processing overhead.
+Use the tool name from the `GET /api/tools` catalog.
+
+```
+POST https://trader.rigoblock.com/api/tools?toolName=build_vault_swap
+Content-Type: application/json
+X-PAYMENT: <x402-payment-header>
+
+{
+  "arguments": {
+    "tokenIn": "ETH",
+    "tokenOut": "USDC",
+    "amountIn": "1"
+  },
+  "chainId": 8453,
+  "vaultAddress": "0xYourVault"
+}
+
+→ 200: {
+    "tool": "build_vault_swap",
+    "message": "Swap 1 ETH → 2079.54 USDC on Base via 0x.",
+    "transaction": {
+      "to": "0xYourVault",
+      "data": "0x...",
+      "value": "0x0",
+      "chainId": 8453,
+      "description": "Swap 1 ETH → 2079.54 USDC via 0x"
+    }
+  }
+```
+
+Cost: **$0.002** per call (x402 exact scheme, eip155:8453).
+
+### 4. `POST /api/chat` — All Vault Operations (Natural Language)
 
 Natural language → DeFi action. This single endpoint handles swaps, LP,
 perps, bridging, vault info — everything. You send a message

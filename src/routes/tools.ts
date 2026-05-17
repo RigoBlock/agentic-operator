@@ -67,7 +67,7 @@ tools.get("/", async (c) => {
   // becoming publicly accessible during a facilitator outage.
   const isBrowserRequest = c.get("browserVerified") ?? false;
   if (!c.get("x402Paid") && !isBrowserRequest) {
-    throw new AuthError("Authentication required", 401);
+    return c.json({ error: "Authentication required" }, 401);
   }
 
   // Merge base tool definitions with skill tool definitions for a complete catalog.
@@ -97,7 +97,11 @@ tools.get("/", async (c) => {
 tools.post("/", async (c) => {
   try {
     const toolName = c.req.query("toolName");
-    const body = await c.req.json<{
+    if (!toolName) {
+      return c.json({ error: "toolName query parameter is required" }, 400);
+    }
+
+    let body: {
       arguments: Record<string, unknown>;
       vaultAddress?: string;
       chainId: number;
@@ -105,17 +109,19 @@ tools.post("/", async (c) => {
       authSignature?: string;
       authTimestamp?: number;
       executionMode?: ExecutionMode;
-    }>();
+    };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
 
-    if (!toolName) {
-      return c.json({ error: "toolName query parameter is required" }, 400);
+    if (!body.arguments || typeof body.arguments !== "object") {
+      return c.json({ error: "arguments object is required" }, 400);
     }
 
     if (!body.chainId) {
       return c.json({ error: "chainId is required" }, 400);
-    }
-    if (!body.arguments || typeof body.arguments !== "object") {
-      return c.json({ error: "arguments object is required" }, 400);
     }
 
     const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
