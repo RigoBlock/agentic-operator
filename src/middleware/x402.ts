@@ -297,8 +297,8 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     ],
     description:
-      "Rigoblock DeFi tool discovery — returns the list of available atomic tools for swap, LP, bridge, staking, and vault management. " +
-      "Each tool is invocable via POST /api/tools/{toolName} with structured arguments.",
+      "Rigoblock DeFi tool discovery. Returns the full catalog with JSON schemas, categories, " +
+      "and access requirements for all 40+ direct-invocation tools.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -312,8 +312,17 @@ const PROTECTED_ROUTES: RoutesConfig = {
           output: {
             type: "json",
             example: {
-              description: "Rigoblock direct DeFi tool invocation",
-              tools: ["get_swap_quote", "build_vault_swap", "add_liquidity"],
+              toolCount: 41,
+              tools: [
+                {
+                  name: "get_swap_quote",
+                  description: "Get a price-only quote...",
+                  category: "Spot Trading",
+                  parameters: { type: "object", properties: {} },
+                  requiresOperatorAuth: false,
+                  readOnly: true,
+                },
+              ],
             },
           },
         },
@@ -345,7 +354,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     },
   },
-  "POST /api/tools/*": {
+  "POST /api/tools": {
     resource: "https://trader.rigoblock.com/api/tools",
     accepts: [
       {
@@ -356,7 +365,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     ],
     description:
-      "Rigoblock direct DeFi tool invocation. POST to /api/tools/{toolName} with arguments object.",
+      "Rigoblock direct DeFi tool invocation. POST to /api/tools?toolName={name} with arguments object.",
     mimeType: "application/json",
     extensions: {
       bazaar: {

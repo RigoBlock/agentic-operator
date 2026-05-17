@@ -6,17 +6,20 @@ metadata: {"homepage":"https://trader.rigoblock.com"}
 
 # Rigoblock DeFi Operator
 
+> Every DeFi operation is exposed as an atomic HTTP API call. Use `curl`, `fetch`,
+> `requests`, or any HTTP client your runtime provides — the API handles all
+> on-chain complexity for you.
+
 You have access to DeFi trading on Rigoblock smart pool vaults via HTTP
 endpoints at `https://trader.rigoblock.com`. All calls are paid with USDC
 on Base via the x402 protocol.
 
 This skill is **language-agnostic**: every operation is a plain HTTP request.
-Use `curl`, `fetch`, `requests`, or any HTTP client your runtime provides.
 
 ## Wallet Requirements
 
 You need **your own wallet** — any EVM wallet that can:
-1. Hold USDC on Base (for x402 API payments — $0.002–$0.10 per call, billed by usage)
+1. Hold USDC on Base (for x402 API payments — $0.002–$0.01 per call)
 2. Sign EIP-191 messages (for operator authentication in delegated mode)
 
 Use whatever wallet SDK you prefer: viem, ethers.js, CDP, web3.py, etc.
@@ -180,9 +183,9 @@ The agent decides *what* to do. Your wallet manages *who* signs. The API ensures
 The agent specifies `chainId` per request — there is no default chain. Every
 `/api/chat` call includes the target chain explicitly.
 
-## Endpoints
+## The Three Endpoints
 
-The API exposes three HTTP endpoints:
+All DeFi operations go through **three** HTTP endpoints:
 
 ### 1. `GET /api/quote` — Price Quotes (read-only)
 
@@ -204,7 +207,35 @@ X-PAYMENT: <x402-payment-header>
 
 Cost: **$0.002** per call (USDC on Base).
 
-### 2. `POST /api/chat` — All Vault Operations
+### 2. `GET /api/tools` — Tool Discovery (read-only)
+
+Returns the full catalog of all direct-invocation tools with OpenAI-compatible
+parameter schemas, categories, and access requirements. Call this first to
+discover what each tool does and what arguments it expects.
+
+```
+GET https://trader.rigoblock.com/api/tools
+X-PAYMENT: <x402-payment-header>
+
+→ 200: {
+    "toolCount": 41,
+    "tools": [
+      {
+        "name": "build_vault_swap",
+        "description": "Build an unsigned swap transaction...",
+        "category": "Spot Trading",
+        "parameters": { "type": "object", "properties": { ... }, "required": [...] },
+        "requiresOperatorAuth": false,
+        "readOnly": false
+      },
+      ...
+    ]
+  }
+```
+
+Cost: **$0.002** per call (x402 exact scheme, eip155:8453).
+
+### 3. `POST /api/chat` — All Vault Operations (Natural Language)
 
 Natural language → DeFi action. This single endpoint handles swaps, LP,
 perps, bridging, vault info — everything. You send a message
@@ -253,26 +284,7 @@ X-PAYMENT: <x402-payment-header>
 → { "reply": "Executed: swapped ...", "executionResult": { "txHash": "0x...", "confirmed": true } }
 ```
 
-Cost: **up to $0.10** per call, billed by usage via x402 (USDC on Base). Typical cost: $0.003–$0.015.
-
-### 3. `POST /api/tools/{toolName}` — Direct Tool Invocation (optional)
-
-Bypasses the LLM and calls a specific tool directly. Useful for programmatic
-agents that want structured JSON responses without paying for LLM processing.
-Read-only tools (e.g. `get_swap_quote`, `get_vault_info`) work with just x402.
-Vault-modifying tools require operator auth for delegated execution.
-
-```
-POST https://trader.rigoblock.com/api/tools/get_swap_quote
-X-PAYMENT: <x402-payment-header>
-Content-Type: application/json
-
-{ "arguments": { "tokenIn": "ETH", "tokenOut": "USDC", "amountIn": "1" }, "chainId": 8453 }
-
-→ 200: { "tool": "get_swap_quote", "message": "...", ... }
-```
-
-Cost: **$0.002** per call (USDC on Base, same as `/api/quote`).
+Cost: **$0.01** per call (USDC on Base).
 
 ### x402 Payment (USDC on Base)
 

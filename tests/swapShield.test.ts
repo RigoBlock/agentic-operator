@@ -372,6 +372,7 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("BLOCKED");
   });
+
 });
 
 describe("Swap Shield — opt-out flow", () => {

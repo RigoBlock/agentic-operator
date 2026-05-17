@@ -58,14 +58,10 @@ function getToolCategory(name: string): string {
   return "Other";
 }
 
-// GET /api/tools — endpoint discovery (also used for Bazaar registration).
-// Returns the list of available tools so crawlers and agents can discover them.
-// Auth: x402 payment or browser session (same as POST /:toolName).
+// GET /api/tools — x402-gated tool discovery for autonomous agents.
+// Returns the full catalog with schemas so agents know what each tool does
+// and what arguments to pass. Requires x402 payment (exact scheme, $0.002 USDC).
 tools.get("/", async (c) => {
-  if (!c.get("x402Paid") && !c.get("browserVerified")) {
-    return c.json({ error: "Authentication required. Use x402 payment or a verified browser session." }, 401);
-  }
-
   // Merge base tool definitions with skill tool definitions for a complete catalog.
   const allDefs = [...BASE_TOOL_DEFINITIONS, ...getSkillTools()];
 
@@ -82,17 +78,17 @@ tools.get("/", async (c) => {
   });
 
   return c.json({
-    description: "Rigoblock direct DeFi tool invocation. POST to /api/tools/{toolName} with arguments object.",
-    usage: "POST /api/tools/{toolName}",
+    description: "Rigoblock direct DeFi tool invocation. POST to /api/tools?toolName={name} with arguments object.",
+    usage: "POST /api/tools?toolName={toolName}",
     price: "$0.002 USDC per call (x402 exact scheme, eip155:8453)",
     toolCount: toolCatalog.length,
     tools: toolCatalog,
   });
 });
 
-tools.post("/:toolName", async (c) => {
+tools.post("/", async (c) => {
   try {
-    const toolName = c.req.param("toolName");
+    const toolName = c.req.query("toolName");
     const body = await c.req.json<{
       arguments: Record<string, unknown>;
       vaultAddress?: string;
@@ -102,6 +98,10 @@ tools.post("/:toolName", async (c) => {
       authTimestamp?: number;
       executionMode?: ExecutionMode;
     }>();
+
+    if (!toolName) {
+      return c.json({ error: "toolName query parameter is required" }, 400);
+    }
 
     if (!body.chainId) {
       return c.json({ error: "chainId is required" }, 400);

@@ -207,7 +207,7 @@ app.get("/api/health", (c) =>
         "POST /api/chat": "up to $0.10 (billed by usage, ~$0.003-$0.015)",
         "GET /api/quote": "$0.002",
         "GET /api/tools": "$0.002",
-        "POST /api/tools/*": "$0.002",
+        "POST /api/tools": "$0.002",
       },
     },
   }),
@@ -244,7 +244,8 @@ app.get("/api", (c) => {
       endpoints: {
         "POST /api/chat": { price: "up to $0.10 (billed by usage)", description: "Natural language DeFi agent — swap/bridge/LP/stake calldata" },
         "GET /api/quote": { price: "$0.002", description: "DEX price quote across 7 chains" },
-        "POST /api/tools/{toolName}": { price: "$0.002", description: "Direct tool invocation — structured input/output" },
+        "POST /api/tools": { price: "$0.002", description: "Direct tool invocation — structured input/output" },
+        "GET /api/tools": { price: "$0.002", description: "Tool discovery with full parameter schemas" },
       },
       accepts: [
         { scheme: "exact", network: "eip155:8453", amount: "2000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37", maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" } },
@@ -386,10 +387,10 @@ app.get("/.well-known/x402.json", (c) =>
         path: "/api/tools",
         method: "GET",
         price: "$0.002",
-        description: "Tool discovery — full catalog with parameter schemas for all direct-invocation tools",
+        description: "Tool discovery — returns full catalog with JSON schemas for all 40+ direct-invocation tools",
       },
       {
-        path: "/api/tools/{toolName}",
+        path: "/api/tools",
         method: "POST",
         price: "$0.002",
         description: "Direct tool invocation without LLM — get_swap_quote, get_vault_info, build_vault_swap, etc.",

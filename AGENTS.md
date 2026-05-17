@@ -8,11 +8,13 @@
 
 ## Overview
 
-The Rigoblock Agentic Operator exposes two x402-gated endpoints:
+The Rigoblock Agentic Operator exposes four x402-gated endpoints. Every operation is an atomic HTTP request.
 
 | Endpoint | Method | Price | What it returns |
 |----------|--------|-------|-----------------|
 | `/api/quote` | GET | $0.002 USDC | DEX price quote (no vault context needed) |
+| `/api/tools` | GET | $0.002 USDC | Full tool catalog with JSON schemas for direct invocation |
+| `/api/tools?toolName={name}` | POST | $0.002 USDC | Direct tool execution with structured arguments (no LLM overhead) |
 | `/api/chat` | POST | up to $0.10 USDC (billed by actual usage, typical $0.003–$0.015) | AI-powered DeFi response (swap calldata, positions, analysis) |
 
 Payments are in USDC on **Base mainnet** (`eip155:8453`) via the
@@ -396,14 +398,16 @@ X-PAYMENT: <x402-payment-header>
 
 **Why this matters for autonomous agents:** Instead of guessing parameters or
 relying on natural language, an agent can call this endpoint once, cache the
-schemas, and then invoke specific tools directly via `POST /api/tools/{toolName}`.
+schemas, and then invoke specific tools directly via `POST /api/tools?toolName={toolName}`.
 
-### `POST /api/tools/{toolName}` — Direct tool invocation
+**Price:** $0.002 USDC per request (x402 exact scheme, eip155:8453). Tool discovery is x402-gated to prevent spam and align with the paid execution model.
+
+### `POST /api/tools?toolName={toolName}` — Direct tool invocation
 
 Execute any tool by name with a structured arguments object. No LLM processing.
 
 ```
-POST /api/tools/build_vault_swap
+POST /api/tools?toolName=build_vault_swap
 X-PAYMENT: <x402-payment-header>
 Content-Type: application/json
 
@@ -435,6 +439,13 @@ Content-Type: application/json
 **Tool categories:** Spot Trading, Vault Info, GMX Perpetuals, Uniswap v4 LP,
 Cross-Chain, GRG Staking, Vault Management, Delegation, TWAP Orders, NAV Sync,
 Operator Settings, Oracle.
+
+**How autonomous agents should use this:**
+1. Call `GET /api/tools` ($0.002) once to discover schemas
+2. Cache the catalog locally
+3. Call `POST /api/tools?toolName={toolName}` with structured arguments for each operation
+4. If the response contains `transaction`, sign and broadcast it (manual mode)
+5. For auto-execution, provide operator auth and set `executionMode: "delegated"`
 
 ---
 

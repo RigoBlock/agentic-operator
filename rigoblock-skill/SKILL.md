@@ -6,12 +6,15 @@ metadata: {"homepage":"https://trader.rigoblock.com"}
 
 # Rigoblock DeFi Operator
 
-You have access to DeFi trading on Rigoblock smart pool vaults via two HTTP
+> Every DeFi operation is exposed as an atomic HTTP API call. Use `curl`, `fetch`,
+> `requests`, or any HTTP client your runtime provides — the API handles all
+> on-chain complexity for you.
+
+You have access to DeFi trading on Rigoblock smart pool vaults via HTTP
 endpoints at `https://trader.rigoblock.com`. All calls are paid with USDC
 on Base via the x402 protocol.
 
 This skill is **language-agnostic**: every operation is a plain HTTP request.
-Use `curl`, `fetch`, `requests`, or any HTTP client your runtime provides.
 
 ## Wallet Requirements
 
@@ -230,7 +233,7 @@ X-PAYMENT: <x402-payment-header>
   }
 ```
 
-Cost: **$0.002** per call (USDC on Base).
+Cost: **$0.002** per call (x402 exact scheme, eip155:8453).
 
 ### 3. `POST /api/chat` — All Vault Operations (Natural Language)
 

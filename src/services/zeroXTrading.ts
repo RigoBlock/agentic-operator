@@ -155,66 +155,72 @@ export async function getZeroXQuote(
   //     a single retry with a much larger probe handles it. The price endpoint
   //     is indicative only (no funds move), so larger probes are safe.
   if (intent.amountOut && !intent.amountIn) {
-    const decimalGap = Math.max(0, decimalsIn - decimalsOut);
-    const probeExponent = decimalGap + 3;
-    let probeSellAmount = 10n ** BigInt(probeExponent);
-    let priceBuyAmountBn = 0n;
+    // 0x API v2 only supports exact-input (sellAmount). For exact-output,
+    // we probe with a small exact-input /quote to get the reliable market rate,
+    // then compute the required sellAmount for the desired buy amount.
+    // Using /quote instead of /price avoids distorted indicative rates for
+    // low-liquidity or exotic token pairs.
+    const probeExponent = Math.max(0, decimalsIn - 3);
+    const probeAmounts = [
+      10n ** BigInt(probeExponent),
+      10n ** BigInt(probeExponent + 1),
+    ];
 
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const priceParams = new URLSearchParams({
-        chainId: String(chainId),
-        sellToken,
-        buyToken,
-        sellAmount: probeSellAmount.toString(),
-        excludedSources: "0x_RFQ",
-      });
+    let probeBuyAmountBn = 0n;
+    let probeSellAmountBn = 0n;
 
-      console.log(`[0x] Price probe: sellAmount=${probeSellAmount} (10^${probeExponent}${attempt > 0 ? " + retry" : ""}, decGap=${decimalGap})`);
-      const priceUrl = `${ZEROX_API_URL}/swap/allowance-holder/price?${priceParams.toString()}`;
-      const priceRes = await fetchWithRetry(priceUrl, {
+    for (const probeSellAmount of probeAmounts) {
+      const probeParams = new URLSearchParams(params);
+      probeParams.set("sellAmount", probeSellAmount.toString());
+      probeParams.set("slippageBps", String(intent.slippageBps ?? 100));
+
+      console.log(`[0x] Exact-output probe: sellAmount=${probeSellAmount} ${intent.tokenIn}`);
+      const probeUrl = `${ZEROX_API_URL}/swap/allowance-holder/quote?${probeParams.toString()}`;
+      const probeRes = await fetchWithRetry(probeUrl, {
         method: "GET",
         headers: getHeaders(env),
       });
 
-      if (!priceRes.ok) {
-        const errText = await priceRes.text().catch(() => "");
-        throw new Error(
-          `0x price estimation failed (${priceRes.status}): Could not get market price for ${intent.tokenIn}→${intent.tokenOut}. ${errText.slice(0, 200)}`
-        );
+      if (!probeRes.ok) {
+        console.warn(`[0x] Probe quote failed (${probeRes.status}), trying next probe amount`);
+        continue;
       }
 
-      const priceData = await priceRes.json() as Record<string, unknown>;
-      const priceBuyAmount = priceData.buyAmount as string;
+      const probeData = await probeRes.json() as Record<string, unknown>;
+      const probeBuyAmount = probeData.buyAmount as string;
 
-      if (priceBuyAmount && priceBuyAmount !== "0") {
-        priceBuyAmountBn = BigInt(priceBuyAmount);
-        console.log(`[0x] Price probe result: ${probeSellAmount} → ${priceBuyAmount} raw`);
+      if (probeBuyAmount && probeBuyAmount !== "0") {
+        probeBuyAmountBn = BigInt(probeBuyAmount);
+        probeSellAmountBn = probeSellAmount;
+        console.log(`[0x] Probe result: ${probeSellAmount} ${intent.tokenIn} → ${probeBuyAmount} ${intent.tokenOut}`);
         break;
-      }
-
-      if (attempt === 0) {
-        // Retry with a substantially larger probe. Scale by ~10^(half of decimalsIn)
-        // so high-decimal tokens (18-dec memecoins) get enough headroom while
-        // low-decimal tokens (6-dec stables) stay reasonable.
-        const retryBump = BigInt(Math.max(8, Math.ceil(decimalsIn / 2)));
-        probeSellAmount = probeSellAmount * (10n ** retryBump);
-        console.log(`[0x] buyAmount=0, retrying with probe=${probeSellAmount}`);
       }
     }
 
-    if (priceBuyAmountBn === 0n) {
+    if (probeBuyAmountBn === 0n || probeSellAmountBn === 0n) {
       throw new Error(
-        `0x could not determine a market price for ${intent.tokenIn}→${intent.tokenOut} on chain ${chainId}. No liquidity.`
+        `0x could not determine a market price for ${intent.tokenIn}→${intent.tokenOut} on chain ${chainId}. ` +
+        `The exact-output probe failed for all probe amounts. ` +
+        `Try a different DEX (uniswap) or a smaller amount.`
       );
     }
 
-    // Step 2: Compute required sellAmount from the indicative rate
-    // rate = priceBuyAmountBn / probeSellAmount
-    // needed = desiredBuyAmount * probeSellAmount / priceBuyAmountBn
+    // Compute required sellAmount from the probe rate
+    // rate = probeBuyAmount / probeSellAmount
+    // needed = desiredBuyAmount * probeSellAmount / probeBuyAmount
     const desiredBuyAmountRaw = parseUnits(intent.amountOut, decimalsOut);
 
-    // Add 2% buffer to account for price movement between price and quote calls
-    const estimatedSellAmount = (desiredBuyAmountRaw * probeSellAmount * 102n) / (priceBuyAmountBn * 100n);
+    // Add 2% buffer to account for price movement between probe and final quote
+    const estimatedSellAmount = (desiredBuyAmountRaw * probeSellAmountBn * 102n) / (probeBuyAmountBn * 100n);
+
+    // Defensive: estimatedSellAmount must be > 0
+    if (estimatedSellAmount === 0n) {
+      throw new Error(
+        `0x could not compute a valid sell amount for ${intent.amountOut} ${intent.tokenOut} on chain ${chainId}. ` +
+        `The probe returned ${probeBuyAmountBn.toString()} buy tokens for ${probeSellAmountBn.toString()} sell tokens, ` +
+        `which produced a zero estimated input. Try a different DEX (uniswap) or a smaller amount.`
+      );
+    }
 
     console.log(`[0x] Estimated sellAmount=${estimatedSellAmount.toString()} (+2% buffer) for target ${intent.amountOut} ${intent.tokenOut}`);
     params.set("sellAmount", estimatedSellAmount.toString());
@@ -252,7 +258,13 @@ export async function getZeroXQuote(
       detail = errText.slice(0, 300) || detail;
     }
     console.error(`[0x] Quote error ${res.status}:`, errText.slice(0, 800));
-    throw new Error(`0x quote failed (${res.status}): ${detail}`);
+    throw new Error(
+      `0x quote failed (${res.status}): ${detail}. ` +
+      `Requested ${intent.amountOut ? "buy " + intent.amountOut : "sell " + intent.amountIn} ` +
+      `${intent.tokenOut} with ${intent.tokenIn} on chain ${chainId}. ` +
+      `If exact-output (buy), the price probe may have failed or returned an extreme rate. ` +
+      `Try switching DEX (uniswap) or reducing the amount.`,
+    );
   }
 
   const data = (await res.json()) as Record<string, unknown>;
@@ -273,11 +285,43 @@ export async function getZeroXQuote(
     throw new Error("0x returned empty transaction data. The quote may not be available.");
   }
 
+  // Defensive: validate that buyAmount and sellAmount are present and are non-empty strings.
+  // Some 0x API versions or edge conditions can return these as numbers or omit them.
+  const rawBuyAmount = data.buyAmount;
+  const rawSellAmount = data.sellAmount;
+  const rawBuyToken = data.buyToken;
+  const rawSellToken = data.sellToken;
+
+  if (typeof rawBuyAmount !== "string" || rawBuyAmount === "") {
+    throw new Error(
+      `0x quote response is missing a valid buyAmount (got ${typeof rawBuyAmount}). ` +
+      `The token pair may not be fully supported by 0x on chain ${chainId}. Try Uniswap.`
+    );
+  }
+  if (typeof rawSellAmount !== "string" || rawSellAmount === "") {
+    throw new Error(
+      `0x quote response is missing a valid sellAmount (got ${typeof rawSellAmount}). ` +
+      `The token pair may not be fully supported by 0x on chain ${chainId}. Try Uniswap.`
+    );
+  }
+  if (typeof rawBuyToken !== "string" || rawBuyToken === "") {
+    throw new Error(
+      `0x quote response is missing a valid buyToken (got ${typeof rawBuyToken}). ` +
+      `The token pair may not be fully supported by 0x on chain ${chainId}. Try Uniswap.`
+    );
+  }
+  if (typeof rawSellToken !== "string" || rawSellToken === "") {
+    throw new Error(
+      `0x quote response is missing a valid sellToken (got ${typeof rawSellToken}). ` +
+      `The token pair may not be fully supported by 0x on chain ${chainId}. Try Uniswap.`
+    );
+  }
+
   return {
-    buyAmount: data.buyAmount as string,
-    buyToken: data.buyToken as string,
-    sellAmount: data.sellAmount as string,
-    sellToken: data.sellToken as string,
+    buyAmount: rawBuyAmount,
+    buyToken: rawBuyToken,
+    sellAmount: rawSellAmount,
+    sellToken: rawSellToken,
     gas: (data.gas as string) || txData.gas || "300000",
     gasPrice: (data.gasPrice as string) || txData.gasPrice || "0",
     totalNetworkFee: (data.totalNetworkFee as string) || "0",
