@@ -360,13 +360,13 @@ of operations — use your own judgment on how to phrase requests:
 - ETH/USDC pool on Arbitrum (reference pool):
   - Pool ID: `0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34`
   - fee: `6000` (0.60%), tickSpacing: `120`, hooks: `0x0000000000000000000000000000000000000000`
-  - currency0: ETH `0x40461291347e1eCbb09499F3371D3f17f10d7159`, currency1: USDT `0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9`
+  - currency0: WETH `0x82aF49447D8a07e3bd95BD0d56f35241523fBab1`, currency1: USDT `0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9`
 - For unknown pools: call `get_pool_info` with the pool ID to discover fee, tickSpacing, and hooks before adding liquidity
 - Examples: "add liquidity to ETH/USDC pool with 0.5 ETH and 1500 USDT on Arbitrum"
 
 ### GMX V2 Perpetuals (Arbitrum)
 - Open, close, increase positions; get positions; cancel/update orders; claim funding
-- ETH/USD market: `ETH/USD [WBTC.b-USDC]`, index `0x40461291347e1eCbb09499F3371D3f17f10d7159`
+- ETH/USD market: index `0x82aF49447D8a07e3bd95BD0d56f35241523fBab1` (WETH)
 - Examples: "open a 1x short ETH/USD position with 500 USDT collateral on GMX"
 
 ### Cross-Chain Bridge (Across Protocol)

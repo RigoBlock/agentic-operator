@@ -3,7 +3,7 @@
 > Browser-based autonomous DeFi agent for Rigoblock smart pool vaults.
 > Open [trader.rigoblock.com](https://trader.rigoblock.com), connect your
 > wallet, and start trading — no API key needed. Uses Cloudflare Workers AI
-> (Llama 4 Scout) by default, with optional premium model override.
+> (Kimi K2.6) by default, with optional premium model override.
 
 **Built on Coinbase CDP.** The backend uses:
 - **Coinbase Developer Platform (CDP) Server Wallet** — per-vault agent wallets with keys in AWS Nitro Enclaves
@@ -13,7 +13,7 @@
 - **External wallet** — MetaMask, WalletConnect, etc. via EIP-6963 discovery.
 - **Agent wallet** — CDP Server Wallet per-vault EOA (keys in AWS Nitro Enclaves, never extractable).
 
-**Zero-friction AI.** Uses Cloudflare Workers AI (Llama 4 Scout) by default —
+**Zero-friction AI.** Uses Cloudflare Workers AI (Kimi K2.6) by default —
 no API key required. Power users can optionally add their own OpenRouter or
 OpenAI key for premium models, like MetaMask lets users customize RPC endpoints.
 
@@ -28,7 +28,7 @@ USDC on Base. A TypeScript SDK with a typed HTTP client is included in `sdk/`.
 ```
 Browser Chat UI (trader.rigoblock.com)
     ↓ operator connects wallet — starts chatting immediately
-    ↓ Workers AI default (Llama 4 Scout), optional premium model override
+    ↓ Workers AI default (Kimi K2.6), optional premium model override
 Cloudflare Worker Backend (trader.rigoblock.com/api)
     ↓ Workers AI reasoning (open-source LLMs) + tool execution
     ↓ tool execution (Uniswap, GMX, Across, vault management)

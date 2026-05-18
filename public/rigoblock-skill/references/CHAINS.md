@@ -14,7 +14,7 @@
 
 ## Key Tokens by Chain
 
-### ETH (Ethereum)
+### XAUT (Tether Gold)
 - **Ethereum:** `0x68749665FF8D2d112Fa859AA293F07A622782F38`
 - **Arbitrum:** `0x40461291347e1eCbb09499F3371D3f17f10d7159` (bridged)
 
@@ -37,8 +37,6 @@
 Note: The current strategy deploys the ETH/USDC LP on **Arbitrum** (same chain as the GMX hedge).
 The Arbitrum pool uses a Rigoblock oracle hook — the operator provides the hook address at LP creation.
 
-### ETH GMX V2 Market (Arbitrum)
-```
-Market: ETH/USD [WBTC.b-USDC]
-Index Token: 0x40461291347e1eCbb09499F3371D3f17f10d7159
-```
+### ETH (Arbitrum)
+- ETH is native on Arbitrum. WETH: `0x82aF49447D8a07e3bd95BD0d56f35241523fBab1`
+- GMX V2 markets resolve dynamically via the GMX API — no single hardcoded market.
