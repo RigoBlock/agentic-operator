@@ -1,5 +1,5 @@
 /**
- * HTTP Tool Endpoints — POST /api/tools/:toolName
+ * HTTP Tool Endpoints — POST /api/tools?{toolName}
  *
  * Direct tool invocation without LLM. Returns structured JSON responses.
  * Useful for agents that want to call specific tools programmatically

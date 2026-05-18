@@ -133,6 +133,10 @@ export const OPERATOR_VERIFIED_TOOLS = new Set<string>([
   "enable_swap_shield",
   // Strategy visibility is operator-private
   "list_strategies",
+  // NAV Sync: reads/writes operator-private KV configs
+  "create_nav_sync",
+  "list_nav_syncs",
+  "cancel_nav_sync",
   // Delegation management: these trigger server-side mutations (CDP wallet creation,
   // KV writes) before the user signs — require ownership proof to prevent abuse.
   "setup_delegation",
