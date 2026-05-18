@@ -219,7 +219,7 @@ See [references/SAFETY.md](./references/SAFETY.md) for the full model.
 ## x402 API — For External AI Agents
 
 External agents can also use the same backend via `GET /api/quote` and
-`POST /api/chat`, paying $0.002–$0.10 per call in USDC on Base. See [AGENTS.md](../AGENTS.md)
+`POST /api/chat`, paying $0.002–$0.10 per call in USDC on Base. See [AGENTS.md](https://github.com/RigoBlock/agentic-operator/blob/main/AGENTS.md)
 for the full x402 integration guide, auth model, and safety guarantees.
 
 ---

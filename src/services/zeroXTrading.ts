@@ -160,21 +160,23 @@ export async function getZeroXQuote(
     // then compute the required sellAmount for the desired buy amount.
     // Using /quote instead of /price avoids distorted indicative rates for
     // low-liquidity or exotic token pairs.
-    const probeExponent = Math.max(0, decimalsIn - 3);
-    const probeAmounts = [
-      10n ** BigInt(probeExponent),
-      10n ** BigInt(probeExponent + 1),
-    ];
-
+    //
+    // Probe sizing uses decimalGap to compensate for raw-unit differences between
+    // tokens. If the first probe returns buyAmount=0 (extreme price ratios like
+    // cheap memecoin → WBTC), a single retry with a substantially larger probe
+    // handles it.
+    const decimalGap = Math.max(0, decimalsIn - decimalsOut);
+    const probeExponent = decimalGap + 3;
+    let probeSellAmount = 10n ** BigInt(probeExponent);
     let probeBuyAmountBn = 0n;
     let probeSellAmountBn = 0n;
 
-    for (const probeSellAmount of probeAmounts) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       const probeParams = new URLSearchParams(params);
       probeParams.set("sellAmount", probeSellAmount.toString());
       probeParams.set("slippageBps", String(intent.slippageBps ?? 100));
 
-      console.log(`[0x] Exact-output probe: sellAmount=${probeSellAmount} ${intent.tokenIn}`);
+      console.log(`[0x] Exact-output probe: sellAmount=${probeSellAmount} (10^${probeExponent}${attempt > 0 ? " + retry" : ""}, decGap=${decimalGap})`);
       const probeUrl = `${ZEROX_API_URL}/swap/allowance-holder/quote?${probeParams.toString()}`;
       const probeRes = await fetchWithRetry(probeUrl, {
         method: "GET",
@@ -183,6 +185,10 @@ export async function getZeroXQuote(
 
       if (!probeRes.ok) {
         console.warn(`[0x] Probe quote failed (${probeRes.status}), trying next probe amount`);
+        if (attempt === 0) {
+          const retryBump = BigInt(Math.max(8, Math.ceil(decimalsIn / 2)));
+          probeSellAmount = probeSellAmount * (10n ** retryBump);
+        }
         continue;
       }
 
@@ -194,6 +200,15 @@ export async function getZeroXQuote(
         probeSellAmountBn = probeSellAmount;
         console.log(`[0x] Probe result: ${probeSellAmount} ${intent.tokenIn} → ${probeBuyAmount} ${intent.tokenOut}`);
         break;
+      }
+
+      if (attempt === 0) {
+        // Retry with a substantially larger probe. Scale by ~10^(half of decimalsIn)
+        // so high-decimal tokens (18-dec memecoins) get enough headroom while
+        // low-decimal tokens (6-dec stables) stay reasonable.
+        const retryBump = BigInt(Math.max(8, Math.ceil(decimalsIn / 2)));
+        probeSellAmount = probeSellAmount * (10n ** retryBump);
+        console.log(`[0x] buyAmount=0, retrying with probe=${probeSellAmount}`);
       }
     }
 
