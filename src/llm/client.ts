@@ -3865,11 +3865,14 @@ export async function executeToolCall(
       };
     }
 
-    // ── Strategy Skills (TWAP, etc.) — delegated to skill registry ────
+    // ── Strategy Skills (TWAP, NAV Sync) — delegated to skill registry ────
 
     case "create_twap_order":
     case "cancel_twap_order":
-    case "list_twap_orders": {
+    case "list_twap_orders":
+    case "create_nav_sync":
+    case "list_nav_syncs":
+    case "cancel_nav_sync": {
       const { handleSkillToolCall } = await import("../skills/index.js");
       const result = await handleSkillToolCall(name, args, env, ctx);
       if (!result) throw new Error(`Skill handler not found for ${name}`);

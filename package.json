@@ -8,7 +8,6 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "predeploy": "rm -rf public/rigoblock-skill && cp -r rigoblock-skill public/rigoblock-skill",
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test:quote": "npx tsx scripts/test-uniswap-quote.ts",

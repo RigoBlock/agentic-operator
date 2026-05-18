@@ -4,10 +4,6 @@
  * Provides a typed HTTP client, x402-ready, for calling the Rigoblock
  * Agentic Operator API. Wallet creation is NOT included — agents bring
  * their own wallets (viem, ethers, CDP, etc.).
- *
- * Strategies are documented at https://trader.rigoblock.com/rigoblock-skill/references/STRATEGIES.md,
- * not as programmatic code — the agent reads the skill and uses tools for
- * deterministic, step-by-step execution.
  */
 
 // Client

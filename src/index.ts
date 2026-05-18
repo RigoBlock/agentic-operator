@@ -542,26 +542,6 @@ app.get("/.well-known/openid-configuration", (c) =>
   }),
 );
 
-// Agent Skills Discovery index (RFC v0.2.0) — machine-readable list of reusable agent skills.
-// See https://github.com/cloudflare/agent-skills-discovery-rfc
-app.get("/.well-known/agent-skills/index.json", (c) =>
-  c.json({
-    $schema: "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
-    skills: [
-      {
-        name: "rigoblock-trading",
-        type: "skill-md",
-        description:
-          "DeFi trading skill for Rigoblock smart vaults: swaps, bridges, LP, staking, NAV queries " +
-          "across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, and Unichain via x402 payments.",
-        url: "https://trader.rigoblock.com/rigoblock-skill/SKILL.md",
-        digest:
-          "sha256:acc3fd047093b12c5e16860b5f3ae15d457c0a8b041151ac80170d23730aec75",
-      },
-    ],
-  }),
-);
-
 export default {
   fetch: app.fetch,
   async scheduled(
