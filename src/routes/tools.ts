@@ -1,5 +1,5 @@
 /**
- * HTTP Tool Endpoints — POST /api/tools/:toolName
+ * HTTP Tool Endpoints — POST /api/tools?{toolName}
  *
  * Direct tool invocation without LLM. Returns structured JSON responses.
  * Useful for agents that want to call specific tools programmatically
@@ -58,12 +58,16 @@ function getToolCategory(name: string): string {
   return "Other";
 }
 
-// GET /api/tools — endpoint discovery (also used for Bazaar registration).
-// Returns the list of available tools so crawlers and agents can discover them.
-// Auth: x402 payment or browser session (same as POST /:toolName).
+// GET /api/tools — x402-gated tool discovery for autonomous agents.
+// Returns the full catalog with schemas so agents know what each tool does
+// and what arguments to pass. Requires x402 payment (exact scheme, $0.002 USDC).
 tools.get("/", async (c) => {
-  if (!c.get("x402Paid") && !c.get("browserVerified")) {
-    return c.json({ error: "Authentication required. Use x402 payment or a verified browser session." }, 401);
+  // Local auth guard: if x402 middleware failed to initialize or payment was
+  // skipped, require browser verification. This prevents the paid catalog from
+  // becoming publicly accessible during a facilitator outage.
+  const isBrowserRequest = c.get("browserVerified") ?? false;
+  if (!c.get("x402Paid") && !isBrowserRequest) {
+    return c.json({ error: "Authentication required" }, 401);
   }
 
   // Merge base tool definitions with skill tool definitions for a complete catalog.
@@ -82,18 +86,22 @@ tools.get("/", async (c) => {
   });
 
   return c.json({
-    description: "Rigoblock direct DeFi tool invocation. POST to /api/tools/{toolName} with arguments object.",
-    usage: "POST /api/tools/{toolName}",
+    description: "Rigoblock direct DeFi tool invocation. POST to /api/tools?toolName={name} with arguments object.",
+    usage: "POST /api/tools?toolName={toolName}",
     price: "$0.002 USDC per call (x402 exact scheme, eip155:8453)",
     toolCount: toolCatalog.length,
     tools: toolCatalog,
   });
 });
 
-tools.post("/:toolName", async (c) => {
+tools.post("/", async (c) => {
   try {
-    const toolName = c.req.param("toolName");
-    const body = await c.req.json<{
+    const toolName = c.req.query("toolName");
+    if (!toolName) {
+      return c.json({ error: "toolName query parameter is required" }, 400);
+    }
+
+    let body: {
       arguments: Record<string, unknown>;
       vaultAddress?: string;
       chainId: number;
@@ -101,13 +109,23 @@ tools.post("/:toolName", async (c) => {
       authSignature?: string;
       authTimestamp?: number;
       executionMode?: ExecutionMode;
-    }>();
+    };
+    try {
+      const parsedBody: unknown = await c.req.json();
+      if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+        return c.json({ error: "Invalid JSON body" }, 400);
+      }
+      body = parsedBody as typeof body;
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    if (!body.arguments || typeof body.arguments !== "object") {
+      return c.json({ error: "arguments object is required" }, 400);
+    }
 
     if (!body.chainId) {
       return c.json({ error: "chainId is required" }, 400);
-    }
-    if (!body.arguments || typeof body.arguments !== "object") {
-      return c.json({ error: "arguments object is required" }, 400);
     }
 
     const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;

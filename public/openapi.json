@@ -235,9 +235,7 @@
             "x402": []
           }
         ]
-      }
-    },
-    "/api/tools/{toolName}": {
+      },
       "post": {
         "operationId": "invokeTool",
         "summary": "Invoke a DeFi tool directly",
@@ -248,7 +246,7 @@
         "parameters": [
           {
             "name": "toolName",
-            "in": "path",
+            "in": "query",
             "required": true,
             "description": "Tool name to invoke",
             "schema": {
@@ -728,11 +726,18 @@
       "ToolDefinition": {
         "type": "object",
         "description": "OpenAI-compatible function schema for a single DeFi tool",
-        "required": ["name", "description", "category", "parameters", "requiresOperatorAuth", "readOnly"],
+        "required": [
+          "name",
+          "description",
+          "category",
+          "parameters",
+          "requiresOperatorAuth",
+          "readOnly"
+        ],
         "properties": {
           "name": {
             "type": "string",
-            "description": "Canonical tool name used in POST /api/tools/{toolName}"
+            "description": "Canonical tool name used in POST /api/tools?toolName={name}"
           },
           "description": {
             "type": "string",
@@ -774,14 +779,20 @@
       },
       "ToolCatalogResponse": {
         "type": "object",
-        "required": ["description", "usage", "price", "toolCount", "tools"],
+        "required": [
+          "description",
+          "usage",
+          "price",
+          "toolCount",
+          "tools"
+        ],
         "properties": {
           "description": {
             "type": "string"
           },
           "usage": {
             "type": "string",
-            "example": "POST /api/tools/{toolName}"
+            "example": "POST /api/tools?toolName={name}"
           },
           "price": {
             "type": "string",
