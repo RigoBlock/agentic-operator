@@ -111,7 +111,11 @@ tools.post("/", async (c) => {
       executionMode?: ExecutionMode;
     };
     try {
-      body = await c.req.json();
+      const parsedBody: unknown = await c.req.json();
+      if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+        return c.json({ error: "Invalid JSON body" }, 400);
+      }
+      body = parsedBody as typeof body;
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }

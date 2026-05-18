@@ -170,6 +170,7 @@ export async function getZeroXQuote(
     let probeSellAmount = 10n ** BigInt(probeExponent);
     let probeBuyAmountBn = 0n;
     let probeSellAmountBn = 0n;
+    let lastProbeError: { status: number; body: string } | null = null;
 
     for (let attempt = 0; attempt < 2; attempt++) {
       const probeParams = new URLSearchParams(params);
@@ -184,12 +185,24 @@ export async function getZeroXQuote(
       });
 
       if (!probeRes.ok) {
-        console.warn(`[0x] Probe quote failed (${probeRes.status}), trying next probe amount`);
-        if (attempt === 0) {
+        const errBody = await probeRes.text();
+        lastProbeError = { status: probeRes.status, body: errBody };
+
+        // Only retry on 400 (potentially amount-related validation) or 5xx (transient).
+        // Auth (401/403), not-found (404), rate-limit (429) are permanent for this pair.
+        const retryable = probeRes.status === 400 || probeRes.status >= 500;
+        if (retryable && attempt === 0) {
+          console.warn(`[0x] Probe quote failed (${probeRes.status}), retrying with larger probe`);
           const retryBump = BigInt(Math.max(8, Math.ceil(decimalsIn / 2)));
           probeSellAmount = probeSellAmount * (10n ** retryBump);
+          continue;
         }
-        continue;
+
+        // Non-retryable or final attempt — surface the actual 0x error
+        throw new Error(
+          `0x quote failed (${probeRes.status}): ${errBody}. ` +
+          `Token pair: ${intent.tokenIn}→${intent.tokenOut} on chain ${chainId}.`
+        );
       }
 
       const probeData = await probeRes.json() as Record<string, unknown>;
@@ -213,10 +226,12 @@ export async function getZeroXQuote(
     }
 
     if (probeBuyAmountBn === 0n || probeSellAmountBn === 0n) {
+      const errDetail = lastProbeError
+        ? `Last 0x error: ${lastProbeError.status} — ${lastProbeError.body}`
+        : "All probe amounts returned zero buyAmount.";
       throw new Error(
         `0x could not determine a market price for ${intent.tokenIn}→${intent.tokenOut} on chain ${chainId}. ` +
-        `The exact-output probe failed for all probe amounts. ` +
-        `Try a different DEX (uniswap) or a smaller amount.`
+        `${errDetail} Try a different DEX (uniswap) or a smaller amount.`
       );
     }
 
