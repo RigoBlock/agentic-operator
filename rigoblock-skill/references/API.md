@@ -113,7 +113,7 @@ message, invokes zero or one tool, and returns a result.
 |-------|----------|-------------|
 | `messages` | Yes | Chat messages array |
 | `vaultAddress` | Yes | Target vault address |
-| `chainId` | No | Chain ID (default from session) |
+| `chainId` | Yes | Chain ID |
 | `operatorAddress` | For delegated | Vault owner address |
 | `authSignature` | For delegated | EIP-191 signature of auth message |
 | `authTimestamp` | For delegated | Timestamp (valid 24h) |
@@ -146,7 +146,7 @@ message, invokes zero or one tool, and returns a result.
 }
 ```
 
-**x402 Price:** $0.01 (USDC on Base)
+**x402 Price:** Up to $0.10 (USDC on Base)
 
 ---
 

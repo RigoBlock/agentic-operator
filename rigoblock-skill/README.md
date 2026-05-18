@@ -18,7 +18,7 @@ no API key required. Power users can optionally add their own OpenRouter or
 OpenAI key for premium models, like MetaMask lets users customize RPC endpoints.
 
 **Also accessible via x402 API.** External AI agents can call the same
-backend via `GET /api/quote` and `POST /api/chat`, paying $0.01/call in
+backend via `GET /api/quote` and `POST /api/chat`, paying $0.002–$0.10 per call in
 USDC on Base. A TypeScript SDK with a typed HTTP client is included in `sdk/`.
 
 ---
@@ -42,7 +42,7 @@ Rigoblock Vault (on-chain: Ethereum + Arbitrum + 5 more chains)
 **Two interfaces, one backend:**
 - **Browser chat** — operator opens the URL, connects wallet, and starts
   chatting immediately. No API key needed (Workers AI default).
-- **x402 API** — external AI agents pay $0.01/call in USDC on Base to use the
+- **x402 API** — external AI agents pay $0.002 per quote/tool, up to $0.10 per chat in USDC on Base to use the
   same execution backend programmatically.
 
 ### What the Agent Does
@@ -164,7 +164,7 @@ API's LLM backend routes to the right tool.
 
 Every request needs an `X-PAYMENT` header. Without it, the API returns `402`.
 The x402 protocol handles payment signing — your wallet signs a micropayment
-($0.002 for quotes, $0.01 for operations) and includes it in the header.
+($0.002 for quotes/tools, up to $0.10 for chat) and includes it in the header.
 
 ### Operator Auth (for execution)
 
@@ -219,7 +219,7 @@ See [references/SAFETY.md](./references/SAFETY.md) for the full model.
 ## x402 API — For External AI Agents
 
 External agents can also use the same backend via `GET /api/quote` and
-`POST /api/chat`, paying $0.01/call in USDC on Base. See [AGENTS.md](../AGENTS.md)
+`POST /api/chat`, paying $0.002–$0.10 per call in USDC on Base. See [AGENTS.md](../AGENTS.md)
 for the full x402 integration guide, auth model, and safety guarantees.
 
 ---
@@ -244,7 +244,7 @@ creates it (because the agent can't fiat-on-ramp itself yet).
    → Or use CDP Server Wallet for managed keys
 
 2. Agent outputs its address → operator funds it:
-     - USDC on Base        → x402 API payments ($0.01/call)
+     - USDC on Base        → x402 API payments ($0.002–$0.10/call)
      - ETH on Ethereum   → vault deploy + delegation + LP gas (~$5)
      - ETH on Arbitrum   → vault deploy + delegation gas (~$1)
 
