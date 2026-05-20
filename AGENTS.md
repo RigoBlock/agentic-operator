@@ -302,7 +302,7 @@ Even a fully authenticated agent with delegation access CANNOT:
 |--------|---------|
 | Drain vault assets to external address | `withdraw` and `transferOwnership` selectors are never delegated |
 | Execute trades that lose > 10% NAV | NAV shield blocks pre-broadcast |
-| Execute swaps with >5% oracle divergence when Swap Shield is enabled | Swap Shield compares DEX quote vs TWAP oracle; this block does not apply if the operator has temporarily raised the tolerance above the current divergence |
+| Execute swaps with >5% oracle divergence | Swap Shield compares DEX quote vs TWAP oracle; this block does not apply if the operator has temporarily raised the tolerance above the current divergence |
 | Bypass slippage protection | Slippage is enforced in swap calldata building |
 | Call arbitrary contract functions | Selector whitelist — only approved vault functions |
 | Send transactions to non-vault contracts | Target address must equal vault address |
@@ -695,7 +695,7 @@ Every slice passes through the **full safety stack** — identical to manually
 triggered swaps:
 
 1. **Swap Shield** — compares DEX quote against on-chain BackgeoOracle TWAP price.
-   Blocks if DEX is >5% worse than oracle (or the operator's temporary tolerance if set) or >10% better than oracle.
+   Blocks if DEX diverges >5% from oracle in either direction (or the operator's temporary tolerance if set).
 2. **NAV shield pre-check** — simulates post-swap NAV before returning calldata.
    Blocks if NAV would drop >10%.
 3. **NAV shield at broadcast** (autonomous mode) — runs again before CDP signs.

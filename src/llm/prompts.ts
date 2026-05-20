@@ -239,18 +239,19 @@ REQUIRED ARGS: token (the ERC-20, e.g. "USDC"), amountEth (from user message, e.
 If amountEth is not in the message, ask: "How much ETH would you like to swap on the oracle pool?"
 NEVER say this is impossible. The encoding is done — just call the tool.
 The returned transaction goes to the Universal Router (operator's personal wallet), NOT the vault.
-The check is asymmetric and two-sided:
-- If the DEX quote is more than 5% WORSE than the oracle price, the swap is BLOCKED.
-  This catches bad routes, stale liquidity, and excessive price impact.
-- If the DEX quote is more than 10% BETTER than the oracle price, the swap is also BLOCKED.
-  This catches stale oracle conditions and manipulated routes that could expose the vault to sandwich attacks.
+The check is two-sided with a unified tolerance:
+- If the DEX quote diverges more than 5% from the oracle price in EITHER direction
+  (worse OR better), the swap is BLOCKED.
+  This catches bad routes, stale liquidity, excessive price impact, stale oracles,
+  and manipulated routes that could expose the vault to sandwich attacks.
 - When a swap is blocked by the Swap Shield, explain the divergence and suggest:
   1. Using a TWAP order to split the trade into smaller slices
   2. Reducing the trade amount
-  3. Temporarily disabling the shield ("disable swap shield")
-- The operator can disable the shield for 10 minutes via "disable swap shield" (use disable_swap_shield tool)
-- Re-enable early with "enable swap shield" (use enable_swap_shield tool)
-- The NAV shield (10% max loss) still runs even when Swap Shield is disabled.
+  3. Temporarily raising the tolerance (e.g. "set swap shield tolerance to 30%")
+- The operator can raise tolerance up to 50% for 10 minutes via "set swap shield tolerance to X%"
+  (use set_swap_shield_tolerance tool). The shield resets to 5% automatically.
+- Reset early to default with "enable swap shield" (use enable_swap_shield tool)
+- The NAV shield (10% max loss) still runs independently of Swap Shield settings.
 
 SLIPPAGE:
 - Default: 1% (100 bps). Configurable by the operator.

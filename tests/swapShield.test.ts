@@ -383,14 +383,14 @@ describe("Swap Shield — tolerance override flow", () => {
   });
 
   it("starts with no tolerance override", async () => {
-    const tolerance = await getSwapShieldTolerance(kv, OPERATOR, VAULT);
+    const tolerance = await getSwapShieldTolerance(kv, OPERATOR);
     expect(tolerance).toBeNull();
   });
 
   it("setSwapShieldTolerance stores tolerance with TTL", async () => {
-    await setSwapShieldTolerance(kv, OPERATOR, VAULT, 30);
+    await setSwapShieldTolerance(kv, OPERATOR, 30);
 
-    const tolerance = await getSwapShieldTolerance(kv, OPERATOR, VAULT);
+    const tolerance = await getSwapShieldTolerance(kv, OPERATOR);
     expect(tolerance).toBe(30);
 
     // Verify KV put was called with TTL
@@ -402,26 +402,26 @@ describe("Swap Shield — tolerance override flow", () => {
   });
 
   it("clearSwapShieldTolerance removes override", async () => {
-    await setSwapShieldTolerance(kv, OPERATOR, VAULT, 30);
-    expect(await getSwapShieldTolerance(kv, OPERATOR, VAULT)).toBe(30);
+    await setSwapShieldTolerance(kv, OPERATOR, 30);
+    expect(await getSwapShieldTolerance(kv, OPERATOR)).toBe(30);
 
-    await clearSwapShieldTolerance(kv, OPERATOR, VAULT);
-    expect(await getSwapShieldTolerance(kv, OPERATOR, VAULT)).toBeNull();
+    await clearSwapShieldTolerance(kv, OPERATOR);
+    expect(await getSwapShieldTolerance(kv, OPERATOR)).toBeNull();
   });
 
-  it("uses case-insensitive addresses", async () => {
-    await setSwapShieldTolerance(kv, OPERATOR.toUpperCase(), VAULT.toUpperCase(), 25);
-    const tolerance = await getSwapShieldTolerance(kv, OPERATOR.toLowerCase(), VAULT.toLowerCase());
+  it("uses case-insensitive operator address", async () => {
+    await setSwapShieldTolerance(kv, OPERATOR.toUpperCase(), 25);
+    const tolerance = await getSwapShieldTolerance(kv, OPERATOR.toLowerCase());
     expect(tolerance).toBe(25);
   });
 
   it("rejects tolerance above 50%", async () => {
-    await expect(setSwapShieldTolerance(kv, OPERATOR, VAULT, 55)).rejects.toThrow("must be between");
+    await expect(setSwapShieldTolerance(kv, OPERATOR, 55)).rejects.toThrow("must be between");
   });
 
   it("rejects non-positive tolerance", async () => {
-    await expect(setSwapShieldTolerance(kv, OPERATOR, VAULT, 0)).rejects.toThrow("must be between");
-    await expect(setSwapShieldTolerance(kv, OPERATOR, VAULT, -5)).rejects.toThrow("must be between");
+    await expect(setSwapShieldTolerance(kv, OPERATOR, 0)).rejects.toThrow("must be between");
+    await expect(setSwapShieldTolerance(kv, OPERATOR, -5)).rejects.toThrow("must be between");
   });
 });
 

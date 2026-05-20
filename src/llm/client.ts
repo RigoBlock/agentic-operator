@@ -2002,6 +2002,7 @@ export async function executeToolCall(
           zxQuote.buyAmount,
           zxQuote.sellToken as Address,
           zxQuote.buyToken as Address,
+          zxQuote.oracleBuyAmount ? BigInt(zxQuote.oracleBuyAmount) : undefined,
         );
 
         // The 0x API returns a complete transaction targeting AllowanceHolder.
@@ -2450,7 +2451,6 @@ export async function executeToolCall(
       await setSwapShieldTolerance(
         env.KV,
         ctx.operatorAddress!,
-        ctx.vaultAddress as string,
         pct,
       );
       return {
@@ -2469,7 +2469,6 @@ export async function executeToolCall(
       await clearSwapShieldTolerance(
         env.KV,
         ctx.operatorAddress!,
-        ctx.vaultAddress as string,
       );
       return {
         message: "✅ Swap Shield tolerance reset to default (5%). All swaps will be checked against oracle prices.",
@@ -4622,6 +4621,7 @@ async function runSwapShield(
   buyAmountRaw: string,
   resolvedTokenIn?: Address,
   resolvedTokenOut?: Address,
+  precomputedOracleOutRaw?: bigint,
 ): Promise<string | undefined> {
   // Check temporary tolerance override
   let maxDivergencePct: number | undefined;
@@ -4629,7 +4629,6 @@ async function runSwapShield(
     const tolerance = await getSwapShieldTolerance(
       env.KV,
       ctx.operatorAddress,
-      ctx.vaultAddress as string,
     );
     if (tolerance !== null) {
       maxDivergencePct = tolerance;
@@ -4680,6 +4679,7 @@ async function runSwapShield(
     intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
     env.ALCHEMY_API_KEY,
     maxDivergencePct,
+    precomputedOracleOutRaw,
   );
 
   if (!result.allowed) {
@@ -4701,9 +4701,8 @@ async function runSwapShield(
     const directionClause = isFavorable
       ? `is ${magnitudePct}% better than the on-chain oracle price`
       : `is ${magnitudePct}% worse than the on-chain oracle price`;
-    const thresholdText = isFavorable
-      ? "10% better-than-oracle safety threshold"
-      : "5% safety threshold";
+    const normalizedMaxDiv = maxDivergencePct ?? 5;
+    const thresholdText = `${normalizedMaxDiv}% tolerance`;
     const explanation = isFavorable
       ? `This can indicate a stale oracle or a manipulated routing path producing an implausibly favorable quote.`
       : `This usually indicates significant price impact from the trade size.`;

@@ -65,7 +65,6 @@ import { getClient } from "./vault.js";
  * low-liquidity routing without false-positiving on normal DEX spread.
  */
 const DEFAULT_MAX_DIVERGENCE_PCT = 5;
-const MAX_FAVORABLE_DIVERGENCE_PCT = 10;
 
 /** Native ETH address (zero address) — EOracle treats this equivalently to WETH */
 const NATIVE_ETH = "0x0000000000000000000000000000000000000000" as Address;
@@ -148,6 +147,7 @@ export async function checkSwapPrice(
   _slippageBps: number,
   alchemyKey: string,
   maxDivergencePct: number = DEFAULT_MAX_DIVERGENCE_PCT,
+  precomputedOracleOutRaw?: bigint,
 ): Promise<SwapShieldResult> {
   void _slippageBps;
 
@@ -210,28 +210,114 @@ export async function checkSwapPrice(
 
   const publicClient = getClient(chainId, alchemyKey);
 
-  // ── Call convertTokenAmount via eth_call ──
+  // ── Oracle amount: use precomputed value when available ──
+  // When the caller already queried convertTokenAmount (e.g. exact-output
+  // estimate in zeroXTrading.ts), skip the redundant RPC call.
   let oracleAmountRaw: bigint;
-  try {
-    const result = await publicClient.readContract({
-      address: vaultAddress,
-      abi: RIGOBLOCK_VAULT_ABI,
-      functionName: "convertTokenAmount",
-      args: [normalizedIn, amountInRaw, normalizedOut],
-    });
+  if (precomputedOracleOutRaw !== undefined && precomputedOracleOutRaw > 0n) {
+    oracleAmountRaw = precomputedOracleOutRaw;
+    console.log(
+      `[SwapShield] Using precomputed oracle amount: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
+      `(chain=${chainId})`
+    );
+  } else {
+    // ── Call convertTokenAmount via eth_call ──
+    try {
+      const result = await publicClient.readContract({
+        address: vaultAddress,
+        abi: RIGOBLOCK_VAULT_ABI,
+        functionName: "convertTokenAmount",
+        args: [normalizedIn, amountInRaw, normalizedOut],
+      });
 
-    oracleAmountRaw = result as bigint;
+      oracleAmountRaw = result as bigint;
 
-    // convertTokenAmount returns int256, but for a positive input amount the
-    // output should always be non-negative. A negative return indicates an
-    // unexpected condition (e.g. overflow, adapter bug) — fail CLOSED to
-    // ORACLE_ERROR rather than silently flip the sign, which could bypass
-    // the divergence threshold if the semantics are inverted.
-    if (oracleAmountRaw < 0n) {
-      console.error(
-        `[SwapShield] convertTokenAmount returned a negative amount (${oracleAmountRaw}) ` +
-        `for positive input ${amountInRaw} on chain ${chainId} — treating as ORACLE_ERROR`,
+      // convertTokenAmount returns int256, but for a positive input amount the
+      // output should always be non-negative. A negative return indicates an
+      // unexpected condition (e.g. overflow, adapter bug) — fail CLOSED to
+      // ORACLE_ERROR rather than silently flip the sign, which could bypass
+      // the divergence threshold if the semantics are inverted.
+      if (oracleAmountRaw < 0n) {
+        console.error(
+          `[SwapShield] convertTokenAmount returned a negative amount (${oracleAmountRaw}) ` +
+          `for positive input ${amountInRaw} on chain ${chainId} — treating as ORACLE_ERROR`,
+        );
+        return {
+          allowed: true,
+          verified: false,
+          oracleAmount: "0",
+          dexAmount: dexExpectedOutRaw.toString(),
+          divergencePct: "0",
+          code: "ORACLE_ERROR",
+          reason:
+            `Oracle returned an invalid (negative) amount on chain ${chainId}. ` +
+            `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
+        };
+      }
+
+      console.log(
+        `[SwapShield] Oracle: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
+        `(chain=${chainId})`,
       );
+    } catch (convertErr) {
+      const convertErrMsg = convertErr instanceof Error ? convertErr.message : String(convertErr);
+      // convertTokenAmount reverted. Use hasPriceFeed to distinguish:
+      //   • Feed genuinely absent    → NO_PRICE_FEED (graceful degradation)
+      //   • Vault has no EOracle ext → ORACLE_ERROR
+      //   • Any other unexpected revert after confirming feeds exist → ORACLE_ERROR
+      // This avoids fragile string-matching and correctly classifies vaults
+      // that do not implement the EOracle extension as ORACLE_ERROR rather than
+      // silently claiming the feed is missing.
+      try {
+        const [tokenInHasFeed, tokenOutHasFeed] = (await Promise.all([
+          publicClient.readContract({
+            address: vaultAddress,
+            abi: RIGOBLOCK_VAULT_ABI,
+            functionName: "hasPriceFeed",
+            args: [normalizedIn],
+          }),
+          publicClient.readContract({
+            address: vaultAddress,
+            abi: RIGOBLOCK_VAULT_ABI,
+            functionName: "hasPriceFeed",
+            args: [normalizedOut],
+          }),
+        ])) as [boolean, boolean];
+
+        if (!tokenInHasFeed || !tokenOutHasFeed) {
+          const missingToken = !tokenInHasFeed ? normalizedIn : normalizedOut;
+          console.warn(
+            `[SwapShield] ⚠ No oracle price feed for token ${missingToken} on chain ${chainId}`,
+          );
+          return {
+            allowed: true,
+            verified: false,
+            oracleAmount: "0",
+            dexAmount: dexExpectedOutRaw.toString(),
+            divergencePct: "0",
+            code: "NO_PRICE_FEED",
+            reason:
+              `Oracle price feed not available for this token pair on chain ${chainId}. ` +
+              `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
+          };
+        }
+
+        // hasPriceFeed returned true but convertTokenAmount still reverted —
+        // unexpected condition (e.g. cardinality too low, pool not initialized).
+        console.error(
+          `[SwapShield] convertTokenAmount reverted despite feeds reporting available on chain ${chainId}: ` +
+          convertErrMsg.slice(0, 200),
+        );
+      } catch (feedErr) {
+        // hasPriceFeed itself reverted — vault likely does not implement EOracle extension,
+        // or the RPC is down / wrong chain. Both cases should NOT be treated as missing feed.
+        const feedErrMsg = feedErr instanceof Error ? feedErr.message : String(feedErr);
+        console.error(
+          `[SwapShield] hasPriceFeed call failed — vault may not implement EOracle on chain ${chainId}: ` +
+          feedErrMsg.slice(0, 200),
+        );
+      }
+
       return {
         allowed: true,
         verified: false,
@@ -240,85 +326,10 @@ export async function checkSwapPrice(
         divergencePct: "0",
         code: "ORACLE_ERROR",
         reason:
-          `Oracle returned an invalid (negative) amount on chain ${chainId}. ` +
+          `Oracle check failed on chain ${chainId}. ` +
           `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
       };
     }
-
-    console.log(
-      `[SwapShield] Oracle: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
-      `(chain=${chainId})`,
-    );
-  } catch (convertErr) {
-    const convertErrMsg = convertErr instanceof Error ? convertErr.message : String(convertErr);
-    // convertTokenAmount reverted. Use hasPriceFeed to distinguish:
-    //   • Feed genuinely absent    → NO_PRICE_FEED (graceful degradation)
-    //   • Vault has no EOracle ext → ORACLE_ERROR
-    //   • Any other unexpected revert after confirming feeds exist → ORACLE_ERROR
-    // This avoids fragile string-matching and correctly classifies vaults
-    // that do not implement the EOracle extension as ORACLE_ERROR rather than
-    // silently claiming the feed is missing.
-    try {
-      const [tokenInHasFeed, tokenOutHasFeed] = (await Promise.all([
-        publicClient.readContract({
-          address: vaultAddress,
-          abi: RIGOBLOCK_VAULT_ABI,
-          functionName: "hasPriceFeed",
-          args: [normalizedIn],
-        }),
-        publicClient.readContract({
-          address: vaultAddress,
-          abi: RIGOBLOCK_VAULT_ABI,
-          functionName: "hasPriceFeed",
-          args: [normalizedOut],
-        }),
-      ])) as [boolean, boolean];
-
-      if (!tokenInHasFeed || !tokenOutHasFeed) {
-        const missingToken = !tokenInHasFeed ? normalizedIn : normalizedOut;
-        console.warn(
-          `[SwapShield] ⚠ No oracle price feed for token ${missingToken} on chain ${chainId}`,
-        );
-        return {
-          allowed: true,
-          verified: false,
-          oracleAmount: "0",
-          dexAmount: dexExpectedOutRaw.toString(),
-          divergencePct: "0",
-          code: "NO_PRICE_FEED",
-          reason:
-            `Oracle price feed not available for this token pair on chain ${chainId}. ` +
-            `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
-        };
-      }
-
-      // hasPriceFeed returned true but convertTokenAmount still reverted —
-      // unexpected condition (e.g. cardinality too low, pool not initialized).
-      console.error(
-        `[SwapShield] convertTokenAmount reverted despite feeds reporting available on chain ${chainId}: ` +
-        convertErrMsg.slice(0, 200),
-      );
-    } catch (feedErr) {
-      // hasPriceFeed itself reverted — vault likely does not implement EOracle extension,
-      // or the RPC is down / wrong chain. Both cases should NOT be treated as missing feed.
-      const feedErrMsg = feedErr instanceof Error ? feedErr.message : String(feedErr);
-      console.error(
-        `[SwapShield] hasPriceFeed call failed — vault may not implement EOracle on chain ${chainId}: ` +
-        feedErrMsg.slice(0, 200),
-      );
-    }
-
-    return {
-      allowed: true,
-      verified: false,
-      oracleAmount: "0",
-      dexAmount: dexExpectedOutRaw.toString(),
-      divergencePct: "0",
-      code: "ORACLE_ERROR",
-      reason:
-        `Oracle check failed on chain ${chainId}. ` +
-        `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
-    };
   }
 
   // Oracle returned 0 — can't compare meaningfully
@@ -351,12 +362,11 @@ export async function checkSwapPrice(
     ? Math.max(0, maxDivergencePct)
     : DEFAULT_MAX_DIVERGENCE_PCT;
   const maxDivergenceBps = BigInt(Math.round(normalizedMaxDivergencePct * 100));
-  const maxFavorableDivergenceBps = BigInt(MAX_FAVORABLE_DIVERGENCE_PCT * 100);
 
   console.log(
     `[SwapShield] Comparison: oracle=${oracleAmountRaw} dexExpected=${dexExpectedOutRaw} ` +
     `divergence=${divergencePctDisplay}% ` +
-    `(max=${normalizedMaxDivergencePct}%)`,
+    `(tolerance=±${normalizedMaxDivergencePct}%)`,
   );
 
   // ── Enforce threshold (cross-multiplication — no division, no truncation) ──
@@ -381,42 +391,41 @@ export async function checkSwapPrice(
         `⚠️ Swap Shield blocked: the DEX quote diverges ${divergencePctDisplay}% from the oracle price ` +
         `(max allowed: ${normalizedMaxDivergencePct}%). ` +
         `This likely indicates significant price impact, a bad route, or stale liquidity.\n\n` +
-        `To proceed anyway, you can temporarily disable the swap shield (10 min): "disable swap shield"\n` +
+        `To proceed anyway, you can temporarily raise the tolerance (up to 50% for 10 min): "set swap shield tolerance to 30%"\n` +
         `Or split the trade into smaller amounts using a TWAP order to reduce price impact.`,
     };
   }
 
-  // Block if DEX is suspiciously favorable (>10% better than oracle)
-  // This catches stale oracle prices or manipulated DEX routes.
-  // Cross-multiplication: (dex - oracle) * 10000 > maxFavorableDivBps * oracle
+  // Block if DEX diverges beyond tolerance in the favorable direction too.
+  // Unified tolerance: the same maxDivergencePct applies to both worse-than-oracle
+  // and better-than-oracle quotes. This is simpler for operators and still safe
+  // because the NAV shield (10% max loss) runs independently.
   if (dexExpectedOutRaw > oracleAmountRaw) {
     const favorableBps = -divergenceBps;
     const favorablePctDisplay = formatBpsAsPct(favorableBps);
-    if ((dexExpectedOutRaw - oracleAmountRaw) * 10000n > maxFavorableDivergenceBps * oracleAmountRaw) {
+    if ((dexExpectedOutRaw - oracleAmountRaw) * 10000n > maxDivergenceBps * oracleAmountRaw) {
       console.warn(
         `[SwapShield] ✗ BLOCKED: DEX quote ${favorablePctDisplay}% BETTER than oracle — ` +
-        `likely stale oracle or manipulated route`,
+        `exceeds ±${normalizedMaxDivergencePct}% tolerance`,
       );
       return {
         allowed: false,
         verified: true,
         oracleAmount: oracleAmountRaw.toString(),
         dexAmount: dexExpectedOutRaw.toString(),
-        // divergencePctDisplay already carries the leading minus for negative bps;
-        // using it directly avoids a double-sign like "--20.00".
         divergencePct: divergencePctDisplay,
         code: "BLOCKED",
         reason:
-          `⚠️ Swap Shield blocked: the DEX quote is ${favorablePctDisplay}% better than the oracle price. ` +
-          `This likely indicates a stale oracle or manipulated route — proceeding could expose ` +
-          `the vault to a sandwich attack.\n\n` +
-          `To proceed anyway, you can temporarily disable the swap shield (10 min): "disable swap shield"`,
+          `⚠️ Swap Shield blocked: the DEX quote is ${favorablePctDisplay}% better than the oracle price, ` +
+          `exceeding the ${normalizedMaxDivergencePct}% tolerance. ` +
+          `This may indicate a stale oracle or manipulated route.\n\n` +
+          `To proceed anyway, temporarily raise the tolerance (up to 50% for 10 min): "set swap shield tolerance to 30%"`,
       };
     }
   }
 
   console.log(
-    `[SwapShield] ✓ ALLOWED: divergence ${divergencePctDisplay}% within ${normalizedMaxDivergencePct}% limit`,
+    `[SwapShield] ✓ ALLOWED: divergence ${divergencePctDisplay}% within ±${normalizedMaxDivergencePct}% tolerance`,
   );
 
   return {
@@ -431,15 +440,14 @@ export async function checkSwapPrice(
 // ── Opt-out helpers ──────────────────────────────────────────────────
 
 /**
- * Get the temporary swap shield tolerance override for this operator+vault.
+ * Get the temporary swap shield tolerance override for this operator.
  * Returns the tolerance percentage (e.g. 30 for 30%) if active, null otherwise.
  */
 export async function getSwapShieldTolerance(
   kv: KVNamespace,
   operatorAddress: string,
-  vaultAddress: string,
 ): Promise<number | null> {
-  const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
+  const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}`;
   const val = await kv.get(key);
   if (!val) return null;
   const num = Number(val);
@@ -454,7 +462,6 @@ export async function getSwapShieldTolerance(
 export async function setSwapShieldTolerance(
   kv: KVNamespace,
   operatorAddress: string,
-  vaultAddress: string,
   tolerancePct: number,
 ): Promise<void> {
   if (!Number.isFinite(tolerancePct) || tolerancePct <= 0 || tolerancePct > MAX_TEMP_DIVERGENCE_PCT) {
@@ -463,10 +470,10 @@ export async function setSwapShieldTolerance(
       `Received: ${tolerancePct}%`,
     );
   }
-  const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
+  const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}`;
   await kv.put(key, String(tolerancePct), { expirationTtl: SWAP_SHIELD_TOLERANCE_TTL });
   console.log(
-    `[SwapShield] Tolerance set to ${tolerancePct}% for ${operatorAddress} on vault ${vaultAddress} (10 min TTL)`,
+    `[SwapShield] Tolerance set to ${tolerancePct}% for ${operatorAddress} (10 min TTL)`,
   );
 }
 
@@ -476,12 +483,11 @@ export async function setSwapShieldTolerance(
 export async function clearSwapShieldTolerance(
   kv: KVNamespace,
   operatorAddress: string,
-  vaultAddress: string,
 ): Promise<void> {
-  const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
+  const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}`;
   await kv.delete(key);
   console.log(
-    `[SwapShield] Tolerance reset to default for ${operatorAddress} on vault ${vaultAddress}`,
+    `[SwapShield] Tolerance reset to default for ${operatorAddress}`,
   );
 }
 

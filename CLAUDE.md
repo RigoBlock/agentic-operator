@@ -119,10 +119,10 @@ RULE: The Swap Shield compares DEX API quotes against the on-chain BackgeoOracle
   against the oracle amount. It does **not** reverse `slippageBps` to derive a
   separate theoretical market price before applying thresholds.
 - **Divergence calculation**: `(oracleAmount - dexOut) / oracleAmount`
-  — two-sided, asymmetric rule: blocks when DEX gives >5% LESS than oracle
-  (bad deal for user) AND when DEX gives >10% MORE than oracle (stale oracle
-  or manipulated route that could expose the vault to sandwich attacks)
-- **Default thresholds**: 5% worse than oracle → blocked; 10% better than oracle → blocked
+  — unified two-sided tolerance: blocks when DEX quote diverges >5% from oracle
+  in EITHER direction (worse OR better). Large tolerance overrides still protect
+  against catastrophic divergence; the NAV shield (10% max loss) runs independently.
+- **Default threshold**: 5% tolerance (±5% from oracle)
 - **Possible outcomes**:
   1. `allowed: true` — divergence within threshold
   2. `allowed: false, code: 'BLOCKED'` — divergence exceeds threshold
@@ -132,7 +132,7 @@ RULE: The Swap Shield compares DEX API quotes against the on-chain BackgeoOracle
 - **Oracle revert classification**: On `convertTokenAmount` revert, `hasPriceFeed(tokenIn)` and `hasPriceFeed(tokenOut)` are called.
   If any returns false → `NO_PRICE_FEED`. If `hasPriceFeed` itself reverts (vault has no EOracle) or feeds exist but call still fails → `ORACLE_ERROR`.
   Never use fragile string-matching on error messages for security-critical classification.
-- **Opt-out**: KV key `swap-shield-disabled:{operator}:{vault}` with 600s TTL
+- **Temporary tolerance**: KV key `swap-shield-tolerance:{operator}:{vault}` with 600s TTL (max 50%)
 - **TWAP suggestion**: When blocked, the error message suggests splitting the trade
   into a TWAP order to reduce price impact
 
