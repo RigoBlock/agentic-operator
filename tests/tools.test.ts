@@ -52,7 +52,7 @@ const REQUIRED_TOOLS = [
   "switch_chain",
   // Trading settings
   "set_default_slippage",
-  "disable_swap_shield",
+  "set_swap_shield_tolerance",
   "enable_swap_shield",
   "refresh_oracle_feed",
   // Strategy listing compatibility alias (TWAP-only at runtime)

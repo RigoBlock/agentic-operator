@@ -3113,11 +3113,13 @@
         return { signature: authSignature, timestamp: authTimestamp };
       }
       const ts = Date.now();
-      // Must match backend buildAuthMessage(address) exactly
+      // Must match backend buildAuthMessage(address, timestamp) exactly
       const message = [
         'Welcome to Rigoblock Operator',
         '',
         'Sign this message to verify your wallet and access your smart pool assistant.',
+        '',
+        `Timestamp: ${ts}`,
       ].join('\n');
       try {
         const sig = await activeProvider.request({

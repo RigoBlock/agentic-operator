@@ -166,7 +166,11 @@ export async function getZeroXQuote(
     // cheap memecoin → WBTC), a single retry with a substantially larger probe
     // handles it.
     const decimalGap = Math.max(0, decimalsIn - decimalsOut);
-    const probeExponent = decimalGap + 3;
+    // Base probe: avoid microscopic amounts that cause distorted 0x API rates.
+    // For 18-decimal tokens, ensure at least 10^(decimalsIn/2) raw units
+    // (e.g. 10^9 for 18-dec ≈ 10^-9 tokens — large enough to avoid rounding noise).
+    const minProbeExponent = Math.max(decimalGap + 3, Math.ceil(decimalsIn / 2));
+    const probeExponent = minProbeExponent;
     let probeSellAmount = 10n ** BigInt(probeExponent);
     let probeBuyAmountBn = 0n;
     let probeSellAmountBn = 0n;
@@ -209,10 +213,17 @@ export async function getZeroXQuote(
       const probeBuyAmount = probeData.buyAmount as string;
 
       if (probeBuyAmount && probeBuyAmount !== "0") {
-        probeBuyAmountBn = BigInt(probeBuyAmount);
-        probeSellAmountBn = probeSellAmount;
-        console.log(`[0x] Probe result: ${probeSellAmount} ${intent.tokenIn} → ${probeBuyAmount} ${intent.tokenOut}`);
-        break;
+        const parsedBuy = BigInt(probeBuyAmount);
+        // Validate probe quality: the buy amount must be large enough to avoid
+        // rounding distortion. If too small, retry with a larger probe.
+        const minMeaningfulBuy = 10n ** BigInt(Math.max(3, Math.ceil(decimalsOut / 2)));
+        if (parsedBuy >= minMeaningfulBuy) {
+          probeBuyAmountBn = parsedBuy;
+          probeSellAmountBn = probeSellAmount;
+          console.log(`[0x] Probe result: ${probeSellAmount} ${intent.tokenIn} → ${probeBuyAmount} ${intent.tokenOut}`);
+          break;
+        }
+        console.warn(`[0x] Probe buy amount too small (${parsedBuy} < ${minMeaningfulBuy}), will retry with larger probe`);
       }
 
       if (attempt === 0) {

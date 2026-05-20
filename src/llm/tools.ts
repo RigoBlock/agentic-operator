@@ -1094,12 +1094,22 @@ export const TOOL_DEFINITIONS = [
   {
     type: "function" as const,
     function: {
-      name: "disable_swap_shield",
+      name: "set_swap_shield_tolerance",
       description:
-        "Temporarily disable the Swap Shield oracle price protection for 10 minutes. " +
+        "Temporarily raise the Swap Shield tolerance (max divergence from oracle) for 10 minutes. " +
         "Use when the operator knowingly accepts price impact (e.g., large trades in thin markets). " +
-        "The shield will automatically re-enable after 10 minutes.",
-      parameters: { type: "object", properties: {}, required: [] },
+        "Provide a percentage like '30%' or '50'. The default is 5%; you can set up to 50%. " +
+        "The shield automatically resets to 5% after 10 minutes.",
+      parameters: {
+        type: "object",
+        properties: {
+          tolerance: {
+            type: "string",
+            description: "Tolerance percentage, e.g. '30%' or '50' (up to 50%)",
+          },
+        },
+        required: ["tolerance"],
+      },
     },
   },
   {
@@ -1107,8 +1117,8 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "enable_swap_shield",
       description:
-        "Re-enable the Swap Shield oracle price protection immediately. " +
-        "Use to cancel a previous disable before the 10-minute timeout.",
+        "Reset the Swap Shield tolerance to the default 5% immediately. " +
+        "Use to cancel a previous tolerance override before the 10-minute timeout.",
       parameters: { type: "object", properties: {}, required: [] },
     },
   },
@@ -1373,7 +1383,7 @@ RULES:
 - STRICT DOMAIN SEPARATION: Uniswap LP intents (positions, remove, collect, burn, closed positions) MUST use Uniswap LP tools only (get_lp_positions, remove_liquidity, collect_lp_fees, burn_position). GMX tools are for perps only. Never answer LP requests with GMX guidance.
 - CLOSED LP POSITIONS: Closed Uniswap positions are still visible via get_lp_positions with Status = Closed until burned. If user asks about closed positions, call get_lp_positions and explain that closed NFTs persist until burn_position is executed.
 - ALWAYS use actual tool calls, never write tool names or JSON as text. If you want to call a tool, USE THE TOOL. Do NOT write {"name": "...", "parameters": {...}} in your text response — that will be shown as garbage to the user. NEVER output raw JSON tool call syntax in your text.
-- YOUR TOOLS ARE NAMED EXACTLY: get_swap_quote, build_vault_swap, get_vault_info, get_token_balance, switch_chain, set_default_slippage, disable_swap_shield, enable_swap_shield, refresh_oracle_feed, setup_delegation, revoke_delegation, check_delegation_status, deploy_smart_pool, fund_pool, crosschain_transfer, crosschain_sync, get_crosschain_quote, get_aggregated_nav, get_rebalance_plan, verify_bridge_arrival, get_pool_info, add_liquidity, remove_liquidity, get_lp_positions, collect_lp_fees, burn_position, gmx_open_position, gmx_close_position, gmx_increase_position, gmx_get_positions, gmx_cancel_order, gmx_update_order, gmx_claim_funding_fees, gmx_get_markets, grg_stake, grg_undelegate_stake, grg_unstake, grg_end_epoch, grg_claim_rewards, list_strategies, create_twap_order, cancel_twap_order, list_twap_orders, revoke_selectors. There is NO tool called "add_liquidity_v4", "remove_liquidity_v4", "deploy_pool", or any other variant. Use ONLY exact tool names from this list.
+- YOUR TOOLS ARE NAMED EXACTLY: get_swap_quote, build_vault_swap, get_vault_info, get_token_balance, switch_chain, set_default_slippage, set_swap_shield_tolerance, enable_swap_shield, refresh_oracle_feed, setup_delegation, revoke_delegation, check_delegation_status, deploy_smart_pool, fund_pool, crosschain_transfer, crosschain_sync, get_crosschain_quote, get_aggregated_nav, get_rebalance_plan, verify_bridge_arrival, get_pool_info, add_liquidity, remove_liquidity, get_lp_positions, collect_lp_fees, burn_position, gmx_open_position, gmx_close_position, gmx_increase_position, gmx_get_positions, gmx_cancel_order, gmx_update_order, gmx_claim_funding_fees, gmx_get_markets, grg_stake, grg_undelegate_stake, grg_unstake, grg_end_epoch, grg_claim_rewards, list_strategies, create_twap_order, cancel_twap_order, list_twap_orders, revoke_selectors. There is NO tool called "add_liquidity_v4", "remove_liquidity_v4", "deploy_pool", or any other variant. Use ONLY exact tool names from this list.
 - NEVER fabricate, invent, or hallucinate tool results. If you need to create a wallet, switch chains, check balances, or perform ANY action — call the actual tool. Do NOT describe the result as if you called it. Every address, balance, hash, or status MUST come from a real tool call.
 - NEVER reply with generic custody disclaimers like "I don't have access to your account" for vault operations. In this system you CAN access vault data through tools. For requests like "what are my GMX positions", "my balances", or "vault status", call the relevant tool immediately (gmx_get_positions, get_token_balance, get_vault_info, get_aggregated_nav) and return the real result.
 - CRITICAL: If a tool returns an error, STOP that step and report the exact error to the user. Do NOT generate a fake success result and continue to the next step. "LP Token ID: 1234567890" or fake tx hashes are hallucinations — never generate them.
@@ -1426,7 +1436,7 @@ USE refresh_oracle_feed WHENEVER:
      → If amountEth is missing from the message, ask: "How much ETH would you like to swap?"
      → NEVER say this is impossible. NEVER say hooks can't be used for routing.
   B) Swap Shield blocks a vault swap due to oracle divergence and user wants to fix the root cause.
-     → Offer as option alongside disable_swap_shield.
+     → Offer as option alongside set_swap_shield_tolerance.
 
 - refresh_oracle_feed is for ANY ERC-20 token (GRG, USDC, LINK, UNI, etc.).
   Only ETH/WETH cannot be specified (ETH is always currency0 — it can't be the output token).
@@ -1435,7 +1445,7 @@ USE refresh_oracle_feed WHENEVER:
 - After the swap is confirmed on-chain, the BackgeoOracle records a new price observation.
   The 5-minute TWAP window then starts converging toward current market price.
 - When a swap is blocked by Swap Shield, the two options are:
-  1. disable_swap_shield — suspend for 10 minutes (immediate fix, accepts price impact)
+  1. set_swap_shield_tolerance — temporarily raise tolerance up to 50% for 10 minutes (immediate fix, accepts price impact)
   2. refresh_oracle_feed — fix the root cause (sign oracle swap, wait ~5 min for TWAP to converge)
 
 DELEGATION:

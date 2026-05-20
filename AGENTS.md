@@ -130,9 +130,13 @@ transaction. See [Safety Guarantees](#safety-guarantees) below.
 Welcome to Rigoblock Operator
 
 Sign this message to verify your wallet and access your smart pool assistant.
+
+Timestamp: 1741700000000
 ```
 
-The signature is valid for 24 hours from `authTimestamp`.
+The `authTimestamp` value MUST be included in the signed message exactly as shown above. This cryptographically binds the signature to a specific point in time, preventing replay attacks. The signature is valid for 24 hours from `authTimestamp`.
+
+**Legacy format (deprecated):** Clients that sign the static message without the timestamp line will still be accepted during a transition period, but this support will be removed. External agents should update their signing code to include the timestamp immediately.
 
 ---
 
@@ -284,8 +288,8 @@ against the on-chain BackgeoOracle TWAP price:
   stale oracle conditions, and manipulated routes
 - Graceful degradation: when the oracle has no price feed, the swap proceeds
   with a warning (does NOT block)
-- The operator can temporarily disable it (10-minute TTL) for known high-impact trades
-- The shield auto-re-enables after the timeout expires
+- The operator can temporarily raise the tolerance up to 50% (10-minute TTL) for known high-impact trades instead of fully disabling the shield
+- The tolerance auto-resets to the default 5% after the timeout expires
 - Independent of the NAV shield — both run on every swap
 
 ---
@@ -298,7 +302,7 @@ Even a fully authenticated agent with delegation access CANNOT:
 |--------|---------|
 | Drain vault assets to external address | `withdraw` and `transferOwnership` selectors are never delegated |
 | Execute trades that lose > 10% NAV | NAV shield blocks pre-broadcast |
-| Execute swaps with >5% oracle divergence when Swap Shield is enabled | Swap Shield compares DEX quote vs TWAP oracle; this block does not apply during an active operator opt-out window |
+| Execute swaps with >5% oracle divergence when Swap Shield is enabled | Swap Shield compares DEX quote vs TWAP oracle; this block does not apply if the operator has temporarily raised the tolerance above the current divergence |
 | Bypass slippage protection | Slippage is enforced in swap calldata building |
 | Call arbitrary contract functions | Selector whitelist — only approved vault functions |
 | Send transactions to non-vault contracts | Target address must equal vault address |
@@ -691,7 +695,7 @@ Every slice passes through the **full safety stack** — identical to manually
 triggered swaps:
 
 1. **Swap Shield** — compares DEX quote against on-chain BackgeoOracle TWAP price.
-   Blocks if DEX is >5% worse or >10% better than oracle.
+   Blocks if DEX is >5% worse than oracle (or the operator's temporary tolerance if set) or >10% better than oracle.
 2. **NAV shield pre-check** — simulates post-swap NAV before returning calldata.
    Blocks if NAV would drop >10%.
 3. **NAV shield at broadcast** (autonomous mode) — runs again before CDP signs.

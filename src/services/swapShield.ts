@@ -81,11 +81,14 @@ const WRAPPED_NATIVE_ADDRESSES: Record<number, string> = {
   42161: "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",  // Arbitrum
 };
 
-/** KV key prefix for swap shield opt-out */
-const SWAP_SHIELD_DISABLED_PREFIX = "swap-shield-disabled:";
+/** KV key prefix for swap shield temporary tolerance override */
+const SWAP_SHIELD_TOLERANCE_PREFIX = "swap-shield-tolerance:";
 
-/** Opt-out TTL: 10 minutes */
-const SWAP_SHIELD_DISABLE_TTL = 600;
+/** Temporary tolerance TTL: 10 minutes */
+const SWAP_SHIELD_TOLERANCE_TTL = 600;
+
+/** Maximum temporary divergence an operator can set (50%) */
+const MAX_TEMP_DIVERGENCE_PCT = 50;
 
 function formatBpsAsPct(bps: bigint): string {
   const sign = bps < 0n ? "-" : "";
@@ -428,46 +431,57 @@ export async function checkSwapPrice(
 // ── Opt-out helpers ──────────────────────────────────────────────────
 
 /**
- * Check if the swap shield is currently disabled for this operator+vault.
- * Returns true if disabled (opt-out active), false otherwise.
+ * Get the temporary swap shield tolerance override for this operator+vault.
+ * Returns the tolerance percentage (e.g. 30 for 30%) if active, null otherwise.
  */
-export async function isSwapShieldDisabled(
+export async function getSwapShieldTolerance(
   kv: KVNamespace,
   operatorAddress: string,
   vaultAddress: string,
-): Promise<boolean> {
-  const key = `${SWAP_SHIELD_DISABLED_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
+): Promise<number | null> {
+  const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
   const val = await kv.get(key);
-  return val !== null;
+  if (!val) return null;
+  const num = Number(val);
+  if (!Number.isFinite(num) || num <= 0 || num > MAX_TEMP_DIVERGENCE_PCT) return null;
+  return num;
 }
 
 /**
- * Temporarily disable the swap shield (10-minute TTL).
+ * Temporarily set a higher swap shield tolerance (10-minute TTL).
+ * @param tolerancePct - Maximum allowed divergence from oracle (e.g. 30 for 30%)
  */
-export async function disableSwapShield(
+export async function setSwapShieldTolerance(
   kv: KVNamespace,
   operatorAddress: string,
   vaultAddress: string,
+  tolerancePct: number,
 ): Promise<void> {
-  const key = `${SWAP_SHIELD_DISABLED_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
-  await kv.put(key, String(Date.now()), { expirationTtl: SWAP_SHIELD_DISABLE_TTL });
+  if (!Number.isFinite(tolerancePct) || tolerancePct <= 0 || tolerancePct > MAX_TEMP_DIVERGENCE_PCT) {
+    throw new Error(
+      `Swap shield tolerance must be between 1% and ${MAX_TEMP_DIVERGENCE_PCT}%. ` +
+      `Received: ${tolerancePct}%`,
+    );
+  }
+  const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
+  await kv.put(key, String(tolerancePct), { expirationTtl: SWAP_SHIELD_TOLERANCE_TTL });
   console.log(
-    `[SwapShield] Disabled for ${operatorAddress} on vault ${vaultAddress} (10 min TTL)`,
+    `[SwapShield] Tolerance set to ${tolerancePct}% for ${operatorAddress} on vault ${vaultAddress} (10 min TTL)`,
   );
 }
 
 /**
- * Re-enable the swap shield (delete opt-out key).
+ * Clear the temporary tolerance override (reset to default 5%).
  */
-export async function enableSwapShield(
+export async function clearSwapShieldTolerance(
   kv: KVNamespace,
   operatorAddress: string,
   vaultAddress: string,
 ): Promise<void> {
-  const key = `${SWAP_SHIELD_DISABLED_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
+  const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
   await kv.delete(key);
   console.log(
-    `[SwapShield] Re-enabled for ${operatorAddress} on vault ${vaultAddress}`,
+    `[SwapShield] Tolerance reset to default for ${operatorAddress} on vault ${vaultAddress}`,
   );
 }
 

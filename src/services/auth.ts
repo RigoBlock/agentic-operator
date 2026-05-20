@@ -32,8 +32,22 @@ const OWNERSHIP_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
  * Build the exact message the frontend must sign.
  * Wallet-wide — NOT tied to any specific vault or chain.
  * Human-readable so the wallet UI shows a clear description of what is being signed.
+ *
+ * The timestamp is included in the message to prevent signature replay attacks.
+ * An attacker who steals a signature cannot replay it with a fresh timestamp,
+ * because the timestamp is cryptographically bound to the signature.
  */
-export function buildAuthMessage(_address: string): string {
+export function buildAuthMessage(_address: string, timestamp?: number): string {
+  if (timestamp !== undefined) {
+    return [
+      "Welcome to Rigoblock Operator",
+      "",
+      "Sign this message to verify your wallet and access your smart pool assistant.",
+      "",
+      `Timestamp: ${timestamp}`,
+    ].join("\n");
+  }
+  // Legacy format (deprecated — kept for transition period only)
   return [
     "Welcome to Rigoblock Operator",
     "",
@@ -78,19 +92,50 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   }
 
   // 2. Verify signature (wallet-wide, no vault in message)
-  const message = buildAuthMessage(operatorAddress);
+  // Try the new secure format first (timestamp included in signed message).
+  // This prevents replay attacks — an attacker cannot reuse an old signature
+  // with a fresh timestamp because the timestamp is cryptographically bound.
+  let valid = false;
+  let usedLegacyFormat = false;
   try {
-    const valid = await verifyMessage({
+    const newMessage = buildAuthMessage(operatorAddress, authTimestamp);
+    valid = await verifyMessage({
       address: operatorAddress as Address,
-      message,
+      message: newMessage,
       signature: authSignature as `0x${string}`,
     });
-    if (!valid) {
-      throw new AuthError("Signature verification failed. The signature does not match the operator address.", 403);
+  } catch {
+    // verifyMessage throws on malformed signatures; we'll handle invalid below
+  }
+
+  // Fallback: try legacy format (static message, no timestamp binding).
+  // This allows existing cached signatures to work during the transition period.
+  if (!valid) {
+    try {
+      const legacyMessage = buildAuthMessage(operatorAddress);
+      valid = await verifyMessage({
+        address: operatorAddress as Address,
+        message: legacyMessage,
+        signature: authSignature as `0x${string}`,
+      });
+      if (valid) {
+        usedLegacyFormat = true;
+        console.warn(
+          `[Auth] Legacy signature format accepted for ${operatorAddress.slice(0, 6)}…${operatorAddress.slice(-4)}. ` +
+          `This format is deprecated and will be removed. Please update your client to include the timestamp in the signed message.`,
+        );
+      }
+    } catch {
+      // Malformed signature
     }
-  } catch (err) {
-    if (err instanceof AuthError) throw err;
-    throw new AuthError("Invalid signature format.", 401);
+  }
+
+  if (!valid) {
+    throw new AuthError(
+      "Signature verification failed. The signature does not match the operator address or the timestamp. " +
+      "Ensure your client includes the authTimestamp in the signed message.",
+      403,
+    );
   }
 
   // 3. Check ownership cache first — avoids 8+ RPC calls per message
