@@ -154,18 +154,13 @@ export async function getZeroXQuote(
   if (intent.amountOut && !intent.amountIn) {
     // 0x API v2 only supports exact-input (sellAmount). For exact-output
     // ("buy 200 GRG"), we need to compute the required sellAmount.
-    //
-    // Use the vault's on-chain oracle (BackgeoOracle TWAP) to convert the
-    // desired buy amount directly to the required sell amount. No 0x probe
-    // fallback is performed if the oracle cannot price the pair.
-    const desiredBuyAmountRaw = parseUnits(intent.amountOut, decimalsOut);
-    let estimatedSellAmount: bigint | null = null;
-
     // Use the vault's on-chain oracle (BackgeoOracle TWAP) to convert the
     // desired buy amount directly to the required sell amount. The 0x probe
     // fallback has been removed because it never produced reliable rates for
     // microscopic amounts and the NAV shield would fail anyway for tokens
     // without an oracle price feed.
+    const desiredBuyAmountRaw = parseUnits(intent.amountOut, decimalsOut);
+    let estimatedSellAmount: bigint | null = null;
     const vaultAddr = (taker && taker.toLowerCase() !== "0x0000000000000000000000000000000000000000")
       ? taker
       : null;

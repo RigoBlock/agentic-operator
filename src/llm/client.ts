@@ -4692,7 +4692,7 @@ async function runSwapShield(
     const directionClause = isFavorable
       ? `is ${magnitudePct}% better than the on-chain oracle price`
       : `is ${magnitudePct}% worse than the on-chain oracle price`;
-    const normalizedMaxDiv = maxDivergencePct ?? 5;
+    const normalizedMaxDiv = maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT;
     const thresholdText = `${normalizedMaxDiv}% tolerance`;
     const explanation = isFavorable
       ? `This can indicate a stale oracle or a manipulated routing path producing an implausibly favorable quote.`
