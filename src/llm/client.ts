@@ -1995,25 +1995,16 @@ export async function executeToolCall(
         const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
 
         // ── Swap Shield — oracle price check ──
-        // Pass addresses already resolved by the 0x API so we avoid a
-        // redundant resolver round-trip and never skip the check on transient failures.
-        // Only use the precomputed oracle value if our exact-output estimate
-        // matches the 0x quote sellAmount exactly. If 0x adjusted the amount
-        // (or rounding diverged), let Swap Shield perform its own oracle call
-        // with the actual sellAmount to avoid comparing against a mismatched value.
-        const precomputedOracleOutRaw = (
-          zxQuote.oracleSellAmount &&
-          zxQuote.oracleSellAmount === zxQuote.sellAmount &&
-          zxQuote.oracleBuyAmount
-        ) ? BigInt(zxQuote.oracleBuyAmount) : undefined;
-
+        // Always let Swap Shield perform its own oracle call in the sell→buy direction
+        // for the actual sellAmount. The precomputed oracleBuyAmount was derived from
+        // the inverse direction (buy→sell) and is not semantically equivalent to the
+        // oracle-expected output for the actual sellAmount, even when amounts match exactly.
         const shieldWarning0x = await runSwapShield(
           env, ctx, intent,
           zxQuote.sellAmount, zxQuote.decimalsIn,
           zxQuote.buyAmount,
           zxQuote.sellToken as Address,
           zxQuote.buyToken as Address,
-          precomputedOracleOutRaw,
         );
 
         // The 0x API returns a complete transaction targeting AllowanceHolder.

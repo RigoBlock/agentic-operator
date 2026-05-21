@@ -1178,7 +1178,8 @@
       const pct = parseFloat(input.value);
       if (isNaN(pct) || pct < 0.1 || pct > 5) {
         alert('Slippage must be between 0.1% and 5%.');
-        input.value = (DEFAULT_SLIPPAGE_BPS / 100).toString();
+        const storedBps = localStorage.getItem(SLIPPAGE_STORAGE_KEY);
+        input.value = storedBps ? (parseInt(storedBps, 10) / 100).toString() : (DEFAULT_SLIPPAGE_BPS / 100).toString();
         return;
       }
       const bps = Math.round(pct * 100);
@@ -1191,7 +1192,9 @@
       const pct = parseFloat(input.value);
       if (isNaN(pct) || pct < 0.5 || pct > 50) {
         alert('Swap Shield tolerance must be between 0.5% and 50%.');
-        input.value = '5';
+        const stored = localStorage.getItem(SHIELD_TOLERANCE_KEY);
+        const expiry = localStorage.getItem(SHIELD_STORAGE_KEY);
+        input.value = (stored && expiry && parseInt(expiry, 10) > Date.now()) ? stored : '5';
         return;
       }
 
