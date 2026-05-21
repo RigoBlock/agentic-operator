@@ -39,10 +39,12 @@
  *
  * ## Divergence direction
  *
- * The rule is two-sided and asymmetric:
- * - BLOCK when the DEX gives >5% less than the oracle predicts (bad deal)
- * - BLOCK when the DEX gives >10% more than the oracle predicts (stale oracle
- *   or manipulated route — could expose vault to sandwich attacks)
+ * The rule is two-sided and unified: the same `maxDivergencePct` threshold
+ * applies in both directions (default 5%, operator-overridable up to 50%).
+ * - BLOCK when the DEX gives >maxDivergencePct% less than the oracle predicts
+ *   (bad deal — excessive slippage, stale liquidity, or compromised API)
+ * - BLOCK when the DEX gives >maxDivergencePct% more than the oracle predicts
+ *   (stale oracle or manipulated route — could expose vault to sandwich attacks)
  * - ALLOW quotes within these bounds (normal spread/slippage)
  *
  * ## Independence from NAV shield

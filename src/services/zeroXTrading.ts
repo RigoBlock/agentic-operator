@@ -53,8 +53,10 @@ export interface ZeroXQuote {
   _raw: Record<string, unknown>;
   /**
    * When the exact-output sell amount was derived from the vault oracle
-   * (convertTokenAmount), these hold the original oracle values so the
-   * Swap Shield can skip its own redundant oracle call.
+   * (convertTokenAmount), these preserve the oracle conversion inputs/results
+   * so the Swap Shield can skip its own redundant oracle call:
+   * - oracleBuyAmount: the requested/target buy amount passed into the oracle
+   * - oracleSellAmount: the oracle-estimated sell amount returned for that target
    */
   oracleBuyAmount?: string;
   oracleSellAmount?: string;
