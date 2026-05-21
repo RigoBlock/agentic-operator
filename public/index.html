@@ -1155,6 +1155,9 @@
     /* ================================================================
        Trading Settings (slippage, swap shield)
        ================================================================ */
+    // Raw base key strings — used ONLY via the namespaced helper functions below.
+    // Never pass these directly to localStorage; always call slippageKey() / shieldKey() etc.
+    // which append the connected wallet address so settings never bleed across accounts.
     const SLIPPAGE_STORAGE_KEY = 'rigoblock_slippage_bps';
     const SLIPPAGE_OVERRIDE_STORAGE_KEY = 'rigoblock_slippage_override_explicit';
     const SHIELD_STORAGE_KEY = 'rigoblock_swap_shield';
@@ -3061,6 +3064,9 @@
           document.getElementById('connect-btn').classList.add('active');
           appendMessage('system', `Connected via ${name}: ${connectedAddress}`);
 
+          // Reload per-address trade settings now that connectedAddress is known
+          restoreTradeSettings();
+
           // Remember provider for auto-reconnect on reload
           const rdns = discoveredProviders.find(p => p.provider === provider)?.info?.rdns || 'injected';
           localStorage.setItem('rigoblock_last_provider', rdns);
@@ -3094,6 +3100,8 @@
         connectedAddress = newAddr;
         document.getElementById('wallet-addr').textContent =
           connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
+        // Reload per-address trade settings for the new account
+        restoreTradeSettings();
         // Try cached auth for the new address (no re-sign needed if still valid)
         if (restoreCachedAuth()) {
           appendMessage('system', `Account switched to ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)} ✓`);
@@ -3173,6 +3181,9 @@
       }
       const ts = Date.now();
       // Must match backend buildAuthMessage(address, timestamp) exactly
+      // Cached auth is version-gated: restoreCachedAuth() above rejects any
+      // payload without version === AUTH_MESSAGE_VERSION (v2 = timestamp line).
+      // If you change this message format, bump AUTH_MESSAGE_VERSION.
       const message = [
         'Welcome to Rigoblock Operator',
         '',

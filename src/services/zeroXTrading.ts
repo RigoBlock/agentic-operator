@@ -208,7 +208,8 @@ export async function getZeroXQuote(
       throw new Error(
         `Cannot estimate exact-output swap for ${intent.tokenIn} → ${intent.tokenOut} on chain ${chainId}. ` +
         `The vault oracle could not price this pair. ` +
-        `Common causes: token lacks an oracle feed, wrong token address, or the vault is on a different chain. ` +
+        `Common causes: token lacks an oracle feed, vault doesn't implement the EOracle extension, ` +
+        `wrong token address, or the vault is on a different chain. ` +
         `Try an exact-input swap instead (e.g. "sell 1000 ${intent.tokenIn} for ${intent.tokenOut}").`
       );
     }
