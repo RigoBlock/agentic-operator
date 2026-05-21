@@ -2426,9 +2426,6 @@ export async function executeToolCall(
     }
 
     case "set_swap_shield_tolerance": {
-      if (!ctx.vaultAddress || ctx.vaultAddress === "0x0000000000000000000000000000000000000000") {
-        throw new Error("No vault selected. Enter a valid vault address before adjusting Swap Shield tolerance.");
-      }
       const raw = String(args.tolerance ?? "").trim();
       let pct: number;
       const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
@@ -2463,9 +2460,6 @@ export async function executeToolCall(
     }
 
     case "enable_swap_shield": {
-      if (!ctx.vaultAddress || ctx.vaultAddress === "0x0000000000000000000000000000000000000000") {
-        throw new Error("No vault selected. Enter a valid vault address before enabling Swap Shield.");
-      }
       await clearSwapShieldTolerance(
         env.KV,
         ctx.operatorAddress!,
@@ -4951,8 +4945,9 @@ function tryFastPathChainSwitch(msg: string): FastPathResult | null {
 // ── Fast-path: Swap Shield toggle ───────────────────────────────────
 
 /**
- * Detect swap shield enable/disable commands, including the frontend
- * magic strings __enable_swap_shield__ / __disable_swap_shield__.
+ * Detect swap shield enable/tolerance commands, including the frontend
+ * magic string __enable_swap_shield__ and the legacy __disable_swap_shield__
+ * alias (mapped to 50% tolerance).
  */
 function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
   const m = msg.toLowerCase().trim();

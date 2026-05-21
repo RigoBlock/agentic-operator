@@ -98,7 +98,7 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
 
 /** Map domains to their tool names — used to filter tool definitions. */
 export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
-  swap: ["get_swap_quote", "build_vault_swap", "set_default_slippage", "disable_swap_shield", "enable_swap_shield", "refresh_oracle_feed"],
+  swap: ["get_swap_quote", "build_vault_swap", "set_default_slippage", "set_swap_shield_tolerance", "enable_swap_shield", "refresh_oracle_feed"],
   gmx: [
     "gmx_open_position", "gmx_close_position", "gmx_increase_position",
     "gmx_get_positions", "gmx_cancel_order", "gmx_update_order",

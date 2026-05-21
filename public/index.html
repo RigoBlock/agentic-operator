@@ -1197,6 +1197,10 @@
 
       // Require wallet + vault to change tolerance server-side
       if (!connectedAddress || !vaultInput.value.trim()) {
+        // Revert input to the last persisted value so UI stays consistent with server state
+        const stored = localStorage.getItem(SHIELD_TOLERANCE_KEY);
+        const expiry = localStorage.getItem(SHIELD_STORAGE_KEY);
+        input.value = (stored && expiry && parseInt(expiry, 10) > Date.now()) ? stored : '5';
         appendMessage('system', 'Connect a wallet and enter a vault address before changing Swap Shield tolerance.');
         return;
       }
@@ -1279,6 +1283,7 @@
         if (remaining <= 0) {
           timer.style.display = 'none';
           localStorage.removeItem(SHIELD_STORAGE_KEY);
+          localStorage.removeItem(SHIELD_TOLERANCE_KEY);
           clearInterval(shieldTimerInterval);
           shieldTimerInterval = null;
           // Reset to default visually

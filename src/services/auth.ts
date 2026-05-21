@@ -82,7 +82,16 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
     throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
   }
 
-  // 1. Check expiry
+  // 1. Validate timestamp type before arithmetic
+  if (
+    typeof authTimestamp !== "number" ||
+    !Number.isFinite(authTimestamp) ||
+    !Number.isInteger(authTimestamp)
+  ) {
+    throw new AuthError("Invalid auth timestamp. Expected an integer timestamp in milliseconds.", 401);
+  }
+
+  // 2. Check expiry
   const now = Date.now();
   if (now - authTimestamp > AUTH_EXPIRY_MS) {
     throw new AuthError("Authentication expired. Please reconnect your wallet.", 401);
