@@ -12,7 +12,8 @@
  *      oracle-derived expected output for the given input
  *    — routes through ETH internally when needed (token→ETH→targetToken)
  * 2. Compare oracle output vs DEX expected output
- * 3. If the DEX gives significantly less than the oracle predicts, block the swap
+ * 3. If the DEX quote diverges beyond the tolerance threshold in either direction
+ *    (worse or better than the oracle predicts), block the swap
  *
  * ## Why convertTokenAmount() instead of direct oracle
  *
