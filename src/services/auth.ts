@@ -57,7 +57,7 @@ export function buildAuthMessage(_address: string, timestamp?: number): string {
 
 export interface AuthParams {
   operatorAddress: string;
-  vaultAddress: string;
+  vaultAddress?: string;
   authSignature: string;
   authTimestamp: number;
   /** Check this chain first before trying all others (avoids unnecessary RPC calls). */
@@ -143,7 +143,19 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
     );
   }
 
-  // 3. Check ownership cache first — avoids 8+ RPC calls per message
+  // 3. Vault ownership check — skip when no vault is provided (operator-scoped tools
+  // like set_swap_shield_tolerance don't require a vault context).
+  if (!vaultAddress) {
+    return; // signature verified, no vault to own
+  }
+  if (!isAddress(vaultAddress)) {
+    throw new AuthError(
+      "Invalid vault address format. Expected a valid EVM address (0x + 40 hex chars).",
+      400,
+    );
+  }
+
+  // 4. Check ownership cache first — avoids 8+ RPC calls per message
   const cacheKey = `${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
   const cachedExpiry = ownershipCache.get(cacheKey);
   if (cachedExpiry && Date.now() < cachedExpiry) {
