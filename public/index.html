@@ -1179,12 +1179,15 @@
       if (isNaN(pct) || pct < 0.1 || pct > 5) {
         alert('Slippage must be between 0.1% and 5%.');
         const storedBps = localStorage.getItem(SLIPPAGE_STORAGE_KEY);
-        if (storedBps) {
-          input.value = (parseInt(storedBps, 10) / 100).toString();
-          // localStorage and override flag already match the restored value — no update needed
+        const parsedBps = storedBps ? parseInt(storedBps, 10) : NaN;
+        if (Number.isFinite(parsedBps) && parsedBps >= MIN_SLIPPAGE_BPS && parsedBps <= MAX_SLIPPAGE_BPS) {
+          // Restore to the last valid user-set value; localStorage and override flag are already in sync
+          input.value = (parsedBps / 100).toString();
         } else {
+          // No valid prior setting: revert to default and clear both storage keys so
+          // subsequent requests fall back to the server-side default
           input.value = (DEFAULT_SLIPPAGE_BPS / 100).toString();
-          // No stored override: ensure the flag is cleared so requests use the server default
+          localStorage.removeItem(SLIPPAGE_STORAGE_KEY);
           localStorage.removeItem(SLIPPAGE_OVERRIDE_STORAGE_KEY);
         }
         return;
