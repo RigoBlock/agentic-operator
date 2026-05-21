@@ -451,7 +451,7 @@ export async function getSwapShieldTolerance(
   const val = await kv.get(key);
   if (!val) return null;
   const num = Number(val);
-  if (!Number.isFinite(num) || num <= 0 || num > MAX_TEMP_DIVERGENCE_PCT) return null;
+  if (!Number.isFinite(num) || num < 0.5 || num > MAX_TEMP_DIVERGENCE_PCT) return null;
   return num;
 }
 

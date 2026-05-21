@@ -78,7 +78,7 @@ export interface AuthParams {
 export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   const { operatorAddress, vaultAddress, authSignature, authTimestamp } = params;
 
-  if (!operatorAddress || !authSignature || !authTimestamp) {
+  if (!operatorAddress || !authSignature || authTimestamp == null) {
     throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
   }
 
