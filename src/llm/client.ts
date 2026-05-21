@@ -4723,7 +4723,7 @@ async function runSwapShield(
       ? `Options:\n` +
         `1. **Retry later** — wait for pricing to normalize and request a fresh quote\n` +
         `2. **Verify route** — compare venues or try a different swap path\n` +
-        disableShieldOption +
+        toleranceShieldOption +
         refreshOracleOption
       : `Options:\n` +
         `1. **Split with TWAP** — create a TWAP order to execute ${sellAmt} ${sellSymbol} → ${buySymbol} ` +

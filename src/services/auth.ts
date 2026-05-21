@@ -92,42 +92,19 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   }
 
   // 2. Verify signature (wallet-wide, no vault in message)
-  // Try the new secure format first (timestamp included in signed message).
-  // This prevents replay attacks — an attacker cannot reuse an old signature
-  // with a fresh timestamp because the timestamp is cryptographically bound.
+  // The signed message MUST include the timestamp to prevent replay attacks.
+  // An attacker cannot reuse an old signature with a fresh timestamp because
+  // the timestamp is cryptographically bound.
   let valid = false;
-  let usedLegacyFormat = false;
   try {
-    const newMessage = buildAuthMessage(operatorAddress, authTimestamp);
+    const message = buildAuthMessage(operatorAddress, authTimestamp);
     valid = await verifyMessage({
       address: operatorAddress as Address,
-      message: newMessage,
+      message,
       signature: authSignature as `0x${string}`,
     });
   } catch {
     // verifyMessage throws on malformed signatures; we'll handle invalid below
-  }
-
-  // Fallback: try legacy format (static message, no timestamp binding).
-  // This allows existing cached signatures to work during the transition period.
-  if (!valid) {
-    try {
-      const legacyMessage = buildAuthMessage(operatorAddress);
-      valid = await verifyMessage({
-        address: operatorAddress as Address,
-        message: legacyMessage,
-        signature: authSignature as `0x${string}`,
-      });
-      if (valid) {
-        usedLegacyFormat = true;
-        console.warn(
-          `[Auth] Legacy signature format accepted for ${operatorAddress.slice(0, 6)}…${operatorAddress.slice(-4)}. ` +
-          `This format is deprecated and will be removed. Please update your client to include the timestamp in the signed message.`,
-        );
-      }
-    } catch {
-      // Malformed signature
-    }
   }
 
   if (!valid) {

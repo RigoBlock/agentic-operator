@@ -4211,13 +4211,18 @@
       setTimeout(() => refreshDelegationStatus(), 600);
     })();
 
-    // One-time cleanup: remove old global swap-shield keys now that we use per-vault keys
+    // One-time cleanup: remove old per-vault swap-shield keys from earlier versions
     (function cleanupOldShieldKeys() {
-      const hasRun = localStorage.getItem('rigoblock_shield_cleanup_v2');
+      const hasRun = localStorage.getItem('rigoblock_shield_cleanup_v3');
       if (hasRun) return;
-      localStorage.removeItem('rigoblock_swap_shield');
-      localStorage.removeItem('rigoblock_swap_shield_tolerance');
-      localStorage.setItem('rigoblock_shield_cleanup_v2', '1');
+      // Remove any keys that were namespaced with a vault address
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith('rigoblock_swap_shield:') || key.startsWith('rigoblock_swap_shield_tolerance:'))) {
+          localStorage.removeItem(key);
+        }
+      }
+      localStorage.setItem('rigoblock_shield_cleanup_v3', '1');
     })();
 
     // Restore trading settings from localStorage

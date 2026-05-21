@@ -189,47 +189,61 @@ export async function getZeroXQuote(
     const vaultAddr = (taker && taker.toLowerCase() !== "0x0000000000000000000000000000000000000000")
       ? taker
       : null;
-    if (vaultAddr && env.ALCHEMY_API_KEY) {
-      try {
-        const publicClient = getClient(chainId, env.ALCHEMY_API_KEY);
-        // The vault's convertTokenAmount handles WETH↔ETH internally,
-        // but the 0x API uses 0xEeee... for native ETH while the vault
-        // expects address(0). Normalize before the oracle call.
-        const NATIVE_ETH = "0x0000000000000000000000000000000000000000" as Address;
-        const normalizeForOracle = (addr: string) =>
-          addr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-            ? NATIVE_ETH
-            : (addr as Address);
-        const oracleSellAmount = await publicClient.readContract({
-          address: vaultAddr as Address,
-          abi: RIGOBLOCK_VAULT_ABI,
-          functionName: "convertTokenAmount",
-          args: [normalizeForOracle(buyToken), desiredBuyAmountRaw, normalizeForOracle(sellToken)],
-        }) as bigint;
+    if (!vaultAddr) {
+      throw new Error(
+        `Exact-output swaps via 0x require a vault address. ` +
+        `No vault was specified for this quote on chain ${chainId}. ` +
+        `Try an exact-input swap instead (e.g. "sell 1000 ${intent.tokenIn} for ${intent.tokenOut}").`
+      );
+    }
+    if (!env.ALCHEMY_API_KEY) {
+      throw new Error(
+        `Exact-output swaps require an Alchemy API key for oracle price lookup. ` +
+        `The RPC credentials are not configured.`
+      );
+    }
 
-        if (oracleSellAmount > 0n) {
-          estimatedSellAmount = oracleSellAmount;
-          cachedOracleBuyAmount = desiredBuyAmountRaw.toString();
-          cachedOracleSellAmount = estimatedSellAmount.toString();
-          console.log(
-            `[0x] Oracle exact-output estimate: ${desiredBuyAmountRaw.toString()} ${intent.tokenOut} ` +
-            `→ ${estimatedSellAmount.toString()} ${intent.tokenIn} (via vault oracle)`
-          );
-        }
-      } catch (oracleErr) {
-        const reason = oracleErr instanceof Error ? oracleErr.message : String(oracleErr);
-        console.error(`[0x] Oracle exact-output estimate failed: ${reason}`);
-        throw new Error(
-          `Cannot estimate exact-output swap for ${intent.tokenIn} → ${intent.tokenOut} on chain ${chainId}. ` +
-          `The vault oracle could not price this pair. ` +
-          `Common causes: token lacks an oracle feed, wrong token address, or the vault is on a different chain. ` +
-          `Try an exact-input swap instead (e.g. "sell 1000 ${intent.tokenIn} for ${intent.tokenOut}").`
+    try {
+      const publicClient = getClient(chainId, env.ALCHEMY_API_KEY);
+      // The vault's convertTokenAmount handles WETH↔ETH internally,
+      // but the 0x API uses 0xEeee... for native ETH while the vault
+      // expects address(0). Normalize before the oracle call.
+      const NATIVE_ETH = "0x0000000000000000000000000000000000000000" as Address;
+      const normalizeForOracle = (addr: string) =>
+        addr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          ? NATIVE_ETH
+          : (addr as Address);
+      const oracleSellAmount = await publicClient.readContract({
+        address: vaultAddr as Address,
+        abi: RIGOBLOCK_VAULT_ABI,
+        functionName: "convertTokenAmount",
+        args: [normalizeForOracle(buyToken), desiredBuyAmountRaw, normalizeForOracle(sellToken)],
+      }) as bigint;
+
+      if (oracleSellAmount > 0n) {
+        estimatedSellAmount = oracleSellAmount;
+        cachedOracleBuyAmount = desiredBuyAmountRaw.toString();
+        cachedOracleSellAmount = estimatedSellAmount.toString();
+        console.log(
+          `[0x] Oracle exact-output estimate: ${desiredBuyAmountRaw.toString()} ${intent.tokenOut} ` +
+          `→ ${estimatedSellAmount.toString()} ${intent.tokenIn} (via vault oracle)`
         );
       }
-    } else {
+    } catch (oracleErr) {
+      const reason = oracleErr instanceof Error ? oracleErr.message : String(oracleErr);
+      console.error(`[0x] Oracle exact-output estimate failed: ${reason}`);
       throw new Error(
-        `Exact-output swaps via 0x require a vault address and an oracle price feed. ` +
-        `No vault was specified for this quote on chain ${chainId}. ` +
+        `Cannot estimate exact-output swap for ${intent.tokenIn} → ${intent.tokenOut} on chain ${chainId}. ` +
+        `The vault oracle could not price this pair. ` +
+        `Common causes: token lacks an oracle feed, wrong token address, or the vault is on a different chain. ` +
+        `Try an exact-input swap instead (e.g. "sell 1000 ${intent.tokenIn} for ${intent.tokenOut}").`
+      );
+    }
+
+    if (estimatedSellAmount === null || estimatedSellAmount <= 0n) {
+      throw new Error(
+        `Cannot estimate exact-output swap for ${intent.tokenIn} → ${intent.tokenOut} on chain ${chainId}. ` +
+        `The oracle returned an invalid sell amount (${estimatedSellAmount === null ? "null" : estimatedSellAmount.toString()}). ` +
         `Try an exact-input swap instead (e.g. "sell 1000 ${intent.tokenIn} for ${intent.tokenOut}").`
       );
     }

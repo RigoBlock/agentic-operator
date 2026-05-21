@@ -132,7 +132,7 @@ RULE: The Swap Shield compares DEX API quotes against the on-chain BackgeoOracle
 - **Oracle revert classification**: On `convertTokenAmount` revert, `hasPriceFeed(tokenIn)` and `hasPriceFeed(tokenOut)` are called.
   If any returns false → `NO_PRICE_FEED`. If `hasPriceFeed` itself reverts (vault has no EOracle) or feeds exist but call still fails → `ORACLE_ERROR`.
   Never use fragile string-matching on error messages for security-critical classification.
-- **Temporary tolerance**: KV key `swap-shield-tolerance:{operator}:{vault}` with 600s TTL (max 50%)
+- **Temporary tolerance**: KV key `swap-shield-tolerance:{operator}` with 600s TTL (max 50%)
 - **TWAP suggestion**: When blocked, the error message suggests splitting the trade
   into a TWAP order to reduce price impact
 
