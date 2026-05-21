@@ -288,21 +288,6 @@ export async function getZeroXQuote(
 
   const data = (await res.json()) as Record<string, unknown>;
 
-  // Sanity check for exact-output: the actual buy amount should be close to the target.
-  // If it's far below (e.g. < 50%), liquidity may be too shallow or slippage exceeded.
-  if (intent.amountOut && !intent.amountIn) {
-    const actualBuyRaw = BigInt(data.buyAmount as string);
-    const desiredBuyRaw = parseUnits(intent.amountOut, decimalsOut);
-    if (actualBuyRaw * 2n < desiredBuyRaw) {
-      throw new Error(
-        `0x quote output (${formatUnits(actualBuyRaw, decimalsOut)} ${intent.tokenOut}) ` +
-        `is far below the requested ${intent.amountOut} ${intent.tokenOut}. ` +
-        `Liquidity may be too shallow or the oracle-estimated sell amount was insufficient. ` +
-        `Try a different DEX (uniswap) or a smaller amount.`
-      );
-    }
-  }
-
   // Check if liquidity is available
   if (data.liquidityAvailable === false) {
     throw new Error(
@@ -349,6 +334,21 @@ export async function getZeroXQuote(
       `0x quote response is missing a valid sellToken (got ${typeof rawSellToken}). ` +
       `The token pair may not be fully supported by 0x on chain ${chainId}. Try Uniswap.`
     );
+  }
+
+  // Sanity check for exact-output: the actual buy amount should be close to the target.
+  // If it's far below (e.g. < 50%), liquidity may be too shallow or slippage exceeded.
+  if (intent.amountOut && !intent.amountIn) {
+    const actualBuyRaw = BigInt(rawBuyAmount);
+    const desiredBuyRaw = parseUnits(intent.amountOut, decimalsOut);
+    if (actualBuyRaw * 2n < desiredBuyRaw) {
+      throw new Error(
+        `0x quote output (${formatUnits(actualBuyRaw, decimalsOut)} ${intent.tokenOut}) ` +
+        `is far below the requested ${intent.amountOut} ${intent.tokenOut}. ` +
+        `Liquidity may be too shallow or the oracle-estimated sell amount was insufficient. ` +
+        `Try a different DEX (uniswap) or a smaller amount.`
+      );
+    }
   }
 
   return {

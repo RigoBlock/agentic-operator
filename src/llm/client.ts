@@ -76,6 +76,7 @@ import {
   DEFAULT_SLIPPAGE_BPS,
   MIN_SLIPPAGE_BPS,
   MAX_SLIPPAGE_BPS,
+  DEFAULT_MAX_DIVERGENCE_PCT,
 } from "../services/swapShield.js";
 import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
 
@@ -4683,7 +4684,7 @@ async function runSwapShield(
     buyRawBig,
     intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
     env.ALCHEMY_API_KEY,
-    maxDivergencePct,
+    maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT,
     precomputedOracleOutRaw,
   );
 

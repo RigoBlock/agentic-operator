@@ -64,7 +64,7 @@ import { getClient } from "./vault.js";
  * Catches rogue quotes, API compromise, fat-finger errors, and extreme
  * low-liquidity routing without false-positiving on normal DEX spread.
  */
-const DEFAULT_MAX_DIVERGENCE_PCT = 5;
+export const DEFAULT_MAX_DIVERGENCE_PCT = 5;
 
 /** Native ETH address (zero address) — EOracle treats this equivalently to WETH */
 const NATIVE_ETH = "0x0000000000000000000000000000000000000000" as Address;
