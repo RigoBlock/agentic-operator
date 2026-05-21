@@ -129,8 +129,8 @@ describe("tool auth category membership", () => {
     expect(OPERATOR_VERIFIED_TOOLS.has("set_default_slippage")).toBe(true);
   });
 
-  it("disable_swap_shield is in OPERATOR_VERIFIED_TOOLS", () => {
-    expect(OPERATOR_VERIFIED_TOOLS.has("disable_swap_shield")).toBe(true);
+  it("set_swap_shield_tolerance is in OPERATOR_VERIFIED_TOOLS", () => {
+    expect(OPERATOR_VERIFIED_TOOLS.has("set_swap_shield_tolerance")).toBe(true);
   });
 
   // Vault tx tools must require auth for browser callers

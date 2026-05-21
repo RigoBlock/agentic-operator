@@ -52,7 +52,7 @@ function getToolCategory(name: string): string {
   if (name.startsWith("setup_delegation") || name.startsWith("revoke_delegation") || name.startsWith("check_delegation_status") || name.startsWith("revoke_selectors")) return "Delegation";
   if (name.startsWith("create_twap_") || name.startsWith("cancel_twap_") || name.startsWith("list_twap_")) return "TWAP Orders";
   if (name.startsWith("create_nav_sync") || name.startsWith("list_nav_syncs") || name.startsWith("cancel_nav_sync")) return "NAV Sync";
-  if (name.startsWith("set_default_slippage") || name.startsWith("disable_swap_shield") || name.startsWith("enable_swap_shield")) return "Operator Settings";
+  if (name.startsWith("set_default_slippage") || name.startsWith("set_swap_shield_tolerance") || name.startsWith("enable_swap_shield")) return "Operator Settings";
   if (name.startsWith("refresh_oracle_feed")) return "Oracle";
   if (name.startsWith("list_strategies")) return "Strategy";
   return "Other";

@@ -17,8 +17,9 @@
 import type { Address, Hex } from "viem";
 import type { Env, SwapIntent } from "../types.js";
 import { resolveTokenAddress } from "../config.js";
-import { parseUnits } from "viem";
-import { getTokenDecimals } from "./vault.js";
+import { parseUnits, formatUnits } from "viem";
+import { getTokenDecimals, getClient } from "./vault.js";
+import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 
 const ZEROX_API_URL = "https://api.0x.org";
 
@@ -139,120 +140,93 @@ export async function getZeroXQuote(
   // Note: The /gasless/ endpoints are NOT suitable here. They don't support
   // native tokens (ETH) and use a completely different Permit2 meta-tx flow.
   //
-  // For exact-output (user wants to buy N tokens), we:
-  //   1. Call /swap/allowance-holder/price with a small probe sellAmount to get
-  //      the indicative market rate, then compute the required sellAmount.
-  //   2. Call /swap/allowance-holder/quote with that sellAmount for the firm
-  //      quote with executable transaction data.
+  // For exact-output (user wants to buy N tokens), the 0x API v2 only supports
+  // exact-input (sellAmount). We use the vault's on-chain oracle
+  // (convertTokenAmount via BackgeoOracle TWAP) to convert the desired buy
+  // amount directly to the required sell amount, then request a firm quote from
+  // 0x with that sellAmount.
   //
-  // Probe sizing uses token decimals to stay small but avoid rounding to 0:
-  //   - max(0, decimalsIn - decimalsOut) compensates for the raw→raw decimal
-  //     shift. When sellToken has MORE decimals, each raw unit is tinier so we
-  //     need proportionally more. When sellToken has FEWER decimals (e.g.,
-  //     USDC→ETH), the conversion naturally amplifies output, so no extra needed.
-  //   - +3 safety handles price ratios up to ~1000:1 (covers USDC→WBTC at $60k).
-  //   - If buyAmount still rounds to 0 (extreme ratios like memecoin→WBTC),
-  //     a single retry with a much larger probe handles it. The price endpoint
-  //     is indicative only (no funds move), so larger probes are safe.
+  // If the oracle cannot price the pair (no feed, wrong address, wrong chain),
+  // we throw immediately — there is no probe fallback because microscopic
+  // probe amounts produced unreliable rates and the NAV shield would fail
+  // downstream anyway for unmapped tokens.
+
   if (intent.amountOut && !intent.amountIn) {
-    // 0x API v2 only supports exact-input (sellAmount). For exact-output,
-    // we probe with a small exact-input /quote to get the reliable market rate,
-    // then compute the required sellAmount for the desired buy amount.
-    // Using /quote instead of /price avoids distorted indicative rates for
-    // low-liquidity or exotic token pairs.
-    //
-    // Probe sizing uses decimalGap to compensate for raw-unit differences between
-    // tokens. If the first probe returns buyAmount=0 (extreme price ratios like
-    // cheap memecoin → WBTC), a single retry with a substantially larger probe
-    // handles it.
-    const decimalGap = Math.max(0, decimalsIn - decimalsOut);
-    const probeExponent = decimalGap + 3;
-    let probeSellAmount = 10n ** BigInt(probeExponent);
-    let probeBuyAmountBn = 0n;
-    let probeSellAmountBn = 0n;
-    let lastProbeError: { status: number; body: string } | null = null;
+    // 0x API v2 only supports exact-input (sellAmount). For exact-output
+    // ("buy 200 GRG"), we need to compute the required sellAmount.
+    // Use the vault's on-chain oracle (BackgeoOracle TWAP) to convert the
+    // desired buy amount directly to the required sell amount. The 0x probe
+    // fallback has been removed because it never produced reliable rates for
+    // microscopic amounts and the NAV shield would fail anyway for tokens
+    // without an oracle price feed.
+    const desiredBuyAmountRaw = parseUnits(intent.amountOut, decimalsOut);
+    let estimatedSellAmount: bigint | null = null;
+    const vaultAddr = (taker && taker.toLowerCase() !== "0x0000000000000000000000000000000000000000")
+      ? taker
+      : null;
+    // Exact-output requires the vault address to estimate the required sell amount
+    // via the on-chain BackgeoOracle. Quote-only callers (no vault) must use
+    // exact-input ("sell X for Y") — the dummy zero-address taker fallback used
+    // in exact-input paths is intentionally not supported here because there is
+    // no oracle to price the pair without a real vault.
+    if (!vaultAddr) {
+      throw new Error(
+        `Exact-output swaps via 0x require a vault address. ` +
+        `No vault was specified for this quote on chain ${chainId}. ` +
+        `Try an exact-input swap instead (e.g. "sell 1000 ${intent.tokenIn} for ${intent.tokenOut}").`
+      );
+    }
+    if (!env.ALCHEMY_API_KEY) {
+      throw new Error(
+        `Exact-output swaps require an Alchemy API key for oracle price lookup. ` +
+        `The RPC credentials are not configured.`
+      );
+    }
 
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const probeParams = new URLSearchParams(params);
-      probeParams.set("sellAmount", probeSellAmount.toString());
-      probeParams.set("slippageBps", String(intent.slippageBps ?? 100));
+    try {
+      const publicClient = getClient(chainId, env.ALCHEMY_API_KEY);
+      // The vault's convertTokenAmount handles WETH↔ETH internally,
+      // but the 0x API uses 0xEeee... for native ETH while the vault
+      // expects address(0). Normalize before the oracle call.
+      const NATIVE_ETH = "0x0000000000000000000000000000000000000000" as Address;
+      const normalizeForOracle = (addr: string) =>
+        addr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          ? NATIVE_ETH
+          : (addr as Address);
+      const oracleSellAmount = await publicClient.readContract({
+        address: vaultAddr as Address,
+        abi: RIGOBLOCK_VAULT_ABI,
+        functionName: "convertTokenAmount",
+        args: [normalizeForOracle(buyToken), desiredBuyAmountRaw, normalizeForOracle(sellToken)],
+      }) as bigint;
 
-      console.log(`[0x] Exact-output probe: sellAmount=${probeSellAmount} (10^${probeExponent}${attempt > 0 ? " + retry" : ""}, decGap=${decimalGap})`);
-      const probeUrl = `${ZEROX_API_URL}/swap/allowance-holder/quote?${probeParams.toString()}`;
-      const probeRes = await fetchWithRetry(probeUrl, {
-        method: "GET",
-        headers: getHeaders(env),
-      });
-
-      if (!probeRes.ok) {
-        const errBody = await probeRes.text();
-        lastProbeError = { status: probeRes.status, body: errBody };
-
-        // Only retry on 400 (potentially amount-related validation) or 5xx (transient).
-        // Auth (401/403), not-found (404), rate-limit (429) are permanent for this pair.
-        const retryable = probeRes.status === 400 || probeRes.status >= 500;
-        if (retryable && attempt === 0) {
-          console.warn(`[0x] Probe quote failed (${probeRes.status}), retrying with larger probe`);
-          const retryBump = BigInt(Math.max(8, Math.ceil(decimalsIn / 2)));
-          probeSellAmount = probeSellAmount * (10n ** retryBump);
-          continue;
-        }
-
-        // Non-retryable or final attempt — surface the actual 0x error
-        throw new Error(
-          `0x quote failed (${probeRes.status}): ${errBody}. ` +
-          `Token pair: ${intent.tokenIn}→${intent.tokenOut} on chain ${chainId}.`
+      if (oracleSellAmount > 0n) {
+        estimatedSellAmount = oracleSellAmount;
+        console.log(
+          `[0x] Oracle exact-output estimate: ${desiredBuyAmountRaw.toString()} ${intent.tokenOut} ` +
+          `→ ${estimatedSellAmount.toString()} ${intent.tokenIn} (via vault oracle)`
         );
       }
-
-      const probeData = await probeRes.json() as Record<string, unknown>;
-      const probeBuyAmount = probeData.buyAmount as string;
-
-      if (probeBuyAmount && probeBuyAmount !== "0") {
-        probeBuyAmountBn = BigInt(probeBuyAmount);
-        probeSellAmountBn = probeSellAmount;
-        console.log(`[0x] Probe result: ${probeSellAmount} ${intent.tokenIn} → ${probeBuyAmount} ${intent.tokenOut}`);
-        break;
-      }
-
-      if (attempt === 0) {
-        // Retry with a substantially larger probe. Scale by ~10^(half of decimalsIn)
-        // so high-decimal tokens (18-dec memecoins) get enough headroom while
-        // low-decimal tokens (6-dec stables) stay reasonable.
-        const retryBump = BigInt(Math.max(8, Math.ceil(decimalsIn / 2)));
-        probeSellAmount = probeSellAmount * (10n ** retryBump);
-        console.log(`[0x] buyAmount=0, retrying with probe=${probeSellAmount}`);
-      }
-    }
-
-    if (probeBuyAmountBn === 0n || probeSellAmountBn === 0n) {
-      const errDetail = lastProbeError
-        ? `Last 0x error: ${lastProbeError.status} — ${lastProbeError.body}`
-        : "All probe amounts returned zero buyAmount.";
+    } catch (oracleErr) {
+      const reason = oracleErr instanceof Error ? oracleErr.message : String(oracleErr);
+      console.error(`[0x] Oracle exact-output estimate failed: ${reason}`);
       throw new Error(
-        `0x could not determine a market price for ${intent.tokenIn}→${intent.tokenOut} on chain ${chainId}. ` +
-        `${errDetail} Try a different DEX (uniswap) or a smaller amount.`
+        `Cannot estimate exact-output swap for ${intent.tokenIn} → ${intent.tokenOut} on chain ${chainId}. ` +
+        `The vault oracle could not price this pair. ` +
+        `Common causes: token lacks an oracle feed, vault doesn't implement the EOracle extension, ` +
+        `wrong token address, or the vault is on a different chain. ` +
+        `Try an exact-input swap instead (e.g. "sell 1000 ${intent.tokenIn} for ${intent.tokenOut}").`
       );
     }
 
-    // Compute required sellAmount from the probe rate
-    // rate = probeBuyAmount / probeSellAmount
-    // needed = desiredBuyAmount * probeSellAmount / probeBuyAmount
-    const desiredBuyAmountRaw = parseUnits(intent.amountOut, decimalsOut);
-
-    // Add 2% buffer to account for price movement between probe and final quote
-    const estimatedSellAmount = (desiredBuyAmountRaw * probeSellAmountBn * 102n) / (probeBuyAmountBn * 100n);
-
-    // Defensive: estimatedSellAmount must be > 0
-    if (estimatedSellAmount === 0n) {
+    if (estimatedSellAmount === null || estimatedSellAmount <= 0n) {
       throw new Error(
-        `0x could not compute a valid sell amount for ${intent.amountOut} ${intent.tokenOut} on chain ${chainId}. ` +
-        `The probe returned ${probeBuyAmountBn.toString()} buy tokens for ${probeSellAmountBn.toString()} sell tokens, ` +
-        `which produced a zero estimated input. Try a different DEX (uniswap) or a smaller amount.`
+        `Cannot estimate exact-output swap for ${intent.tokenIn} → ${intent.tokenOut} on chain ${chainId}. ` +
+        `The oracle returned an invalid sell amount (${estimatedSellAmount === null ? "null" : estimatedSellAmount.toString()}). ` +
+        `Try an exact-input swap instead (e.g. "sell 1000 ${intent.tokenIn} for ${intent.tokenOut}").`
       );
     }
 
-    console.log(`[0x] Estimated sellAmount=${estimatedSellAmount.toString()} (+2% buffer) for target ${intent.amountOut} ${intent.tokenOut}`);
     params.set("sellAmount", estimatedSellAmount.toString());
   } else if (intent.amountIn) {
     params.set(
@@ -294,7 +268,7 @@ export async function getZeroXQuote(
     throw new Error(
       `0x quote failed (${res.status}): ${detail}. ` +
       `Requested ${requestDesc} on chain ${chainId}. ` +
-      `If exact-output (buy), the price probe may have failed or returned an extreme rate. ` +
+      `If exact-output (buy), the oracle estimate may have been insufficient or liquidity is too low. ` +
       `Try switching DEX (uniswap) or reducing the amount.`,
     );
   }
@@ -347,6 +321,21 @@ export async function getZeroXQuote(
       `0x quote response is missing a valid sellToken (got ${typeof rawSellToken}). ` +
       `The token pair may not be fully supported by 0x on chain ${chainId}. Try Uniswap.`
     );
+  }
+
+  // Sanity check for exact-output: the actual buy amount should be close to the target.
+  // If it's far below (e.g. < 50%), liquidity may be too shallow or slippage exceeded.
+  if (intent.amountOut && !intent.amountIn) {
+    const actualBuyRaw = BigInt(rawBuyAmount);
+    const desiredBuyRaw = parseUnits(intent.amountOut, decimalsOut);
+    if (actualBuyRaw * 2n < desiredBuyRaw) {
+      throw new Error(
+        `0x quote output (${formatUnits(actualBuyRaw, decimalsOut)} ${intent.tokenOut}) ` +
+        `is far below the requested ${intent.amountOut} ${intent.tokenOut}. ` +
+        `Liquidity may be too shallow or the oracle-estimated sell amount was insufficient. ` +
+        `Try a different DEX (uniswap) or a smaller amount.`
+      );
+    }
   }
 
   return {

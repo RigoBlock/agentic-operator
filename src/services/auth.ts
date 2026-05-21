@@ -14,7 +14,7 @@
  * Signatures are valid for 24 hours.
  */
 
-import { verifyMessage, type Address } from "viem";
+import { verifyMessage, isAddress, type Address } from "viem";
 import { isVaultOwner } from "./vault.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "../config.js";
 
@@ -32,8 +32,22 @@ const OWNERSHIP_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
  * Build the exact message the frontend must sign.
  * Wallet-wide — NOT tied to any specific vault or chain.
  * Human-readable so the wallet UI shows a clear description of what is being signed.
+ *
+ * The timestamp is included in the message to prevent signature replay attacks.
+ * An attacker who steals a signature cannot replay it with a fresh timestamp,
+ * because the timestamp is cryptographically bound to the signature.
  */
-export function buildAuthMessage(_address: string): string {
+export function buildAuthMessage(_address: string, timestamp?: number): string {
+  if (timestamp !== undefined) {
+    return [
+      "Welcome to Rigoblock Operator",
+      "",
+      "Sign this message to verify your wallet and access your smart pool assistant.",
+      "",
+      `Timestamp: ${timestamp}`,
+    ].join("\n");
+  }
+  // Legacy format (deprecated — kept for transition period only)
   return [
     "Welcome to Rigoblock Operator",
     "",
@@ -43,7 +57,7 @@ export function buildAuthMessage(_address: string): string {
 
 export interface AuthParams {
   operatorAddress: string;
-  vaultAddress: string;
+  vaultAddress?: string;
   authSignature: string;
   authTimestamp: number;
   /** Check this chain first before trying all others (avoids unnecessary RPC calls). */
@@ -64,11 +78,20 @@ export interface AuthParams {
 export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   const { operatorAddress, vaultAddress, authSignature, authTimestamp } = params;
 
-  if (!operatorAddress || !authSignature || !authTimestamp) {
+  if (!operatorAddress || !authSignature || authTimestamp == null) {
     throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
   }
 
-  // 1. Check expiry
+  // 1. Validate timestamp type before arithmetic
+  if (
+    typeof authTimestamp !== "number" ||
+    !Number.isFinite(authTimestamp) ||
+    !Number.isInteger(authTimestamp)
+  ) {
+    throw new AuthError("Invalid auth timestamp. Expected an integer timestamp in milliseconds.", 401);
+  }
+
+  // 2. Check expiry
   const now = Date.now();
   if (now - authTimestamp > AUTH_EXPIRY_MS) {
     throw new AuthError("Authentication expired. Please reconnect your wallet.", 401);
@@ -78,22 +101,61 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   }
 
   // 2. Verify signature (wallet-wide, no vault in message)
-  const message = buildAuthMessage(operatorAddress);
+  // The signed message MUST include the timestamp to prevent replay attacks.
+  // An attacker cannot reuse an old signature with a fresh timestamp because
+  // the timestamp is cryptographically bound.
+
+  // Validate address format before casting — an invalid address would cause
+  // verifyMessage to throw a generic error that could be mistaken for a
+  // signature-format problem.
+  if (!isAddress(operatorAddress)) {
+    throw new AuthError(
+      "Invalid operator address format. Expected a valid EVM address (0x + 40 hex chars).",
+      400,
+    );
+  }
+
+  let valid = false;
   try {
-    const valid = await verifyMessage({
+    const message = buildAuthMessage(operatorAddress, authTimestamp);
+    valid = await verifyMessage({
       address: operatorAddress as Address,
       message,
       signature: authSignature as `0x${string}`,
     });
-    if (!valid) {
-      throw new AuthError("Signature verification failed. The signature does not match the operator address.", 403);
-    }
   } catch (err) {
-    if (err instanceof AuthError) throw err;
-    throw new AuthError("Invalid signature format.", 401);
+    // verifyMessage throws when the signature is malformed (wrong length, bad encoding, etc.).
+    // This is distinct from a well-formed signature that simply doesn't verify — report 401
+    // so callers know the problem is format, not ownership.
+    throw new AuthError(
+      "Invalid signature format: " +
+      (err instanceof Error ? err.message : "signature could not be decoded") +
+      ". Ensure the authSignature is a valid 65-byte EIP-191 hex string.",
+      401,
+    );
   }
 
-  // 3. Check ownership cache first — avoids 8+ RPC calls per message
+  if (!valid) {
+    throw new AuthError(
+      "Signature verification failed. The signature does not match the operator address or the timestamp. " +
+      "Ensure your client includes the authTimestamp in the signed message.",
+      403,
+    );
+  }
+
+  // 3. Vault ownership check — skip when no vault is provided (operator-scoped tools
+  // like set_swap_shield_tolerance don't require a vault context).
+  if (!vaultAddress) {
+    return; // signature verified, no vault to own
+  }
+  if (!isAddress(vaultAddress)) {
+    throw new AuthError(
+      "Invalid vault address format. Expected a valid EVM address (0x + 40 hex chars).",
+      400,
+    );
+  }
+
+  // 4. Check ownership cache first — avoids 8+ RPC calls per message
   const cacheKey = `${operatorAddress.toLowerCase()}:${vaultAddress.toLowerCase()}`;
   const cachedExpiry = ownershipCache.get(cacheKey);
   if (cachedExpiry && Date.now() < cachedExpiry) {

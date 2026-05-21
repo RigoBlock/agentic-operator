@@ -21,9 +21,9 @@ vi.mock("../src/services/vault.js", () => ({
 
 import {
   checkSwapPrice,
-  isSwapShieldDisabled,
-  disableSwapShield,
-  enableSwapShield,
+  getSwapShieldTolerance,
+  setSwapShieldTolerance,
+  clearSwapShieldTolerance,
   getStoredSlippage,
   setStoredSlippage,
   DEFAULT_SLIPPAGE_BPS,
@@ -375,44 +375,53 @@ describe("Swap Shield — checkSwapPrice", () => {
 
 });
 
-describe("Swap Shield — opt-out flow", () => {
+describe("Swap Shield — tolerance override flow", () => {
   let kv: KVNamespace;
 
   beforeEach(() => {
     kv = createMockKV();
   });
 
-  it("starts with shield enabled (not disabled)", async () => {
-    const disabled = await isSwapShieldDisabled(kv, OPERATOR, VAULT);
-    expect(disabled).toBe(false);
+  it("starts with no tolerance override", async () => {
+    const tolerance = await getSwapShieldTolerance(kv, OPERATOR);
+    expect(tolerance).toBeNull();
   });
 
-  it("disableSwapShield sets opt-out with TTL", async () => {
-    await disableSwapShield(kv, OPERATOR, VAULT);
+  it("setSwapShieldTolerance stores tolerance with TTL", async () => {
+    await setSwapShieldTolerance(kv, OPERATOR, 30);
 
-    const disabled = await isSwapShieldDisabled(kv, OPERATOR, VAULT);
-    expect(disabled).toBe(true);
+    const tolerance = await getSwapShieldTolerance(kv, OPERATOR);
+    expect(tolerance).toBe(30);
 
     // Verify KV put was called with TTL
     expect(kv.put).toHaveBeenCalledWith(
-      expect.stringContaining("swap-shield-disabled:"),
-      expect.any(String),
+      expect.stringContaining("swap-shield-tolerance:"),
+      "30",
       { expirationTtl: 600 },
     );
   });
 
-  it("enableSwapShield removes opt-out", async () => {
-    await disableSwapShield(kv, OPERATOR, VAULT);
-    expect(await isSwapShieldDisabled(kv, OPERATOR, VAULT)).toBe(true);
+  it("clearSwapShieldTolerance removes override", async () => {
+    await setSwapShieldTolerance(kv, OPERATOR, 30);
+    expect(await getSwapShieldTolerance(kv, OPERATOR)).toBe(30);
 
-    await enableSwapShield(kv, OPERATOR, VAULT);
-    expect(await isSwapShieldDisabled(kv, OPERATOR, VAULT)).toBe(false);
+    await clearSwapShieldTolerance(kv, OPERATOR);
+    expect(await getSwapShieldTolerance(kv, OPERATOR)).toBeNull();
   });
 
-  it("uses case-insensitive addresses", async () => {
-    await disableSwapShield(kv, OPERATOR.toUpperCase(), VAULT.toUpperCase());
-    const disabled = await isSwapShieldDisabled(kv, OPERATOR.toLowerCase(), VAULT.toLowerCase());
-    expect(disabled).toBe(true);
+  it("uses case-insensitive operator address", async () => {
+    await setSwapShieldTolerance(kv, OPERATOR.toUpperCase(), 25);
+    const tolerance = await getSwapShieldTolerance(kv, OPERATOR.toLowerCase());
+    expect(tolerance).toBe(25);
+  });
+
+  it("rejects tolerance above 50%", async () => {
+    await expect(setSwapShieldTolerance(kv, OPERATOR, 55)).rejects.toThrow("must be between");
+  });
+
+  it("rejects non-positive tolerance", async () => {
+    await expect(setSwapShieldTolerance(kv, OPERATOR, 0)).rejects.toThrow("must be between");
+    await expect(setSwapShieldTolerance(kv, OPERATOR, -5)).rejects.toThrow("must be between");
   });
 });
 

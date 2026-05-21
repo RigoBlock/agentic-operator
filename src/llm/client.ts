@@ -68,14 +68,15 @@ import {
 import { checkNavImpact } from "../services/navGuard.js";
 import {
   checkSwapPrice,
-  isSwapShieldDisabled,
-  disableSwapShield,
-  enableSwapShield,
+  getSwapShieldTolerance,
+  setSwapShieldTolerance,
+  clearSwapShieldTolerance,
   getStoredSlippage,
   setStoredSlippage,
   DEFAULT_SLIPPAGE_BPS,
   MIN_SLIPPAGE_BPS,
   MAX_SLIPPAGE_BPS,
+  DEFAULT_MAX_DIVERGENCE_PCT,
 } from "../services/swapShield.js";
 import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
 
@@ -129,7 +130,7 @@ export function isVerifiedOperatorContext(
 export const OPERATOR_VERIFIED_TOOLS = new Set<string>([
   // Operator-scoped KV mutations
   "set_default_slippage",
-  "disable_swap_shield",
+  "set_swap_shield_tolerance",
   "enable_swap_shield",
   // Strategy visibility is operator-private
   "list_strategies",
@@ -1994,8 +1995,6 @@ export async function executeToolCall(
         const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
 
         // ── Swap Shield — oracle price check ──
-        // Pass addresses already resolved by the 0x API so we avoid a
-        // redundant resolver round-trip and never skip the check on transient failures.
         const shieldWarning0x = await runSwapShield(
           env, ctx, intent,
           zxQuote.sellAmount, zxQuote.decimalsIn,
@@ -2070,7 +2069,9 @@ export async function executeToolCall(
         const sellLine = is0xEstimated
           ? `Sell: ~${inputAmount} ${intent.tokenIn} (estimated for ~${intent.amountOut} ${intent.tokenOut})`
           : `Sell: ${intent.amountIn} ${intent.tokenIn}`;
-        const buyLine = `Buy: ~${outputAmount} ${intent.tokenOut}`;
+        const buyLine = isExactOutput
+          ? `Buy: ~${outputAmount} ${intent.tokenOut} (target: ${intent.amountOut} ${intent.tokenOut})`
+          : `Buy: ~${outputAmount} ${intent.tokenOut}`;
 
         let message = [
           "✅ Swap ready (0x Aggregator)",
@@ -2422,34 +2423,47 @@ export async function executeToolCall(
       };
     }
 
-    case "disable_swap_shield": {
-      if (!ctx.vaultAddress || ctx.vaultAddress === "0x0000000000000000000000000000000000000000") {
-        throw new Error("No vault selected. Enter a valid vault address before disabling Swap Shield.");
+    case "set_swap_shield_tolerance": {
+      const raw = String(args.tolerance ?? "").trim();
+      let pct: number;
+      const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
+      const plainMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)$/);
+      if (percentMatch) {
+        const num = parseFloat(percentMatch[1]);
+        if (isNaN(num) || num <= 0) {
+          throw new Error("Invalid tolerance value. Provide a positive number (e.g., '30%' or '30').");
+        }
+        pct = num;
+      } else if (plainMatch) {
+        const num = parseFloat(plainMatch[1]);
+        if (isNaN(num) || num <= 0) {
+          throw new Error("Invalid tolerance value. Provide a positive number (e.g., '30%' or '30').");
+        }
+        pct = num;
+      } else {
+        throw new Error("Invalid tolerance format. Use a number like '30%' or '30'.");
       }
-      await disableSwapShield(
+      await setSwapShieldTolerance(
         env.KV,
         ctx.operatorAddress!,
-        ctx.vaultAddress as string,
+        pct,
       );
       return {
         message:
-          "⚠️ Swap Shield disabled for 10 minutes. During this time, swaps will NOT be checked " +
-          "against oracle prices. The shield will re-enable automatically.\n\n" +
-          "The NAV shield (10% max loss) still protects against catastrophic trades.",
+          `⚠️ Swap Shield tolerance temporarily set to ${pct}% for 10 minutes. ` +
+          `Swaps will be allowed if the DEX quote diverges up to ${pct}% from the oracle price. ` +
+          `The shield will reset to the default 5% automatically.\n\n` +
+          `The NAV shield (10% max loss) still protects against catastrophic trades.`,
       };
     }
 
     case "enable_swap_shield": {
-      if (!ctx.vaultAddress || ctx.vaultAddress === "0x0000000000000000000000000000000000000000") {
-        throw new Error("No vault selected. Enter a valid vault address before enabling Swap Shield.");
-      }
-      await enableSwapShield(
+      await clearSwapShieldTolerance(
         env.KV,
         ctx.operatorAddress!,
-        ctx.vaultAddress as string,
       );
       return {
-        message: "✅ Swap Shield re-enabled. All swaps will be checked against oracle prices.",
+        message: "✅ Swap Shield tolerance reset to default (5%). All swaps will be checked against oracle prices.",
       };
     }
 
@@ -4588,7 +4602,8 @@ export async function resolveSlippage(env: Env, ctx: RequestContext): Promise<nu
  * and throws a descriptive error if the quote diverges too much.
  *
  * Called from both 0x and Uniswap flows in build_vault_swap.
- * Skipped when the operator has temporarily disabled the shield.
+ * Uses the operator's temporary tolerance override (if set) instead of the
+ * default 5% threshold.
  */
 async function runSwapShield(
   env: Env,
@@ -4600,16 +4615,16 @@ async function runSwapShield(
   resolvedTokenIn?: Address,
   resolvedTokenOut?: Address,
 ): Promise<string | undefined> {
-  // Check opt-out
+  // Check temporary tolerance override
+  let maxDivergencePct: number | undefined;
   if (isVerifiedOperatorContext(ctx) && env.KV) {
-    const disabled = await isSwapShieldDisabled(
+    const tolerance = await getSwapShieldTolerance(
       env.KV,
       ctx.operatorAddress,
-      ctx.vaultAddress as string,
     );
-    if (disabled) {
-      console.log("[SwapShield] Temporarily disabled by operator — skipping");
-      return;
+    if (tolerance !== null) {
+      maxDivergencePct = tolerance;
+      console.log(`[SwapShield] Using operator tolerance override: ${tolerance}%`);
     }
   }
 
@@ -4655,6 +4670,7 @@ async function runSwapShield(
     buyRawBig,
     intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
     env.ALCHEMY_API_KEY,
+    maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT,
   );
 
   if (!result.allowed) {
@@ -4676,19 +4692,19 @@ async function runSwapShield(
     const directionClause = isFavorable
       ? `is ${magnitudePct}% better than the on-chain oracle price`
       : `is ${magnitudePct}% worse than the on-chain oracle price`;
-    const thresholdText = isFavorable
-      ? "10% better-than-oracle safety threshold"
-      : "5% safety threshold";
+    const normalizedMaxDiv = maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT;
+    const thresholdText = `${normalizedMaxDiv}% tolerance`;
     const explanation = isFavorable
       ? `This can indicate a stale oracle or a manipulated routing path producing an implausibly favorable quote.`
       : `This usually indicates significant price impact from the trade size.`;
-    const disableShieldOption = isVerifiedOperatorContext(ctx)
-      ? `3. **Disable shield** — say "disable swap shield" to suspend it for 10 minutes ` +
+    const toleranceShieldOption = isVerifiedOperatorContext(ctx)
+      ? `3. **Raise tolerance** — say "set swap shield tolerance to 30%" (or up to 50%) ` +
+        `to temporarily allow more divergence for 10 minutes. ` +
         (isFavorable
-          ? `(use with caution — you accept oracle/route integrity risk)\n`
-          : `(use with caution — you accept full price impact risk)\n`)
-      : `3. **Disable shield** — requires operator authentication; sign in as the vault owner first ` +
-        `then say "disable swap shield"\n`;
+          ? `Use with caution — you accept oracle/route integrity risk.\n`
+          : `Use with caution — you accept full price impact risk.\n`)
+      : `3. **Raise tolerance** — requires operator authentication; sign in as the vault owner first ` +
+        `then say "set swap shield tolerance to 30%"\n`;
     const refreshOracleOption = isFavorable
       ? `4. **Refresh oracle feed** — say "refresh oracle feed for ${sellSymbol} with 0.001 ETH" to ` +
         `swap a tiny amount of ETH on the BackgeoOracle pool from your operator wallet, creating a ` +
@@ -4698,13 +4714,13 @@ async function runSwapShield(
       ? `Options:\n` +
         `1. **Retry later** — wait for pricing to normalize and request a fresh quote\n` +
         `2. **Verify route** — compare venues or try a different swap path\n` +
-        disableShieldOption +
+        toleranceShieldOption +
         refreshOracleOption
       : `Options:\n` +
         `1. **Split with TWAP** — create a TWAP order to execute ${sellAmt} ${sellSymbol} → ${buySymbol} ` +
         `in smaller slices over time, reducing price impact\n` +
         `2. **Reduce amount** — try a smaller trade\n` +
-        disableShieldOption;
+        toleranceShieldOption;
     throw new Error(
       `⚠️ Swap Shield blocked this trade.\n\n` +
       `The DEX quote ${directionClause}, ` +
@@ -4797,14 +4813,16 @@ function sanitizeSwapArgs(
       const amount = buyMatch[1].replace(/,/g, "");
       const token = buyMatch[2].toUpperCase();
 
-      // The LLM MUST set amountOut for "buy" — correct if wrong
+      // The LLM MUST set amountOut for "buy" — correct if wrong.
+      // Always delete amountIn so a hallucinated sell-side amount does not
+      // override the exact-output path in getZeroXQuote.
       const currentAmountOut = corrected.amountOut as string | undefined;
 
       if (!currentAmountOut || Math.abs(parseFloat(currentAmountOut) - parseFloat(amount)) > parseFloat(amount) * 0.01) {
         console.log(`[sanitize] Correcting buy amount: amountOut=${currentAmountOut} → ${amount} (user said "buy ${amount} ${token}")`);
         corrected.amountOut = amount;
-        delete corrected.amountIn; // buy = amountOut, never amountIn
       }
+      delete corrected.amountIn; // buy = amountOut, never amountIn
 
       // Ensure tokenOut matches the token next to the number
       if (corrected.tokenOut && (corrected.tokenOut as string).toUpperCase() !== token) {
@@ -4830,8 +4848,8 @@ function sanitizeSwapArgs(
       if (!currentAmountIn || Math.abs(parseFloat(currentAmountIn) - parseFloat(amount)) > parseFloat(amount) * 0.01) {
         console.log(`[sanitize] Correcting sell amount: amountIn=${currentAmountIn} → ${amount}`);
         corrected.amountIn = amount;
-        delete corrected.amountOut;
       }
+      delete corrected.amountOut; // sell/swap = amountIn, never amountOut
 
       if (corrected.tokenIn && (corrected.tokenIn as string).toUpperCase() !== token) {
         console.log(`[sanitize] Correcting tokenIn: ${corrected.tokenIn} → ${token}`);
@@ -4923,8 +4941,9 @@ function tryFastPathChainSwitch(msg: string): FastPathResult | null {
 // ── Fast-path: Swap Shield toggle ───────────────────────────────────
 
 /**
- * Detect swap shield enable/disable commands, including the frontend
- * magic strings __enable_swap_shield__ / __disable_swap_shield__.
+ * Detect swap shield enable/tolerance commands, including the frontend
+ * magic string __enable_swap_shield__ and the legacy __disable_swap_shield__
+ * alias (mapped to 50% tolerance).
  */
 function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
   const m = msg.toLowerCase().trim();
@@ -4932,8 +4951,14 @@ function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
   if (m === "__enable_swap_shield__" || /^(?:re-?)?enable\s+swap\s+shield$/i.test(m)) {
     return { name: "enable_swap_shield", args: {} };
   }
+  // "set swap shield tolerance to 30%" / "swap shield tolerance 50%"
+  const toleranceMatch = m.match(/^(?:set\s+)?swap\s+shield\s+tolerance\s+(?:to\s+)?([0-9]+(?:\.[0-9]+)?)%?$/i);
+  if (toleranceMatch) {
+    return { name: "set_swap_shield_tolerance", args: { tolerance: `${toleranceMatch[1]}%` } };
+  }
+  // Legacy alias: treat "disable swap shield" as max tolerance (50%)
   if (m === "__disable_swap_shield__" || /^disable\s+swap\s+shield$/i.test(m)) {
-    return { name: "disable_swap_shield", args: {} };
+    return { name: "set_swap_shield_tolerance", args: { tolerance: "50%" } };
   }
 
   return null;
