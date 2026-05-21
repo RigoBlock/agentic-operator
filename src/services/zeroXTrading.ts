@@ -51,15 +51,6 @@ export interface ZeroXQuote {
   decimalsOut: number;
   /** The full raw response */
   _raw: Record<string, unknown>;
-  /**
-   * When the exact-output sell amount was derived from the vault oracle
-   * (convertTokenAmount), these preserve the oracle conversion inputs/results
-   * so the Swap Shield can skip its own redundant oracle call:
-   * - oracleBuyAmount: the requested/target buy amount passed into the oracle
-   * - oracleSellAmount: the oracle-estimated sell amount returned for that target
-   */
-  oracleBuyAmount?: string;
-  oracleSellAmount?: string;
 }
 
 // ── Headers ────────────────────────────────────────────────────────────
@@ -160,11 +151,6 @@ export async function getZeroXQuote(
   // probe amounts produced unreliable rates and the NAV shield would fail
   // downstream anyway for unmapped tokens.
 
-  // Hoisted: when the oracle provides the exact-output estimate, we stash the
-  // values so the Swap Shield can skip its redundant convertTokenAmount call.
-  let cachedOracleBuyAmount: string | undefined;
-  let cachedOracleSellAmount: string | undefined;
-
   if (intent.amountOut && !intent.amountIn) {
     // 0x API v2 only supports exact-input (sellAmount). For exact-output
     // ("buy 200 GRG"), we need to compute the required sellAmount.
@@ -216,8 +202,6 @@ export async function getZeroXQuote(
 
       if (oracleSellAmount > 0n) {
         estimatedSellAmount = oracleSellAmount;
-        cachedOracleBuyAmount = desiredBuyAmountRaw.toString();
-        cachedOracleSellAmount = estimatedSellAmount.toString();
         console.log(
           `[0x] Oracle exact-output estimate: ${desiredBuyAmountRaw.toString()} ${intent.tokenOut} ` +
           `→ ${estimatedSellAmount.toString()} ${intent.tokenIn} (via vault oracle)`
@@ -371,8 +355,6 @@ export async function getZeroXQuote(
     decimalsIn,
     decimalsOut,
     _raw: data,
-    oracleBuyAmount: cachedOracleBuyAmount,
-    oracleSellAmount: cachedOracleSellAmount,
   };
 }
 

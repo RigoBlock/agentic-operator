@@ -1163,8 +1163,15 @@
     const MIN_SLIPPAGE_BPS = 10;
     const MAX_SLIPPAGE_BPS = 500;
 
+    // Key helpers — namespaced per connected address so switching wallets
+    // never shows a stale override that belongs to a different operator.
+    function slippageKey() { return SLIPPAGE_STORAGE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
+    function slippageOverrideKey() { return SLIPPAGE_OVERRIDE_STORAGE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
+    function shieldKey() { return SHIELD_STORAGE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
+    function shieldToleranceKey() { return SHIELD_TOLERANCE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
+
     function getSlippageBps() {
-      const stored = localStorage.getItem(SLIPPAGE_STORAGE_KEY);
+      const stored = localStorage.getItem(slippageKey());
       if (!stored) return DEFAULT_SLIPPAGE_BPS;
       const parsed = parseInt(stored, 10);
       if (!Number.isFinite(parsed) || parsed < MIN_SLIPPAGE_BPS || parsed > MAX_SLIPPAGE_BPS) {
@@ -1178,24 +1185,24 @@
       const pct = parseFloat(input.value);
       if (isNaN(pct) || pct < 0.1 || pct > 5) {
         alert('Slippage must be between 0.1% and 5%.');
-        const storedBps = localStorage.getItem(SLIPPAGE_STORAGE_KEY);
+        const storedBps = localStorage.getItem(slippageKey());
         const parsedBps = storedBps ? parseInt(storedBps, 10) : NaN;
         if (Number.isFinite(parsedBps) && parsedBps >= MIN_SLIPPAGE_BPS && parsedBps <= MAX_SLIPPAGE_BPS) {
           // Restore to the last valid user-set value and re-affirm both storage entries
           input.value = (parsedBps / 100).toString();
-          localStorage.setItem(SLIPPAGE_STORAGE_KEY, String(parsedBps));
-          localStorage.setItem(SLIPPAGE_OVERRIDE_STORAGE_KEY, 'true');
+          localStorage.setItem(slippageKey(), String(parsedBps));
+          localStorage.setItem(slippageOverrideKey(), 'true');
         } else {
           // No valid prior setting: revert to default and clear both storage entries
           input.value = (DEFAULT_SLIPPAGE_BPS / 100).toString();
-          localStorage.removeItem(SLIPPAGE_STORAGE_KEY);
-          localStorage.removeItem(SLIPPAGE_OVERRIDE_STORAGE_KEY);
+          localStorage.removeItem(slippageKey());
+          localStorage.removeItem(slippageOverrideKey());
         }
         return;
       }
       const bps = Math.round(pct * 100);
-      localStorage.setItem(SLIPPAGE_STORAGE_KEY, String(bps));
-      localStorage.setItem(SLIPPAGE_OVERRIDE_STORAGE_KEY, 'true');
+      localStorage.setItem(slippageKey(), String(bps));
+      localStorage.setItem(slippageOverrideKey(), 'true');
     }
 
     async function onSwapShieldToleranceChange() {
@@ -1203,8 +1210,8 @@
       const pct = parseFloat(input.value);
       if (isNaN(pct) || pct < 0.5 || pct > 50) {
         alert('Swap Shield tolerance must be between 0.5% and 50%.');
-        const stored = localStorage.getItem(SHIELD_TOLERANCE_KEY);
-        const expiry = localStorage.getItem(SHIELD_STORAGE_KEY);
+        const stored = localStorage.getItem(shieldToleranceKey());
+        const expiry = localStorage.getItem(shieldKey());
         const hasActive = stored && expiry && parseInt(expiry, 10) > Date.now();
         if (hasActive) {
           // Restore to the last persisted active tolerance so UI matches KV state
@@ -1212,8 +1219,8 @@
         } else {
           // No active override: show the default and ensure stale KV keys are cleared
           input.value = '5';
-          localStorage.removeItem(SHIELD_TOLERANCE_KEY);
-          localStorage.removeItem(SHIELD_STORAGE_KEY);
+          localStorage.removeItem(shieldToleranceKey());
+          localStorage.removeItem(shieldKey());
         }
         return;
       }
@@ -1221,8 +1228,8 @@
       // Require wallet + vault to change tolerance server-side
       if (!connectedAddress || !vaultInput.value.trim()) {
         // Revert input to the last persisted value so UI stays consistent with server state
-        const stored = localStorage.getItem(SHIELD_TOLERANCE_KEY);
-        const expiry = localStorage.getItem(SHIELD_STORAGE_KEY);
+        const stored = localStorage.getItem(shieldToleranceKey());
+        const expiry = localStorage.getItem(shieldKey());
         input.value = (stored && expiry && parseInt(expiry, 10) > Date.now()) ? stored : '5';
         appendMessage('system', 'Connect a wallet and enter a vault address before changing Swap Shield tolerance.');
         return;
@@ -1248,15 +1255,15 @@
         }
 
         const expiry = Date.now() + 600000;
-        localStorage.setItem(SHIELD_STORAGE_KEY, String(expiry));
-        localStorage.setItem(SHIELD_TOLERANCE_KEY, String(pct));
+        localStorage.setItem(shieldKey(), String(expiry));
+        localStorage.setItem(shieldToleranceKey(), String(pct));
         document.getElementById('swap-shield-reset').style.display = 'inline-block';
         startShieldTimer(expiry);
       } catch (err) {
         appendMessage('system', `Failed to set swap shield tolerance: ${err instanceof Error ? err.message : String(err)}`);
         // Revert UI to the last known persisted state so it stays consistent with server/KV
-        const stored = localStorage.getItem(SHIELD_TOLERANCE_KEY);
-        const expiry = localStorage.getItem(SHIELD_STORAGE_KEY);
+        const stored = localStorage.getItem(shieldToleranceKey());
+        const expiry = localStorage.getItem(shieldKey());
         input.value = (stored && expiry && parseInt(expiry, 10) > Date.now()) ? stored : '5';
         if (!stored || !expiry || parseInt(expiry, 10) <= Date.now()) {
           document.getElementById('swap-shield-reset').style.display = 'none';
@@ -1295,8 +1302,8 @@
         }
 
         input.value = '5';
-        localStorage.removeItem(SHIELD_STORAGE_KEY);
-        localStorage.removeItem(SHIELD_TOLERANCE_KEY);
+        localStorage.removeItem(shieldKey());
+        localStorage.removeItem(shieldToleranceKey());
         document.getElementById('swap-shield-reset').style.display = 'none';
         if (shieldTimerInterval) { clearInterval(shieldTimerInterval); shieldTimerInterval = null; }
         document.getElementById('swap-shield-timer').style.display = 'none';
@@ -1314,8 +1321,8 @@
         const remaining = Math.max(0, expiry - Date.now());
         if (remaining <= 0) {
           timer.style.display = 'none';
-          localStorage.removeItem(SHIELD_STORAGE_KEY);
-          localStorage.removeItem(SHIELD_TOLERANCE_KEY);
+          localStorage.removeItem(shieldKey());
+          localStorage.removeItem(shieldToleranceKey());
           clearInterval(shieldTimerInterval);
           shieldTimerInterval = null;
           // Reset to default visually
@@ -1354,8 +1361,8 @@
       document.getElementById('slippage-input').value = (bps / 100).toString();
 
       // Restore swap shield tolerance
-      const shieldExpiry = localStorage.getItem(SHIELD_STORAGE_KEY);
-      const storedTolerance = localStorage.getItem(SHIELD_TOLERANCE_KEY);
+      const shieldExpiry = localStorage.getItem(shieldKey());
+      const storedTolerance = localStorage.getItem(shieldToleranceKey());
       const toleranceInput = document.getElementById('swap-shield-tolerance');
       if (shieldTimerInterval) { clearInterval(shieldTimerInterval); shieldTimerInterval = null; }
       document.getElementById('swap-shield-timer').style.display = 'none';
@@ -1367,8 +1374,8 @@
           document.getElementById('swap-shield-reset').style.display = 'inline-block';
           startShieldTimer(expiry);
         } else {
-          localStorage.removeItem(SHIELD_STORAGE_KEY);
-          localStorage.removeItem(SHIELD_TOLERANCE_KEY);
+          localStorage.removeItem(shieldKey());
+          localStorage.removeItem(shieldToleranceKey());
           toleranceInput.value = '5';
           document.getElementById('swap-shield-reset').style.display = 'none';
         }
@@ -1912,7 +1919,7 @@
         };
         // Only send per-request slippage when user explicitly overrides from UI.
         // Otherwise backend resolves from verified request -> KV -> default.
-        const hasExplicitUiSlippageOverride = localStorage.getItem(SLIPPAGE_OVERRIDE_STORAGE_KEY) === 'true';
+        const hasExplicitUiSlippageOverride = localStorage.getItem(slippageOverrideKey()) === 'true';
         if (hasExplicitUiSlippageOverride) {
           chatBody.slippageBps = getSlippageBps();
         }
@@ -3135,6 +3142,8 @@
      * Wallet-wide — not tied to any specific vault or chain.
      */
     const AUTH_STORAGE_PREFIX = 'rigoblock_auth_';
+    /** Version of the auth message format. Bump when the signed message format changes. */
+    const AUTH_MESSAGE_VERSION = 2; // v2 added the Timestamp line (prevents legacy cache replay)
     /** Returns the per-address localStorage key for auth caching */
     function authKey(addr) { return AUTH_STORAGE_PREFIX + (addr || '').toLowerCase(); }
 
@@ -3143,6 +3152,9 @@
       try {
         const cached = JSON.parse(localStorage.getItem(authKey(connectedAddress)) || 'null');
         if (!cached) return false;
+        // Reject cached auth from the old (versionless) message format — the backend
+        // no longer accepts signatures without a timestamp line.
+        if (cached.version !== AUTH_MESSAGE_VERSION) return false;
         // Sanity-check address matches (key is address-scoped but double-check)
         if (cached.address?.toLowerCase() !== connectedAddress?.toLowerCase()) return false;
         if (Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return false; // 23h to add margin
@@ -3178,6 +3190,7 @@
         // Cache in localStorage keyed by address — switching accounts never overwrites
         // another address's cached signature, so switching A→B→A doesn't require re-signing A.
         localStorage.setItem(authKey(connectedAddress), JSON.stringify({
+          version: AUTH_MESSAGE_VERSION,
           address: connectedAddress,
           signature: sig,
           timestamp: ts,
@@ -3246,7 +3259,8 @@
           const savedAuth = localStorage.getItem(authKey(addr));
           if (!savedAuth) return;
           const cached = JSON.parse(savedAuth);
-          if (!cached || Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return;
+          if (!cached || cached.version !== AUTH_MESSAGE_VERSION) return;
+          if (Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return;
           if (addr.toLowerCase() !== cached.address?.toLowerCase()) return;
           activeProvider = provider;
           connectedAddress = addr;

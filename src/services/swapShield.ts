@@ -150,7 +150,6 @@ export async function checkSwapPrice(
   _slippageBps: number,
   alchemyKey: string,
   maxDivergencePct: number = DEFAULT_MAX_DIVERGENCE_PCT,
-  precomputedOracleOutRaw?: bigint,
 ): Promise<SwapShieldResult> {
   void _slippageBps;
 
@@ -213,56 +212,46 @@ export async function checkSwapPrice(
 
   const publicClient = getClient(chainId, alchemyKey);
 
-  // ── Oracle amount: use precomputed value when available ──
-  // When the caller already queried convertTokenAmount (e.g. exact-output
-  // estimate in zeroXTrading.ts), skip the redundant RPC call.
+  // ── Call convertTokenAmount via eth_call ──
   let oracleAmountRaw: bigint;
-  if (precomputedOracleOutRaw !== undefined && precomputedOracleOutRaw > 0n) {
-    oracleAmountRaw = precomputedOracleOutRaw;
-    console.log(
-      `[SwapShield] Using precomputed oracle amount: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
-      `(chain=${chainId})`
-    );
-  } else {
-    // ── Call convertTokenAmount via eth_call ──
-    try {
-      const result = await publicClient.readContract({
-        address: vaultAddress,
-        abi: RIGOBLOCK_VAULT_ABI,
-        functionName: "convertTokenAmount",
-        args: [normalizedIn, amountInRaw, normalizedOut],
-      });
+  try {
+    const result = await publicClient.readContract({
+      address: vaultAddress,
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "convertTokenAmount",
+      args: [normalizedIn, amountInRaw, normalizedOut],
+    });
 
-      oracleAmountRaw = result as bigint;
+    oracleAmountRaw = result as bigint;
 
-      // convertTokenAmount returns int256, but for a positive input amount the
-      // output should always be non-negative. A negative return indicates an
-      // unexpected condition (e.g. overflow, adapter bug) — fail CLOSED to
-      // ORACLE_ERROR rather than silently flip the sign, which could bypass
-      // the divergence threshold if the semantics are inverted.
-      if (oracleAmountRaw < 0n) {
-        console.error(
-          `[SwapShield] convertTokenAmount returned a negative amount (${oracleAmountRaw}) ` +
-          `for positive input ${amountInRaw} on chain ${chainId} — treating as ORACLE_ERROR`,
-        );
-        return {
-          allowed: true,
-          verified: false,
-          oracleAmount: "0",
-          dexAmount: dexExpectedOutRaw.toString(),
-          divergencePct: "0",
-          code: "ORACLE_ERROR",
-          reason:
-            `Oracle returned an invalid (negative) amount on chain ${chainId}. ` +
-            `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
-        };
-      }
-
-      console.log(
-        `[SwapShield] Oracle: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
-        `(chain=${chainId})`,
+    // convertTokenAmount returns int256, but for a positive input amount the
+    // output should always be non-negative. A negative return indicates an
+    // unexpected condition (e.g. overflow, adapter bug) — fail CLOSED to
+    // ORACLE_ERROR rather than silently flip the sign, which could bypass
+    // the divergence threshold if the semantics are inverted.
+    if (oracleAmountRaw < 0n) {
+      console.error(
+        `[SwapShield] convertTokenAmount returned a negative amount (${oracleAmountRaw}) ` +
+        `for positive input ${amountInRaw} on chain ${chainId} — treating as ORACLE_ERROR`,
       );
-    } catch (convertErr) {
+      return {
+        allowed: true,
+        verified: false,
+        oracleAmount: "0",
+        dexAmount: dexExpectedOutRaw.toString(),
+        divergencePct: "0",
+        code: "ORACLE_ERROR",
+        reason:
+          `Oracle returned an invalid (negative) amount on chain ${chainId}. ` +
+          `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
+      };
+    }
+
+    console.log(
+      `[SwapShield] Oracle: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
+      `(chain=${chainId})`,
+    );
+  } catch (convertErr) {
       const convertErrMsg = convertErr instanceof Error ? convertErr.message : String(convertErr);
       // convertTokenAmount reverted. Use hasPriceFeed to distinguish:
       //   • Feed genuinely absent    → NO_PRICE_FEED (graceful degradation)
@@ -333,7 +322,6 @@ export async function checkSwapPrice(
           `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
       };
     }
-  }
 
   // Oracle returned 0 — can't compare meaningfully
   if (oracleAmountRaw === 0n) {

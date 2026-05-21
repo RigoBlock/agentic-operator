@@ -112,8 +112,16 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
       message,
       signature: authSignature as `0x${string}`,
     });
-  } catch {
-    // verifyMessage throws on malformed signatures; we'll handle invalid below
+  } catch (err) {
+    // verifyMessage throws when the signature is malformed (wrong length, bad encoding, etc.).
+    // This is distinct from a well-formed signature that simply doesn't verify — report 401
+    // so callers know the problem is format, not ownership.
+    throw new AuthError(
+      "Invalid signature format: " +
+      (err instanceof Error ? err.message : "signature could not be decoded") +
+      ". Ensure the authSignature is a valid 65-byte EIP-191 hex string.",
+      401,
+    );
   }
 
   if (!valid) {

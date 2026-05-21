@@ -1995,10 +1995,6 @@ export async function executeToolCall(
         const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
 
         // ── Swap Shield — oracle price check ──
-        // Always let Swap Shield perform its own oracle call in the sell→buy direction
-        // for the actual sellAmount. The precomputed oracleBuyAmount was derived from
-        // the inverse direction (buy→sell) and is not semantically equivalent to the
-        // oracle-expected output for the actual sellAmount, even when amounts match exactly.
         const shieldWarning0x = await runSwapShield(
           env, ctx, intent,
           zxQuote.sellAmount, zxQuote.decimalsIn,
@@ -2454,7 +2450,7 @@ export async function executeToolCall(
       );
       return {
         message:
-          `⚠️ Swap Shield tolerance temporarily raised to ${pct}% for 10 minutes. ` +
+          `⚠️ Swap Shield tolerance temporarily set to ${pct}% for 10 minutes. ` +
           `Swaps will be allowed if the DEX quote diverges up to ${pct}% from the oracle price. ` +
           `The shield will reset to the default 5% automatically.\n\n` +
           `The NAV shield (10% max loss) still protects against catastrophic trades.`,
