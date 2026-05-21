@@ -464,9 +464,9 @@ export async function setSwapShieldTolerance(
   operatorAddress: string,
   tolerancePct: number,
 ): Promise<void> {
-  if (!Number.isFinite(tolerancePct) || tolerancePct <= 0 || tolerancePct > MAX_TEMP_DIVERGENCE_PCT) {
+  if (!Number.isFinite(tolerancePct) || tolerancePct < 0.5 || tolerancePct > MAX_TEMP_DIVERGENCE_PCT) {
     throw new Error(
-      `Swap shield tolerance must be between 1% and ${MAX_TEMP_DIVERGENCE_PCT}%. ` +
+      `Swap shield tolerance must be between 0.5% and ${MAX_TEMP_DIVERGENCE_PCT}%. ` +
       `Received: ${tolerancePct}%`,
     );
   }

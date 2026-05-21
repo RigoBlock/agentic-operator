@@ -4610,7 +4610,8 @@ export async function resolveSlippage(env: Env, ctx: RequestContext): Promise<nu
  * and throws a descriptive error if the quote diverges too much.
  *
  * Called from both 0x and Uniswap flows in build_vault_swap.
- * Skipped when the operator has temporarily disabled the shield.
+ * Uses the operator's temporary tolerance override (if set) instead of the
+ * default 5% threshold.
  */
 async function runSwapShield(
   env: Env,

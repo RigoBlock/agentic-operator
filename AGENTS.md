@@ -136,7 +136,7 @@ Timestamp: 1741700000000
 
 The `authTimestamp` value MUST be included in the signed message exactly as shown above. This cryptographically binds the signature to a specific point in time, preventing replay attacks. The signature is valid for 24 hours from `authTimestamp`.
 
-**Legacy format (deprecated):** Clients that sign the static message without the timestamp line will still be accepted during a transition period, but this support will be removed. External agents should update their signing code to include the timestamp immediately.
+**Legacy format:** The older static message format without the timestamp line is no longer accepted. External agents must include `authTimestamp` in the signed message exactly as shown above.
 
 ---
 

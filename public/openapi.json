@@ -291,7 +291,7 @@
                 "revoke_selectors",
                 "verify_bridge_arrival",
                 "set_default_slippage",
-                "disable_swap_shield",
+                "set_swap_shield_tolerance",
                 "enable_swap_shield",
                 "create_twap_order",
                 "cancel_twap_order",
