@@ -1179,7 +1179,14 @@
       if (isNaN(pct) || pct < 0.1 || pct > 5) {
         alert('Slippage must be between 0.1% and 5%.');
         const storedBps = localStorage.getItem(SLIPPAGE_STORAGE_KEY);
-        input.value = storedBps ? (parseInt(storedBps, 10) / 100).toString() : (DEFAULT_SLIPPAGE_BPS / 100).toString();
+        if (storedBps) {
+          input.value = (parseInt(storedBps, 10) / 100).toString();
+          // localStorage and override flag already match the restored value — no update needed
+        } else {
+          input.value = (DEFAULT_SLIPPAGE_BPS / 100).toString();
+          // No stored override: ensure the flag is cleared so requests use the server default
+          localStorage.removeItem(SLIPPAGE_OVERRIDE_STORAGE_KEY);
+        }
         return;
       }
       const bps = Math.round(pct * 100);
@@ -1194,7 +1201,16 @@
         alert('Swap Shield tolerance must be between 0.5% and 50%.');
         const stored = localStorage.getItem(SHIELD_TOLERANCE_KEY);
         const expiry = localStorage.getItem(SHIELD_STORAGE_KEY);
-        input.value = (stored && expiry && parseInt(expiry, 10) > Date.now()) ? stored : '5';
+        const hasActive = stored && expiry && parseInt(expiry, 10) > Date.now();
+        if (hasActive) {
+          // Restore to the last persisted active tolerance so UI matches KV state
+          input.value = stored;
+        } else {
+          // No active override: show the default and ensure stale KV keys are cleared
+          input.value = '5';
+          localStorage.removeItem(SHIELD_TOLERANCE_KEY);
+          localStorage.removeItem(SHIELD_STORAGE_KEY);
+        }
         return;
       }
 
