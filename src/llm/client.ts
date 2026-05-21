@@ -4614,7 +4614,6 @@ async function runSwapShield(
   buyAmountRaw: string,
   resolvedTokenIn?: Address,
   resolvedTokenOut?: Address,
-  precomputedOracleOutRaw?: bigint,
 ): Promise<string | undefined> {
   // Check temporary tolerance override
   let maxDivergencePct: number | undefined;
@@ -4672,7 +4671,6 @@ async function runSwapShield(
     intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
     env.ALCHEMY_API_KEY,
     maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT,
-    precomputedOracleOutRaw,
   );
 
   if (!result.allowed) {
