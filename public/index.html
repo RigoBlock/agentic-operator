@@ -1231,6 +1231,15 @@
         startShieldTimer(expiry);
       } catch (err) {
         appendMessage('system', `Failed to set swap shield tolerance: ${err instanceof Error ? err.message : String(err)}`);
+        // Revert UI to the last known persisted state so it stays consistent with server/KV
+        const stored = localStorage.getItem(SHIELD_TOLERANCE_KEY);
+        const expiry = localStorage.getItem(SHIELD_STORAGE_KEY);
+        input.value = (stored && expiry && parseInt(expiry, 10) > Date.now()) ? stored : '5';
+        if (!stored || !expiry || parseInt(expiry, 10) <= Date.now()) {
+          document.getElementById('swap-shield-reset').style.display = 'none';
+          if (shieldTimerInterval) { clearInterval(shieldTimerInterval); shieldTimerInterval = null; }
+          document.getElementById('swap-shield-timer').style.display = 'none';
+        }
       } finally {
         input.disabled = false;
       }

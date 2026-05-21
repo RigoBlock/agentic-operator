@@ -147,21 +147,16 @@ export async function getZeroXQuote(
   // Note: The /gasless/ endpoints are NOT suitable here. They don't support
   // native tokens (ETH) and use a completely different Permit2 meta-tx flow.
   //
-  // For exact-output (user wants to buy N tokens), we:
-  //   1. Call /swap/allowance-holder/price with a small probe sellAmount to get
-  //      the indicative market rate, then compute the required sellAmount.
-  //   2. Call /swap/allowance-holder/quote with that sellAmount for the firm
-  //      quote with executable transaction data.
+  // For exact-output (user wants to buy N tokens), the 0x API v2 only supports
+  // exact-input (sellAmount). We use the vault's on-chain oracle
+  // (convertTokenAmount via BackgeoOracle TWAP) to convert the desired buy
+  // amount directly to the required sell amount, then request a firm quote from
+  // 0x with that sellAmount.
   //
-  // Probe sizing uses token decimals to stay small but avoid rounding to 0:
-  //   - max(0, decimalsIn - decimalsOut) compensates for the raw→raw decimal
-  //     shift. When sellToken has MORE decimals, each raw unit is tinier so we
-  //     need proportionally more. When sellToken has FEWER decimals (e.g.,
-  //     USDC→ETH), the conversion naturally amplifies output, so no extra needed.
-  //   - +3 safety handles price ratios up to ~1000:1 (covers USDC→WBTC at $60k).
-  //   - If buyAmount still rounds to 0 (extreme ratios like memecoin→WBTC),
-  //     a single retry with a much larger probe handles it. The price endpoint
-  //     is indicative only (no funds move), so larger probes are safe.
+  // If the oracle cannot price the pair (no feed, wrong address, wrong chain),
+  // we throw immediately — there is no probe fallback because microscopic
+  // probe amounts produced unreliable rates and the NAV shield would fail
+  // downstream anyway for unmapped tokens.
 
   // Hoisted: when the oracle provides the exact-output estimate, we stash the
   // values so the Swap Shield can skip its redundant convertTokenAmount call.
