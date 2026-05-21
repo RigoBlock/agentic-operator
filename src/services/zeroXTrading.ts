@@ -164,6 +164,11 @@ export async function getZeroXQuote(
     const vaultAddr = (taker && taker.toLowerCase() !== "0x0000000000000000000000000000000000000000")
       ? taker
       : null;
+    // Exact-output requires the vault address to estimate the required sell amount
+    // via the on-chain BackgeoOracle. Quote-only callers (no vault) must use
+    // exact-input ("sell X for Y") — the dummy zero-address taker fallback used
+    // in exact-input paths is intentionally not supported here because there is
+    // no oracle to price the pair without a real vault.
     if (!vaultAddr) {
       throw new Error(
         `Exact-output swaps via 0x require a vault address. ` +

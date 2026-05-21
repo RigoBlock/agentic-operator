@@ -14,7 +14,7 @@
  * Signatures are valid for 24 hours.
  */
 
-import { verifyMessage, type Address } from "viem";
+import { verifyMessage, isAddress, type Address } from "viem";
 import { isVaultOwner } from "./vault.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "../config.js";
 
@@ -104,6 +104,17 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   // The signed message MUST include the timestamp to prevent replay attacks.
   // An attacker cannot reuse an old signature with a fresh timestamp because
   // the timestamp is cryptographically bound.
+
+  // Validate address format before casting — an invalid address would cause
+  // verifyMessage to throw a generic error that could be mistaken for a
+  // signature-format problem.
+  if (!isAddress(operatorAddress)) {
+    throw new AuthError(
+      "Invalid operator address format. Expected a valid EVM address (0x + 40 hex chars).",
+      400,
+    );
+  }
+
   let valid = false;
   try {
     const message = buildAuthMessage(operatorAddress, authTimestamp);

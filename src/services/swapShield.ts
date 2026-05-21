@@ -350,7 +350,7 @@ export async function checkSwapPrice(
     ((oracleAmountRaw - dexExpectedOutRaw) * 10000n) / oracleAmountRaw;
   const divergencePctDisplay = formatBpsAsPct(divergenceBps);
   const normalizedMaxDivergencePct = Number.isFinite(maxDivergencePct)
-    ? Math.max(0, maxDivergencePct)
+    ? Math.min(MAX_TEMP_DIVERGENCE_PCT, Math.max(0, maxDivergencePct))
     : DEFAULT_MAX_DIVERGENCE_PCT;
   const maxDivergenceBps = BigInt(Math.round(normalizedMaxDivergencePct * 100));
 
