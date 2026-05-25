@@ -2535,16 +2535,67 @@ export async function executeToolCall(
         amountIn = "0.001";
       }
 
+      const viaVault = args.viaVault === true;
+      const vaultAddr = viaVault ? (ctx.vaultAddress as Address | undefined) : undefined;
+
+      if (viaVault && !vaultAddr) {
+        throw new Error(
+          `viaVault=true requires a vault address. Connect a vault first or omit viaVault to use the EOA path.`
+        );
+      }
+
       const result = await buildOraclePoolSwapTx(
         tokenArg,
         amountIn,
         ctx.chainId,
         env.ALCHEMY_API_KEY,
+        vaultAddr,
       );
+
+      // EOA path: simulate the transaction to catch reverts early and provide accurate gas
+      if (!viaVault && env.ALCHEMY_API_KEY && ctx.operatorAddress) {
+        try {
+          const publicClient = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
+          const tx = result.transaction;
+
+          // eth_call simulation — catches pool reverts, insufficient cardinality, etc.
+          await publicClient.call({
+            account: ctx.operatorAddress as Address,
+            to: tx.to as Address,
+            data: tx.data,
+            value: BigInt(tx.value),
+            chain: undefined,
+          });
+
+          // eth_estimateGas for accurate gas limit
+          const estimatedGas = await publicClient.estimateGas({
+            account: ctx.operatorAddress as Address,
+            to: tx.to as Address,
+            data: tx.data,
+            value: BigInt(tx.value),
+            chain: undefined,
+          });
+
+          // Add 20% buffer for execution variance
+          const gasWithBuffer = (estimatedGas * 120n) / 100n;
+          result.transaction.gas = "0x" + gasWithBuffer.toString(16);
+          console.log(
+            `[oracle] EOA simulation passed. Gas estimate: ${estimatedGas} → buffered: ${gasWithBuffer}`
+          );
+        } catch (simErr) {
+          const reason = simErr instanceof Error ? simErr.message : String(simErr);
+          console.warn(`[oracle] EOA simulation failed: ${reason}`);
+          throw new Error(
+            `Oracle refresh simulation failed: ${reason}. ` +
+            `This usually means the pool is not initialized, the operator has insufficient ${nativeSymbol} balance, ` +
+            `or the oracle hook rejected the swap. Verify the pool state and try again.`
+          );
+        }
+      }
 
       return {
         message: result.message,
-        transaction: { ...result.transaction, operatorOnly: true },
+        transaction: viaVault ? result.transaction : { ...result.transaction, operatorOnly: true },
         chainSwitch: oracleChainSwitched,
       };
     }

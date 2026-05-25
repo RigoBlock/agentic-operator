@@ -2332,10 +2332,18 @@
       document.getElementById('tx-description').textContent = tx.description || 'Vault swap transaction';
       const gasDisplay = tx.gas ? parseInt(tx.gas, 16).toLocaleString() : 'auto';
       const dataLength = tx.data ? (tx.data.length - 2) / 2 : 0;
+      const isOperatorOnly = tx.operatorOnly;
+      const valueHex = tx.value || '0x0';
+      const valueBigInt = valueHex === '0x0' ? 0n : BigInt(valueHex);
+      const valueDisplay = valueBigInt > 0n
+        ? `${Number(valueBigInt) / 1e18} (msg.value)`
+        : '0 (vault uses own balance)';
+      const toLabel = isOperatorOnly ? 'To' : 'To (vault)';
+
       document.getElementById('tx-details').innerHTML = `
-        <div class="row"><span class="label">To (vault)</span><span class="value">${escapeHtml(tx.to)}</span></div>
+        <div class="row"><span class="label">${toLabel}</span><span class="value">${escapeHtml(tx.to)}</span></div>
         <div class="row"><span class="label">Chain</span><span class="value">${CHAIN_NAMES[tx.chainId] || tx.chainId}</span></div>
-        <div class="row"><span class="label">Value</span><span class="value">0 (vault uses own balance)</span></div>
+        <div class="row"><span class="label">Value</span><span class="value">${valueDisplay}</span></div>
         <div class="row"><span class="label">Gas limit</span><span class="value">${gasDisplay}</span></div>
         <div class="row"><span class="label">Data</span><span class="value">${tx.data.slice(0, 10)}… (${dataLength} bytes)</span></div>
       `;

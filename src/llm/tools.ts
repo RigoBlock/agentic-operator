@@ -1163,6 +1163,13 @@ export const TOOL_DEFINITIONS = [
               "the system estimates the required native token input using the vault's on-chain oracle. " +
               "Requires an active vault session.",
           },
+          viaVault: {
+            type: "boolean",
+            description:
+              "If true, route the swap through the vault adapter instead of the operator's personal wallet. " +
+              "The vault must have enough native token balance. When delegation is active, this enables " +
+              "auto-execution with NAV shield protection. Default: false (EOA direct to Universal Router).",
+          },
           chain: {
             type: "string",
             description:

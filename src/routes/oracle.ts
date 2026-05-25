@@ -4,9 +4,11 @@
  * POST /api/oracle/refresh
  *
  * Body (JSON):
- *   token     string   — ERC-20 symbol or address whose oracle feed is stale (e.g. "GRG", "USDC")
- *   amountEth string   — Amount of native token to swap (human-readable, e.g. "0.001"). Optional; defaults to 0.001.
- *   chainId   number   — Chain where the oracle pool lives
+ *   token        string   — ERC-20 symbol or address whose oracle feed is stale (e.g. "GRG", "USDC")
+ *   amountEth    string   — Amount of native token to swap (human-readable, e.g. "0.001"). Optional; defaults to 0.001.
+ *   chainId      number   — Chain where the oracle pool lives
+ *   vaultAddress string   — Optional. If provided, routes through the vault adapter (value=0, supports delegation).
+ *                           Omit for EOA path (direct to Universal Router).
  *
  * Returns an unsigned OPERATOR EOA transaction to be signed with the operator's
  * personal wallet (not the vault). The transaction targets the Universal Router,
@@ -38,6 +40,7 @@ oracle.post("/refresh", async (c) => {
 
   const token = typeof body.token === "string" ? body.token.trim() : "";
   let amountEth = typeof body.amountEth === "string" ? body.amountEth.trim() : "";
+  const rawVault = body.vaultAddress;
   const rawChain = body.chainId ?? body.chain;
 
   if (!token) {
@@ -83,8 +86,13 @@ oracle.post("/refresh", async (c) => {
     return c.json({ error: `amountEth must be a positive decimal number (e.g. '0.001'). Scientific notation is not supported.` }, 400);
   }
 
+  const vaultAddress =
+    typeof rawVault === "string" && rawVault.startsWith("0x") && rawVault.length === 42
+      ? (rawVault as Address)
+      : undefined;
+
   try {
-    const result = await buildOraclePoolSwapTx(token, amountEth, chainId, c.env.ALCHEMY_API_KEY);
+    const result = await buildOraclePoolSwapTx(token, amountEth, chainId, c.env.ALCHEMY_API_KEY, vaultAddress);
     return c.json({
       transaction: result.transaction,
       poolInfo: result.poolInfo,
