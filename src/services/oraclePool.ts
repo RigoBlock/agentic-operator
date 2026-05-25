@@ -24,9 +24,13 @@
  *
  * ## Transaction type
  *
- * Returns an OPERATOR EOA transaction (to: Universal Router, not the vault).
- * The operator signs with their personal wallet. No vault delegation required.
- * Value = amountIn (ETH for ETH→token swaps).
+ * Two paths depending on whether `vaultAddress` is provided:
+ *   - **EOA path** (no `vaultAddress`): targets the Universal Router. The operator
+ *     signs with their personal wallet and sends `msg.value = amountIn`. No vault
+ *     delegation required.
+ *   - **Vault path** (`vaultAddress` provided): targets the vault's `execute()`
+ *     adapter with `value = 0`. Settlement is sourced from the vault's own native
+ *     balance. Supports delegation, NAV shield, and slippage protection.
  */
 
 import {
@@ -358,7 +362,10 @@ export async function buildOraclePoolSwapTx(
   );
 
   // Encode Universal Router execute(commands, inputs, deadline)
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300); // 5-minute deadline
+  // Vault/delegated path uses 30 minutes to accommodate queuing and user review;
+  // EOA path uses 5 minutes since the user signs and broadcasts immediately.
+  const deadlineSeconds = viaVault ? 1800 : 300;
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
   const calldata = encodeFunctionData({
     abi: UR_EXECUTE_ABI,
     functionName: "execute",

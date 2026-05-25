@@ -86,8 +86,8 @@ oracle.post("/refresh", async (c) => {
     return c.json({ error: `amountEth must be a positive decimal number of ${nativeSymbol} (e.g. '0.001'). Scientific notation is not supported.` }, 400);
   }
 
-  if (rawVault !== undefined && (typeof rawVault !== "string" || !isAddress(rawVault))) {
-    return c.json({ error: "vaultAddress must be a valid EVM address (0x-prefixed, 42 hex characters)." }, 400);
+  if (rawVault !== undefined && (typeof rawVault !== "string" || !isAddress(rawVault) || rawVault === "0x0000000000000000000000000000000000000000")) {
+    return c.json({ error: "vaultAddress must be a valid non-zero EVM address (0x-prefixed, 42 hex characters)." }, 400);
   }
   const vaultAddress = typeof rawVault === "string" ? (rawVault as Address) : undefined;
 

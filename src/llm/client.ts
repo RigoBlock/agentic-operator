@@ -2512,6 +2512,11 @@ export async function executeToolCall(
           const tokenAddr = await resolveTokenAddress(ctx.chainId, tokenArg);
           const decimalsOut = await getTokenDecimals(ctx.chainId, tokenAddr, env.ALCHEMY_API_KEY);
           const desiredOutRaw = parseUnits(amountOut, decimalsOut);
+          if (desiredOutRaw <= 0n) {
+            throw new Error(
+              `amountOut must be a positive value; got "${amountOut}". Provide a value greater than zero.`
+            );
+          }
           const publicClient = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
           const NATIVE_ZERO = "0x0000000000000000000000000000000000000000" as Address;
           const normalizeForOracle = (addr: string) =>
