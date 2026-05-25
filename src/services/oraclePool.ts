@@ -43,7 +43,7 @@ import {
   type Hex,
 } from "viem";
 import { getClient } from "./vault.js";
-import { resolveTokenAddress } from "../config.js";
+import { resolveTokenAddress, TOKEN_MAP } from "../config.js";
 
 /** Chain-native token symbol for user-facing strings. */
 const NATIVE_TOKEN: Record<number, string> = {
@@ -234,15 +234,16 @@ export async function buildOraclePoolSwapTx(
     throw new Error("vaultAddress must be a valid non-zero vault address.");
   }
 
-  // Resolve token address — normalize WETH/ETH to address(0)
+  // Resolve token address — normalize ETH aliases and wrapped-native to address(0)
   const rawTokenAddr = await resolveTokenAddress(chainId, token);
+  const nativeSymbol = getNativeTokenSymbol(chainId);
+  const wrappedNativeAddr = (TOKEN_MAP[chainId]?.[`W${nativeSymbol}`] as string | undefined)?.toLowerCase();
   const tokenAddr: Address =
     rawTokenAddr.toLowerCase() === ETH_ADDRESS ||
-    rawTokenAddr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    rawTokenAddr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" ||
+    (wrappedNativeAddr !== undefined && rawTokenAddr.toLowerCase() === wrappedNativeAddr)
       ? ETH_ADDRESS
       : rawTokenAddr;
-
-  const nativeSymbol = getNativeTokenSymbol(chainId);
 
   if (tokenAddr === ETH_ADDRESS) {
     throw new Error(
