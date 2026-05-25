@@ -596,6 +596,16 @@ export async function buildInitializePoolTx(
   let sqrtPriceX96: bigint;
   if (params.sqrtPriceX96 !== undefined) {
     sqrtPriceX96 = BigInt(params.sqrtPriceX96);
+    if (sqrtPriceX96 <= 0n) {
+      throw new Error(`sqrtPriceX96 must be greater than zero (got ${sqrtPriceX96}).`);
+    }
+    if (sqrtPriceX96 < MIN_SQRT_RATIO || sqrtPriceX96 >= MAX_SQRT_RATIO) {
+      throw new Error(
+        `sqrtPriceX96 ${sqrtPriceX96} is outside TickMath bounds ` +
+        `[${MIN_SQRT_RATIO}, ${MAX_SQRT_RATIO}). ` +
+        `Use computeSqrtPriceX96FromAmounts (via amountA + amountB) to derive a valid initial price.`
+      );
+    }
   } else if (params.amountA !== undefined && params.amountB !== undefined) {
     const raw0 = isALower ? params.amountA : params.amountB;
     const raw1 = isALower ? params.amountB : params.amountA;
