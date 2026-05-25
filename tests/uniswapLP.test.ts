@@ -356,11 +356,11 @@ describe("computeSqrtPriceX96FromAmounts", () => {
     // price(a/b) = 1 / price(b/a), so sqrtPriceX96(a,b) * sqrtPriceX96(b,a) ≈ Q96^2
     const r1 = computeSqrtPriceX96FromAmounts(1n * 10n ** 6n, 4n * 10n ** 6n); // price = 4
     const r2 = computeSqrtPriceX96FromAmounts(4n * 10n ** 6n, 1n * 10n ** 6n); // price = 0.25
-    // r1 = 2*Q96, r2 = 0.5*Q96 → r1 * r2 ≈ Q96^2
+    // r1 = 2*Q96, r2 = 0.5*Q96 → r1 * r2 = Q96^2 (exact for these amounts)
     const product = r1 * r2;
     const expected = Q96 * Q96;
-    // Allow ±1 for integer floor rounding
+    // Allow ±2 for integer floor rounding of each sqrt value
     const diff = product > expected ? product - expected : expected - product;
-    expect(diff).toBeLessThanOrEqual(Q96);
+    expect(diff).toBeLessThanOrEqual(2n);
   });
 });

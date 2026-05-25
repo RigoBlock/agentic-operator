@@ -4066,7 +4066,9 @@ export async function executeToolCall(
         ``,
         info.initialized
           ? `To add liquidity: use fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`
-          : `⚠️ Pool is NOT initialized. Call initialize_pool first with fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`,
+          : info.poolKeyKnown
+            ? `⚠️ Pool is NOT initialized. Call initialize_pool first with fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`
+            : `⚠️ Pool is NOT initialized. The pool key (fee, tickSpacing, hooks, token0, token1) could not be determined from the pool ID alone — please provide the full pool key so initialize_pool can be called with the correct parameters.`,
       ].join("\n");
 
       return { message };

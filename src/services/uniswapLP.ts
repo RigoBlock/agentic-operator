@@ -416,6 +416,15 @@ export async function buildAddLiquidityTx(
     poolState = await readPoolState(poolId, chainId, env.ALCHEMY_API_KEY);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // Distinguish between infrastructure failures (StateView not deployed, RPC errors)
+    // and pool-key mismatches so users are not misled into retrying with a different key.
+    const isInfraError = msg.includes("StateView not available") || msg.includes("StateView");
+    if (isInfraError) {
+      throw new Error(
+        `Failed to read pool state on chain ${chainId}: ${msg}. ` +
+        `Ensure the StateView contract is deployed on this chain and the RPC is reachable.`
+      );
+    }
     throw new Error(
       `Pool not found on chain ${chainId} with fee=${fee / 10000}%, tickSpacing=${tickSpacing}, hooks=${hooks}. ` +
       `Computed pool ID: ${poolId}. ` +
@@ -782,6 +791,13 @@ export interface PoolInfo {
   /** The keccak256(abi.encode(PoolKey)) pool ID. */
   poolId: Hex;
   initialized: boolean;
+  /**
+   * True when fee/tickSpacing/hooks/currency0/currency1 are authoritative values from
+   * the on-chain Initialize event.  False when the pool is uninitialized and these fields
+   * are zero/unknown placeholders — callers must ask the user for the full pool key before
+   * presenting them as parameters for initialize_pool.
+   */
+  poolKeyKnown: boolean;
   /** Fee tier in hundredths of a bip (e.g. 6000 = 0.60%). */
   fee: number;
   /** Tick spacing — always exact (from Initialize event or provided). */
@@ -868,6 +884,7 @@ export async function getPoolInfoById(
     return {
       poolId,
       initialized: false,
+      poolKeyKnown: false,
       fee,
       tickSpacing,
       hooks,
@@ -881,6 +898,7 @@ export async function getPoolInfoById(
   return {
     poolId,
     initialized: sqrtPriceX96 !== 0n,
+    poolKeyKnown: true,
     fee,
     tickSpacing,
     hooks,
