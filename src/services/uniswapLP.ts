@@ -264,6 +264,26 @@ function getAmountsForLiquidity(
 
 // ── PoolKey Helpers ────────────────────────────────────────────────────
 
+/**
+ * Validate fee and tickSpacing against their on-chain ABI types.
+ * fee: uint24 (0 ≤ fee ≤ 16,777,215, integer)
+ * tickSpacing: int24, must be > 0 and ≤ 8,388,607 (integer)
+ */
+function validatePoolKeyNumerics(fee: number, tickSpacing: number): void {
+  if (!Number.isInteger(fee) || fee < 0 || fee > 0xffffff) {
+    throw new Error(
+      `Invalid fee: ${fee}. Fee must be a non-negative integer that fits in uint24 (0–16,777,215). ` +
+      `Common values: 100 (0.01%), 500 (0.05%), 3000 (0.3%), 10000 (1%).`
+    );
+  }
+  if (!Number.isInteger(tickSpacing) || tickSpacing <= 0 || tickSpacing > 0x7fffff) {
+    throw new Error(
+      `Invalid tickSpacing: ${tickSpacing}. Tick spacing must be a positive integer that fits in int24 (1–8,388,607). ` +
+      `Common values: 1, 10, 60, 200.`
+    );
+  }
+}
+
 /** Compute pool ID = keccak256(abi.encode(PoolKey)). */
 function computePoolId(poolKey: PoolKey): Hex {
   return keccak256(
@@ -404,6 +424,7 @@ export async function buildAddLiquidityTx(
   const fee = params.fee;
   const tickSpacing = params.tickSpacing ?? defaultTickSpacing(fee);
   const hooks = params.hooks ?? ZERO_ADDRESS;
+  validatePoolKeyNumerics(fee, tickSpacing);
 
   const poolKey: PoolKey = { currency0, currency1, fee, tickSpacing, hooks };
   const poolId = computePoolId(poolKey);
@@ -584,11 +605,11 @@ export async function buildInitializePoolTx(
   const fee = params.fee;
   const tickSpacing = params.tickSpacing ?? defaultTickSpacing(fee);
   const hooks = params.hooks ?? ZERO_ADDRESS;
+  validatePoolKeyNumerics(fee, tickSpacing);
 
   const poolKey: PoolKey = { currency0, currency1, fee, tickSpacing, hooks };
   const poolId = computePoolId(poolKey);
 
-  // Check if pool is already initialized
   try {
     const state = await readPoolState(poolId, chainId, env.ALCHEMY_API_KEY);
     if (state.sqrtPriceX96 !== 0n) {
