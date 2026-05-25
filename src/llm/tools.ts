@@ -1162,8 +1162,9 @@ export const TOOL_DEFINITIONS = [
           amountOut: {
             type: "string",
             description:
-              "Desired output amount of the token (e.g., '2' for 2 GRG). If provided instead of amountEth, " +
+              "Sizing hint for the desired output amount (e.g., '2' for ~2 GRG). If provided instead of amountEth, " +
               "the system estimates the required native token input using the vault's on-chain oracle. " +
+              "The actual received amount may differ — the swap is exact-input with no on-chain min-out bound. " +
               "Requires an active vault session.",
           },
           viaVault: {

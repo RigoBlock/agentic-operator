@@ -30,7 +30,8 @@
  *     delegation required.
  *   - **Vault path** (`vaultAddress` provided): targets the vault's `execute()`
  *     adapter with `value = 0`. Settlement is sourced from the vault's own native
- *     balance. Supports delegation, NAV shield, and slippage protection.
+ *     balance. Supports delegation and the NAV shield. The swap is exact-input
+ *     with amountOutMinimum=0 — output is not bounded on-chain.
  */
 
 import {
@@ -195,8 +196,9 @@ export interface OraclePoolSwapResult {
  *      non-payable, so no `msg.value` is sent by the caller. Internally, Uniswap
  *      V4's `SETTLE_ALL` action requires the native token to be present at execution
  *      time — but the vault adapter sources this payment from the vault's own native
- *      balance, not from `msg.value`. This path supports delegation, NAV shield,
- *      and slippage protection.
+ *      balance, not from `msg.value`. This path supports delegation and the NAV
+ *      shield. The swap is exact-input with amountOutMinimum=0 — output amount
+ *      is not bounded on-chain (NAV shield enforces a value-level check instead).
  *   2. **EOA path** (`vaultAddress` omitted): the calldata targets the Uniswap
  *      Universal Router directly. The operator sends `msg.value = amountIn` and
  *      signs with their personal wallet.
