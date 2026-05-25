@@ -439,6 +439,7 @@ export async function buildOraclePoolSwapTx(
       chainId,
       gas: "0x" + ORACLE_SWAP_GAS_LIMIT.toString(16),
       description,
+      operatorOnly: true,
     },
     poolInfo: {
       oracle,

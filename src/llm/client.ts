@@ -2477,8 +2477,6 @@ export async function executeToolCall(
         throw new Error("'token' is required. Specify the token symbol whose oracle feed is stale (e.g., 'GRG', 'USDC').");
       }
 
-      const nativeSymbol = getNativeTokenSymbol(ctx.chainId);
-
       // Auto-switch chain if provided
       let oracleChainSwitched: number | undefined;
       if (args.chain) {
@@ -2489,8 +2487,17 @@ export async function executeToolCall(
         }
       }
 
+      const nativeSymbol = getNativeTokenSymbol(ctx.chainId);
+
       let amountIn = (args.amountEth as string) || "";
       const amountOut = (args.amountOut as string) || "";
+
+      // Reject ambiguous input: only one of amountEth or amountOut may be provided.
+      if (amountIn && amountOut) {
+        throw new Error(
+          "Provide amountEth (native token input) OR amountOut (token output to receive), not both."
+        );
+      }
 
       // If amountOut is provided instead of amountIn, estimate the required native input
       // using the vault's on-chain BackgeoOracle (convertTokenAmount).

@@ -2332,12 +2332,14 @@
       document.getElementById('tx-description').textContent = tx.description || 'Vault swap transaction';
       const gasDisplay = tx.gas ? parseInt(tx.gas, 16).toLocaleString() : 'auto';
       const dataLength = tx.data ? (tx.data.length - 2) / 2 : 0;
-      const isOperatorOnly = tx.operatorOnly;
       const valueHex = tx.value || '0x0';
       const valueBigInt = valueHex === '0x0' ? 0n : BigInt(valueHex);
+      // tx.operatorOnly is set by the API for EOA-signed transactions; also treat
+      // non-zero msg.value as a reliable indicator (vault calls never require msg.value).
+      const isOperatorOnly = tx.operatorOnly || valueBigInt > 0n;
       const valueDisplay = valueBigInt > 0n
         ? `${Number(valueBigInt) / 1e18} (msg.value)`
-        : '0 (vault uses own balance)';
+        : isOperatorOnly ? '0' : '0 (vault uses own balance)';
       const toLabel = isOperatorOnly ? 'To' : 'To (vault)';
 
       document.getElementById('tx-details').innerHTML = `

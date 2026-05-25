@@ -10,15 +10,15 @@
  *   vaultAddress string   — Optional. If provided, routes through the vault adapter (value=0, supports delegation).
  *                           Omit for EOA path (direct to Universal Router).
  *
- * Returns an unsigned OPERATOR EOA transaction to be signed with the operator's
- * personal wallet (not the vault). The transaction targets the Universal Router,
- * not the vault adapter.
+ * Returns an unsigned transaction in one of two forms:
+ * - EOA path (default, no vaultAddress): operator signs with personal wallet; targets Universal Router directly.
+ * - Vault path (vaultAddress provided): routes through the vault adapter (value=0, supports delegation).
  *
  * Auth: x402 payment OR authenticated browser session.
  */
 
 import { Hono } from "hono";
-import { parseUnits } from "viem";
+import { parseUnits, type Address } from "viem";
 import type { Env, AppVariables } from "../types.js";
 import { buildOraclePoolSwapTx, getNativeTokenSymbol } from "../services/oraclePool.js";
 import { sanitizeError, resolveChainId } from "../config.js";
@@ -83,7 +83,7 @@ oracle.post("/refresh", async (c) => {
     const parsed = parseUnits(amountEth, 18);
     if (parsed <= 0n) throw new Error("non-positive");
   } catch {
-    return c.json({ error: `amountEth must be a positive decimal number (e.g. '0.001'). Scientific notation is not supported.` }, 400);
+    return c.json({ error: `amountEth must be a positive decimal number of ${nativeSymbol} (e.g. '0.001'). Scientific notation is not supported.` }, 400);
   }
 
   const vaultAddress =

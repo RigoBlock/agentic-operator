@@ -1135,8 +1135,10 @@ export const TOOL_DEFINITIONS = [
         "'swap ETH for GRG via oracle'); " +
         "(2) Swap Shield is blocking a vault swap due to oracle price divergence and user wants to " +
         "fix the root cause rather than disabling the shield. " +
-        "This is an OPERATOR EOA transaction (to: Universal Router, NOT the vault) — " +
+        "This is an oracle pool refresh that can execute via two paths: " +
+        "(1) EOA path (default): OPERATOR EOA transaction (to: Universal Router, NOT the vault) — " +
         "the operator signs with their personal wallet and receives the output token. " +
+        "(2) Vault path (viaVault=true): routes through the vault adapter (value=0, supports delegation). " +
         "If the user says 'buy N TOKEN' without specifying input amount, pass amountOut=N and " +
         "the system will estimate the required native token input. If no amount is given at all, " +
         "a default of 0.001 native token is used.",
