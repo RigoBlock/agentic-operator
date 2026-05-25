@@ -39,7 +39,13 @@ oracle.post("/refresh", async (c) => {
   }
 
   const token = typeof body.token === "string" ? body.token.trim() : "";
-  let amountEth = typeof body.amountEth === "string" ? body.amountEth.trim() : "";
+  // Accept numeric amountEth (e.g. 0.001 from JSON) by coercing to string.
+  let amountEth =
+    typeof body.amountEth === "string"
+      ? body.amountEth.trim()
+      : typeof body.amountEth === "number"
+        ? String(body.amountEth)
+        : "";
   const rawVault = body.vaultAddress;
   const rawChain = body.chainId ?? body.chain;
 

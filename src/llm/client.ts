@@ -2489,8 +2489,10 @@ export async function executeToolCall(
 
       const nativeSymbol = getNativeTokenSymbol(ctx.chainId);
 
-      let amountIn = (args.amountEth as string) || "";
-      const amountOut = (args.amountOut as string) || "";
+      // Coerce to string: the LLM (or function-calling) may deliver numbers instead
+      // of strings; String(...) ensures parseUnits/branching behaves deterministically.
+      let amountIn = args.amountEth != null ? String(args.amountEth).trim() : "";
+      const amountOut = args.amountOut != null ? String(args.amountOut).trim() : "";
 
       // Reject ambiguous input: only one of amountEth or amountOut may be provided.
       if (amountIn && amountOut) {
@@ -2560,7 +2562,8 @@ export async function executeToolCall(
         amountIn = "0.001";
       }
 
-      const viaVault = args.viaVault === true;
+      // Accept both boolean true and the string "true" (function-calling can send either).
+      const viaVault = args.viaVault === true || args.viaVault === "true";
       const vaultAddr = viaVault ? (ctx.vaultAddress as Address | undefined) : undefined;
 
       if (viaVault && !vaultAddr) {
