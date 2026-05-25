@@ -100,6 +100,7 @@ function isqrt(n: bigint): bigint {
  *              = floor(sqrt(amount1 * 2^192 / amount0))
  *
  * @throws if either amount is zero (would produce an invalid or infinite price)
+ * @throws if the computed sqrtPriceX96 falls outside TickMath bounds (extreme price ratio)
  */
 export function computeSqrtPriceX96FromAmounts(amount0: bigint, amount1: bigint): bigint {
   if (amount0 <= 0n) throw new Error("amount0 must be greater than zero to compute initial pool price");
@@ -589,8 +590,14 @@ export async function buildInitializePoolTx(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes("already initialized")) throw e;
-    // readPoolState returns sqrtPriceX96=0 for uninitialized pools (does not throw).
-    // A thrown error here indicates an RPC issue or missing StateView deployment — proceed.
+    // Only swallow StateView-unavailable errors — those are expected on chains without
+    // StateView deployment. Rethrow all other errors (e.g. RPC failures) so the caller
+    // gets a clear "cannot verify" message instead of silently proceeding to build a tx
+    // that might revert.
+    if (!msg.includes("StateView not available")) {
+      throw new Error(`Could not verify pool initialization state: ${msg}. Please retry or check your RPC connection.`);
+    }
+    // StateView not available on this chain — proceed without the pre-check.
   }
 
   let sqrtPriceX96: bigint;
