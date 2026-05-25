@@ -159,6 +159,7 @@ export interface OraclePoolSwapResult {
     chainId: number;
     gas: string;     // hex
     description: string;
+    operatorOnly?: boolean;
   };
   /** Human-readable pool key summary for diagnostics. */
   poolInfo: {

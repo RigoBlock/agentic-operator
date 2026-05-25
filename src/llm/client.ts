@@ -2501,7 +2501,13 @@ export async function executeToolCall(
 
       // If amountOut is provided instead of amountIn, estimate the required native input
       // using the vault's on-chain BackgeoOracle (convertTokenAmount).
-      if (!amountIn && amountOut && ctx.vaultAddress && env.ALCHEMY_API_KEY) {
+      if (!amountIn && amountOut) {
+        if (!ctx.vaultAddress || !env.ALCHEMY_API_KEY) {
+          throw new Error(
+            `amountOut requires a connected vault with an active RPC key for oracle estimation. ` +
+            `Connect a vault first, or provide amountEth directly.`
+          );
+        }
         try {
           const tokenAddr = await resolveTokenAddress(ctx.chainId, tokenArg);
           const decimalsOut = await getTokenDecimals(ctx.chainId, tokenAddr, env.ALCHEMY_API_KEY);
@@ -2527,13 +2533,18 @@ export async function executeToolCall(
               `[oracle] Estimated ${amountOut} ${tokenArg} → ${amountIn} ${nativeSymbol} ` +
               `(via vault oracle, +5% buffer)`
             );
+          } else {
+            throw new Error(`Oracle returned a zero estimate for ${amountOut} ${tokenArg}.`);
           }
         } catch (err) {
           console.warn(
             `[oracle] convertTokenAmount estimate failed for ${tokenArg} output=${amountOut}:`,
             err instanceof Error ? err.message : err
           );
-          // Fall through to default
+          throw new Error(
+            `Could not estimate native input for amountOut="${amountOut}" ${tokenArg}: oracle estimation failed. ` +
+            `Provide amountEth directly instead.`
+          );
         }
       }
 

@@ -18,7 +18,7 @@
  */
 
 import { Hono } from "hono";
-import { parseUnits, type Address } from "viem";
+import { parseUnits, isAddress, type Address } from "viem";
 import type { Env, AppVariables } from "../types.js";
 import { buildOraclePoolSwapTx, getNativeTokenSymbol } from "../services/oraclePool.js";
 import { sanitizeError, resolveChainId } from "../config.js";
@@ -86,10 +86,10 @@ oracle.post("/refresh", async (c) => {
     return c.json({ error: `amountEth must be a positive decimal number of ${nativeSymbol} (e.g. '0.001'). Scientific notation is not supported.` }, 400);
   }
 
-  const vaultAddress =
-    typeof rawVault === "string" && rawVault.startsWith("0x") && rawVault.length === 42
-      ? (rawVault as Address)
-      : undefined;
+  if (rawVault !== undefined && (typeof rawVault !== "string" || !isAddress(rawVault))) {
+    return c.json({ error: "vaultAddress must be a valid EVM address (0x-prefixed, 42 hex characters)." }, 400);
+  }
+  const vaultAddress = typeof rawVault === "string" ? (rawVault as Address) : undefined;
 
   try {
     const result = await buildOraclePoolSwapTx(token, amountEth, chainId, c.env.ALCHEMY_API_KEY, vaultAddress);
