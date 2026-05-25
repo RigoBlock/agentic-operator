@@ -5,7 +5,7 @@
  *
  * Body (JSON):
  *   token     string   — ERC-20 symbol or address whose oracle feed is stale (e.g. "GRG", "USDC")
- *   amountEth string   — Amount of ETH to swap (human-readable, e.g. "0.001")
+ *   amountEth string   — Amount of native token to swap (human-readable, e.g. "0.001"). Optional; defaults to 0.001.
  *   chainId   number   — Chain where the oracle pool lives
  *
  * Returns an unsigned OPERATOR EOA transaction to be signed with the operator's
@@ -18,7 +18,7 @@
 import { Hono } from "hono";
 import { parseUnits } from "viem";
 import type { Env, AppVariables } from "../types.js";
-import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
+import { buildOraclePoolSwapTx, getNativeTokenSymbol } from "../services/oraclePool.js";
 import { sanitizeError, resolveChainId } from "../config.js";
 
 export const oracle = new Hono<{ Bindings: Env; Variables: AppVariables }>();
@@ -37,18 +37,12 @@ oracle.post("/refresh", async (c) => {
   }
 
   const token = typeof body.token === "string" ? body.token.trim() : "";
-  const amountEth = typeof body.amountEth === "string" ? body.amountEth.trim() : "";
+  let amountEth = typeof body.amountEth === "string" ? body.amountEth.trim() : "";
   const rawChain = body.chainId ?? body.chain;
 
   if (!token) {
     return c.json(
       { error: "Missing required field: token (ERC-20 symbol or address, e.g. 'GRG' or 'USDC')" },
-      400,
-    );
-  }
-  if (!amountEth) {
-    return c.json(
-      { error: "Missing required field: amountEth (ETH amount, e.g. '0.001')" },
       400,
     );
   }
@@ -72,6 +66,13 @@ oracle.post("/refresh", async (c) => {
     );
   }
 
+  const nativeSymbol = getNativeTokenSymbol(chainId);
+
+  // Default amount if not provided
+  if (!amountEth) {
+    amountEth = "0.001";
+  }
+
   // Validate amountEth: parseFloat accepts "0.01abc" → 0.01 and "1e-3" → 0.001,
   // both of which later fail inside buildOraclePoolSwapTx/parseUnits with a 500.
   // Validate strictly with parseUnits so those cases return a clear 400.
@@ -79,7 +80,7 @@ oracle.post("/refresh", async (c) => {
     const parsed = parseUnits(amountEth, 18);
     if (parsed <= 0n) throw new Error("non-positive");
   } catch {
-    return c.json({ error: "amountEth must be a positive decimal number (e.g. '0.001'). Scientific notation is not supported." }, 400);
+    return c.json({ error: `amountEth must be a positive decimal number (e.g. '0.001'). Scientific notation is not supported.` }, 400);
   }
 
   try {
@@ -95,7 +96,7 @@ oracle.post("/refresh", async (c) => {
     const isClientError =
       msg.includes("not deployed on chain") ||
       msg.includes("not available on chain") ||
-      msg.includes("ETH/WETH does not need") ||
+      msg.includes("does not need an oracle update") ||
       msg.includes("cardinality = 0") ||
       msg.includes("Invalid decimal") ||
       msg.includes("Token") ||

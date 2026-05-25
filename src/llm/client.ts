@@ -78,7 +78,7 @@ import {
   MAX_SLIPPAGE_BPS,
   DEFAULT_MAX_DIVERGENCE_PCT,
 } from "../services/swapShield.js";
-import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
+import { buildOraclePoolSwapTx, getNativeTokenSymbol } from "../services/oraclePool.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
 // These appear as 4-byte hex prefixes in "execution reverted" messages.
@@ -2477,13 +2477,7 @@ export async function executeToolCall(
         throw new Error("'token' is required. Specify the token symbol whose oracle feed is stale (e.g., 'GRG', 'USDC').");
       }
 
-      const amountEth = args.amountEth as string;
-      if (!amountEth) {
-        throw new Error(
-          "Please specify how much ETH you want to swap on the oracle pool (e.g., '0.001' or '0.01'). " +
-          "Larger amounts move the price more aggressively and converge the TWAP faster.",
-        );
-      }
+      const nativeSymbol = getNativeTokenSymbol(ctx.chainId);
 
       // Auto-switch chain if provided
       let oracleChainSwitched: number | undefined;
@@ -2495,16 +2489,62 @@ export async function executeToolCall(
         }
       }
 
+      let amountIn = (args.amountEth as string) || "";
+      const amountOut = (args.amountOut as string) || "";
+
+      // If amountOut is provided instead of amountIn, estimate the required native input
+      // using the vault's on-chain BackgeoOracle (convertTokenAmount).
+      if (!amountIn && amountOut && ctx.vaultAddress && env.ALCHEMY_API_KEY) {
+        try {
+          const tokenAddr = await resolveTokenAddress(ctx.chainId, tokenArg);
+          const decimalsOut = await getTokenDecimals(ctx.chainId, tokenAddr, env.ALCHEMY_API_KEY);
+          const desiredOutRaw = parseUnits(amountOut, decimalsOut);
+          const publicClient = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
+          const NATIVE_ZERO = "0x0000000000000000000000000000000000000000" as Address;
+          const normalizeForOracle = (addr: string) =>
+            addr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              ? NATIVE_ZERO
+              : (addr as Address);
+          const estimatedIn = await publicClient.readContract({
+            address: ctx.vaultAddress as Address,
+            abi: RIGOBLOCK_VAULT_ABI,
+            functionName: "convertTokenAmount",
+            args: [normalizeForOracle(tokenAddr), desiredOutRaw, NATIVE_ZERO],
+          }) as bigint;
+          if (estimatedIn > 0n) {
+            // Add a 5% buffer to ensure the swap produces at least the desired output
+            // (the oracle TWAP may be slightly stale).
+            const buffered = (estimatedIn * 105n) / 100n;
+            amountIn = formatUnits(buffered, 18);
+            console.log(
+              `[oracle] Estimated ${amountOut} ${tokenArg} → ${amountIn} ${nativeSymbol} ` +
+              `(via vault oracle, +5% buffer)`
+            );
+          }
+        } catch (err) {
+          console.warn(
+            `[oracle] convertTokenAmount estimate failed for ${tokenArg} output=${amountOut}:`,
+            err instanceof Error ? err.message : err
+          );
+          // Fall through to default
+        }
+      }
+
+      // Default if still not set
+      if (!amountIn) {
+        amountIn = "0.001";
+      }
+
       const result = await buildOraclePoolSwapTx(
         tokenArg,
-        amountEth,
+        amountIn,
         ctx.chainId,
         env.ALCHEMY_API_KEY,
       );
 
       return {
         message: result.message,
-        transaction: result.transaction,
+        transaction: { ...result.transaction, operatorOnly: true },
         chainSwitch: oracleChainSwitched,
       };
     }
