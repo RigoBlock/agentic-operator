@@ -2480,8 +2480,11 @@ export async function executeToolCall(
       // Vault-dependent options (viaVault, amountOut) require ctx.vaultAddress to be on
       // the active chain. Check this BEFORE mutating ctx.chainId to avoid leaving context
       // in a partially-switched state if the guard throws.
+      // Use the same normalization as the amountOut coercion below so that numeric 0,
+      // whitespace strings, and null/undefined are all handled consistently.
       const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-      const requestsVaultPath = args.viaVault === true || args.viaVault === "true" || !!args.amountOut;
+      const normalizedAmountOut = args.amountOut != null ? String(args.amountOut).trim() : "";
+      const requestsVaultPath = args.viaVault === true || args.viaVault === "true" || normalizedAmountOut !== "";
 
       // Auto-switch chain if provided (only safe for non-vault-dependent calls)
       let oracleChainSwitched: number | undefined;
@@ -2504,7 +2507,7 @@ export async function executeToolCall(
       // Coerce to string: the LLM (or function-calling) may deliver numbers instead
       // of strings; String(...) ensures parseUnits/branching behaves deterministically.
       let amountIn = args.amountEth != null ? String(args.amountEth).trim() : "";
-      const amountOut = args.amountOut != null ? String(args.amountOut).trim() : "";
+      const amountOut = normalizedAmountOut; // already coerced above for the vault-path guard
 
       // Reject ambiguous input: only one of amountEth or amountOut may be provided.
       if (amountIn && amountOut) {
