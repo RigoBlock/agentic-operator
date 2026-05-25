@@ -881,6 +881,7 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "remove_liquidity",
       description:
+        "Remove liquidity from a Uniswap v4 LP position through the vault's modifyLiquidities adapter. " +
         "Requires the position's ERC-721 token ID and the liquidity amount to remove. " +
         "Does NOT burn the NFT by default — the position remains as a closed (0-liquidity) record. " +
         "Use collect_lp_fees to harvest any fees, then burn_position to permanently delete the NFT.",

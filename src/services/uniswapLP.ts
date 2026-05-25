@@ -907,7 +907,7 @@ export async function getPoolInfoById(
 
   return {
     poolId,
-    initialized: sqrtPriceX96 !== 0n,
+    initialized: hasInitializeEvent || sqrtPriceX96 !== 0n,
     poolKeyKnown: true,
     fee,
     tickSpacing,
