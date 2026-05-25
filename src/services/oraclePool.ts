@@ -297,6 +297,9 @@ export async function buildOraclePoolSwapTx(
 
   // Parse native token input amount
   const amountInWei = parseUnits(amountIn, 18);
+  if (amountInWei <= 0n) {
+    throw new Error(`amountIn must be a positive amount of native token; received "${amountIn}".`);
+  }
 
   const viaVault = !!vaultAddress;
 

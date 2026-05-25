@@ -40,11 +40,13 @@ oracle.post("/refresh", async (c) => {
 
   const token = typeof body.token === "string" ? body.token.trim() : "";
   // Accept numeric amountEth (e.g. 0.001 from JSON) by coercing to string.
+  // Use toFixed(18) for numbers instead of String() to avoid scientific-notation
+  // output (e.g. String(0.0000001) → "1e-7") which parseUnits rejects.
   let amountEth =
     typeof body.amountEth === "string"
       ? body.amountEth.trim()
       : typeof body.amountEth === "number"
-        ? String(body.amountEth)
+        ? body.amountEth.toFixed(18)
         : "";
   const rawVault = body.vaultAddress;
   const rawChain = body.chainId ?? body.chain;
