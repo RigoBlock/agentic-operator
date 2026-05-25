@@ -24,9 +24,14 @@
  *
  * ## Transaction type
  *
- * Returns an OPERATOR EOA transaction (to: Universal Router, not the vault).
- * The operator signs with their personal wallet. No vault delegation required.
- * Value = amountIn (ETH for ETH→token swaps).
+ * Two paths depending on whether `vaultAddress` is provided:
+ *   - **EOA path** (no `vaultAddress`): targets the Universal Router. The operator
+ *     signs with their personal wallet and sends `msg.value = amountIn`. No vault
+ *     delegation required.
+ *   - **Vault path** (`vaultAddress` provided): targets the vault's `execute()`
+ *     adapter with `value = 0`. Settlement is sourced from the vault's own native
+ *     balance. Supports delegation and the NAV shield. The swap is exact-input
+ *     with amountOutMinimum=0 — output is not bounded on-chain.
  */
 
 import {
@@ -38,7 +43,17 @@ import {
   type Hex,
 } from "viem";
 import { getClient } from "./vault.js";
-import { resolveTokenAddress } from "../config.js";
+import { resolveTokenAddress, TOKEN_MAP } from "../config.js";
+
+/** Chain-native token symbol for user-facing strings. */
+const NATIVE_TOKEN: Record<number, string> = {
+  1: "ETH", 10: "ETH", 130: "ETH", 8453: "ETH", 42161: "ETH",
+  56: "BNB", 137: "POL",
+};
+
+export function getNativeTokenSymbol(chainId: number): string {
+  return NATIVE_TOKEN[chainId] || "ETH";
+}
 
 // ── BackgeoOracle contract addresses per chain ─────────────────────────
 // Source: https://github.com/RigoBlock/v3-contracts/blob/development/src/utils/constants.ts
@@ -141,7 +156,13 @@ const ORACLE_SWAP_GAS_LIMIT = 400_000n;
 // ── Types ──────────────────────────────────────────────────────────────
 
 export interface OraclePoolSwapResult {
-  /** Transaction to be signed by the operator EOA (not vault). */
+  /**
+   * Unsigned transaction for the oracle refresh.
+   * - When `operatorOnly` is `true` (EOA path): targets the Universal Router;
+   *   the operator signs with their personal wallet and sends `msg.value = amountIn`.
+   * - When `operatorOnly` is absent/false (vault path): targets the vault adapter
+   *   (`vault.execute`); `value = 0` and can be delegated or relayed.
+   */
   transaction: {
     to: Address;
     data: Hex;
@@ -149,6 +170,7 @@ export interface OraclePoolSwapResult {
     chainId: number;
     gas: string;     // hex
     description: string;
+    operatorOnly?: boolean;
   };
   /** Human-readable pool key summary for diagnostics. */
   poolInfo: {
@@ -165,20 +187,36 @@ export interface OraclePoolSwapResult {
 // ── Main Function ───────────────────────────────────────────────────────
 
 /**
- * Build an unsigned EOA transaction that swaps a small ETH amount on the
+ * Build an unsigned transaction that swaps a small native-token amount on the
  * BackgeoOracle V4 pool to refresh stale price observations.
  *
+ * Two paths are supported:
+ *   1. **Vault path** (`vaultAddress` provided): the calldata targets the vault's
+ *      `execute()` adapter with `value = 0`. The external `vault.execute` call is
+ *      non-payable, so no `msg.value` is sent by the caller. Internally, Uniswap
+ *      V4's `SETTLE_ALL` action requires the native token to be present at execution
+ *      time — but the vault adapter sources this payment from the vault's own native
+ *      balance, not from `msg.value`. This path supports delegation and the NAV
+ *      shield. The swap is exact-input with amountOutMinimum=0 — output amount
+ *      is not bounded on-chain (NAV shield enforces a value-level check instead).
+ *   2. **EOA path** (`vaultAddress` omitted): the calldata targets the Uniswap
+ *      Universal Router directly. The operator sends `msg.value = amountIn` and
+ *      signs with their personal wallet.
+ *
  * @param token - Token symbol or address whose oracle feed is stale (e.g., "GRG").
- * @param amountEth - Amount of ETH to swap (default "0.001"). Larger amounts
+ * @param amountIn - Amount of native token to swap (default "0.001"). Larger amounts
  *   move the pool price more aggressively toward market, converging the TWAP faster.
  * @param chainId - Chain where the oracle is stale.
  * @param alchemyKey - Alchemy API key for RPC calls.
+ * @param vaultAddress - Optional vault address. If provided, the transaction targets
+ *   the vault adapter instead of the Universal Router.
  */
 export async function buildOraclePoolSwapTx(
   token: string,
-  amountEth: string = "0.001",
+  amountIn: string = "0.001",
   chainId: number,
   alchemyKey: string,
+  vaultAddress?: Address,
 ): Promise<OraclePoolSwapResult> {
   const oracle = BACKGEO_ORACLE[chainId];
   if (!oracle) {
@@ -192,17 +230,24 @@ export async function buildOraclePoolSwapTx(
     throw new Error(`Universal Router not available on chain ${chainId}.`);
   }
 
-  // Resolve token address — normalize WETH/ETH to address(0)
+  if (vaultAddress !== undefined && vaultAddress === "0x0000000000000000000000000000000000000000") {
+    throw new Error("vaultAddress must be a valid non-zero vault address.");
+  }
+
+  // Resolve token address — normalize ETH aliases and wrapped-native to address(0)
   const rawTokenAddr = await resolveTokenAddress(chainId, token);
+  const nativeSymbol = getNativeTokenSymbol(chainId);
+  const wrappedNativeAddr = (TOKEN_MAP[chainId]?.[`W${nativeSymbol}`] as string | undefined)?.toLowerCase();
   const tokenAddr: Address =
     rawTokenAddr.toLowerCase() === ETH_ADDRESS ||
-    rawTokenAddr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    rawTokenAddr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" ||
+    (wrappedNativeAddr !== undefined && rawTokenAddr.toLowerCase() === wrappedNativeAddr)
       ? ETH_ADDRESS
       : rawTokenAddr;
 
   if (tokenAddr === ETH_ADDRESS) {
     throw new Error(
-      "ETH/WETH does not need an oracle update — it is always currency0. " +
+      `${nativeSymbol}/W${nativeSymbol} does not need an oracle update — it is always currency0. ` +
       "Please specify the token whose oracle feed is stale (e.g., 'GRG').",
     );
   }
@@ -257,8 +302,13 @@ export async function buildOraclePoolSwapTx(
     );
   }
 
-  // Parse ETH input amount
-  const amountInWei = parseUnits(amountEth, 18);
+  // Parse native token input amount
+  const amountInWei = parseUnits(amountIn, 18);
+  if (amountInWei <= 0n) {
+    throw new Error(`amountIn must be a positive amount of native token; received "${amountIn}".`);
+  }
+
+  const viaVault = !!vaultAddress;
 
   // ── Build V4 SWAP_EXACT_IN_SINGLE calldata ────────────────────────────
   //
@@ -268,10 +318,14 @@ export async function buildOraclePoolSwapTx(
   //   PoolKey, zeroForOne=true, amountIn, amountOutMin=0, hookData=0x
   //
   // param[1] — SETTLE_ALL: (currencyIn, maxAmount)
-  //   Settles ETH from msg.value. maxAmount = amountIn ensures no over-settling.
+  //   EOA path: settles ETH from msg.value. Vault path: settles from the vault's own
+  //   native balance (vault.execute is non-payable, so value=0; the vault adapter
+  //   sources the native token internally). maxAmount = amountIn ensures no over-settling.
   //
   // param[2] — TAKE_ALL: (currencyOut, minAmount=0)
-  //   Takes all token output and sends to msg.sender (the operator).
+  //   Takes all token output and sends to msg.sender.
+  //   EOA path: msg.sender is the operator, so the operator receives the output token.
+  //   Vault path: msg.sender is the vault adapter, so the output token stays in the vault.
 
   const swapParam = encodeAbiParameters(
     [
@@ -322,7 +376,10 @@ export async function buildOraclePoolSwapTx(
   );
 
   // Encode Universal Router execute(commands, inputs, deadline)
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300); // 5-minute deadline
+  // Vault/delegated path uses 30 minutes to accommodate queuing and user review;
+  // EOA path uses 5 minutes since the user signs and broadcasts immediately.
+  const deadlineSeconds = viaVault ? 1800 : 300;
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
   const calldata = encodeFunctionData({
     abi: UR_EXECUTE_ABI,
     functionName: "execute",
@@ -331,28 +388,75 @@ export async function buildOraclePoolSwapTx(
 
   // Derive a user-friendly token symbol for the description
   const tokenSymbol = token.toUpperCase();
+
+  if (viaVault) {
+    const description =
+      `Oracle pool refresh: swap ${amountIn} ${nativeSymbol} → ${tokenSymbol} on BackgeoOracle V4 pool ` +
+      `(chain ${chainId}) via vault. Creates a new price observation.`;
+
+    const message = [
+      `🔄 Oracle Refresh Transaction Ready (Vault)`,
+      ``,
+      `This swaps a small amount of ${nativeSymbol} from the vault on the BackgeoOracle's dedicated`,
+      `Uniswap V4 pool to create a fresh price observation. The 5-minute TWAP will start converging`,
+      `toward the current market price after this swap is confirmed.`,
+      ``,
+      `Token: ${tokenSymbol}`,
+      `Amount: ${amountIn} ${nativeSymbol} → ${tokenSymbol}`,
+      `Pool: fee=0, tickSpacing=32767, hooks=${oracle.slice(0, 10)}…`,
+      `Oracle: ${oracle}`,
+      `Pool ID: ${poolId.slice(0, 18)}…`,
+      `Cardinality: ${cardinality} observations stored`,
+      `Chain: ${chainId}`,
+      ``,
+      `This transaction goes through the vault adapter and can be executed via delegation.`,
+      `Gas limit: ${ORACLE_SWAP_GAS_LIMIT.toString()}`,
+    ].join("\n");
+
+    return {
+      transaction: {
+        to: vaultAddress!,
+        data: calldata,
+        value: "0x0",
+        chainId,
+        gas: "0x" + ORACLE_SWAP_GAS_LIMIT.toString(16),
+        description,
+      },
+      poolInfo: {
+        oracle,
+        currency0: ETH_ADDRESS,
+        currency1: tokenAddr,
+        tokenSymbol,
+        poolId,
+        cardinality,
+      },
+      message,
+    };
+  }
+
+  // EOA path
   const description =
-    `Oracle pool refresh: swap ${amountEth} ETH → ${tokenSymbol} on BackgeoOracle V4 pool ` +
+    `Oracle pool refresh: swap ${amountIn} ${nativeSymbol} → ${tokenSymbol} on BackgeoOracle V4 pool ` +
     `(chain ${chainId}) to create a new price observation. ` +
-    `Sign with your operator wallet (NOT the vault).`;
+    `Sign with your operator wallet (EOA).`;
 
   const message = [
     `🔄 Oracle Refresh Transaction Ready`,
     ``,
-    `This swaps a small amount of ETH on the BackgeoOracle's dedicated Uniswap V4 pool`,
+    `This swaps a small amount of ${nativeSymbol} on the BackgeoOracle's dedicated Uniswap V4 pool`,
     `to create a fresh price observation. The 5-minute TWAP will start converging`,
     `toward the current market price after this swap is confirmed.`,
     ``,
     `Token: ${tokenSymbol}`,
-    `Amount: ${amountEth} ETH → ${tokenSymbol}`,
+    `Amount: ${amountIn} ${nativeSymbol} → ${tokenSymbol}`,
     `Pool: fee=0, tickSpacing=32767, hooks=${oracle.slice(0, 10)}…`,
     `Oracle: ${oracle}`,
     `Pool ID: ${poolId.slice(0, 18)}…`,
     `Cardinality: ${cardinality} observations stored`,
     `Chain: ${chainId}`,
     ``,
-    `⚠️ Sign this with your OPERATOR WALLET (EOA), NOT the vault.`,
-    `The transaction goes directly to the Universal Router — not the vault adapter.`,
+    `⚠️ Sign this with your OPERATOR WALLET (EOA).`,
+    `The transaction goes directly to the Universal Router.`,
     `Gas limit: ${ORACLE_SWAP_GAS_LIMIT.toString()}`,
   ].join("\n");
 
@@ -364,6 +468,7 @@ export async function buildOraclePoolSwapTx(
       chainId,
       gas: "0x" + ORACLE_SWAP_GAS_LIMIT.toString(16),
       description,
+      operatorOnly: true,
     },
     poolInfo: {
       oracle,

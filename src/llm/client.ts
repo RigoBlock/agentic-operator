@@ -78,7 +78,7 @@ import {
   MAX_SLIPPAGE_BPS,
   DEFAULT_MAX_DIVERGENCE_PCT,
 } from "../services/swapShield.js";
-import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
+import { buildOraclePoolSwapTx, getNativeTokenSymbol } from "../services/oraclePool.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
 // These appear as 4-byte hex prefixes in "execution reverted" messages.
@@ -2477,34 +2477,178 @@ export async function executeToolCall(
         throw new Error("'token' is required. Specify the token symbol whose oracle feed is stale (e.g., 'GRG', 'USDC').");
       }
 
-      const amountEth = args.amountEth as string;
-      if (!amountEth) {
-        throw new Error(
-          "Please specify how much ETH you want to swap on the oracle pool (e.g., '0.001' or '0.01'). " +
-          "Larger amounts move the price more aggressively and converge the TWAP faster.",
-        );
-      }
+      // Vault-dependent options (viaVault, amountOut) require ctx.vaultAddress to be on
+      // the active chain. Check this BEFORE mutating ctx.chainId to avoid leaving context
+      // in a partially-switched state if the guard throws.
+      // Use the same normalization as the amountOut coercion below so that numeric 0,
+      // whitespace strings, and null/undefined are all handled consistently.
+      const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+      // Use toFixed(18) for numeric inputs to avoid scientific notation (e.g.
+      // 0.0000001 → "1e-7" via String()) that parseUnits rejects.
+      const toDecimalString = (v: unknown): string => {
+        if (v == null) return "";
+        if (typeof v === "number") return v.toFixed(18);
+        return String(v).trim();
+      };
+      const normalizedAmountOut = toDecimalString(args.amountOut);
+      const requestsVaultPath = args.viaVault === true || args.viaVault === "true" || normalizedAmountOut !== "";
 
-      // Auto-switch chain if provided
+      // Auto-switch chain if provided (only safe for non-vault-dependent calls)
       let oracleChainSwitched: number | undefined;
       if (args.chain) {
         const requestedChain = resolveChainId(args.chain as string);
         if (requestedChain !== ctx.chainId) {
+          if (requestsVaultPath) {
+            throw new Error(
+              `Cannot switch chains while using vault-dependent options (viaVault or amountOut). ` +
+              `Connect a vault on chain ${requestedChain} first, or omit viaVault/amountOut.`
+            );
+          }
           ctx.chainId = requestedChain;
           oracleChainSwitched = requestedChain;
         }
       }
 
+      const nativeSymbol = getNativeTokenSymbol(ctx.chainId);
+
+      // Coerce to decimal string; toDecimalString() uses toFixed(18) for numbers
+      // to avoid scientific notation (e.g. 0.0000001 → "1e-7") that parseUnits rejects.
+      let amountIn = toDecimalString(args.amountEth);
+      const amountOut = normalizedAmountOut; // already coerced above for the vault-path guard
+
+      // Reject ambiguous input: only one of amountEth or amountOut may be provided.
+      if (amountIn && amountOut) {
+        throw new Error(
+          "Provide amountEth (native token input) OR amountOut (token output to receive), not both."
+        );
+      }
+
+      // If amountOut is provided instead of amountIn, estimate the required native input
+      // using the vault's on-chain BackgeoOracle (convertTokenAmount).
+      if (!amountIn && amountOut) {
+        if (!ctx.vaultAddress || ctx.vaultAddress === ZERO_ADDR || !env.ALCHEMY_API_KEY) {
+          throw new Error(
+            `amountOut requires a connected vault with an active RPC key for oracle estimation. ` +
+            `Connect a vault first, or provide amountEth directly.`
+          );
+        }
+        try {
+          const tokenAddr = await resolveTokenAddress(ctx.chainId, tokenArg);
+          const decimalsOut = await getTokenDecimals(ctx.chainId, tokenAddr, env.ALCHEMY_API_KEY);
+          const desiredOutRaw = parseUnits(amountOut, decimalsOut);
+          if (desiredOutRaw <= 0n) {
+            throw new Error(
+              `amountOut must be a positive value; got "${amountOut}". Provide a value greater than zero.`
+            );
+          }
+          const publicClient = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
+          const NATIVE_ZERO = "0x0000000000000000000000000000000000000000" as Address;
+          const normalizeForOracle = (addr: string) =>
+            addr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              ? NATIVE_ZERO
+              : (addr as Address);
+          const estimatedIn = await publicClient.readContract({
+            address: ctx.vaultAddress as Address,
+            abi: RIGOBLOCK_VAULT_ABI,
+            functionName: "convertTokenAmount",
+            args: [normalizeForOracle(tokenAddr), desiredOutRaw, NATIVE_ZERO],
+          }) as bigint;
+          if (estimatedIn > 0n) {
+            // Add a 5% buffer to ensure the swap produces at least the desired output
+            // (the oracle TWAP may be slightly stale).
+            const buffered = (estimatedIn * 105n) / 100n;
+            amountIn = formatUnits(buffered, 18);
+            console.log(
+              `[oracle] Estimated ${amountOut} ${tokenArg} → ${amountIn} ${nativeSymbol} ` +
+              `(via vault oracle, +5% buffer)`
+            );
+          } else if (estimatedIn < 0n) {
+            throw new Error(`Oracle returned a negative estimate for ${amountOut} ${tokenArg} — unexpected oracle condition.`);
+          } else {
+            throw new Error(`Oracle returned a zero estimate for ${amountOut} ${tokenArg}.`);
+          }
+        } catch (err) {
+          console.warn(
+            `[oracle] convertTokenAmount estimate failed for ${tokenArg} output=${amountOut}:`,
+            err instanceof Error ? err.message : err
+          );
+          throw new Error(
+            `Could not estimate native input for amountOut="${amountOut}" ${tokenArg}: oracle estimation failed. ` +
+            `Provide amountEth directly instead.`
+          );
+        }
+      }
+
+      // Default if still not set
+      if (!amountIn) {
+        amountIn = "0.001";
+      }
+
+      // Accept both boolean true and the string "true" (function-calling can send either).
+      const viaVault = args.viaVault === true || args.viaVault === "true";
+      // Treat zero address as "no vault" (frontend uses it as a placeholder before connecting).
+      const vaultAddr = viaVault && ctx.vaultAddress && ctx.vaultAddress !== ZERO_ADDR
+        ? (ctx.vaultAddress as Address)
+        : undefined;
+
+      if (viaVault && !vaultAddr) {
+        throw new Error(
+          `viaVault=true requires a connected vault. Connect a vault first or omit viaVault to use the EOA path.`
+        );
+      }
+
       const result = await buildOraclePoolSwapTx(
         tokenArg,
-        amountEth,
+        amountIn,
         ctx.chainId,
         env.ALCHEMY_API_KEY,
+        vaultAddr,
       );
+
+      // EOA path: simulate the transaction to catch reverts early and provide accurate gas
+      if (!viaVault && env.ALCHEMY_API_KEY && ctx.operatorAddress) {
+        try {
+          const publicClient = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
+          const tx = result.transaction;
+
+          // eth_call simulation — catches pool reverts, insufficient cardinality, etc.
+          await publicClient.call({
+            account: ctx.operatorAddress as Address,
+            to: tx.to as Address,
+            data: tx.data,
+            value: BigInt(tx.value),
+            chain: undefined,
+          });
+
+          // eth_estimateGas for accurate gas limit
+          const estimatedGas = await publicClient.estimateGas({
+            account: ctx.operatorAddress as Address,
+            to: tx.to as Address,
+            data: tx.data,
+            value: BigInt(tx.value),
+            chain: undefined,
+          });
+
+          // Add 20% buffer for execution variance
+          const gasWithBuffer = (estimatedGas * 120n) / 100n;
+          result.transaction.gas = "0x" + gasWithBuffer.toString(16);
+          console.log(
+            `[oracle] EOA simulation passed. Gas estimate: ${estimatedGas} → buffered: ${gasWithBuffer}`
+          );
+        } catch (simErr) {
+          const reason = simErr instanceof Error ? simErr.message : String(simErr);
+          console.warn(`[oracle] EOA simulation failed: ${reason}`);
+          throw new Error(
+            `Oracle refresh simulation failed: ${reason}. ` +
+            `This usually means the pool is not initialized, the operator has insufficient ${nativeSymbol} balance, ` +
+            `or the oracle hook rejected the swap. Verify the pool state and try again.`
+          );
+        }
+      }
 
       return {
         message: result.message,
-        transaction: result.transaction,
+        transaction: viaVault ? result.transaction : { ...result.transaction, operatorOnly: true },
         chainSwitch: oracleChainSwitched,
       };
     }
