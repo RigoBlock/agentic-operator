@@ -568,6 +568,10 @@ export async function buildInitializePoolTx(
     resolveTokenAddress(chainId, params.tokenB),
   ]);
 
+  if (addrA.toLowerCase() === addrB.toLowerCase()) {
+    throw new Error(`tokenA and tokenB must be different tokens, but both resolved to ${addrA}.`);
+  }
+
   const isALower = addrA.toLowerCase() < addrB.toLowerCase();
   const currency0 = (isALower ? addrA : addrB) as Address;
   const currency1 = (isALower ? addrB : addrA) as Address;

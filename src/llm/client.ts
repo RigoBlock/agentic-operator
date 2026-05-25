@@ -4065,7 +4065,12 @@ export async function executeToolCall(
         `Current Tick: ${info.currentTick}`,
         ``,
         info.initialized
-          ? `To add liquidity: use fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`
+          ? info.poolKeyKnown
+            ? `To add liquidity: use fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`
+            : `⚠️ Pool is initialized but the pool key could not be confirmed from on-chain Initialize event logs (RPC/node limitation). ` +
+              `The fee/tickSpacing/hooks/currency0/currency1 values shown may be placeholders or estimates. ` +
+              `Please verify the exact pool key (fee, tickSpacing, hooks) before calling add_liquidity to avoid a pool-key mismatch. ` +
+              `You can retry get_pool_info with a different RPC, or provide the known pool key directly.`
           : info.poolKeyKnown
             ? `⚠️ Pool is NOT initialized. Call initialize_pool first with fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`
             : `⚠️ Pool is NOT initialized. The pool key (fee, tickSpacing, hooks, token0, token1) could not be determined from the pool ID alone — please provide the full pool key so initialize_pool can be called with the correct parameters.`,
