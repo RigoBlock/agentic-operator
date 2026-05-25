@@ -2483,7 +2483,14 @@ export async function executeToolCall(
       // Use the same normalization as the amountOut coercion below so that numeric 0,
       // whitespace strings, and null/undefined are all handled consistently.
       const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-      const normalizedAmountOut = args.amountOut != null ? String(args.amountOut).trim() : "";
+      // Use toFixed(18) for numeric inputs to avoid scientific notation (e.g.
+      // 0.0000001 → "1e-7" via String()) that parseUnits rejects.
+      const toDecimalString = (v: unknown): string => {
+        if (v == null) return "";
+        if (typeof v === "number") return v.toFixed(18);
+        return String(v).trim();
+      };
+      const normalizedAmountOut = toDecimalString(args.amountOut);
       const requestsVaultPath = args.viaVault === true || args.viaVault === "true" || normalizedAmountOut !== "";
 
       // Auto-switch chain if provided (only safe for non-vault-dependent calls)
@@ -2504,9 +2511,9 @@ export async function executeToolCall(
 
       const nativeSymbol = getNativeTokenSymbol(ctx.chainId);
 
-      // Coerce to string: the LLM (or function-calling) may deliver numbers instead
-      // of strings; String(...) ensures parseUnits/branching behaves deterministically.
-      let amountIn = args.amountEth != null ? String(args.amountEth).trim() : "";
+      // Coerce to decimal string; toDecimalString() uses toFixed(18) for numbers
+      // to avoid scientific notation (e.g. 0.0000001 → "1e-7") that parseUnits rejects.
+      let amountIn = toDecimalString(args.amountEth);
       const amountOut = normalizedAmountOut; // already coerced above for the vault-path guard
 
       // Reject ambiguous input: only one of amountEth or amountOut may be provided.
