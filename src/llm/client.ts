@@ -2533,6 +2533,8 @@ export async function executeToolCall(
               `[oracle] Estimated ${amountOut} ${tokenArg} → ${amountIn} ${nativeSymbol} ` +
               `(via vault oracle, +5% buffer)`
             );
+          } else if (estimatedIn < 0n) {
+            throw new Error(`Oracle returned a negative estimate for ${amountOut} ${tokenArg} — unexpected oracle condition.`);
           } else {
             throw new Error(`Oracle returned a zero estimate for ${amountOut} ${tokenArg}.`);
           }

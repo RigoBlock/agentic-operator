@@ -2335,7 +2335,9 @@
       const valueHex = tx.value || '0x0';
       const valueBigInt = valueHex === '0x0' ? 0n : BigInt(valueHex);
       // tx.operatorOnly is set by the API for EOA-signed transactions; also treat
-      // non-zero msg.value as a reliable indicator (vault calls never require msg.value).
+      // non-zero msg.value as a reliable indicator (delegated vault adapter calls
+      // never require msg.value; direct vault owner calls like fundPool may, but
+      // those are EOA transactions anyway).
       const isOperatorOnly = tx.operatorOnly || valueBigInt > 0n;
       const valueDisplay = valueBigInt > 0n
         ? (() => {
