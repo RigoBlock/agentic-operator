@@ -151,7 +151,13 @@ const ORACLE_SWAP_GAS_LIMIT = 400_000n;
 // ── Types ──────────────────────────────────────────────────────────────
 
 export interface OraclePoolSwapResult {
-  /** Transaction to be signed by the operator EOA (not vault). */
+  /**
+   * Unsigned transaction for the oracle refresh.
+   * - When `operatorOnly` is `true` (EOA path): targets the Universal Router;
+   *   the operator signs with their personal wallet and sends `msg.value = amountIn`.
+   * - When `operatorOnly` is absent/false (vault path): targets the vault adapter
+   *   (`vault.execute`); `value = 0` and can be delegated or relayed.
+   */
   transaction: {
     to: Address;
     data: Hex;
@@ -181,11 +187,12 @@ export interface OraclePoolSwapResult {
  *
  * Two paths are supported:
  *   1. **Vault path** (`vaultAddress` provided): the calldata targets the vault's
- *      `execute()` adapter with `value = 0`. The Rigoblock adapter handles native
- *      token settlement internally using the vault's balance — no `msg.value` is
- *      required because this is an exact-in swap where `amountIn` is already
- *      encoded in the V4 `SWAP_EXACT_IN_SINGLE` action. This path supports
- *      delegation, NAV shield, and slippage protection.
+ *      `execute()` adapter with `value = 0`. The external `vault.execute` call is
+ *      non-payable, so no `msg.value` is sent by the caller. Internally, Uniswap
+ *      V4's `SETTLE_ALL` action requires the native token to be present at execution
+ *      time — but the vault adapter sources this payment from the vault's own native
+ *      balance, not from `msg.value`. This path supports delegation, NAV shield,
+ *      and slippage protection.
  *   2. **EOA path** (`vaultAddress` omitted): the calldata targets the Uniswap
  *      Universal Router directly. The operator sends `msg.value = amountIn` and
  *      signs with their personal wallet.
