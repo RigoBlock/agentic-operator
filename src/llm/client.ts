@@ -2487,6 +2487,17 @@ export async function executeToolCall(
         }
       }
 
+      // Vault-dependent options (viaVault, amountOut) require ctx.vaultAddress to be on
+      // the active chain. Disallow chain auto-switch when either is requested.
+      const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+      const requestsVaultPath = args.viaVault === true || args.viaVault === "true" || !!args.amountOut;
+      if (oracleChainSwitched && requestsVaultPath) {
+        throw new Error(
+          `Cannot switch chains while using vault-dependent options (viaVault or amountOut). ` +
+          `Connect a vault on chain ${oracleChainSwitched} first, or omit viaVault/amountOut.`
+        );
+      }
+
       const nativeSymbol = getNativeTokenSymbol(ctx.chainId);
 
       // Coerce to string: the LLM (or function-calling) may deliver numbers instead
@@ -2504,7 +2515,7 @@ export async function executeToolCall(
       // If amountOut is provided instead of amountIn, estimate the required native input
       // using the vault's on-chain BackgeoOracle (convertTokenAmount).
       if (!amountIn && amountOut) {
-        if (!ctx.vaultAddress || !env.ALCHEMY_API_KEY) {
+        if (!ctx.vaultAddress || ctx.vaultAddress === ZERO_ADDR || !env.ALCHEMY_API_KEY) {
           throw new Error(
             `amountOut requires a connected vault with an active RPC key for oracle estimation. ` +
             `Connect a vault first, or provide amountEth directly.`
@@ -2564,11 +2575,14 @@ export async function executeToolCall(
 
       // Accept both boolean true and the string "true" (function-calling can send either).
       const viaVault = args.viaVault === true || args.viaVault === "true";
-      const vaultAddr = viaVault ? (ctx.vaultAddress as Address | undefined) : undefined;
+      // Treat zero address as "no vault" (frontend uses it as a placeholder before connecting).
+      const vaultAddr = viaVault && ctx.vaultAddress && ctx.vaultAddress !== ZERO_ADDR
+        ? (ctx.vaultAddress as Address)
+        : undefined;
 
       if (viaVault && !vaultAddr) {
         throw new Error(
-          `viaVault=true requires a vault address. Connect a vault first or omit viaVault to use the EOA path.`
+          `viaVault=true requires a connected vault. Connect a vault first or omit viaVault to use the EOA path.`
         );
       }
 

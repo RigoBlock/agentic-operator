@@ -5,7 +5,7 @@
  *
  * Body (JSON):
  *   token        string   — ERC-20 symbol or address whose oracle feed is stale (e.g. "GRG", "USDC")
- *   amountEth    string   — Amount of native token to swap (human-readable, e.g. "0.001"). Optional; defaults to 0.001.
+ *   amountEth    string|number — Amount of native token to swap (human-readable, e.g. "0.001" or 0.001). Optional; defaults to 0.001.
  *   chainId      number   — Chain where the oracle pool lives
  *   vaultAddress string   — Optional. If provided, routes through the vault adapter (value=0, supports delegation).
  *                           Omit for EOA path (direct to Universal Router).
