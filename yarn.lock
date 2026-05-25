@@ -1744,7 +1744,7 @@
     "@uniswap/v3-core" "^1.0.0"
     base64-sol "1.0.1"
 
-"@uniswap/v3-sdk@3.29.1":
+"@uniswap/v3-sdk@^3.29.1", "@uniswap/v3-sdk@3.29.1":
   version "3.29.1"
   resolved "https://registry.npmjs.org/@uniswap/v3-sdk/-/v3-sdk-3.29.1.tgz"
   integrity sha512-EYCzrfCCxc9DqUguw5rX+9774jvpVIvvrnyraJenZ371JiX/VC09/6OToKReu3gJfgITaH1BynMATwGkmOb2SQ==

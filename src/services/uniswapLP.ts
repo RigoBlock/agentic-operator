@@ -23,11 +23,14 @@ import {
   type Address,
   type Hex,
   encodeAbiParameters,
+  encodeFunctionData,
   keccak256,
   parseUnits,
   formatUnits,
 } from "viem";
 import { Pool, Position, V4PositionManager } from "@uniswap/v4-sdk";
+import { TickMath } from "@uniswap/v3-sdk";
+import JSBI from "jsbi";
 import { Token, Ether, Percent, type Currency } from "@uniswap/sdk-core";
 import { encodeVaultModifyLiquidities, getTokenDecimals, getClient } from "./vault.js";
 import { resolveTokenAddress } from "../config.js";
@@ -42,7 +45,7 @@ import { ERC20_ABI } from "../abi/erc20.js";
  * Source: https://docs.uniswap.org/contracts/v4/deployments
  * NOTE: PoolManager is NOT at the same address on every chain.
  */
-const POOL_MANAGER: Record<number, Address> = {
+export const POOL_MANAGER: Record<number, Address> = {
   1:     "0x000000000004444c5dc75cB358380D2e3dE08A90", // Ethereum
   10:    "0x9a13f98cb987694c9f086b1f5eb990eea8264ec3", // Optimism
   56:    "0x28e2ea090877bf75740558f6bfb36a5ffee9e9df", // BNB Chain
@@ -72,6 +75,50 @@ const STATE_VIEW: Record<number, Address> = {
 
 /** Q96 = 2^96 for fixed-point sqrtPrice math */
 const Q96 = 2n ** 96n;
+
+/** TickMath absolute sqrtRatio bounds (from Uniswap v3 TickMath.sol) */
+const MIN_SQRT_RATIO = 4295128739n;
+const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n;
+
+/** Integer square root — returns floor(sqrt(n)) using Newton-Raphson. */
+function isqrt(n: bigint): bigint {
+  if (n === 0n) return 0n;
+  let x = n;
+  let y = (x + 1n) >> 1n;
+  while (y < x) {
+    x = y;
+    y = (x + n / x) >> 1n;
+  }
+  return x;
+}
+
+/**
+ * Compute sqrtPriceX96 from a ratio of raw token amounts using integer math.
+ * Avoids floating-point precision loss for large ERC-20 base-unit amounts.
+ *
+ * sqrtPriceX96 = sqrt(amount1 / amount0) * 2^96
+ *              = floor(sqrt(amount1 * 2^192 / amount0))
+ *
+ * @throws if either amount is zero (would produce an invalid or infinite price)
+ * @throws if the computed sqrtPriceX96 falls outside TickMath bounds (extreme price ratio)
+ */
+export function computeSqrtPriceX96FromAmounts(amount0: bigint, amount1: bigint): bigint {
+  if (amount0 <= 0n) throw new Error("amount0 must be greater than zero to compute initial pool price");
+  if (amount1 <= 0n) throw new Error("amount1 must be greater than zero to compute initial pool price");
+  const sqrtPriceX96 = isqrt(amount1 * Q96 * Q96 / amount0);
+  if (sqrtPriceX96 < MIN_SQRT_RATIO || sqrtPriceX96 >= MAX_SQRT_RATIO) {
+    throw new Error(
+      `Computed sqrtPriceX96 (${sqrtPriceX96}) is outside TickMath bounds. ` +
+      `Choose a price ratio that corresponds to a tick within [${MIN_TICK}, ${MAX_TICK}].`
+    );
+  }
+  return sqrtPriceX96;
+}
+
+/** Get the floor tick for a given sqrtPriceX96 using the official TickMath. */
+function getTickAtSqrtPriceX96(sqrtPriceX96: bigint): number {
+  return TickMath.getTickAtSqrtRatio(JSBI.BigInt(sqrtPriceX96.toString()));
+}
 
 /** Absolute tick bounds (for tickSpacing=1; aligned to actual spacing below) */
 const MIN_TICK = -887272;
@@ -158,9 +205,6 @@ async function readPoolState(
   const tick = slot0Result[1];
   const liquidity = liqResult;
 
-  if (sqrtPriceX96 === 0n) {
-    throw new Error("Pool not initialized or pool ID not found on this chain.");
-  }
   return { sqrtPriceX96, tick, liquidity };
 }
 
@@ -219,6 +263,26 @@ function getAmountsForLiquidity(
 }
 
 // ── PoolKey Helpers ────────────────────────────────────────────────────
+
+/**
+ * Validate fee and tickSpacing against their on-chain ABI types.
+ * fee: uint24 (0 ≤ fee ≤ 16,777,215, integer)
+ * tickSpacing: int24, must be > 0 and ≤ 8,388,607 (integer)
+ */
+function validatePoolKeyNumerics(fee: number, tickSpacing: number): void {
+  if (!Number.isInteger(fee) || fee < 0 || fee > 0xffffff) {
+    throw new Error(
+      `Invalid fee: ${fee}. Fee must be a non-negative integer that fits in uint24 (0–16,777,215). ` +
+      `Common values: 100 (0.01%), 500 (0.05%), 3000 (0.3%), 10000 (1%).`
+    );
+  }
+  if (!Number.isInteger(tickSpacing) || tickSpacing <= 0 || tickSpacing > 0x7fffff) {
+    throw new Error(
+      `Invalid tickSpacing: ${tickSpacing}. Tick spacing must be a positive integer that fits in int24 (1–8,388,607). ` +
+      `Common values: 1, 10, 60, 200.`
+    );
+  }
+}
 
 /** Compute pool ID = keccak256(abi.encode(PoolKey)). */
 function computePoolId(poolKey: PoolKey): Hex {
@@ -360,6 +424,7 @@ export async function buildAddLiquidityTx(
   const fee = params.fee;
   const tickSpacing = params.tickSpacing ?? defaultTickSpacing(fee);
   const hooks = params.hooks ?? ZERO_ADDRESS;
+  validatePoolKeyNumerics(fee, tickSpacing);
 
   const poolKey: PoolKey = { currency0, currency1, fee, tickSpacing, hooks };
   const poolId = computePoolId(poolKey);
@@ -373,11 +438,33 @@ export async function buildAddLiquidityTx(
     poolState = await readPoolState(poolId, chainId, env.ALCHEMY_API_KEY);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // Distinguish between infrastructure failures (StateView not deployed, RPC errors)
+    // and pool-key mismatches so users are not misled into retrying with a different key.
+    const isInfraError = msg.includes("StateView not available") || msg.includes("StateView");
+    if (isInfraError) {
+      throw new Error(
+        `Failed to read pool state on chain ${chainId}: ${msg}. ` +
+        `Ensure the StateView contract is deployed on this chain and the RPC is reachable.`
+      );
+    }
     throw new Error(
       `Pool not found on chain ${chainId} with fee=${fee / 10000}%, tickSpacing=${tickSpacing}, hooks=${hooks}. ` +
+      `Computed pool ID: ${poolId}. ` +
       `Uniswap v4 requires an exact pool key match. ` +
-      `Use get_pool_info with the pool ID to discover the correct fee and tickSpacing. ` +
+      `If the pool is not yet initialized, call initialize_pool first. ` +
       `(${msg})`
+    );
+  }
+
+  // 4a. sqrtPriceX96 = 0 means either the pool is uninitialized OR the pool key
+  //     (fee/tickSpacing/hooks) doesn't match any existing pool. Both cases block LP.
+  if (poolState.sqrtPriceX96 === 0n) {
+    throw new Error(
+      `Pool ${poolId} returned sqrtPriceX96 = 0, which means either: ` +
+      `(a) the pool exists but has not been initialized yet, or ` +
+      `(b) the pool key (fee=${fee}, tickSpacing=${tickSpacing}, hooks=${hooks}) does not match any existing pool. ` +
+      `Use get_pool_info to verify the exact pool key. ` +
+      `If the pool is not yet initialized, use initialize_pool with the correct pool key and an initial price.`
     );
   }
 
@@ -469,6 +556,150 @@ export async function buildAddLiquidityTx(
   const description = `[Uniswap v4] ${action}: ${raw0} ${sym0} + ${raw1} ${sym1} (${range} range, fee ${fee / 10000}%)`;
 
   return { calldata: sdkCalldata as Hex, description, poolId, tickLower, tickUpper };
+}
+
+export interface InitializePoolParams {
+  tokenA: string;        // symbol or address
+  tokenB: string;
+  fee: number;           // fee in hundredths of a bip
+  tickSpacing?: number;  // defaults based on fee tier
+  hooks?: Address;       // hook contract (default: zero address)
+  /** Initial sqrtPriceX96 as a string. If omitted, computed from amountA + amountB. */
+  sqrtPriceX96?: string;
+  amountA?: string;      // human-readable amount of tokenA (required if sqrtPriceX96 omitted)
+  amountB?: string;      // human-readable amount of tokenB (required if sqrtPriceX96 omitted)
+}
+
+/**
+ * Build an unsigned transaction to initialize a Uniswap v4 pool.
+ *
+ * The transaction targets the PoolManager directly (not the vault), because
+ * the Rigoblock vault adapter does not expose `initializePool`. Anyone can
+ * initialize a pool — it does not need to be the vault owner.
+ *
+ * After initialization, use add_liquidity to add liquidity through the vault.
+ */
+export async function buildInitializePoolTx(
+  env: Env,
+  params: InitializePoolParams,
+  chainId: number,
+): Promise<{ calldata: Hex; description: string; poolId: Hex; poolKey: PoolKey; sqrtPriceX96: string; operatorOnly: true }> {
+  const [addrA, addrB] = await Promise.all([
+    resolveTokenAddress(chainId, params.tokenA),
+    resolveTokenAddress(chainId, params.tokenB),
+  ]);
+
+  if (addrA.toLowerCase() === addrB.toLowerCase()) {
+    throw new Error(`tokenA and tokenB must be different tokens, but both resolved to ${addrA}.`);
+  }
+
+  const isALower = addrA.toLowerCase() < addrB.toLowerCase();
+  const currency0 = (isALower ? addrA : addrB) as Address;
+  const currency1 = (isALower ? addrB : addrA) as Address;
+
+  const [dec0, dec1] = await Promise.all([
+    getTokenDecimals(chainId, currency0, env.ALCHEMY_API_KEY),
+    getTokenDecimals(chainId, currency1, env.ALCHEMY_API_KEY),
+  ]);
+
+  const fee = params.fee;
+  const tickSpacing = params.tickSpacing ?? defaultTickSpacing(fee);
+  const hooks = params.hooks ?? ZERO_ADDRESS;
+  validatePoolKeyNumerics(fee, tickSpacing);
+
+  const poolKey: PoolKey = { currency0, currency1, fee, tickSpacing, hooks };
+  const poolId = computePoolId(poolKey);
+
+  try {
+    const state = await readPoolState(poolId, chainId, env.ALCHEMY_API_KEY);
+    if (state.sqrtPriceX96 !== 0n) {
+      throw new Error(`Pool ${poolId} is already initialized (sqrtPriceX96 = ${state.sqrtPriceX96.toString()}).`);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("already initialized")) throw e;
+    // Only swallow StateView-unavailable errors — those are expected on chains without
+    // StateView deployment. Rethrow all other errors (e.g. RPC failures) so the caller
+    // gets a clear "cannot verify" message instead of silently proceeding to build a tx
+    // that might revert.
+    if (!msg.includes("StateView not available")) {
+      throw new Error(`Could not verify pool initialization state: ${msg}. Please retry or check your RPC connection.`);
+    }
+    // StateView not available on this chain — proceed without the pre-check.
+  }
+
+  let sqrtPriceX96: bigint;
+  if (params.sqrtPriceX96 !== undefined) {
+    sqrtPriceX96 = BigInt(params.sqrtPriceX96);
+    if (sqrtPriceX96 <= 0n) {
+      throw new Error(`sqrtPriceX96 must be greater than zero (got ${sqrtPriceX96}).`);
+    }
+    if (sqrtPriceX96 < MIN_SQRT_RATIO || sqrtPriceX96 >= MAX_SQRT_RATIO) {
+      throw new Error(
+        `sqrtPriceX96 ${sqrtPriceX96} is outside TickMath bounds ` +
+        `[${MIN_SQRT_RATIO}, ${MAX_SQRT_RATIO}). ` +
+        `Use computeSqrtPriceX96FromAmounts (via amountA + amountB) to derive a valid initial price.`
+      );
+    }
+  } else if (params.amountA !== undefined && params.amountB !== undefined) {
+    const raw0 = isALower ? params.amountA : params.amountB;
+    const raw1 = isALower ? params.amountB : params.amountA;
+    const amount0 = parseUnits(raw0, dec0);
+    const amount1 = parseUnits(raw1, dec1);
+    sqrtPriceX96 = computeSqrtPriceX96FromAmounts(amount0, amount1);
+  } else {
+    throw new Error(
+      `Either sqrtPriceX96 or both amounts (amountA + amountB) must be provided to compute the initial pool price.`
+    );
+  }
+
+  const tick = getTickAtSqrtPriceX96(sqrtPriceX96);
+
+  // Build PoolManager.initialize(poolKey, sqrtPriceX96) calldata
+  const poolManager = POOL_MANAGER[chainId];
+  if (!poolManager) {
+    throw new Error(`Uniswap v4 PoolManager not available on chain ${chainId}.`);
+  }
+
+  const initializeAbi = [{
+    name: "initialize",
+    type: "function" as const,
+    stateMutability: "nonpayable" as const,
+    inputs: [
+      {
+        name: "key",
+        type: "tuple" as const,
+        components: [
+          { name: "currency0", type: "address" as const },
+          { name: "currency1", type: "address" as const },
+          { name: "fee", type: "uint24" as const },
+          { name: "tickSpacing", type: "int24" as const },
+          { name: "hooks", type: "address" as const },
+        ],
+      },
+      { name: "sqrtPriceX96", type: "uint160" as const },
+    ],
+    outputs: [{ name: "tick", type: "int24" as const }],
+  }] as const;
+
+  const calldata = encodeFunctionData({
+    abi: initializeAbi,
+    functionName: "initialize",
+    args: [poolKey, sqrtPriceX96],
+  });
+
+  const sym0 = isALower ? params.tokenA : params.tokenB;
+  const sym1 = isALower ? params.tokenB : params.tokenA;
+  const description = `[Uniswap v4] Initialize pool: ${sym0}/${sym1} (fee ${fee / 10000}%, tickSpacing ${tickSpacing}, hooks ${hooks}) at tick ${tick}, sqrtPriceX96 ${sqrtPriceX96.toString()}`;
+
+  return {
+    calldata,
+    description,
+    poolId,
+    poolKey,
+    sqrtPriceX96: sqrtPriceX96.toString(),
+    operatorOnly: true,
+  };
 }
 
 export interface RemoveLiquidityParams {
@@ -605,6 +836,13 @@ export interface PoolInfo {
   /** The keccak256(abi.encode(PoolKey)) pool ID. */
   poolId: Hex;
   initialized: boolean;
+  /**
+   * True when fee/tickSpacing/hooks/currency0/currency1 are authoritative values from
+   * the on-chain Initialize event.  False when the pool is uninitialized and these fields
+   * are zero/unknown placeholders — callers must ask the user for the full pool key before
+   * presenting them as parameters for initialize_pool.
+   */
+  poolKeyKnown: boolean;
   /** Fee tier in hundredths of a bip (e.g. 6000 = 0.60%). */
   fee: number;
   /** Tick spacing — always exact (from Initialize event or provided). */
@@ -654,10 +892,6 @@ export async function getPoolInfoById(
   const tick = slot0Result[1];
   const lpFee = slot0Result[3];
 
-  if (sqrtPriceX96 === 0n) {
-    throw new Error(`Pool ${poolId} not found or not initialized on chain ${chainId}.`);
-  }
-
   // 2. Fetch Initialize event to recover tickSpacing, hooks, and token addresses
   let fee: number = lpFee;
   let tickSpacing: number = defaultTickSpacing(lpFee);
@@ -665,6 +899,7 @@ export async function getPoolInfoById(
   let currency0: Address = "0x0000000000000000000000000000000000000000" as Address;
   let currency1: Address = "0x0000000000000000000000000000000000000000" as Address;
 
+  let hasInitializeEvent = false;
   try {
     const logs = await client.getLogs({
       address: poolManager,
@@ -674,6 +909,7 @@ export async function getPoolInfoById(
       toBlock: "latest",
     });
     if (logs.length > 0 && logs[0].args) {
+      hasInitializeEvent = true;
       const e = logs[0].args;
       fee         = Number(e.fee ?? lpFee);
       tickSpacing = Number(e.tickSpacing ?? defaultTickSpacing(lpFee));
@@ -685,9 +921,29 @@ export async function getPoolInfoById(
     // Initialize event lookup failed (node limitation) — fee from slot0, ts estimated
   }
 
+  if (sqrtPriceX96 === 0n && !hasInitializeEvent) {
+    // Pool is uninitialized (slot0 returns 0 and no Initialize event found).
+    // Return an uninitialized PoolInfo so callers can guide the user to initialize_pool.
+    // Note: initialize_pool requires the full pool key (tokenA, tokenB, fee, tickSpacing,
+    // hooks) — it cannot be derived from a poolId alone.
+    return {
+      poolId,
+      initialized: false,
+      poolKeyKnown: false,
+      fee,
+      tickSpacing,
+      hooks,
+      currency0,
+      currency1,
+      sqrtPriceX96: "0",
+      currentTick: 0,
+    };
+  }
+
   return {
     poolId,
-    initialized: true,
+    initialized: hasInitializeEvent || sqrtPriceX96 !== 0n,
+    poolKeyKnown: hasInitializeEvent,
     fee,
     tickSpacing,
     hooks,
