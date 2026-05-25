@@ -76,11 +76,42 @@ const STATE_VIEW: Record<number, Address> = {
 /** Q96 = 2^96 for fixed-point sqrtPrice math */
 const Q96 = 2n ** 96n;
 
-/** Compute sqrtPriceX96 from a ratio of raw token amounts. */
-function computeSqrtPriceX96FromAmounts(amount0: bigint, amount1: bigint): bigint {
-  const price = Number(amount1) / Number(amount0);
-  const sqrtPrice = Math.sqrt(price);
-  return BigInt(Math.floor(sqrtPrice * Number(Q96)));
+/** TickMath absolute sqrtRatio bounds (from Uniswap v3 TickMath.sol) */
+const MIN_SQRT_RATIO = 4295128739n;
+const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n;
+
+/** Integer square root — returns floor(sqrt(n)) using Newton-Raphson. */
+function isqrt(n: bigint): bigint {
+  if (n === 0n) return 0n;
+  let x = n;
+  let y = (x + 1n) >> 1n;
+  while (y < x) {
+    x = y;
+    y = (x + n / x) >> 1n;
+  }
+  return x;
+}
+
+/**
+ * Compute sqrtPriceX96 from a ratio of raw token amounts using integer math.
+ * Avoids floating-point precision loss for large ERC-20 base-unit amounts.
+ *
+ * sqrtPriceX96 = sqrt(amount1 / amount0) * 2^96
+ *              = floor(sqrt(amount1 * 2^192 / amount0))
+ *
+ * @throws if either amount is zero (would produce an invalid or infinite price)
+ */
+export function computeSqrtPriceX96FromAmounts(amount0: bigint, amount1: bigint): bigint {
+  if (amount0 <= 0n) throw new Error("amount0 must be greater than zero to compute initial pool price");
+  if (amount1 <= 0n) throw new Error("amount1 must be greater than zero to compute initial pool price");
+  const sqrtPriceX96 = isqrt(amount1 * Q96 * Q96 / amount0);
+  if (sqrtPriceX96 < MIN_SQRT_RATIO || sqrtPriceX96 >= MAX_SQRT_RATIO) {
+    throw new Error(
+      `Computed sqrtPriceX96 (${sqrtPriceX96}) is outside TickMath bounds. ` +
+      `Choose a price ratio that corresponds to a tick within [${MIN_TICK}, ${MAX_TICK}].`
+    );
+  }
+  return sqrtPriceX96;
 }
 
 /** Get the floor tick for a given sqrtPriceX96 using the official TickMath. */
@@ -549,7 +580,8 @@ export async function buildInitializePoolTx(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes("already initialized")) throw e;
-    // Pool not found on StateView is OK — means it truly doesn't exist yet
+    // readPoolState returns sqrtPriceX96=0 for uninitialized pools (does not throw).
+    // A thrown error here indicates an RPC issue or missing StateView deployment — proceed.
   }
 
   let sqrtPriceX96: bigint;
@@ -829,12 +861,21 @@ export async function getPoolInfoById(
   }
 
   if (sqrtPriceX96 === 0n && !hasInitializeEvent) {
-    throw new Error(
-      `Pool ${poolId} not found on chain ${chainId}. ` +
-      `No Initialize event exists and slot0 shows sqrtPriceX96 = 0. ` +
-      `The pool may not exist, or the RPC node does not support log filtering. ` +
-      `Verify the pool ID and chain.`
-    );
+    // Pool is uninitialized (slot0 returns 0 and no Initialize event found).
+    // Return an uninitialized PoolInfo so callers can guide the user to initialize_pool.
+    // Note: initialize_pool requires the full pool key (tokenA, tokenB, fee, tickSpacing,
+    // hooks) — it cannot be derived from a poolId alone.
+    return {
+      poolId,
+      initialized: false,
+      fee,
+      tickSpacing,
+      hooks,
+      currency0,
+      currency1,
+      sqrtPriceX96: "0",
+      currentTick: 0,
+    };
   }
 
   return {

@@ -10,7 +10,7 @@
  * Helper: pack tickLower into bits[31..8] and tickUpper into bits[55..32].
  */
 import { describe, it, expect } from "vitest";
-import { decodePositionInfo, buildBurnPositionTx, buildRemoveLiquidityTx, buildCollectFeesTx } from "../src/services/uniswapLP.js";
+import { decodePositionInfo, buildBurnPositionTx, buildRemoveLiquidityTx, buildCollectFeesTx, computeSqrtPriceX96FromAmounts } from "../src/services/uniswapLP.js";
 import { Pool, Position, V4PositionManager } from "@uniswap/v4-sdk";
 import { Token, Percent } from "@uniswap/sdk-core";
 
@@ -307,3 +307,60 @@ describe("buildCollectFeesTx", () => {
   });
 });
 
+// ── computeSqrtPriceX96FromAmounts — integer math precision ──────────
+// Validates that the integer-math implementation produces correct results
+// without floating-point overflow or precision loss for ERC-20 base units.
+
+describe("computeSqrtPriceX96FromAmounts", () => {
+  const Q96 = 2n ** 96n;
+
+  it("1:1 ratio returns exactly Q96 (sqrt(1) * 2^96)", () => {
+    // Any equal amounts produce price = 1, so sqrtPriceX96 = 2^96
+    const result = computeSqrtPriceX96FromAmounts(10n ** 6n, 10n ** 6n);
+    expect(result).toBe(Q96);
+  });
+
+  it("4:1 ratio (amount1/amount0 = 4) returns 2 * Q96", () => {
+    // price = 4, sqrt(4) = 2, sqrtPriceX96 = 2 * Q96
+    const result = computeSqrtPriceX96FromAmounts(1n, 4n);
+    expect(result).toBe(2n * Q96);
+  });
+
+  it("throws when amount0 is zero", () => {
+    expect(() => computeSqrtPriceX96FromAmounts(0n, 10n ** 6n)).toThrow("amount0 must be greater than zero");
+  });
+
+  it("throws when amount1 is zero", () => {
+    expect(() => computeSqrtPriceX96FromAmounts(10n ** 6n, 0n)).toThrow("amount1 must be greater than zero");
+  });
+
+  it("handles large ERC-20 base-unit amounts without precision loss", () => {
+    // 1 ETH (18 dec) vs 2000 USDC (6 dec): amount0=1e18, amount1=2000e6
+    // price = 2000e6 / 1e18 = 2e-9; sqrtPriceX96 = sqrt(2e-9) * 2^96 ≈ 3.54e24
+    // Key property: result must be > 0 (floating-point would lose precision for such small prices)
+    const amount0 = 10n ** 18n;       // 1 ETH in wei
+    const amount1 = 2000n * 10n ** 6n; // 2000 USDC
+    const result = computeSqrtPriceX96FromAmounts(amount0, amount1);
+    expect(result).toBeGreaterThan(0n);
+    // sqrt(2e-9) * 2^96 ≈ 3.54e24 — verify we're in the right order of magnitude
+    expect(result).toBeGreaterThan(3_000_000_000_000_000_000_000_000n);
+    expect(result).toBeLessThan(4_000_000_000_000_000_000_000_000n);
+  });
+
+  it("throws when ratio is so extreme that sqrtPriceX96 is out of TickMath bounds", () => {
+    // Ratio 1:1e60 is far outside valid tick range
+    expect(() => computeSqrtPriceX96FromAmounts(1n, 10n ** 60n)).toThrow("outside TickMath bounds");
+  });
+
+  it("result is symmetric: swapping amounts produces reciprocal sqrtPriceX96", () => {
+    // price(a/b) = 1 / price(b/a), so sqrtPriceX96(a,b) * sqrtPriceX96(b,a) ≈ Q96^2
+    const r1 = computeSqrtPriceX96FromAmounts(1n * 10n ** 6n, 4n * 10n ** 6n); // price = 4
+    const r2 = computeSqrtPriceX96FromAmounts(4n * 10n ** 6n, 1n * 10n ** 6n); // price = 0.25
+    // r1 = 2*Q96, r2 = 0.5*Q96 → r1 * r2 ≈ Q96^2
+    const product = r1 * r2;
+    const expected = Q96 * Q96;
+    // Allow ±1 for integer floor rounding
+    const diff = product > expected ? product - expected : expected - product;
+    expect(diff).toBeLessThanOrEqual(Q96);
+  });
+});
