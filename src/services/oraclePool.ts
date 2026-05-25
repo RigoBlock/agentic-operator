@@ -228,6 +228,10 @@ export async function buildOraclePoolSwapTx(
     throw new Error(`Universal Router not available on chain ${chainId}.`);
   }
 
+  if (vaultAddress !== undefined && vaultAddress === "0x0000000000000000000000000000000000000000") {
+    throw new Error("vaultAddress must be a valid non-zero vault address.");
+  }
+
   // Resolve token address — normalize WETH/ETH to address(0)
   const rawTokenAddr = await resolveTokenAddress(chainId, token);
   const tokenAddr: Address =
