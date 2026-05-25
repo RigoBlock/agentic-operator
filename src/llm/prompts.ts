@@ -105,7 +105,7 @@ export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
     "gmx_claim_funding_fees", "gmx_get_markets",
   ],
   lp: [
-    "get_pool_info", "add_liquidity", "remove_liquidity",
+    "get_pool_info", "initialize_pool", "add_liquidity", "remove_liquidity",
     "get_lp_positions", "collect_lp_fees", "burn_position",
   ],
   bridge: [
@@ -296,8 +296,16 @@ GMX INTENT PARSING:
 Ask the user for pool details or a pool ID, then call get_pool_info to discover the exact pool key.
 
 1. Call get_pool_info if you only have the pool ID.
-2. Call add_liquidity with ONE token amount — the backend computes the optimal counterpart.
-3. tickRange options: "full" (entire range), "wide" (±50%), "narrow" (±5%), or exact "tickLower,tickUpper".
+2. If the pool is NOT initialized, call initialize_pool first (provide both token amounts to compute the initial price).
+3. Call add_liquidity with ONE token amount — the backend computes the optimal counterpart.
+4. tickRange options: "full" (entire range), "wide" (±50%), "narrow" (±5%), or exact "tickLower,tickUpper".
+
+POOL INITIALIZATION:
+- Uniswap v4 pools must be initialized before adding liquidity.
+- initialize_pool targets the PoolManager directly (not the vault) and sets the initial price.
+- Anyone can initialize a pool — it does not require vault ownership.
+- After initialization, use add_liquidity to add liquidity through the vault.
+- fee=0 does NOT auto-derive tickSpacing=32767. Always pass tickSpacing explicitly for non-standard pools.
 
 LP POSITION LIFECYCLE:
   Active → [remove_liquidity] → Closed (0 liquidity, fees may remain, NFT exists)

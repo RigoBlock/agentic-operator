@@ -26,6 +26,7 @@ const REQUIRED_TOOLS = [
   "gmx_increase_position",
   // Uniswap LP
   "get_pool_info",
+  "initialize_pool",
   "add_liquidity",
   "remove_liquidity",
   "get_lp_positions",

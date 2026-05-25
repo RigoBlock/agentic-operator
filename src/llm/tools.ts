@@ -735,6 +735,9 @@ export const TOOL_DEFINITIONS = [
         "the backend computes the optimal counterpart amount from the current pool price and tick range. " +
         "IMPORTANT: Uniswap v4 supports infinite fee tiers and custom tickSpacings — the fee and " +
         "tickSpacing must match the pool exactly or the transaction will fail. " +
+        "CRITICAL: fee=0 does NOT auto-derive tickSpacing=32767; the default for fee=0 is tickSpacing=1. " +
+        "Always provide tickSpacing explicitly for non-standard pools (e.g. oracle pools with tickSpacing=32767). " +
+        "If the pool is not yet initialized, call initialize_pool first. " +
         "If you only know the pool ID, call get_pool_info first to discover the exact pool key.",
       parameters: {
         type: "object",
@@ -769,8 +772,10 @@ export const TOOL_DEFINITIONS = [
           tickSpacing: {
             type: "number",
             description:
-              "Tick spacing for the pool — must match the pool exactly for non-standard pools. " +
-              "Auto-derived from fee if not specified: 100→1, 500→10, 3000→60, 6000→120, 10000→200. " +
+              "Tick spacing for the pool — REQUIRED when fee does not map to a standard tier. " +
+              "Auto-derived from fee if omitted: 100→1, 500→10, 3000→60, 6000→120, 10000→200. " +
+              "WARNING: fee=0 defaults to tickSpacing=1, NOT 32767. " +
+              "Oracle pools and full-range positions often use tickSpacing=32767 — pass it explicitly. " +
               "Use get_pool_info to retrieve the exact value for any pool.",
           },
           tickRange: {
@@ -788,6 +793,73 @@ export const TOOL_DEFINITIONS = [
             description:
               "Hook contract address for the pool. Default: zero address (no hooks). " +
               "Get the exact value from get_pool_info — any mismatch means a different pool.",
+          },
+        },
+        required: ["tokenA", "tokenB", "fee"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "initialize_pool",
+      description:
+        "Initialize a Uniswap v4 pool on the PoolManager. " +
+        "ANYONE can initialize a pool — it does not require vault ownership. " +
+        "Initialization sets the initial price (sqrtPriceX96) and creates the pool so liquidity can be added. " +
+        "You must provide either (1) both token amounts, from which the initial price is computed, OR " +
+        "(2) an explicit sqrtPriceX96 string. " +
+        "After initialization, use add_liquidity to add liquidity through the vault. " +
+        "This transaction targets the PoolManager directly (not the vault) and must be signed by the operator.",
+      parameters: {
+        type: "object",
+        properties: {
+          tokenA: {
+            type: "string",
+            description: "First token — symbol (e.g., ETH, WBTC, USDC) or address",
+          },
+          tokenB: {
+            type: "string",
+            description: "Second token — symbol (e.g., USDT, USDC, WBTC) or address",
+          },
+          fee: {
+            type: "number",
+            description:
+              "Pool fee in hundredths of a bip — REQUIRED. " +
+              "Common values: 0=0%, 100=0.01%, 500=0.05%, 3000=0.30%, 10000=1%.",
+          },
+          tickSpacing: {
+            type: "number",
+            description:
+              "Tick spacing for the pool — REQUIRED for non-standard pools. " +
+              "Auto-derived from fee if omitted: 100→1, 500→10, 3000→60, 6000→120, 10000→200. " +
+              "WARNING: fee=0 defaults to tickSpacing=1, NOT 32767.",
+          },
+          hooks: {
+            type: "string",
+            description: "Hook contract address. Default: zero address (no hooks).",
+          },
+          sqrtPriceX96: {
+            type: "string",
+            description:
+              "Explicit initial sqrtPriceX96 as a decimal string (Q64.96 fixed-point). " +
+              "If omitted, amountA and amountB must be provided to compute the price automatically.",
+          },
+          amountA: {
+            type: "string",
+            description:
+              "Amount of tokenA to use for price computation (human-readable). " +
+              "Required if sqrtPriceX96 is omitted.",
+          },
+          amountB: {
+            type: "string",
+            description:
+              "Amount of tokenB to use for price computation (human-readable). " +
+              "Required if sqrtPriceX96 is omitted.",
+          },
+          chain: {
+            type: "string",
+            description: "Target chain name or ID (e.g., 'ethereum', 'base', '42161')",
           },
         },
         required: ["tokenA", "tokenB", "fee"],

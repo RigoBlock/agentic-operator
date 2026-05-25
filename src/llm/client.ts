@@ -57,7 +57,7 @@ import {
   buildRebalancePlan,
   chainName as crosschainChainName,
 } from "../services/crosschain.js";
-import { buildAddLiquidityTx, buildRemoveLiquidityTx, getVaultLPPositions, buildCollectFeesTx, buildBurnPositionTx, getPoolInfoById, getPositionDirect } from "../services/uniswapLP.js";
+import { buildAddLiquidityTx, buildRemoveLiquidityTx, buildInitializePoolTx, getVaultLPPositions, buildCollectFeesTx, buildBurnPositionTx, getPoolInfoById, getPositionDirect, POOL_MANAGER } from "../services/uniswapLP.js";
 import {
   buildStakeCalldata,
   buildUndelegateStakeCalldata,
@@ -105,6 +105,7 @@ export const TOOL_NAME_ALIASES: Record<string, string> = {
   trade: "build_vault_swap",
   build_lp_add: "add_liquidity",
   build_lp_remove: "remove_liquidity",
+  init_pool: "initialize_pool",
   bridge_tokens: "crosschain_transfer",
   stake_grg: "grg_stake",
   equalize_nav: "crosschain_sync",
@@ -4063,7 +4064,9 @@ export async function executeToolCall(
         `Currency 1: ${info.currency1}`,
         `Current Tick: ${info.currentTick}`,
         ``,
-        `To add liquidity: use fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`,
+        info.initialized
+          ? `To add liquidity: use fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`
+          : `⚠️ Pool is NOT initialized. Call initialize_pool first with fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`,
       ].join("\n");
 
       return { message };
@@ -4115,6 +4118,59 @@ export async function executeToolCall(
         `${result.description}`,
         `Tick range: [${result.tickLower}, ${result.tickUpper}]`,
         `Chain: ${chainName}`,
+      ].join("\n");
+
+      return { message, transaction, chainSwitch: chainSwitched };
+    }
+
+    case "initialize_pool": {
+      if (!ctx.operatorAddress) {
+        throw new Error("Wallet not connected. Connect your wallet first.");
+      }
+
+      let chainSwitched: number | undefined;
+      if (args.chain) {
+        const match = resolveChainArg((args.chain as string).trim());
+        if (match.id !== ctx.chainId) {
+          ctx.chainId = match.id;
+          chainSwitched = match.id;
+        }
+      }
+
+      const result = await buildInitializePoolTx(env, {
+        tokenA: args.tokenA as string,
+        tokenB: args.tokenB as string,
+        fee: args.fee as number,
+        tickSpacing: args.tickSpacing as number | undefined,
+        hooks: args.hooks as Address | undefined,
+        sqrtPriceX96: args.sqrtPriceX96 as string | undefined,
+        amountA: args.amountA as string | undefined,
+        amountB: args.amountB as string | undefined,
+      }, ctx.chainId);
+
+      const transaction: UnsignedTransaction = {
+        to: POOL_MANAGER[ctx.chainId],
+        data: result.calldata,
+        value: "0x0",
+        chainId: ctx.chainId,
+        gas: await estimateGas(
+          ctx.chainId, POOL_MANAGER[ctx.chainId],
+          result.calldata, "0x0",
+          ctx.operatorAddress, env.ALCHEMY_API_KEY, "lp",
+        ),
+        description: result.description,
+        operatorOnly: true,
+      };
+
+      const chainName = resolveChainName(ctx.chainId);
+      const message = [
+        `✅ Initialize Pool ready`,
+        `${result.description}`,
+        `Pool ID: ${result.poolId}`,
+        `Chain: ${chainName}`,
+        ``,
+        `⚠️ This transaction must be signed and broadcast from your wallet (not the vault). ` +
+        `After confirmation, you can add liquidity via add_liquidity.`,
       ].join("\n");
 
       return { message, transaction, chainSwitch: chainSwitched };
