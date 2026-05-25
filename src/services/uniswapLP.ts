@@ -435,12 +435,15 @@ export async function buildAddLiquidityTx(
     );
   }
 
-  // 4a. Pool exists on-chain but has not been initialized (sqrtPriceX96 = 0).
+  // 4a. sqrtPriceX96 = 0 means either the pool is uninitialized OR the pool key
+  //     (fee/tickSpacing/hooks) doesn't match any existing pool. Both cases block LP.
   if (poolState.sqrtPriceX96 === 0n) {
     throw new Error(
-      `Pool ${poolId} is not initialized. ` +
-      `You must initialize the pool before adding liquidity. ` +
-      `Use the initialize_pool tool with the same pool key and an initial price (or both token amounts).`
+      `Pool ${poolId} returned sqrtPriceX96 = 0, which means either: ` +
+      `(a) the pool exists but has not been initialized yet, or ` +
+      `(b) the pool key (fee=${fee}, tickSpacing=${tickSpacing}, hooks=${hooks}) does not match any existing pool. ` +
+      `Use get_pool_info to verify the exact pool key. ` +
+      `If the pool is not yet initialized, use initialize_pool with the correct pool key and an initial price.`
     );
   }
 
@@ -915,7 +918,7 @@ export async function getPoolInfoById(
   return {
     poolId,
     initialized: hasInitializeEvent || sqrtPriceX96 !== 0n,
-    poolKeyKnown: true,
+    poolKeyKnown: hasInitializeEvent,
     fee,
     tickSpacing,
     hooks,
