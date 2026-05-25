@@ -308,10 +308,14 @@ export async function buildOraclePoolSwapTx(
   //   PoolKey, zeroForOne=true, amountIn, amountOutMin=0, hookData=0x
   //
   // param[1] — SETTLE_ALL: (currencyIn, maxAmount)
-  //   Settles ETH from msg.value. maxAmount = amountIn ensures no over-settling.
+  //   EOA path: settles ETH from msg.value. Vault path: settles from the vault's own
+  //   native balance (vault.execute is non-payable, so value=0; the vault adapter
+  //   sources the native token internally). maxAmount = amountIn ensures no over-settling.
   //
   // param[2] — TAKE_ALL: (currencyOut, minAmount=0)
-  //   Takes all token output and sends to msg.sender (the operator).
+  //   Takes all token output and sends to msg.sender.
+  //   EOA path: msg.sender is the operator, so the operator receives the output token.
+  //   Vault path: msg.sender is the vault adapter, so the output token stays in the vault.
 
   const swapParam = encodeAbiParameters(
     [

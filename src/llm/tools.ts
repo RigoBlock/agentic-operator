@@ -1139,6 +1139,7 @@ export const TOOL_DEFINITIONS = [
         "(1) EOA path (default): OPERATOR EOA transaction (to: Universal Router, NOT the vault) — " +
         "the operator signs with their personal wallet and receives the output token. " +
         "(2) Vault path (viaVault=true): routes through the vault adapter (value=0, supports delegation). " +
+        "The output token is sent to msg.sender of the Universal Router, which is the vault adapter — so the output stays in the vault. " +
         "If the user says 'buy N TOKEN' without specifying input amount, pass amountOut=N and " +
         "the system will estimate the required native token input. If no amount is given at all, " +
         "a default of 0.001 native token is used.",

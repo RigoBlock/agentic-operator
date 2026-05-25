@@ -2477,25 +2477,26 @@ export async function executeToolCall(
         throw new Error("'token' is required. Specify the token symbol whose oracle feed is stale (e.g., 'GRG', 'USDC').");
       }
 
-      // Auto-switch chain if provided
+      // Vault-dependent options (viaVault, amountOut) require ctx.vaultAddress to be on
+      // the active chain. Check this BEFORE mutating ctx.chainId to avoid leaving context
+      // in a partially-switched state if the guard throws.
+      const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+      const requestsVaultPath = args.viaVault === true || args.viaVault === "true" || !!args.amountOut;
+
+      // Auto-switch chain if provided (only safe for non-vault-dependent calls)
       let oracleChainSwitched: number | undefined;
       if (args.chain) {
         const requestedChain = resolveChainId(args.chain as string);
         if (requestedChain !== ctx.chainId) {
+          if (requestsVaultPath) {
+            throw new Error(
+              `Cannot switch chains while using vault-dependent options (viaVault or amountOut). ` +
+              `Connect a vault on chain ${requestedChain} first, or omit viaVault/amountOut.`
+            );
+          }
           ctx.chainId = requestedChain;
           oracleChainSwitched = requestedChain;
         }
-      }
-
-      // Vault-dependent options (viaVault, amountOut) require ctx.vaultAddress to be on
-      // the active chain. Disallow chain auto-switch when either is requested.
-      const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-      const requestsVaultPath = args.viaVault === true || args.viaVault === "true" || !!args.amountOut;
-      if (oracleChainSwitched && requestsVaultPath) {
-        throw new Error(
-          `Cannot switch chains while using vault-dependent options (viaVault or amountOut). ` +
-          `Connect a vault on chain ${oracleChainSwitched} first, or omit viaVault/amountOut.`
-        );
       }
 
       const nativeSymbol = getNativeTokenSymbol(ctx.chainId);
