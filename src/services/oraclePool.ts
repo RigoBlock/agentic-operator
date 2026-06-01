@@ -42,9 +42,8 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { getClient } from "./vault.js";
+import { getClient, getTokenDecimals } from "./vault.js";
 import { resolveTokenAddress, TOKEN_MAP, NATIVE_TOKEN, getNativeTokenSymbol } from "../config.js";
-import { getTokenDecimals } from "./vault.js";
 
 // ── BackgeoOracle contract addresses per chain ─────────────────────────
 // Source: https://github.com/RigoBlock/v3-contracts/blob/development/src/utils/constants.ts
@@ -299,11 +298,18 @@ export async function buildOraclePoolSwapTx(
   // Parse input amount (native token for buy, ERC-20 token for sell)
   const isBuy = direction === "buy";
   let amountInWei: bigint;
-  if (isBuy) {
-    amountInWei = parseUnits(amountIn, 18);
-  } else {
-    const tokenDecimals = await getTokenDecimals(chainId, tokenAddr, alchemyKey);
-    amountInWei = parseUnits(amountIn, tokenDecimals);
+  try {
+    if (isBuy) {
+      amountInWei = parseUnits(amountIn, 18);
+    } else {
+      const tokenDecimals = await getTokenDecimals(chainId, tokenAddr, alchemyKey);
+      amountInWei = parseUnits(amountIn, tokenDecimals);
+    }
+  } catch {
+    throw new Error(
+      `Invalid decimal: "${amountIn}" has too many decimal places for the token. ` +
+      `Use a smaller precision (e.g. "0.001"). Scientific notation is not supported.`
+    );
   }
   if (amountInWei <= 0n) {
     throw new Error(

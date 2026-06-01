@@ -12,51 +12,12 @@ import {
   getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay, calculateVaultGasLimit,
 } from "../../services/uniswapTrading.js";
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../../services/zeroXTrading.js";
-import {
-  getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint, getClient,
-} from "../../services/vault.js";
-import { resolveTokenAddress, resolveChainId, sanitizeError, STAKING_PROXY, getNativeTokenSymbol } from "../../config.js";
-import { decodeFunctionData, encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
+import { getVaultTokenBalance, encodeVaultExecute } from "../../services/vault.js";
+import { resolveTokenAddress } from "../../config.js";
+import { decodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
-import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../../abi/poolFactory.js";
-import { ERC20_ABI } from "../../abi/erc20.js";
 import {
-  prepareDelegation, prepareRevocation, prepareSelectiveRevocation,
-  checkDelegationOnChain, buildDefaultSelectors, getDelegationConfig, revokeDelegationOnChain,
-} from "../../services/delegation.js";
-import { getAgentWalletInfo } from "../../services/agentWallet.js";
-import {
-  findGmxMarket, getGmxMarkets, getGmxTickers, getGmxTokenPrice,
-  resolveGmxCollateral, getGmxTokenDecimals,
-  buildCreateIncreaseOrderCalldata, buildCreateDecreaseOrderCalldata,
-  buildUpdateOrderCalldata, buildCancelOrderCalldata, buildClaimFundingFeesCalldata,
-} from "../../services/gmxTrading.js";
-import { getGmxPositionsSummary, getGmxPositions } from "../../services/gmxPositions.js";
-import { ARBITRUM_CHAIN_ID, GmxOrderType } from "../../abi/gmx.js";
-import {
-  getCrosschainQuote, buildCrosschainTransfer, buildCrosschainSync,
-  getAggregatedNav, buildRebalancePlan, chainName as crosschainChainName,
-} from "../../services/crosschain.js";
-import {
-  buildAddLiquidityTx, buildRemoveLiquidityTx, buildInitializePoolTx,
-  getVaultLPPositions, buildCollectFeesTx, buildBurnPositionTx,
-  getPoolInfoById, getPositionDirect, POOL_MANAGER,
-} from "../../services/uniswapLP.js";
-import {
-  buildStakeCalldata, buildUndelegateStakeCalldata, buildUnstakeCalldata,
-  buildEndEpochCalldata, buildWithdrawDelegatorRewardsCalldata,
-} from "../../services/grgStaking.js";
-import { checkNavImpact } from "../../services/navGuard.js";
-import {
-  checkSwapPrice, getSwapShieldTolerance, setSwapShieldTolerance, clearSwapShieldTolerance,
-  getStoredSlippage, setStoredSlippage,
-  DEFAULT_SLIPPAGE_BPS, MIN_SLIPPAGE_BPS, MAX_SLIPPAGE_BPS, DEFAULT_MAX_DIVERGENCE_PCT,
-} from "../../services/swapShield.js";
-import { buildOraclePoolSwapTx } from "../../services/oraclePool.js";
-import { AuthError } from "../../services/auth.js";
-import {
-  friendlyError, estimateGas, preCheckNavImpact,
-  resolveChainName, resolveSlippage, runSwapShield, executeToolCall, switchChainIfNeeded,
+  estimateGas, preCheckNavImpact, resolveChainName, resolveSlippage, runSwapShield, switchChainIfNeeded,
 } from "../client.js";
 
 /** Format a raw wei amount to a human-readable decimal string (6 places). */
