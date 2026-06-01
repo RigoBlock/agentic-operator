@@ -81,9 +81,14 @@ function discoverRoutes(): DiscoveredRoute[] {
     const resolvedPath = join(SRC_DIR, relative);
     const routeSrc = readFileSync(resolvedPath, "utf-8");
 
-    // Find methods: quoteUniswap.post("/", ...) or quoteUniswap.get("/", ...)
-    // Capture the sub-route path too, e.g. oracle.post("/refresh", ...)
-    const methodRe = new RegExp(`${varName}\\.(get|post|put|delete)\\("([^"]+)"`, "g");
+    // Find the router variable name declared inside the sub-router file
+    // (e.g. "const tools = new Hono<...>()" → "tools"). The import alias in
+    // index.ts (e.g. "toolsRoute") does NOT match the variable used inside the file.
+    const routerVarMatch = routeSrc.match(/const\s+(\w+)\s*=\s*new\s+Hono/);
+    const routerVar = routerVarMatch ? routerVarMatch[1] : varName;
+
+    // Find methods: tools.get("/", ...) or oracle.post("/refresh", ...)
+    const methodRe = new RegExp(`${routerVar}\\.(get|post|put|delete)\\("([^"]+)"`, "g");
     let mm: RegExpExecArray | null;
     while ((mm = methodRe.exec(routeSrc)) !== null) {
       const subPath = mm[2];

@@ -22,7 +22,7 @@ import { Hono } from "hono";
 import { parseUnits, isAddress, type Address } from "viem";
 import type { Env, AppVariables } from "../types.js";
 import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
-import { sanitizeError, resolveChainId, getNativeTokenSymbol } from "../config.js";
+import { sanitizeError, resolveChainId } from "../config.js";
 
 export const oracle = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
@@ -86,8 +86,6 @@ oracle.post("/refresh", async (c) => {
       400,
     );
   }
-
-  const nativeSymbol = getNativeTokenSymbol(chainId);
 
   // Default amount: 0.001 units is small enough to be financially insignificant for
   // every token (0.001 ETH ≈ $2–6, 0.001 WBTC ≈ $100, 0.001 USDC ≈ $0.001), while

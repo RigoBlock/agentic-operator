@@ -61,25 +61,30 @@ quote0x.get("/", async (c) => {
   }
 
   // ── Oracle enrichment ──
+  // Skip for exact-output (buy-amount) quotes: the oracle expects an input amount
+  // to compare against the DEX quote, but exact-output quotes only provide buyAmount.
   const query = c.req.query();
-  const chainId = Number(query.chainId || "1");
-  const tokenIn = (query.sellToken || "") as Address;
-  const tokenOut = (query.buyToken || "") as Address;
-  const amountIn = query.sellAmount || "0";
-  const dexExpectedOut = String(data.buyAmount || "0");
-
   let enrichment;
-  try {
-    enrichment = await enrichQuoteWithOracle(
-      chainId,
-      tokenIn,
-      tokenOut,
-      amountIn,
-      dexExpectedOut,
-      c.env.ALCHEMY_API_KEY,
-    );
-  } catch {
+  if (!query.sellAmount) {
     enrichment = { priceFeedExists: false, deltaBps: 0, oracleAmount: "0" };
+  } else {
+    const chainId = Number(query.chainId || "1");
+    const tokenIn = (query.sellToken || "") as Address;
+    const tokenOut = (query.buyToken || "") as Address;
+    const amountIn = query.sellAmount;
+    const dexExpectedOut = String(data.buyAmount || "0");
+    try {
+      enrichment = await enrichQuoteWithOracle(
+        chainId,
+        tokenIn,
+        tokenOut,
+        amountIn,
+        dexExpectedOut,
+        c.env.ALCHEMY_API_KEY,
+      );
+    } catch {
+      enrichment = { priceFeedExists: false, deltaBps: 0, oracleAmount: "0" };
+    }
   }
 
   return c.json({ ...data, ...enrichment });
