@@ -1209,22 +1209,17 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "refresh_oracle_feed",
       description:
-        "Swap the chain's native token (ETH on most chains, POL on Polygon, BNB on BSC) for an ERC-20 token " +
-        "directly on the BackgeoOracle's dedicated Uniswap V4 oracle pool. " +
+        "Swap on the BackgeoOracle's dedicated Uniswap V4 oracle pool to create a fresh price observation. " +
         "Use this tool in TWO situations: " +
         "(1) User explicitly asks to swap on/via/through/using the BackgeoOracle or oracle pool " +
         "(e.g., 'swap 0.001 POL for GRG using BackgeoOracle', 'swap on oracle pool', " +
         "'swap ETH for GRG via oracle'); " +
         "(2) Swap Shield is blocking a vault swap due to oracle price divergence and user wants to " +
         "fix the root cause rather than disabling the shield. " +
-        "This is an oracle pool refresh that can execute via two paths: " +
-        "(1) EOA path (default): OPERATOR EOA transaction (to: Universal Router, NOT the vault) — " +
-        "the operator signs with their personal wallet and receives the output token. " +
-        "(2) Vault path (viaVault=true): routes through the vault adapter (value=0, supports delegation). " +
-        "The output token is sent to msg.sender of the Universal Router, which is the vault adapter — so the output stays in the vault. " +
-        "If the user says 'buy N TOKEN' without specifying input amount, pass amountOut=N and " +
-        "the system will estimate the required native token input. If no amount is given at all, " +
-        "a default of 0.001 native token is used.",
+        "Supports both directions: buying (native token → ERC-20) and selling (ERC-20 → native token). " +
+        "When a vault is connected, the vault path is used by default so the swap happens from the vault " +
+        "and supports delegation / NAV shield. The EOA path (operator personal wallet) is used only when " +
+        "explicitly requested or no vault is connected.",
       parameters: {
         type: "object",
         properties: {
@@ -1234,18 +1229,26 @@ export const TOOL_DEFINITIONS = [
               "The ERC-20 token whose oracle feed is stale — symbol (e.g., 'GRG', 'USDC') or " +
               "contract address. The native token (ETH/POL/BNB) cannot be specified (it is always currency0).",
           },
-          amountEth: {
+          direction: {
+            type: "string",
+            enum: ["buy", "sell"],
+            description:
+              "Swap direction: 'buy' means native token → ERC-20 (default). 'sell' means ERC-20 → native token. " +
+              "Infer from user phrasing: 'buy GRG' → buy, 'sell GRG' → sell.",
+          },
+          amount: {
             type: "string",
             description:
-              "Amount of native token to swap as input (e.g., '0.001', '0.01', '5'). " +
+              "Amount to swap. For 'buy' direction: amount of native token to spend (e.g., '0.001', '0.01'). " +
+              "For 'sell' direction: amount of the ERC-20 token to sell (e.g., '1', '10'). " +
               "Larger amounts move the oracle pool price more aggressively and converge TWAP faster. " +
-              "Provide this OR amountOut, not both. If neither is provided, defaults to 0.001.",
+              "Defaults to 0.001 native token for buy, or 1 token unit for sell.",
           },
           amountOut: {
             type: "string",
             description:
-              "Sizing hint for the desired output amount (e.g., '2' for ~2 GRG). If provided instead of amountEth, " +
-              "the system estimates the required native token input using the vault's on-chain oracle. " +
+              "[Buy direction only] Sizing hint for the desired token output (e.g., '2' for ~2 GRG). " +
+              "If provided instead of amount, the system estimates the required native token input using the vault's on-chain oracle. " +
               "The actual received amount may differ — the swap is exact-input with no on-chain min-out bound. " +
               "Requires an active vault session.",
           },
@@ -1253,8 +1256,8 @@ export const TOOL_DEFINITIONS = [
             type: "boolean",
             description:
               "If true, route the swap through the vault adapter instead of the operator's personal wallet. " +
-              "The vault must have enough native token balance. When delegation is active, this enables " +
-              "auto-execution with NAV shield protection. Default: false (EOA direct to Universal Router).",
+              "The vault must have enough of the input token balance. When delegation is active, this enables " +
+              "auto-execution with NAV shield protection. Default: true when a vault is connected, false otherwise.",
           },
           chain: {
             type: "string",

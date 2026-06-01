@@ -5,7 +5,8 @@
  *
  * Body (JSON):
  *   token        string   — ERC-20 symbol or address whose oracle feed is stale (e.g. "GRG", "USDC")
- *   amountEth    string|number — Amount of native token to swap (human-readable, e.g. "0.001" or 0.001). Optional; defaults to 0.001.
+ *   amount       string|number — Amount to swap (human-readable). For buy direction: native token amount (default "0.001"). For sell direction: token amount (default "1").
+ *   direction    string   — "buy" (native → token, default) or "sell" (token → native).
  *   chainId      number   — Chain where the oracle pool lives
  *   vaultAddress string   — Optional. If provided, routes through the vault adapter (value=0, supports delegation).
  *                           Omit for EOA path (direct to Universal Router).
@@ -42,12 +43,17 @@ oracle.post("/refresh", async (c) => {
   // Accept numeric amountEth (e.g. 0.001 from JSON) by coercing to string.
   // Use toFixed(18) for numbers instead of String() to avoid scientific-notation
   // output (e.g. String(0.0000001) → "1e-7") which parseUnits rejects.
-  let amountEth =
-    typeof body.amountEth === "string"
-      ? body.amountEth.trim()
-      : typeof body.amountEth === "number"
-        ? body.amountEth.toFixed(18)
-        : "";
+  const direction = (typeof body.direction === "string" ? body.direction.trim().toLowerCase() : "buy") as "buy" | "sell";
+  let amount =
+    typeof body.amount === "string"
+      ? body.amount.trim()
+      : typeof body.amount === "number"
+        ? body.amount.toFixed(18)
+        : typeof body.amountEth === "string"
+          ? body.amountEth.trim()
+          : typeof body.amountEth === "number"
+            ? body.amountEth.toFixed(18)
+            : "";
   const rawVault = body.vaultAddress;
   const rawChain = body.chainId ?? body.chain;
 
@@ -80,18 +86,20 @@ oracle.post("/refresh", async (c) => {
   const nativeSymbol = getNativeTokenSymbol(chainId);
 
   // Default amount if not provided
-  if (!amountEth) {
-    amountEth = "0.001";
+  if (!amount) {
+    amount = direction === "buy" ? "0.001" : "1";
   }
 
-  // Validate amountEth: parseFloat accepts "0.01abc" → 0.01 and "1e-3" → 0.001,
+  // Validate amount: parseFloat accepts "0.01abc" → 0.01 and "1e-3" → 0.001,
   // both of which later fail inside buildOraclePoolSwapTx/parseUnits with a 500.
   // Validate strictly with parseUnits so those cases return a clear 400.
+  // For sell direction, token decimals are resolved inside buildOraclePoolSwapTx,
+  // so we only do a loose positivity check here.
   try {
-    const parsed = parseUnits(amountEth, 18);
+    const parsed = parseUnits(amount, direction === "buy" ? 18 : 9);
     if (parsed <= 0n) throw new Error("non-positive");
   } catch {
-    return c.json({ error: `amountEth must be a positive decimal number of ${nativeSymbol} (e.g. '0.001'). Scientific notation is not supported.` }, 400);
+    return c.json({ error: `amount must be a positive decimal number (e.g. '0.001'). Scientific notation is not supported.` }, 400);
   }
 
   if (rawVault !== undefined && (typeof rawVault !== "string" || !isAddress(rawVault) || rawVault === "0x0000000000000000000000000000000000000000")) {
@@ -100,7 +108,7 @@ oracle.post("/refresh", async (c) => {
   const vaultAddress = typeof rawVault === "string" ? (rawVault as Address) : undefined;
 
   try {
-    const result = await buildOraclePoolSwapTx(token, amountEth, chainId, c.env.ALCHEMY_API_KEY, vaultAddress);
+    const result = await buildOraclePoolSwapTx(token, amount, chainId, c.env.ALCHEMY_API_KEY, vaultAddress, direction);
     return c.json({
       transaction: result.transaction,
       poolInfo: result.poolInfo,

@@ -44,6 +44,7 @@ import {
 } from "viem";
 import { getClient } from "./vault.js";
 import { resolveTokenAddress, TOKEN_MAP } from "../config.js";
+import { getTokenDecimals } from "./vault.js";
 
 /** Chain-native token symbol for user-facing strings. */
 const NATIVE_TOKEN: Record<number, string> = {
@@ -204,12 +205,14 @@ export interface OraclePoolSwapResult {
  *      signs with their personal wallet.
  *
  * @param token - Token symbol or address whose oracle feed is stale (e.g., "GRG").
- * @param amountIn - Amount of native token to swap (default "0.001"). Larger amounts
- *   move the pool price more aggressively toward market, converging the TWAP faster.
+ * @param amountIn - Amount to swap. For "buy" direction: native token amount (default "0.001").
+ *   For "sell" direction: token amount (default "1"). Larger amounts move the pool price
+ *   more aggressively toward market, converging the TWAP faster.
  * @param chainId - Chain where the oracle is stale.
  * @param alchemyKey - Alchemy API key for RPC calls.
  * @param vaultAddress - Optional vault address. If provided, the transaction targets
  *   the vault adapter instead of the Universal Router.
+ * @param direction - "buy" (native → token, default) or "sell" (token → native).
  */
 export async function buildOraclePoolSwapTx(
   token: string,
@@ -217,6 +220,7 @@ export async function buildOraclePoolSwapTx(
   chainId: number,
   alchemyKey: string,
   vaultAddress?: Address,
+  direction: "buy" | "sell" = "buy",
 ): Promise<OraclePoolSwapResult> {
   const oracle = BACKGEO_ORACLE[chainId];
   if (!oracle) {
@@ -302,10 +306,19 @@ export async function buildOraclePoolSwapTx(
     );
   }
 
-  // Parse native token input amount
-  const amountInWei = parseUnits(amountIn, 18);
+  // Parse input amount (native token for buy, ERC-20 token for sell)
+  const isBuy = direction === "buy";
+  let amountInWei: bigint;
+  if (isBuy) {
+    amountInWei = parseUnits(amountIn, 18);
+  } else {
+    const tokenDecimals = await getTokenDecimals(chainId, tokenAddr, alchemyKey);
+    amountInWei = parseUnits(amountIn, tokenDecimals);
+  }
   if (amountInWei <= 0n) {
-    throw new Error(`amountIn must be a positive amount of native token; received "${amountIn}".`);
+    throw new Error(
+      `amount must be a positive value; received "${amountIn}".`
+    );
   }
 
   const viaVault = !!vaultAddress;
@@ -352,7 +365,7 @@ export async function buildOraclePoolSwapTx(
         tickSpacing: poolKey.tickSpacing,
         hooks: poolKey.hooks,
       },
-      true,          // zeroForOne: ETH (c0) → token (c1)
+      isBuy,         // zeroForOne: true = ETH (c0) → token (c1), false = token (c1) → ETH (c0)
       amountInWei,   // uint128 amountIn
       0n,            // amountOutMinimum: no minimum — oracle updates accept any output
       "0x" as Hex,   // hookData: empty
@@ -361,12 +374,12 @@ export async function buildOraclePoolSwapTx(
 
   const settleParam = encodeAbiParameters(
     [{ type: "address" }, { type: "uint256" }],
-    [ETH_ADDRESS, amountInWei],  // SETTLE_ALL: settle ETH, cap at amountIn
+    isBuy ? [ETH_ADDRESS, amountInWei] : [tokenAddr, amountInWei],  // SETTLE_ALL: settle input currency
   );
 
   const takeParam = encodeAbiParameters(
     [{ type: "address" }, { type: "uint256" }],
-    [tokenAddr, 0n],  // TAKE_ALL: take token, minimum = 0
+    isBuy ? [tokenAddr, 0n] : [ETH_ADDRESS, 0n],  // TAKE_ALL: take output currency, minimum = 0
   );
 
   // Pack actions and params into V4 swap input
@@ -390,19 +403,20 @@ export async function buildOraclePoolSwapTx(
   const tokenSymbol = token.toUpperCase();
 
   if (viaVault) {
-    const description =
-      `Oracle pool refresh: swap ${amountIn} ${nativeSymbol} → ${tokenSymbol} on BackgeoOracle V4 pool ` +
-      `(chain ${chainId}) via vault. Creates a new price observation.`;
+    const vaultDescription = isBuy
+      ? `Oracle pool refresh: swap ${amountIn} ${nativeSymbol} → ${tokenSymbol} on BackgeoOracle V4 pool (chain ${chainId}) via vault. Creates a new price observation.`
+      : `Oracle pool refresh: swap ${amountIn} ${tokenSymbol} → ${nativeSymbol} on BackgeoOracle V4 pool (chain ${chainId}) via vault. Creates a new price observation.`;
 
     const message = [
       `🔄 Oracle Refresh Transaction Ready (Vault)`,
       ``,
-      `This swaps a small amount of ${nativeSymbol} from the vault on the BackgeoOracle's dedicated`,
-      `Uniswap V4 pool to create a fresh price observation. The 5-minute TWAP will start converging`,
+      `This swaps a small amount on the BackgeoOracle's dedicated Uniswap V4 pool`,
+      `to create a fresh price observation. The 5-minute TWAP will start converging`,
       `toward the current market price after this swap is confirmed.`,
       ``,
       `Token: ${tokenSymbol}`,
-      `Amount: ${amountIn} ${nativeSymbol} → ${tokenSymbol}`,
+      `Direction: ${isBuy ? `${nativeSymbol} → ${tokenSymbol}` : `${tokenSymbol} → ${nativeSymbol}`}`,
+      `Amount: ${amountIn} ${isBuy ? nativeSymbol : tokenSymbol}`,
       `Pool: fee=0, tickSpacing=32767, hooks=${oracle.slice(0, 10)}…`,
       `Oracle: ${oracle}`,
       `Pool ID: ${poolId.slice(0, 18)}…`,
@@ -420,7 +434,7 @@ export async function buildOraclePoolSwapTx(
         value: "0x0",
         chainId,
         gas: "0x" + ORACLE_SWAP_GAS_LIMIT.toString(16),
-        description,
+        description: vaultDescription,
       },
       poolInfo: {
         oracle,
@@ -435,20 +449,20 @@ export async function buildOraclePoolSwapTx(
   }
 
   // EOA path
-  const description =
-    `Oracle pool refresh: swap ${amountIn} ${nativeSymbol} → ${tokenSymbol} on BackgeoOracle V4 pool ` +
-    `(chain ${chainId}) to create a new price observation. ` +
-    `Sign with your operator wallet (EOA).`;
+  const eoaDescription = isBuy
+    ? `Oracle pool refresh: swap ${amountIn} ${nativeSymbol} → ${tokenSymbol} on BackgeoOracle V4 pool (chain ${chainId}) to create a new price observation. Sign with your operator wallet (EOA).`
+    : `Oracle pool refresh: swap ${amountIn} ${tokenSymbol} → ${nativeSymbol} on BackgeoOracle V4 pool (chain ${chainId}) to create a new price observation. Sign with your operator wallet (EOA).`;
 
   const message = [
     `🔄 Oracle Refresh Transaction Ready`,
     ``,
-    `This swaps a small amount of ${nativeSymbol} on the BackgeoOracle's dedicated Uniswap V4 pool`,
+    `This swaps a small amount on the BackgeoOracle's dedicated Uniswap V4 pool`,
     `to create a fresh price observation. The 5-minute TWAP will start converging`,
     `toward the current market price after this swap is confirmed.`,
     ``,
     `Token: ${tokenSymbol}`,
-    `Amount: ${amountIn} ${nativeSymbol} → ${tokenSymbol}`,
+    `Direction: ${isBuy ? `${nativeSymbol} → ${tokenSymbol}` : `${tokenSymbol} → ${nativeSymbol}`}`,
+    `Amount: ${amountIn} ${isBuy ? nativeSymbol : tokenSymbol}`,
     `Pool: fee=0, tickSpacing=32767, hooks=${oracle.slice(0, 10)}…`,
     `Oracle: ${oracle}`,
     `Pool ID: ${poolId.slice(0, 18)}…`,
@@ -464,10 +478,10 @@ export async function buildOraclePoolSwapTx(
     transaction: {
       to: universalRouter,
       data: calldata,
-      value: "0x" + amountInWei.toString(16),
+      value: isBuy ? "0x" + amountInWei.toString(16) : "0x0",
       chainId,
       gas: "0x" + ORACLE_SWAP_GAS_LIMIT.toString(16),
-      description,
+      description: eoaDescription,
       operatorOnly: true,
     },
     poolInfo: {

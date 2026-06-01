@@ -2478,6 +2478,8 @@ export async function executeToolCall(
         throw new Error("'token' is required. Specify the token symbol whose oracle feed is stale (e.g., 'GRG', 'USDC').");
       }
 
+      const direction = (args.direction as string)?.toLowerCase() === "sell" ? "sell" : "buy";
+
       // Vault-dependent options (viaVault, amountOut) require ctx.vaultAddress to be on
       // the active chain. Check this BEFORE mutating ctx.chainId to avoid leaving context
       // in a partially-switched state if the guard throws.
@@ -2492,7 +2494,13 @@ export async function executeToolCall(
         return String(v).trim();
       };
       const normalizedAmountOut = toDecimalString(args.amountOut);
-      const requestsVaultPath = args.viaVault === true || args.viaVault === "true" || normalizedAmountOut !== "";
+      // Default viaVault to true when a vault is connected, unless explicitly set to false
+      const hasVault = ctx.vaultAddress && ctx.vaultAddress !== ZERO_ADDR;
+      const viaVaultExplicit = args.viaVault === true || args.viaVault === "true" || args.viaVault === false || args.viaVault === "false";
+      const viaVault = viaVaultExplicit
+        ? (args.viaVault === true || args.viaVault === "true")
+        : !!hasVault;
+      const requestsVaultPath = viaVault || normalizedAmountOut !== "";
 
       // Auto-switch chain if provided (only safe for non-vault-dependent calls)
       let oracleChainSwitched: number | undefined;
@@ -2514,23 +2522,26 @@ export async function executeToolCall(
 
       // Coerce to decimal string; toDecimalString() uses toFixed(18) for numbers
       // to avoid scientific notation (e.g. 0.0000001 → "1e-7") that parseUnits rejects.
-      let amountIn = toDecimalString(args.amountEth);
+      // Accept both legacy 'amountEth' and new 'amount' parameter names.
+      let amountIn = toDecimalString(args.amount ?? args.amountEth);
       const amountOut = normalizedAmountOut; // already coerced above for the vault-path guard
 
-      // Reject ambiguous input: only one of amountEth or amountOut may be provided.
+      // Reject ambiguous input: only one of amount or amountOut may be provided.
       if (amountIn && amountOut) {
         throw new Error(
-          "Provide amountEth (native token input) OR amountOut (token output to receive), not both."
+          direction === "buy"
+            ? "Provide amount (native token input) OR amountOut (token output to receive), not both."
+            : "Provide amount (token input) OR amountOut (native token output to receive), not both."
         );
       }
 
-      // If amountOut is provided instead of amountIn, estimate the required native input
+      // If amountOut is provided instead of amount, estimate the required input
       // using the vault's on-chain BackgeoOracle (convertTokenAmount).
       if (!amountIn && amountOut) {
         if (!ctx.vaultAddress || ctx.vaultAddress === ZERO_ADDR || !env.ALCHEMY_API_KEY) {
           throw new Error(
             `amountOut requires a connected vault with an active RPC key for oracle estimation. ` +
-            `Connect a vault first, or provide amountEth directly.`
+            `Connect a vault first, or provide amount directly.`
           );
         }
         try {
@@ -2548,25 +2559,45 @@ export async function executeToolCall(
             addr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
               ? NATIVE_ZERO
               : (addr as Address);
-          const estimatedIn = await publicClient.readContract({
-            address: ctx.vaultAddress as Address,
-            abi: RIGOBLOCK_VAULT_ABI,
-            functionName: "convertTokenAmount",
-            args: [normalizeForOracle(tokenAddr), desiredOutRaw, NATIVE_ZERO],
-          }) as bigint;
-          if (estimatedIn > 0n) {
-            // Add a 5% buffer to ensure the swap produces at least the desired output
-            // (the oracle TWAP may be slightly stale).
-            const buffered = (estimatedIn * 105n) / 100n;
-            amountIn = formatUnits(buffered, 18);
-            console.log(
-              `[oracle] Estimated ${amountOut} ${tokenArg} → ${amountIn} ${nativeSymbol} ` +
-              `(via vault oracle, +5% buffer)`
-            );
-          } else if (estimatedIn < 0n) {
-            throw new Error(`Oracle returned a negative estimate for ${amountOut} ${tokenArg} — unexpected oracle condition.`);
+          if (direction === "buy") {
+            const estimatedIn = await publicClient.readContract({
+              address: ctx.vaultAddress as Address,
+              abi: RIGOBLOCK_VAULT_ABI,
+              functionName: "convertTokenAmount",
+              args: [normalizeForOracle(tokenAddr), desiredOutRaw, NATIVE_ZERO],
+            }) as bigint;
+            if (estimatedIn > 0n) {
+              const buffered = (estimatedIn * 105n) / 100n;
+              amountIn = formatUnits(buffered, 18);
+              console.log(
+                `[oracle] Estimated ${amountOut} ${tokenArg} → ${amountIn} ${nativeSymbol} ` +
+                `(via vault oracle, +5% buffer)`
+              );
+            } else if (estimatedIn < 0n) {
+              throw new Error(`Oracle returned a negative estimate for ${amountOut} ${tokenArg} — unexpected oracle condition.`);
+            } else {
+              throw new Error(`Oracle returned a zero estimate for ${amountOut} ${tokenArg}.`);
+            }
           } else {
-            throw new Error(`Oracle returned a zero estimate for ${amountOut} ${tokenArg}.`);
+            // sell direction: estimate token input for desired native output
+            const estimatedIn = await publicClient.readContract({
+              address: ctx.vaultAddress as Address,
+              abi: RIGOBLOCK_VAULT_ABI,
+              functionName: "convertTokenAmount",
+              args: [NATIVE_ZERO, desiredOutRaw, normalizeForOracle(tokenAddr)],
+            }) as bigint;
+            if (estimatedIn > 0n) {
+              const buffered = (estimatedIn * 105n) / 100n;
+              amountIn = formatUnits(buffered, decimalsOut);
+              console.log(
+                `[oracle] Estimated ${amountOut} ${nativeSymbol} → ${amountIn} ${tokenArg} ` +
+                `(via vault oracle, +5% buffer)`
+              );
+            } else if (estimatedIn < 0n) {
+              throw new Error(`Oracle returned a negative estimate for ${amountOut} ${nativeSymbol} — unexpected oracle condition.`);
+            } else {
+              throw new Error(`Oracle returned a zero estimate for ${amountOut} ${nativeSymbol}.`);
+            }
           }
         } catch (err) {
           console.warn(
@@ -2574,21 +2605,19 @@ export async function executeToolCall(
             err instanceof Error ? err.message : err
           );
           throw new Error(
-            `Could not estimate native input for amountOut="${amountOut}" ${tokenArg}: oracle estimation failed. ` +
-            `Provide amountEth directly instead.`
+            `Could not estimate input for amountOut="${amountOut}" ${tokenArg}: oracle estimation failed. ` +
+            `Provide amount directly instead.`
           );
         }
       }
 
       // Default if still not set
       if (!amountIn) {
-        amountIn = "0.001";
+        amountIn = direction === "buy" ? "0.001" : "1";
       }
 
-      // Accept both boolean true and the string "true" (function-calling can send either).
-      const viaVault = args.viaVault === true || args.viaVault === "true";
       // Treat zero address as "no vault" (frontend uses it as a placeholder before connecting).
-      const vaultAddr = viaVault && ctx.vaultAddress && ctx.vaultAddress !== ZERO_ADDR
+      const vaultAddr = viaVault && hasVault
         ? (ctx.vaultAddress as Address)
         : undefined;
 
@@ -2604,6 +2633,7 @@ export async function executeToolCall(
         ctx.chainId,
         env.ALCHEMY_API_KEY,
         vaultAddr,
+        direction,
       );
 
       // EOA path: simulate the transaction to catch reverts early and provide accurate gas
@@ -2639,9 +2669,12 @@ export async function executeToolCall(
         } catch (simErr) {
           const reason = simErr instanceof Error ? simErr.message : String(simErr);
           console.warn(`[oracle] EOA simulation failed: ${reason}`);
+          const balanceHint = direction === "buy"
+            ? `the operator has insufficient ${nativeSymbol} balance`
+            : `the operator has insufficient token balance or has not approved the Universal Router`;
           throw new Error(
             `Oracle refresh simulation failed: ${reason}. ` +
-            `This usually means the pool is not initialized, the operator has insufficient ${nativeSymbol} balance, ` +
+            `This usually means the pool is not initialized, ${balanceHint}, ` +
             `or the oracle hook rejected the swap. Verify the pool state and try again.`
           );
         }
