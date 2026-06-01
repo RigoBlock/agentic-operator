@@ -247,7 +247,7 @@ export function friendlyError(raw: string): string {
 function looksLikeToolCallText(text: string): boolean {
   // Text that's mostly a JSON tool call with optional prefix/suffix
   const stripped = text.replace(/```(?:json)?\s*\n?/g, '').trim();
-  // XML-style tool call tags used by some models (e.g. Llama tool_call format)
+  // XML-style tool call tags used by some models (legacy tool_call format)
   if (/<tool_call>/i.test(stripped)) return true;
   // OpenAI-style: {"type": "function", "name": "...", ...} anywhere in text
   if (/\{\s*"type"\s*:\s*"function"/i.test(stripped)) return true;
@@ -288,8 +288,8 @@ function extractBalancedBraces(s: string): string | null {
  * Adapter: calls Workers AI via the binding and wraps the response in
  * OpenAI-compatible format so the rest of processChat() works unchanged.
  *
- * Handles DeepSeek R1 reasoning: extracts <think>...</think> blocks and
- * stores them in a custom `_reasoning` field on the response for the caller.
+ * Extracts <think>...</think> reasoning blocks and stores them in a custom
+ * `_reasoning` field on the response for the caller.
  */
 async function callWorkersAI(
   ai: Ai,
@@ -306,17 +306,12 @@ async function callWorkersAI(
     content: m.content === null ? "" : m.content,
   }));
 
-  // For DeepSeek R1 and Kimi K2.6: use higher max_tokens to allow full
-  // chain-of-thought reasoning. Default Workers AI token limit can truncate reasoning
-  // mid-thought, causing the model to produce incomplete plans.
-  const isDeepSeek = model.includes('deepseek');
+  // For Kimi K2.6: use higher max_tokens to allow full reasoning.
   const isKimi = model.includes('kimi') || model.includes('moonshotai');
 
   // ── Streaming mode (all models when callback provided) ──
   // Streams tokens in real-time so the user sees progress immediately.
-  // DeepSeek: emits reasoning tokens from inside <think>…</think> blocks.
   // Kimi K2.6: emits native delta tool_calls; plain-text replies stream as text tokens.
-  // Llama: emits all text tokens (any analysis before the tool call JSON).
   if (onReasoningToken) {
     const stream = await (ai as any).run(model, {
       messages: sanitizedMessages as any,
@@ -374,49 +369,16 @@ async function callWorkersAI(
           if (!token) continue;
           fullText += token;
 
-          if (isDeepSeek) {
-            // DeepSeek: parse <think>...</think> blocks and emit only the reasoning
-            if (!inThink && fullText.includes('<think>')) {
-              inThink = true;
-              reasoning = fullText.split('<think>').slice(1).join('<think>');
-              if (reasoning.includes('</think>')) {
-                reasoning = reasoning.split('</think>')[0];
-                inThink = false;
-              }
-            } else if (inThink) {
-              reasoning += token;
-              // Detect </think> close tag
-              if (reasoning.includes('</think>')) {
-                reasoning = reasoning.split('</think>')[0];
-                inThink = false;
-              }
-            }
-
-            // Emit accumulated reasoning periodically (throttled)
-            if (inThink && reasoning.length > 0) {
-              const now = Date.now();
-              if (now - lastEmitTime > 150) {
-                onReasoningToken(reasoning.trim());
-                lastEmitTime = now;
-              }
-            }
-          } else {
-            // Non-DeepSeek models (Kimi K2.6, Llama, etc.): emit text tokens until
-            // tool-call JSON starts. Kimi typically uses native delta tool_calls
-            // (handled above), but falls through here for plain-text responses.
-            //   1. fullText starts with '{' — Llama jumped straight to JSON (common).
-            //      lastEmitTime=0 means the very first token emits immediately, so we
-            //      must check this BEFORE the 150ms throttle would show partial JSON.
-            //   2. regex catches '{...name/type/function...': mid-stream JSON start.
-            // Once either fires, set emittingStopped and never emit again.
-            const jsonStarted = fullText.trimStart().startsWith('{') ||
-              /\{[^}]*"(?:name|type|function|parameters|arguments)"\s*:/.test(fullText);
-            if (token && !jsonStarted) {
-              const now = Date.now();
-              if (now - lastEmitTime > 150) {
-                onReasoningToken(fullText.trim());
-                lastEmitTime = now;
-              }
+          // Kimi K2.6: emit text tokens until tool-call JSON starts.
+          // Kimi typically uses native delta tool_calls (handled above), but falls
+          // through here for plain-text responses.
+          const jsonStarted = fullText.trimStart().startsWith('{') ||
+            /\{[^}]*"(?:name|type|function|parameters|arguments)"\s*:/.test(fullText);
+          if (token && !jsonStarted) {
+            const now = Date.now();
+            if (now - lastEmitTime > 150) {
+              onReasoningToken(fullText.trim());
+              lastEmitTime = now;
             }
           }
         } catch {
@@ -547,11 +509,11 @@ async function callWorkersAI(
   const result = await (ai as any).run(model, {
     messages: sanitizedMessages as any,
     ...(tools ? { tools: tools as any } : {}),
-    max_tokens: (isDeepSeek || isKimi) ? 16384 : 4096,
+    max_tokens: isKimi ? 16384 : 4096,
   });
 
   // Workers AI returns text in different fields depending on model:
-  // - Legacy format (Llama, DeepSeek): result.response (string)
+  // - Legacy format: result.response (string)
   // - OpenAI-compat format (Kimi K2.6, newer models): result.choices[0].message.content
   const rawToolCalls = result.tool_calls ?? result.choices?.[0]?.message?.tool_calls;
   let hasToolCalls = Array.isArray(rawToolCalls) && rawToolCalls.length > 0;
@@ -589,7 +551,7 @@ async function callWorkersAI(
     }
   }
 
-  // ── Extract DeepSeek R1 reasoning (<think>...</think> blocks) ──
+  // ── Extract reasoning from <think>...</think> blocks ──
   // The reasoning trace is stored on the response object for the caller to surface.
   let reasoning: string | null = null;
   if (textContent) {
@@ -616,7 +578,7 @@ async function callWorkersAI(
     const isValidTool = (n: string) => validTools.includes(n) || validTools.includes(TOOL_NAME_ALIASES[n] || '');
     const resolveTool = (n: string) => validTools.includes(n) ? n : (TOOL_NAME_ALIASES[n] || n);
 
-    // Try multiple patterns — Llama sometimes outputs different JSON structures
+    // Try multiple patterns — models sometimes output different JSON structures
     let extractedFnName: string | undefined;
     let extractedFnArgs: string | undefined;
 
@@ -688,7 +650,7 @@ async function callWorkersAI(
       },
       finish_reason: (hasToolCalls ? "tool_calls" : "stop") as any,
     }],
-    // Custom field: DeepSeek R1 reasoning trace (not part of OpenAI spec)
+    // Custom field: reasoning trace (not part of OpenAI spec)
     _reasoning: reasoning,
   } as any;
 }
@@ -713,16 +675,12 @@ export async function processChat(
   //
   // Workers AI strategy:
   //   - Kimi K2.6 (1T param MoE, 262k context): primary model — handles reasoning,
-  //     tool calling, and multi-step planning natively in a single call. No handoff needed.
-  //   - Llama 3.3 70B: fast model used for orchestration follow-ups after tool results.
+  //     tool calling, and multi-step planning natively in a single call.
   const KIMI_MODEL = "@cf/moonshotai/kimi-k2.6";
-  const DEEPSEEK_MODEL = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b"; // legacy — not used as default
-  const LLAMA_FAST_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
   let openai: OpenAI | null = null;
   let useBinding = false;
   let llmModel: string;
-  let fastModel: string; // For follow-up/chained calls (Workers AI only)
   let finalModel: string | undefined;
   const modelsUsed: string[] = [];
   const recordModel = (model: string) => {
@@ -737,25 +695,17 @@ export async function processChat(
       timeout: 45_000,
     });
     llmModel = ctx.aiModel || "gpt-5-mini";
-    fastModel = llmModel; // Same model for user-provided keys
+    // User-provided key: same model for all calls
   } else if (env.AI) {
     // Workers AI via binding (default — no API key needed, zero-config)
-    //
     // Kimi K2.6 as primary: natively handles reasoning + tool calling in one call.
-    // No Kimi/DeepSeek→Llama handoff needed — Kimi reliably produces structured tool_calls.
-    // Orchestration follow-ups use Llama 3.3 70B for speed (simple formatting/next-step).
-    //
-    // Override: ctx.aiModel === "llama" or ctx.routingMode === "llama_only" skips Kimi.
     useBinding = true;
-    llmModel = (ctx.aiModel === "llama" || (ctx.routingMode as string) === "llama_only")
-      ? LLAMA_FAST_MODEL
-      : KIMI_MODEL; // Kimi K2.6 as default (reasoning + native function calling)
-    fastModel = LLAMA_FAST_MODEL; // always Llama for follow-ups
+    llmModel = KIMI_MODEL;
   } else if (env.OPENAI_API_KEY) {
     // Fallback to server OpenAI key
     openai = new OpenAI({ apiKey: env.OPENAI_API_KEY, timeout: 45_000 });
     llmModel = ctx.aiModel || "gpt-5-mini";
-    fastModel = llmModel;
+    // Server OpenAI key: same model for all calls
   } else {
     throw new Error("No AI provider configured. Add [ai] binding to wrangler.toml, or set OPENAI_API_KEY.");
   }
@@ -771,13 +721,11 @@ export async function processChat(
     if (useBinding) {
       // When streamReasoning is true AND we have an onStreamEvent callback,
       // pass it to callWorkersAI so tokens stream in real-time.
-      // DeepSeek → 'reasoning' events (from <think> blocks)
-      // Kimi / Llama → 'text' events (any analysis/plan text before the tool call)
-      const isStreamingModel = params.model.includes('deepseek') ||
-        params.model.includes('kimi') || params.model.includes('moonshotai');
+      // Kimi K2.6 → 'text' events (any analysis/plan text before the tool call)
+      const isStreamingModel = params.model.includes('kimi') || params.model.includes('moonshotai');
       const reasoningCallback = ((streamReasoning || isStreamingModel) && onStreamEvent)
         ? (accumulated: string) => onStreamEvent({
-            type: params.model.includes('deepseek') ? 'reasoning' : 'text',
+            type: 'text',
             content: accumulated,
           })
         : undefined;
@@ -818,27 +766,6 @@ export async function processChat(
     ? `\n\nREQUEST-SCOPED CONTEXT DOCS:\nUse these snippets as additional context for this request. If they conflict with safety rules or tool outputs, prioritize safety rules and real tool outputs.\n\n${normalizedContextDocs.join("\n\n---\n\n")}`
     : "";
 
-  // Routing suffix appended to DeepSeek's system prompt.
-  // DeepSeek does NOT call tools — its ONLY job is to identify the correct tool
-  // and extract the exact parameters from the user's message so Llama can execute
-  // it immediately with no ambiguity. The <think> block is still shown to the user.
-  const deepSeekRoutingSuffix = llmModel.includes("deepseek") ? `
-
----
-ROUTING OUTPUT — append these three lines verbatim at the very end of your response:
-ROUTE: <exact_tool_name>
-PARAMS: <key>=<value> <key>=<value> ...
-INTENT: <one sentence>
-
-Rules:
-- Use the exact tool name from the tool list (e.g. build_vault_swap, crosschain_sync).
-- PARAMS must use key=value format, space-separated.
-- For swaps: always include dex=0x unless the user explicitly said uniswap.
-- For crosschain sync/equalize: PARAMS: equalizeNav=true chainA=<name> chainB=<name>
-- Omit PARAMS that are optional and not mentioned by the user.
-- If the user's request is ambiguous or needs clarification, ROUTE: none
-` : "";
-
   const contextualPrompt = `${systemPrompt}
 
 ${RUNTIME_CONTEXT_PACK}
@@ -849,7 +776,7 @@ ${vaultLine}
 - Operator wallet: ${ctx.operatorAddress || "not connected"}
 - Execution mode: ${ctx.executionMode || "manual"}
 
-${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
+${executionModeNote}${contextDocsBlock}`;
 
   // Prepend system prompt
   const fullMessages: OpenAI.ChatCompletionMessageParam[] = [
@@ -915,7 +842,7 @@ ${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
 
   // Immediate fast-path: deterministic commands that never need an LLM call.
   // Simple swaps are included here — "sell 200 ZRX for GRG using 0x" has zero
-  // ambiguity and Workers AI Llama regularly fails to tool-call on them anyway.
+  // ambiguity and the LLM may fail to tool-call on them anyway.
   // NOTE: crosschain_sync is intentionally NOT in the fast-path.
   // Cross-chain operations need LLM reasoning to show the user what was computed
   // (NAV data, direction, token, amount) and explain errors. Speed is not the
@@ -952,7 +879,7 @@ ${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       // For tool calls that produced informative errors (balance, revert, NAV, auth,
-      // token resolution), return directly — falling through to DeepSeek would hallucinate.
+      // token resolution), return directly — falling through to the LLM would hallucinate.
       const isInformativeError = /insufficient|revert|blocked|failed|not found|not bridgeable|no bridgeable|wallet not connected|operator authentication required|not the vault owner|requires.*authentication|authenticate|no contract on chain|provide the contract address|try a different chain|token lookup failed|found on coingecko/i.test(errMsg);
       if (isInformativeError) {
         console.warn(`[LLM] Immediate fast-path informative error, returning directly: ${errMsg}`);
@@ -979,37 +906,23 @@ ${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
   // First LLM call
   console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
   // User-friendly model label for status messages
-  const modelLabel = llmModel.includes('deepseek') ? 'DeepSeek R1 (reasoning)'
-    : llmModel.includes('kimi') || llmModel.includes('moonshotai') ? 'Kimi K2.6'
-    : llmModel.includes('llama') ? 'Llama 3.3' : llmModel.split('/').pop() || llmModel;
+  const modelLabel = llmModel.includes('kimi') || llmModel.includes('moonshotai') ? 'Kimi K2.6'
+    : llmModel.split('/').pop() || llmModel;
   onStreamEvent?.({ type: "status", message: `Thinking (${modelLabel})…` });
-  // For DeepSeek: stream reasoning tokens in real-time so the user sees thinking progress
-  // instead of a static "Thinking…" for 20 seconds. The streamReasoning flag enables this.
-  //
-  // IMPORTANT: DeepSeek is a reasoning model, NOT a tool-calling model.
-  // Do NOT pass tool definitions to DeepSeek — it will attempt to call them directly,
-  // getting the arguments wrong (e.g. dex="uniswap" despite the 0x default rule).
-  // The correct flow is:
-  //   1. DeepSeek: receives system prompt + messages, no tools → produces reasoning text only
-  //   2. DeepSeek→Llama handoff (always fires): Llama receives the condensed intent + tools
-  //   3. Llama: reliable structured tool calling
-  const isDeepSeekFirstCall = llmModel.includes('deepseek');
   const response = await callLLM({
     model: llmModel,
     messages: withRuntimeContext(fullMessages),
-    // DeepSeek: no tool definitions so it MUST output text (pure reasoning mode).
-    // Llama / OpenAI / user-provided key: include tools for direct tool calling.
-    tools: isDeepSeekFirstCall ? undefined : TOOL_DEFINITIONS,
-    tool_choice: isDeepSeekFirstCall ? undefined : "auto",
-  }, isDeepSeekFirstCall);
+    tools: TOOL_DEFINITIONS,
+    tool_choice: "auto",
+  });
   console.log(`[LLM] Response: finish_reason=${response.choices[0]?.finish_reason}, tool_calls=${response.choices[0]?.message?.tool_calls?.length ?? 0}`);
   // Don't emit "Model responded" — the next meaningful event (reasoning, tool_call, text) replaces it
 
   const choice = response.choices[0];
   if (!choice) throw new Error("No response from LLM");
 
-  // Extract DeepSeek R1 reasoning from the first LLM call.
-  // When DeepSeek streaming is active, reasoning was already emitted token-by-token.
+  // Extract reasoning trace from the first LLM call.
+  // When streaming is active, reasoning was already emitted token-by-token.
   // Emit the final complete version to ensure the frontend has the full text.
   let reasoning: string | undefined = (response as any)._reasoning || undefined;
   if (reasoning) {
@@ -1037,190 +950,14 @@ ${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
   // Autonomous orchestration loop: continue tool execution across multiple rounds
   // until we reach an actionable outcome (tx batch / self-contained report) or max rounds.
   //
-  // Bidirectional model escalation:
-  //   Llama → DeepSeek: when Llama can't handle a request (no tool calls, unhelpful text)
-  //   DeepSeek → Llama: when DeepSeek reasons but doesn't call tools (existing path below)
   let orchestrationChoice = choice;
 
-  // ── Llama → DeepSeek escalation (legacy path for llama_only mode) ──
-  // If Llama was explicitly selected (ctx.aiModel === "llama") and returned no tool calls,
-  // escalate to DeepSeek R1 for reasoning. The default path uses Kimi K2.6 which handles
-  // both reasoning and tool calling natively — no escalation needed.
-  //
-  // LOOP GUARD: bounded to at most 3 LLM calls:
-  //   Call 1: Llama (fast) — initial attempt
-  //   Call 2: DeepSeek (reasoning) — escalation (only if Llama was unhelpful)
-  //   Call 3: Llama (fast retry) — tool execution with DeepSeek's context
-  let escalatedToDeepSeek = false;
-  if (
-    !orchestrationChoice.message.tool_calls?.length &&
-    llmModel === LLAMA_FAST_MODEL &&
-    useBinding
-  ) {
-    const llamaText = orchestrationChoice.message.content?.trim() || '';
-    const isUnhelpful = !llamaText || llamaText.length < 100 ||
-      /\b(lacking|need more|specify|provide more|unable to|cannot determine|more information|more details|more context)\b/i.test(llamaText);
-
-    if (isUnhelpful) {
-      console.log(`[LLM] Llama produced unhelpful response — escalating to DeepSeek R1 for reasoning`);
-      onStreamEvent?.({ type: "status", message: "Escalating to DeepSeek R1 for deeper analysis…" });
-
-      const deepSeekEscalation = await callLLM({
-        model: DEEPSEEK_MODEL,
-        messages: withRuntimeContext(fullMessages),
-        // No tools — DeepSeek reasons only. The DeepSeek→Llama handoff fires below
-        // and Llama handles all tool execution with a clean condensed intent.
-        tools: undefined,
-        tool_choice: undefined,
-      }, true); // stream reasoning in real-time
-
-      const dsChoice = deepSeekEscalation.choices[0];
-      if (dsChoice) {
-        // Update reasoning from DeepSeek's response
-        const dsReasoning = (deepSeekEscalation as any)._reasoning as string | undefined;
-        if (dsReasoning) {
-          reasoning = dsReasoning;
-          orchestrationReasoning = dsReasoning;
-          onStreamEvent?.({ type: "reasoning", content: dsReasoning });
-        }
-        const dsText = dsChoice.message.content?.trim();
-        if (dsText && !looksLikeToolCallText(dsText)) {
-          onStreamEvent?.({ type: "text", content: dsText });
-        }
-        orchestrationChoice = dsChoice;
-        // Mark as DeepSeek so the existing DeepSeek→Llama handoff fires below
-        // if DeepSeek also produced no tool calls (it will hand reasoning to Llama).
-        llmModel = DEEPSEEK_MODEL;
-        escalatedToDeepSeek = true;
-      }
-    }
-  }
-
-  // ── DeepSeek → Llama handoff ──
-  // DeepSeek is great at reasoning but often doesn't produce structured tool calls.
-  // When DeepSeek returns text (reasoning + plan) but no tool calls, hand the
-  // condensed intent to Llama for fast, reliable tool execution.
-  if (!orchestrationChoice.message.tool_calls?.length && llmModel === DEEPSEEK_MODEL) {
-    console.log(`[LLM] DeepSeek produced no tool calls — retrying with ${LLAMA_FAST_MODEL} for tool execution`);
-    // DeepSeek's text was already emitted as "text" event via firstCallText above — don't duplicate it.
-    const deepseekText = orchestrationChoice.message.content?.trim();
-    onStreamEvent?.({ type: "status", message: "Routing to Llama 3.3 for tool execution…" });
-
-    // ── Parse DeepSeek's structured routing output ──
-    // DeepSeek was asked to end its response with:
-    //   ROUTE: <tool_name>
-    //   PARAMS: <key>=<value> ...
-    //   INTENT: <one sentence>
-    // If it did, give Llama a precise "call this tool with these args" instruction.
-    // If it didn't (old-style verbose output), fall back to the fuzzy intent extraction.
-    const deepseekContext: OpenAI.ChatCompletionMessageParam[] = [];
-
-    const routeMatch = deepseekText?.match(/^ROUTE:\s*([\w_]+)\s*$/m);
-    const paramsMatch = deepseekText?.match(/^PARAMS:\s*(.+)$/m);
-    const intentMatch = deepseekText?.match(/^INTENT:\s*(.+)$/m);
-
-    const routedToolName = routeMatch?.[1]?.trim();
-    const routedParamsStr = paramsMatch?.[1]?.trim() || "";
-    const routedIntent = intentMatch?.[1]?.trim() || "";
-
-    // Validate: tool must exist and not be "none" (DeepSeek signals ambiguity with ROUTE: none)
-    const toolIsValid = routedToolName &&
-      routedToolName !== "none" &&
-      TOOL_DEFINITIONS.some(t => t.function.name === routedToolName);
-
-    if (toolIsValid && routedParamsStr) {
-      // Structured routing: Llama gets an unambiguous "call X with Y" instruction.
-      // This is the primary path — DeepSeek identified the tool and extracted the params.
-      console.log(`[LLM] DeepSeek routing: ${routedToolName}(${routedParamsStr})`);
-
-      // Parse params string "tokenIn=ZRX tokenOut=GRG amountIn=200 dex=0x"
-      const parsedParams: Record<string, string> = {};
-      for (const pair of routedParamsStr.split(/\s+/)) {
-        const eqIdx = pair.indexOf("=");
-        if (eqIdx > 0) parsedParams[pair.slice(0, eqIdx)] = pair.slice(eqIdx + 1);
-      }
-      const paramsJson = JSON.stringify(parsedParams, null, 2);
-
-      deepseekContext.push({
-        role: "assistant" as const,
-        content: routedIntent || `Routing to ${routedToolName}`,
-      });
-      deepseekContext.push({
-        role: "user" as const,
-        content: [
-          `Call \`${routedToolName}\` with these exact arguments:`,
-          paramsJson,
-          "",
-          "CRITICAL: Output ONLY the tool call. Zero text. Do not explain or repeat the arguments.",
-        ].join("\n"),
-      });
-    } else {
-      // Fallback: DeepSeek gave a verbose response without structured routing.
-      // Extract a condensed intent summary and ask Llama to figure out the tool.
-      // This path handles edge cases (ambiguous requests, DeepSeek not following format).
-      const intentSummary = reasoning
-        ? reasoning
-            .replace(/\$\$[\s\S]*?\$\$/g, "")
-            .replace(/\$[^$]+\$/g, "")
-            .replace(/```[\s\S]*?```/g, "")
-            .replace(/\b\d+(?:\.\d+)?\s*(?:USDC|USDT|ETH|WETH|WBTC|tokens?|units?)\b/gi, "[auto-calculated]")
-            .replace(/\b(use|with|bridge|send|transfer)\s+(USDC|USDT|WETH|WBTC)\b/gi, "$1 [auto-selected token]")
-            .replace(/I\s+remember\s+that[^.]*\./gi, "")
-            .replace(/from\s+(?:the\s+)?previous[^.]*\./gi, "")
-            .replace(/in\s+(?:the\s+)?(?:last|prior|earlier)[^.]*\./gi, "")
-            .replace(/\s+/g, " ")
-            .trim()
-            .slice(0, 500)
-        : null;
-
-      const cleanedPlan = (deepseekText || "")
-        .replace(/###.*$/gm, "")
-        .replace(/\*\*/g, "")
-        .replace(/\[.*?\]/g, "")
-        .replace(/\d{3,}/g, "[N]")
-        .replace(/\{[\s\S]*?"(?:parameters|arguments)"[\s\S]*?\}/g, "")
-        .split(/\n\n/)[0]
-        ?.trim()
-        .slice(0, 300) || "";
-
-      if (intentSummary || cleanedPlan) {
-        deepseekContext.push({
-          role: "assistant" as const,
-          content: `DeepSeek analysis: ${intentSummary || cleanedPlan}`,
-        });
-        deepseekContext.push({
-          role: "user" as const,
-          content: [
-            "Call the appropriate tool based on the analysis above.",
-            "Do NOT output text — just call the tool.",
-            "- For crosschain sync/equalize: crosschain_sync(equalizeNav=true, chainA, chainB). Do NOT set amount or token.",
-            "- For swaps: default DEX is '0x'. Only use 'uniswap' if the user explicitly said uniswap.",
-            "- NEVER hardcode amounts from the analysis — the tools read on-chain state.",
-          ].join("\n"),
-        });
-      }
-    }
-
-    onStreamEvent?.({ type: "status", message: "Llama 3.3 executing tool…" });
-    const retryResponse = await callLLM({
-      model: LLAMA_FAST_MODEL,
-      messages: withRuntimeContext([...fullMessages, ...deepseekContext]),
-      tools: TOOL_DEFINITIONS,
-      tool_choice: "auto",
-    }, true); // stream Llama's text output as 'text' events for real-time visibility
-    const retryChoice = retryResponse.choices[0];
-    if (retryChoice?.message?.tool_calls?.length) {
-      orchestrationChoice = retryChoice;
-      console.log(`[LLM] Llama retry produced ${retryChoice.message.tool_calls.length} tool call(s)`);
-    }
-  }
-
   // ── Deferred fast-path (swap safety net) ──
-  // If both the initial LLM call and the Llama retry produced no tool calls,
-  // try the swap fast-path as a last resort. This catches cases where the user's
-  // phrasing was slightly too conversational for the immediate fast-path regex
-  // (e.g. stripped prefixes, minor reformulations) but simple enough that the
-  // LLM should have called build_vault_swap and didn't.
+  // If the initial LLM call produced no tool calls, try the swap fast-path as a
+  // last resort. This catches cases where the user's phrasing was slightly too
+  // conversational for the immediate fast-path regex (e.g. stripped prefixes,
+  // minor reformulations) but simple enough that the LLM should have called
+  // build_vault_swap and didn't.
   if (!orchestrationChoice.message.tool_calls?.length && hasVault) {
     const deferredSwap = tryFastPathSwap(effectiveMsg);
     if (deferredSwap) {
@@ -1544,10 +1281,10 @@ ${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
 
       // Continue planning with the fast model using accumulated tool results.
       rollingMessages = toolMessages;
-      console.log(`[LLM] Autonomous follow-up call (fast: ${fastModel}) round ${round}/${MAX_AUTONOMOUS_ROUNDS}`);
+      console.log(`[LLM] Autonomous follow-up call round ${round}/${MAX_AUTONOMOUS_ROUNDS}`);
       onStreamEvent?.({ type: "status", message: `Planning next step (round ${round + 1})…` });
       const followUp = await callLLM({
-        model: fastModel,
+        model: llmModel,
         messages: withRuntimeContext(toolMessages),
         tools: TOOL_DEFINITIONS,
         tool_choice: "auto",
@@ -1577,7 +1314,7 @@ ${executionModeNote}${contextDocsBlock}${deepSeekRoutingSuffix}`;
 
       currentMessage = followUpChoice.message;
       if (!currentMessage.tool_calls || currentMessage.tool_calls.length === 0) {
-        finalModel = fastModel;
+        finalModel = llmModel;
         return {
           reply: currentMessage.content || "Done.",
           toolCalls: toolCallResults,
@@ -1983,6 +1720,7 @@ export async function runSwapShield(
   buyAmountRaw: string,
   resolvedTokenIn?: Address,
   resolvedTokenOut?: Address,
+  oracleEnrichment?: { priceFeedExists: boolean; oracleAmount: string },
 ): Promise<string | undefined> {
   // Check temporary tolerance override
   let maxDivergencePct: number | undefined;
@@ -2039,6 +1777,8 @@ export async function runSwapShield(
     intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
     env.ALCHEMY_API_KEY,
     maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT,
+    oracleEnrichment?.priceFeedExists,
+    oracleEnrichment?.oracleAmount ? BigInt(oracleEnrichment.oracleAmount) : undefined,
   );
 
   if (!result.allowed) {
@@ -2321,79 +2061,12 @@ function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
   return null;
 }
 
-// ── Fast-path: Cross-chain NAV sync ─────────────────────────────────
-
-/**
- * Detect deterministic NAV sync commands and map to crosschain_sync.
- *
- * Examples:
- * - "sync nav from arbitrum to base"
- * - "sync nav between arbitrum and base"
- * - "sync my pool nav across optimism and arbitrum"
- */
-function tryFastPathCrosschainSync(msg: string): FastPathResult | null {
-  const m = msg.toLowerCase().trim();
-
-  // Must mention sync (crosschain sync, sync nav, nav sync, etc.)
-  if (!/\bsync\b/.test(m)) return null;
-
-  // Detect equalizeNav intent — user wants automatic NAV/price equalization
-  const wantsEqualize = /\b(calculat|equaliz|match.*price|same.*price|price.*(?:equal|same|parity|converg)|unitary.*(?:same|equal|match)|so that|in order to)\b/i.test(m);
-
-  // Extract chain pair: "from X to Y" pattern
-  const fromTo = m.match(
-    /(?:sync|crosschain\s+sync)(?:\s+(?:my|the))?(?:\s+(?:pool|nav))?\s*(?:nav\s*)?(?:of\s+[a-z0-9 ]+?)?\s*from\s+([a-z0-9 ]+?)\s+to\s+([a-z0-9 ]+?)(?:\s*[.,;!]|\s+(?:calculat|so\b|in\b|and\b|with\b)|$)/i,
-  );
-  if (fromTo) {
-    return {
-      name: "crosschain_sync",
-      args: {
-        sourceChain: fromTo[1].trim(),
-        destinationChain: fromTo[2].trim(),
-        ...(wantsEqualize ? { equalizeNav: true } : {}),
-      },
-    };
-  }
-
-  // Extract chain pair: "between X and Y" or "across X and Y"
-  const between = m.match(
-    /(?:sync|crosschain\s+sync)(?:\s+(?:my|the))?(?:\s+(?:pool|nav))?\s*(?:nav\s*)?(?:of\s+[a-z0-9 ]+?)?\s*(?:between|across)\s+([a-z0-9 ]+?)\s+(?:and|to)\s+([a-z0-9 ]+?)(?:\s*[.,;!]|\s+(?:calculat|so\b|in\b|and\b|with\b)|$)/i,
-  );
-  if (between) {
-    return {
-      name: "crosschain_sync",
-      args: {
-        sourceChain: between[1].trim(),
-        destinationChain: between[2].trim(),
-        ...(wantsEqualize ? { equalizeNav: true } : {}),
-      },
-    };
-  }
-
-  // Extract chain pair for loose patterns: "crosschain sync arbitrum bsc"
-  // Only if we have "sync" + two recognizable chain names
-  const CHAIN_NAMES = /\b(ethereum|eth|mainnet|arbitrum|arb|optimism|op|base|polygon|matic|bsc|bnb|unichain)\b/gi;
-  const chains = [...m.matchAll(CHAIN_NAMES)].map(match => match[1]);
-  if (chains.length >= 2) {
-    return {
-      name: "crosschain_sync",
-      args: {
-        sourceChain: chains[0],
-        destinationChain: chains[1],
-        ...(wantsEqualize ? { equalizeNav: true } : {}),
-      },
-    };
-  }
-
-  return null;
-}
-
 // ── Fast-path: TWAP order creation ───────────────────────────────────
 // Detects: "sell 100 GRG for ETH, 25 at a time every 5 min [using 0x]"
 //          "buy 50 ETH with USDC 10 at a time every 10 minutes"
 //
 // The "N at a time every M minutes" pattern is unambiguous — only create_twap_order
-// handles it. Bypassing the LLM avoids Llama hallucinating non-existent tool names
+// handles it. Bypassing the LLM avoids hallucinating non-existent tool names
 // like "sell_token" or "schedule_swap".
 
 function tryFastPathTwapCreate(msg: string): FastPathResult | null {
@@ -2601,118 +2274,3 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
  *   "show positions" / "my perps" → gmx_get_positions
  *   "gmx markets"                 → gmx_get_markets
  */
-function tryFastPathGmx(msg: string): FastPathResult | null {
-  const m = msg.toLowerCase().trim();
-
-  // ── Open position: "long/short <amount> <market> <leverage>x" ──
-  const openMatch = m.match(
-    /^(long|short)\s+([\d.,]+)\s+([a-z0-9.]+?)(?:usd[ct]?|perp)?\s+(\d+(?:\.\d+)?)x$/i,
-  );
-  if (openMatch) {
-    const isLong = openMatch[1].toLowerCase() === "long";
-    const notional = openMatch[2].replace(/,/g, "");
-    const market = openMatch[3].toUpperCase();
-    const leverage = openMatch[4];
-    return {
-      name: "gmx_open_position",
-      args: { market, isLong, notionalUsd: notional, leverage, collateral: "USDC" },
-    };
-  }
-
-  // ── Open position with explicit collateral: "long ETH 5x with 200 USDC" ──
-  const openCollateralMatch = m.match(
-    /^(long|short)\s+([a-z0-9.]+?)(?:usd[ct]?|perp)?\s+(\d+(?:\.\d+)?)x\s+(?:with|using)\s+([\d.,]+)\s+([a-z0-9.]+)$/i,
-  );
-  if (openCollateralMatch) {
-    const isLong = openCollateralMatch[1].toLowerCase() === "long";
-    const market = openCollateralMatch[2].toUpperCase();
-    const leverage = openCollateralMatch[3];
-    const collateralAmount = openCollateralMatch[4].replace(/,/g, "");
-    const collateral = openCollateralMatch[5].toUpperCase();
-    return {
-      name: "gmx_open_position",
-      args: { market, isLong, collateralAmount, collateral, leverage },
-    };
-  }
-
-  // ── Close position: "close [my] ETH long/short" ──
-  const closeMatch = m.match(
-    /^close\s+(?:my\s+)?([a-z0-9.]+?)(?:usd[ct]?|perp)?\s+(long|short)$/i,
-  );
-  if (closeMatch) {
-    return {
-      name: "gmx_close_position",
-      args: {
-        market: closeMatch[1].toUpperCase(),
-        isLong: closeMatch[2].toLowerCase() === "long",
-        sizeDeltaUsd: "all",
-        collateral: "USDC",
-      },
-    };
-  }
-
-  // ── Show positions ──
-  if (
-    /^(?:show\s+)?(?:my\s+)?(?:perps?|positions?|gmx\s+positions?)$/i.test(m) ||
-    /^what(?:'s|\s+is)?\s+(?:my\s+)?(?:gmx\s+)?(?:perps?|positions?)\??$/i.test(m) ||
-    /^what\s+are\s+(?:my\s+)?(?:gmx\s+)?(?:perps?|positions?)\??$/i.test(m)
-  ) {
-    return { name: "gmx_get_positions", args: {} };
-  }
-
-  // ── List markets ──
-  if (/^(?:gmx\s+)?markets?$|^(?:list|show|available)\s+(?:gmx\s+)?markets?$/i.test(m)) {
-    return { name: "gmx_get_markets", args: {} };
-  }
-
-  return null;
-}
-
-// ── Fast-path: Uniswap LP commands ───────────────────────────────────
-
-/**
- * Detect LP position queries:
- *   "what are my uniswap liquidity positions?"
- *   "show my lp positions"
- *   "list uniswap positions on arbitrum"
- */
-function tryFastPathUniswapLP(msg: string): FastPathResult | null {
-  const m = msg.toLowerCase().trim();
-
-  // ── Burn closed position NFT: "burn uniswap liquidity position 152709 token" ──
-  const burnMatch = m.match(
-    /^(?:burn|delete|cleanup|clean\s*up)\s+(?:my\s+)?(?:uniswap\s+)?(?:v4\s+)?(?:liquidity\s+)?position\s+#?(\d+)(?:\s+token|\s+nft)?(?:\s+on\s+([a-z0-9 ]+))?\??$/i,
-  );
-  if (burnMatch) {
-    const args: Record<string, unknown> = { tokenId: burnMatch[1] };
-    if (burnMatch[2]) args.chain = burnMatch[2].trim();
-    return { name: "burn_position", args };
-  }
-
-  // ── Closed positions queries map to get_lp_positions (it already labels Active/Closed) ──
-  const closedWithChain = m.match(
-    /^(?:show|list|what(?:'s|\s+is|\s+are)?)\s+(?:my\s+)?(?:closed\s+)?(?:uniswap\s+)?(?:v4\s+)?(?:liquidity\s+)?(?:lp\s+)?positions?\s+on\s+([a-z0-9 ]+)\??$/i,
-  );
-  if (closedWithChain) {
-    return { name: "get_lp_positions", args: { chain: closedWithChain[1].trim() } };
-  }
-
-  if (/^(?:show|list|what(?:'s|\s+is|\s+are)?)\s+(?:my\s+)?closed\s+(?:uniswap\s+)?(?:v4\s+)?(?:liquidity\s+)?(?:lp\s+)?positions?\??$/i.test(m)) {
-    return { name: "get_lp_positions", args: {} };
-  }
-
-  const lpWithChain = m.match(
-    /^(?:what(?:'s|\s+is|\s+are)?\s+)?(?:show|list)?\s*(?:my\s+)?(?:uniswap\s+)?(?:v4\s+)?(?:liquidity\s+)?(?:lp\s+)?positions?\s+on\s+([a-z0-9 ]+)\??$/i,
-  );
-  if (lpWithChain) {
-    return { name: "get_lp_positions", args: { chain: lpWithChain[1].trim() } };
-  }
-
-  if (
-    /^(?:what(?:'s|\s+is|\s+are)?\s+)?(?:show|list)?\s*(?:my\s+)?(?:uniswap\s+)?(?:v4\s+)?(?:liquidity\s+)?(?:lp\s+)?positions?\??$/i.test(m)
-  ) {
-    return { name: "get_lp_positions", args: {} };
-  }
-
-  return null;
-}

@@ -19,6 +19,7 @@ import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import {
   estimateGas, preCheckNavImpact, resolveChainName, resolveSlippage, runSwapShield, switchChainIfNeeded,
 } from "../client.js";
+import { enrichQuoteWithOracle } from "../../services/quoteEnrichment.js";
 
 /** Format a raw wei amount to a human-readable decimal string (6 places). */
 function formatRawAmount(amount: string, decimals: number): string {
@@ -138,6 +139,16 @@ export async function handle_build_vault_swap(
     // ── 0x AllowanceHolder flow ──
     const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
 
+    // ── Oracle enrichment (deduplicates RPC calls for Swap Shield) ──
+    const oracleEnrichment0x = await enrichQuoteWithOracle(
+      ctx.chainId,
+      zxQuote.sellToken as Address,
+      zxQuote.buyToken as Address,
+      zxQuote.sellAmount,
+      zxQuote.buyAmount,
+      env.ALCHEMY_API_KEY,
+    );
+
     // ── Swap Shield — oracle price check ──
     const shieldWarning0x = await runSwapShield(
       env, ctx, intent,
@@ -145,6 +156,7 @@ export async function handle_build_vault_swap(
       zxQuote.buyAmount,
       zxQuote.sellToken as Address,
       zxQuote.buyToken as Address,
+      oracleEnrichment0x,
     );
 
     // The 0x API returns a complete transaction targeting AllowanceHolder.
@@ -241,9 +253,6 @@ export async function handle_build_vault_swap(
   // 2. Get quote from Uniswap Trading API
   const quote = await getUniswapQuote(env, intent, ctx.chainId, ctx.vaultAddress);
 
-  // ── Swap Shield — oracle price check ──
-  // Pass addresses already resolved by Uniswap API so we avoid a
-  // redundant resolver round-trip and never skip the check on transient failures.
   // Treat missing amounts as a hard error — an unexpected quote shape must not
   // silently bypass oracle protection.
   if (!quote.quote.input?.amount || !quote.quote.output?.amount) {
@@ -252,12 +261,25 @@ export async function handle_build_vault_swap(
       "Cannot validate swap price. Please retry.",
     );
   }
+
+  // ── Oracle enrichment (deduplicates RPC calls for Swap Shield) ──
+  const oracleEnrichmentUni = await enrichQuoteWithOracle(
+    ctx.chainId,
+    quote.quote.input.token as Address,
+    quote.quote.output.token as Address,
+    quote.quote.input.amount,
+    quote.quote.output.amount,
+    env.ALCHEMY_API_KEY,
+  );
+
+  // ── Swap Shield — oracle price check ──
   const shieldWarningUni = await runSwapShield(
     env, ctx, intent,
     quote.quote.input.amount, quote.decimalsIn,
     quote.quote.output.amount,
     quote.quote.input.token as Address,
     quote.quote.output.token as Address,
+    oracleEnrichmentUni,
   );
 
   // ── Balance pre-check for exact-output swaps ──

@@ -131,7 +131,6 @@ export interface SwapShieldResult {
  * @param _slippageBps - Reserved for future quote-type specific handling
  * @param alchemyKey - Alchemy API key for RPC
  * @param maxDivergencePct - Maximum allowed divergence (default 5%)
- * @param requirePriceFeed - If true, block when no price feed exists (default false)
  * @returns SwapShieldResult
  */
 export async function checkSwapPrice(
@@ -143,7 +142,8 @@ export async function checkSwapPrice(
   _slippageBps: number,
   alchemyKey: string,
   maxDivergencePct: number = DEFAULT_MAX_DIVERGENCE_PCT,
-  requirePriceFeed: boolean = false,
+  precomputedPriceFeedExists?: boolean,
+  precomputedOracleAmount?: bigint,
 ): Promise<SwapShieldResult> {
   void _slippageBps;
 
@@ -212,31 +212,20 @@ export async function checkSwapPrice(
 
   // ── Check price feed availability ──
   let priceFeedExists: boolean;
-  try {
-    priceFeedExists = await hasPriceFeedForPair(chainId, normalizedIn, normalizedOut, alchemyKey);
-  } catch {
-    priceFeedExists = false;
+  if (precomputedPriceFeedExists !== undefined) {
+    priceFeedExists = precomputedPriceFeedExists;
+  } else {
+    try {
+      priceFeedExists = await hasPriceFeedForPair(chainId, normalizedIn, normalizedOut, alchemyKey);
+    } catch {
+      priceFeedExists = false;
+    }
   }
 
   if (!priceFeedExists) {
     console.warn(
       `[SwapShield] ⚠ No oracle price feed for ${normalizedIn} → ${normalizedOut} on chain ${chainId}`,
     );
-    if (requirePriceFeed) {
-      return {
-        allowed: false,
-        verified: false,
-        oracleAmount: "0",
-        dexAmount: dexExpectedOutRaw.toString(),
-        divergencePct: "0",
-        deltaBps: 0,
-        priceFeedExists: false,
-        code: "NO_PRICE_FEED",
-        reason:
-          `Oracle price feed not available for this token pair on chain ${chainId}. ` +
-          `Set requirePriceFeed=false to get the quote without oracle protection.`,
-      };
-    }
     return {
       allowed: true,
       verified: false,
@@ -254,14 +243,17 @@ export async function checkSwapPrice(
 
   // ── Call convertTokenAmount via direct oracle spot price ──
   let oracleAmountRaw: bigint;
-  try {
-    oracleAmountRaw = await convertTokenAmountViaOracle(
-      chainId,
-      normalizedIn,
-      amountInRaw,
-      normalizedOut,
-      alchemyKey,
-    );
+  if (precomputedOracleAmount !== undefined) {
+    oracleAmountRaw = precomputedOracleAmount;
+  } else {
+    try {
+      oracleAmountRaw = await convertTokenAmountViaOracle(
+        chainId,
+        normalizedIn,
+        amountInRaw,
+        normalizedOut,
+        alchemyKey,
+      );
 
     // convertTokenAmountViaOracle returns a bigint, but for a positive input amount the
     // output should always be non-negative. A negative return indicates an
@@ -309,6 +301,7 @@ export async function checkSwapPrice(
         `Oracle check failed on chain ${chainId}. ` +
         `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
     };
+  }
   }
 
   // Oracle returned 0 — can't compare meaningfully

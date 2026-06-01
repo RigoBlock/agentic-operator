@@ -362,7 +362,7 @@ src/
     vault.ts            ← On-chain vault reads
     bundler.ts          ← ERC-4337 bundler (gas sponsorship)
   llm/
-    client.ts           ← LLM provider resolution (DeepSeek R1 reasoning + Llama 3.3 fast → user key → OpenAI fallback)
+    client.ts           ← LLM provider resolution (Workers AI Kimi K2.6 → user key → OpenAI fallback)
     tools.ts            ← Tool definitions (55+) + system prompt
 public/
   index.html            ← Chat UI + wallet connect
