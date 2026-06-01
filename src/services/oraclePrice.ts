@@ -17,7 +17,7 @@
 
 import { type Address, type Hex, keccak256, encodeAbiParameters } from "viem";
 import { getClient } from "./vault.js";
-import { resolveTokenAddress, getWrappedNativeAddress } from "../config.js";
+import { getWrappedNativeAddress } from "../config.js";
 import { TickMath } from "@uniswap/v3-sdk";
 import JSBI from "jsbi";
 import { BACKGEO_ORACLE } from "./oraclePool.js";

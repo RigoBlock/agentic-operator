@@ -43,7 +43,11 @@ oracle.post("/refresh", async (c) => {
   // Accept numeric amountEth (e.g. 0.001 from JSON) by coercing to string.
   // Use toFixed(18) for numbers instead of String() to avoid scientific-notation
   // output (e.g. String(0.0000001) → "1e-7") which parseUnits rejects.
-  const direction = (typeof body.direction === "string" ? body.direction.trim().toLowerCase() : "buy") as "buy" | "sell";
+  const rawDirection = typeof body.direction === "string" ? body.direction.trim().toLowerCase() : "buy";
+  if (rawDirection !== "buy" && rawDirection !== "sell") {
+    return c.json({ error: "direction must be 'buy' or 'sell'" }, 400);
+  }
+  const direction = rawDirection as "buy" | "sell";
   let amount =
     typeof body.amount === "string"
       ? body.amount.trim()
@@ -93,10 +97,10 @@ oracle.post("/refresh", async (c) => {
   // Validate amount: parseFloat accepts "0.01abc" → 0.01 and "1e-3" → 0.001,
   // both of which later fail inside buildOraclePoolSwapTx/parseUnits with a 500.
   // Validate strictly with parseUnits so those cases return a clear 400.
-  // For sell direction, token decimals are resolved inside buildOraclePoolSwapTx,
-  // so we only do a loose positivity check here.
+  // We use 18 decimals as a safe upper-bound for the loose positivity check
+  // (covers all ERC-20s); the exact decimal check happens inside buildOraclePoolSwapTx.
   try {
-    const parsed = parseUnits(amount, direction === "buy" ? 18 : 9);
+    const parsed = parseUnits(amount, 18);
     if (parsed <= 0n) throw new Error("non-positive");
   } catch {
     return c.json({ error: `amount must be a positive decimal number (e.g. '0.001'). Scientific notation is not supported.` }, 400);

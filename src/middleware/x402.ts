@@ -582,21 +582,6 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       },
     },
   },
-  "POST /api/oracle/refresh": {
-    resource: "https://trader.rigoblock.com/api/oracle/refresh",
-    accepts: [
-      {
-        scheme: "exact",
-        payTo: PAY_TO,
-        price: "$0.002",
-        network: BASE_NETWORK,
-      },
-    ],
-    description:
-      "BackgeoOracle pool refresh transaction builder. Returns an unsigned swap transaction " +
-      "that updates the on-chain oracle price feed for a given token. Supports both EOA and vault paths.",
-    mimeType: "application/json",
-  },
 };
 
 // ── Build x402 v2 server (lazy-initialized) ───────────────────────────

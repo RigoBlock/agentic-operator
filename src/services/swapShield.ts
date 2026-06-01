@@ -62,7 +62,6 @@ import {
   hasPriceFeedForPair,
   normalizeTokenAddress,
 } from "./oraclePrice.js";
-import { getWrappedNativeAddress } from "../config.js";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -73,8 +72,6 @@ import { getWrappedNativeAddress } from "../config.js";
  */
 export const DEFAULT_MAX_DIVERGENCE_PCT = 5;
 
-/** Native ETH address (zero address) — EOracle treats this equivalently to WETH */
-const NATIVE_ETH = "0x0000000000000000000000000000000000000000" as Address;
 
 /** KV key prefix for swap shield temporary tolerance override */
 const SWAP_SHIELD_TOLERANCE_PREFIX = "swap-shield-tolerance:";

@@ -3306,7 +3306,7 @@
               await validateVault();
             }
             // Always refresh delegation status after reconnect so executionMode is accurate
-            refreshDelegationStatus();
+            await refreshDelegationStatus();
             attachProviderListeners(provider);
           } catch { /* silent — auto-reconnect is best-effort */ }
         })();
