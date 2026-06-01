@@ -281,7 +281,7 @@ export async function handle_fund_pool(
     `Chain: ${chainName}`,
     `Recipient: ${recipient}`,
     "",
-    "**Step 1/2:** Sign the approval transaction to allow the pool to transfer your ${baseSymbol}.",
+    `**Step 1/2:** Sign the approval transaction to allow the pool to transfer your ${baseSymbol}.`,
     "**Step 2/2:** After approval, you'll be prompted to sign the mint transaction.",
   ].join("\n");
 
