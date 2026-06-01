@@ -206,7 +206,7 @@ export interface OraclePoolSwapResult {
  */
 export async function buildOraclePoolSwapTx(
   token: string,
-  amountIn: string = "0.001",
+  amountIn: string,
   chainId: number,
   alchemyKey: string,
   vaultAddress?: Address,

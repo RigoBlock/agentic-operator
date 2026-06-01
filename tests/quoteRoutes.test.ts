@@ -186,6 +186,85 @@ describe("POST /api/quote/uniswap", () => {
     expect(json.deltaBps).toBe(0);
     expect(json.oracleAmount).toBe("0");
   });
+
+  it("skips oracle enrichment for EXACT_OUTPUT quotes (avoids meaningless deltaBps)", async () => {
+    const app = createApp();
+    const upstreamResponse = {
+      routing: "CLASSIC",
+      quote: { input: { token: "ETH", amount: "1000" }, output: { token: "USDC", amount: "2000" } },
+    };
+
+    (global.fetch as any).mockResolvedValueOnce(
+      new Response(JSON.stringify(upstreamResponse), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+
+    const res = await app.request(
+      "/api/quote/uniswap",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-test-x402-paid": "true",
+        },
+        body: JSON.stringify({
+          type: "EXACT_OUTPUT",
+          amount: "2000",
+          tokenIn: "ETH",
+          tokenOut: "USDC",
+          tokenInChainId: 8453,
+          tokenOutChainId: 8453,
+        }),
+      },
+      mockEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.priceFeedExists).toBe(false);
+    expect(json.deltaBps).toBe(0);
+    expect(json.oracleAmount).toBe("0");
+    // enrichQuoteWithOracle should NOT have been called for EXACT_OUTPUT
+    expect(mockEnrich).not.toHaveBeenCalled();
+  });
+
+  it("skips oracle enrichment when chainId is missing (avoids defaulting to chain 1)", async () => {
+    const app = createApp();
+    const upstreamResponse = {
+      routing: "CLASSIC",
+      quote: { input: { token: "ETH", amount: "1000" }, output: { token: "USDC", amount: "2000" } },
+    };
+
+    (global.fetch as any).mockResolvedValueOnce(
+      new Response(JSON.stringify(upstreamResponse), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+
+    const res = await app.request(
+      "/api/quote/uniswap",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-test-x402-paid": "true",
+        },
+        body: JSON.stringify({
+          type: "EXACT_INPUT",
+          amount: "1000",
+          tokenIn: "ETH",
+          tokenOut: "USDC",
+          // intentionally omitting tokenInChainId and chainId
+        }),
+      },
+      mockEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.priceFeedExists).toBe(false);
+    expect(json.deltaBps).toBe(0);
+    expect(json.oracleAmount).toBe("0");
+    // enrichQuoteWithOracle should NOT have been called when chainId is missing
+    expect(mockEnrich).not.toHaveBeenCalled();
+  });
 });
 
 describe("GET /api/quote/0x", () => {

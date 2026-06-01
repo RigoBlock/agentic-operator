@@ -2494,13 +2494,19 @@ export async function executeToolCall(
         return String(v).trim();
       };
       const normalizedAmountOut = toDecimalString(args.amountOut);
-      // Default viaVault to true when a vault is connected, unless explicitly set to false
+      // Default viaVault to true when a vault is connected on the SAME chain,
+      // unless explicitly set to false. This allows oracle refreshes on other
+      // chains without blocking the auto chain-switch.
       const hasVault = ctx.vaultAddress && ctx.vaultAddress !== ZERO_ADDR;
       const viaVaultExplicit = args.viaVault === true || args.viaVault === "true" || args.viaVault === false || args.viaVault === "false";
-      const viaVault = viaVaultExplicit
-        ? (args.viaVault === true || args.viaVault === "true")
-        : !!hasVault;
-      const requestsVaultPath = viaVault || normalizedAmountOut !== "";
+      let viaVault: boolean;
+      if (viaVaultExplicit) {
+        viaVault = args.viaVault === true || args.viaVault === "true";
+      } else {
+        const requestedChain = args.chain ? resolveChainId(args.chain as string) : ctx.chainId;
+        viaVault = !!hasVault && requestedChain === ctx.chainId;
+      }
+      const requestsVaultPath = viaVault || normalizedAmountOut !== ""
 
       // Auto-switch chain if provided (only safe for non-vault-dependent calls)
       let oracleChainSwitched: number | undefined;
@@ -2611,9 +2617,12 @@ export async function executeToolCall(
         }
       }
 
-      // Default if still not set
+      // Default amount: 0.001 units is small enough to be financially insignificant for
+      // every token (0.001 ETH ≈ $2–6, 0.001 WBTC ≈ $100, 0.001 USDC ≈ $0.001), while
+      // being non-zero — which is the only requirement for creating a BackgeoOracle
+      // price observation (the tick is recorded at swap time regardless of size).
       if (!amountIn) {
-        amountIn = direction === "buy" ? "0.001" : "1";
+        amountIn = "0.001";
       }
 
       // Treat zero address as "no vault" (frontend uses it as a placeholder before connecting).

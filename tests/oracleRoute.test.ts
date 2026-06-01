@@ -181,4 +181,62 @@ describe("POST /api/oracle/refresh", () => {
       "sell",
     );
   });
+
+  it("defaults amount to 0.001 for buy direction when omitted", async () => {
+    const app = createApp();
+    mockBuildTx.mockResolvedValueOnce({
+      transaction: { to: "0xRouter", data: "0xabc", value: "0x0" },
+      poolInfo: { tokenSymbol: "GRG" },
+    });
+
+    const res = await app.request(
+      "/api/oracle/refresh",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-test-x402-paid": "true" },
+        body: JSON.stringify({ token: "GRG", chainId: 8453, direction: "buy" }),
+      },
+      mockEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockBuildTx).toHaveBeenCalledWith(
+      "GRG",
+      "0.001",
+      8453,
+      "test-alchemy-key",
+      undefined,
+      "buy",
+    );
+  });
+
+  it("defaults amount to 0.001 for sell direction when omitted (not 1)", async () => {
+    const app = createApp();
+    mockBuildTx.mockResolvedValueOnce({
+      transaction: { to: "0xRouter", data: "0xabc", value: "0x0" },
+      poolInfo: { tokenSymbol: "GRG" },
+    });
+
+    const res = await app.request(
+      "/api/oracle/refresh",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-test-x402-paid": "true" },
+        body: JSON.stringify({ token: "GRG", chainId: 8453, direction: "sell" }),
+      },
+      mockEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    // The old default was "1" which is dangerous (1 WBTC = $100k+). The new
+    // default is "0.001" — small enough to be safe for every token.
+    expect(mockBuildTx).toHaveBeenCalledWith(
+      "GRG",
+      "0.001",
+      8453,
+      "test-alchemy-key",
+      undefined,
+      "sell",
+    );
+  });
 });

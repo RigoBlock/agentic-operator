@@ -5,7 +5,7 @@
  *
  * Body (JSON):
  *   token        string   — ERC-20 symbol or address whose oracle feed is stale (e.g. "GRG", "USDC")
- *   amount       string|number — Amount to swap (human-readable). For buy direction: native token amount (default "0.001"). For sell direction: token amount (default "1").
+ *   amount       string|number — Amount to swap (human-readable). Default is "0.001" for both directions (small enough to not matter financially, large enough to create a price observation).
  *   direction    string   — "buy" (native → token, default) or "sell" (token → native).
  *   chainId      number   — Chain where the oracle pool lives
  *   vaultAddress string   — Optional. If provided, routes through the vault adapter (value=0, supports delegation).
@@ -89,9 +89,12 @@ oracle.post("/refresh", async (c) => {
 
   const nativeSymbol = getNativeTokenSymbol(chainId);
 
-  // Default amount if not provided
+  // Default amount: 0.001 units is small enough to be financially insignificant for
+  // every token (0.001 ETH ≈ $2–6, 0.001 WBTC ≈ $100, 0.001 USDC ≈ $0.001), while
+  // being non-zero — which is the only requirement for creating a BackgeoOracle
+  // price observation (the tick is recorded at swap time regardless of size).
   if (!amount) {
-    amount = direction === "buy" ? "0.001" : "1";
+    amount = "0.001";
   }
 
   // Validate amount: parseFloat accepts "0.01abc" → 0.01 and "1e-3" → 0.001,

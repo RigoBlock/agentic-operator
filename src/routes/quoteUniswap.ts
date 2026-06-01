@@ -71,35 +71,48 @@ quoteUniswap.post("/", async (c) => {
   }
 
   // ── Oracle enrichment ──
-  const chainId = Number(body.tokenInChainId || body.chainId || 1);
   const tokenIn = String(body.tokenIn || "") as Address;
   const tokenOut = String(body.tokenOut || "") as Address;
-  const amountIn = String(body.amount || "");
-
-  // Extract DEX expected output from the response
-  // Uniswap returns different quote objects depending on routing type
-  const quoteObj =
-    (data.quote as Record<string, unknown>) ||
-    (data.classicQuote as Record<string, unknown>) ||
-    (data.wrapUnwrapQuote as Record<string, unknown>) ||
-    (data.dutchLimitV2Quote as Record<string, unknown>) ||
-    (data.dutchLimitV3Quote as Record<string, unknown>) ||
-    (data.priorityQuote as Record<string, unknown>) ||
-    (data.chainedQuote as Record<string, unknown>) ||
-    {};
-  const output = (quoteObj.output as Record<string, string>) || {};
-  const dexExpectedOut = output.amount || "0";
+  const rawChainId = body.tokenInChainId ?? body.chainId;
 
   let enrichment;
   try {
-    enrichment = await enrichQuoteWithOracle(
-      chainId,
-      tokenIn,
-      tokenOut,
-      amountIn,
-      dexExpectedOut,
-      c.env.ALCHEMY_API_KEY,
-    );
+    if (!rawChainId) {
+      // No chain specified — can't query oracle. Return neutral enrichment.
+      enrichment = { priceFeedExists: false, deltaBps: 0, oracleAmount: "0" };
+    } else if (body.type === "EXACT_OUTPUT") {
+      // EXACT_OUTPUT: body.amount is the desired output, not the input.
+      // Comparing DEX input vs oracle input for the same output requires
+      // swapping the token direction in the oracle call. Skip enrichment
+      // to avoid producing meaningless deltaBps/oracleAmount.
+      enrichment = { priceFeedExists: false, deltaBps: 0, oracleAmount: "0" };
+    } else {
+      const chainId = Number(rawChainId);
+      const amountIn = String(body.amount || "");
+
+      // Extract DEX expected output from the response
+      // Uniswap returns different quote objects depending on routing type
+      const quoteObj =
+        (data.quote as Record<string, unknown>) ||
+        (data.classicQuote as Record<string, unknown>) ||
+        (data.wrapUnwrapQuote as Record<string, unknown>) ||
+        (data.dutchLimitV2Quote as Record<string, unknown>) ||
+        (data.dutchLimitV3Quote as Record<string, unknown>) ||
+        (data.priorityQuote as Record<string, unknown>) ||
+        (data.chainedQuote as Record<string, unknown>) ||
+        {};
+      const output = (quoteObj.output as Record<string, string>) || {};
+      const dexExpectedOut = output.amount || "0";
+
+      enrichment = await enrichQuoteWithOracle(
+        chainId,
+        tokenIn,
+        tokenOut,
+        amountIn,
+        dexExpectedOut,
+        c.env.ALCHEMY_API_KEY,
+      );
+    }
   } catch {
     enrichment = { priceFeedExists: false, deltaBps: 0, oracleAmount: "0" };
   }
