@@ -131,7 +131,6 @@ export interface SwapShieldResult {
  * @param _slippageBps - Reserved for future quote-type specific handling
  * @param alchemyKey - Alchemy API key for RPC
  * @param maxDivergencePct - Maximum allowed divergence (default 5%)
- * @param requirePriceFeed - If true, block when no price feed exists (default false)
  * @returns SwapShieldResult
  */
 export async function checkSwapPrice(
@@ -143,7 +142,6 @@ export async function checkSwapPrice(
   _slippageBps: number,
   alchemyKey: string,
   maxDivergencePct: number = DEFAULT_MAX_DIVERGENCE_PCT,
-  requirePriceFeed: boolean = false,
 ): Promise<SwapShieldResult> {
   void _slippageBps;
 
@@ -222,21 +220,6 @@ export async function checkSwapPrice(
     console.warn(
       `[SwapShield] ⚠ No oracle price feed for ${normalizedIn} → ${normalizedOut} on chain ${chainId}`,
     );
-    if (requirePriceFeed) {
-      return {
-        allowed: false,
-        verified: false,
-        oracleAmount: "0",
-        dexAmount: dexExpectedOutRaw.toString(),
-        divergencePct: "0",
-        deltaBps: 0,
-        priceFeedExists: false,
-        code: "NO_PRICE_FEED",
-        reason:
-          `Oracle price feed not available for this token pair on chain ${chainId}. ` +
-          `Set requirePriceFeed=false to get the quote without oracle protection.`,
-      };
-    }
     return {
       allowed: true,
       verified: false,

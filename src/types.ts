@@ -123,12 +123,10 @@ export interface ChatRequest {
   stream?: boolean;
   /** User-provided AI API key (OpenRouter, Anthropic, or OpenAI) */
   aiApiKey?: string;
-  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b") */
+  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/moonshotai/kimi-k2.6") */
   aiModel?: string;
   /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
   aiBaseUrl?: string;
-  /** Force Llama 3.3 70B fast-model routing, bypassing Kimi K2.6. Useful for testing or when a lightweight fast model is preferred over the default orchestration. */
-  routingMode?: "llama_only";
   /** Optional per-request context snippets (e.g. selected markdown excerpts) injected into runtime prompt */
   contextDocs?: string[];
   /**
@@ -191,7 +189,7 @@ export interface ChatResponse {
   executionResult?: ExecutionResult;
   /** In delegated mode with multiple txs: results for each */
   executionResults?: ExecutionResult[];
-  /** DeepSeek R1 reasoning trace (contents of <think>...</think> block) */
+  /** Reasoning trace emitted by the model during processing */
   reasoning?: string;
   /** Ordered list of models that produced this output (for hallucination tracking) */
   modelsUsed?: string[];

@@ -370,28 +370,16 @@ async function handleMessage(
         const pick = args[0]?.toLowerCase();
         const modelKey = `tg-model:${userId}`;
         if (!pick) {
-          const current = await env.KV.get(modelKey) || "llama";
-          const label = current === "deepseek"
-            ? "DeepSeek R1 (reasoning mode)"
-            : "Llama 3.3 70B (default)";
           await sendMessage(token, chatId,
-            `Current model: <b>${label}</b>\n\nChange with:\n` +
-            `<code>/model llama</code> — Llama 3.3 70B (best tool calling)\n` +
-            `<code>/model deepseek</code> — DeepSeek R1 (chain-of-thought reasoning)`,
+            "Current model: <b>Kimi K2.6</b> (fixed — no switching required).\n\n" +
+            "Kimi K2.6 handles reasoning, tool calling, and multi-step planning natively.",
           );
           return;
         }
-        if (pick === "llama" || pick === "llama3" || pick === "llama3.3") {
-          await env.KV.put(modelKey, "llama");
-          await sendMessage(token, chatId, "Switched to <b>Llama 3.3 70B</b> — fast, reliable tool calling.");
-        } else if (pick === "deepseek" || pick === "r1" || pick === "deepseek-r1") {
-          await env.KV.put(modelKey, "deepseek");
-          await sendMessage(token, chatId, "Switched to <b>DeepSeek R1</b> — reasoning mode with chain-of-thought traces.");
-        } else {
-          await sendMessage(token, chatId,
-            `Unknown model "<code>${escapeHtml(pick)}</code>".\nUse <code>/model llama</code> or <code>/model deepseek</code>.`,
-          );
-        }
+        // Legacy model switching removed — Kimi K2.6 is the sole model.
+        await sendMessage(token, chatId,
+          "Model switching is no longer supported. Kimi K2.6 is the fixed model.",
+        );
         return;
       }
 
@@ -631,9 +619,10 @@ async function handleMessage(
   const delegationOnAnyChain = delegationOnCurrentChain || await isDelegationActiveAnyChain(env.KV, vault.address);
   const executionMode = delegationOnAnyChain ? "delegated" : "manual";
 
-  // Load per-user model preference (set via /model command).
-  // "deepseek" → DeepSeek R1 reasoning mode; anything else → Llama 3.3 70B (default).
+  // Load per-user model preference (legacy — Kimi K2.6 is now the fixed model).
   const modelPref = await env.KV.get(`tg-model:${userId}`);
+  // Ignore legacy "llama" / "deepseek" values — they are no longer supported.
+  const effectiveModelPref = (modelPref && modelPref !== "llama" && modelPref !== "deepseek") ? modelPref : undefined;
 
   // Load execution mode preference: "autonomous" = auto-execute, "confirm" (default) = show buttons
   const execModePref = await env.KV.get(`tg-execmode:${userId}`);
@@ -649,7 +638,7 @@ async function handleMessage(
     operatorVerified: true,
     isBrowserRequest: false,
     executionMode,
-    aiModel: modelPref === "deepseek" ? "deepseek" : undefined,
+    aiModel: effectiveModelPref,
   };
 
   try {

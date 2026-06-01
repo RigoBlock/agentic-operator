@@ -208,26 +208,6 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(mockConvertTokenAmount).not.toHaveBeenCalled();
   });
 
-  it("blocks when requirePriceFeed=true and no price feed exists", async () => {
-    mockHasPriceFeed.mockResolvedValue(false);
-
-    const result = await checkSwapPrice(
-      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
-      1n * 10n ** 18n,
-      1000n * 10n ** 18n,
-      100,
-      ALCHEMY_KEY,
-      5, // maxDivergencePct
-      true, // requirePriceFeed
-    );
-
-    expect(result.allowed).toBe(false);
-    expect(result.verified).toBe(false);
-    expect(result.code).toBe("NO_PRICE_FEED");
-    expect(result.priceFeedExists).toBe(false);
-    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
-  });
-
   it("classifies ORACLE_ERROR when hasPriceFeed returns true but convertTokenAmount still reverts", async () => {
     mockHasPriceFeed.mockResolvedValue(true);
     mockConvertTokenAmount.mockRejectedValue(new Error("execution reverted"));
