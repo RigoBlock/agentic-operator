@@ -10,13 +10,35 @@
  * 6. Slippage storage and resolution
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { Address } from "viem";
 
-// ── Mock vault.ts getClient before importing swapShield ──
-const mockReadContract = vi.fn();
-vi.mock("../src/services/vault.js", () => ({
-  getClient: () => ({
-    readContract: mockReadContract,
-  }),
+// ── Mock oraclePrice.ts before importing swapShield ──
+const { mockConvertTokenAmount, mockHasPriceFeed } = vi.hoisted(() => ({
+  mockConvertTokenAmount: vi.fn(),
+  mockHasPriceFeed: vi.fn(),
+}));
+
+vi.mock("../src/services/oraclePrice.js", () => ({
+  convertTokenAmountViaOracle: mockConvertTokenAmount,
+  hasPriceFeedForPair: mockHasPriceFeed,
+  normalizeTokenAddress: (token: Address, chainId: number) => {
+    const ETH_ADDRESS = "0x0000000000000000000000000000000000000000";
+    const lower = token.toLowerCase();
+    if (lower === ETH_ADDRESS) return ETH_ADDRESS as Address;
+    if (lower === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee") return ETH_ADDRESS as Address;
+    const WRAPPED_NATIVE_ADDRESSES: Record<number, string> = {
+      1: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      10: "0x4200000000000000000000000000000000000006",
+      56: "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+      130: "0x4200000000000000000000000000000000000006",
+      137: "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
+      8453: "0x4200000000000000000000000000000000000006",
+      42161: "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+    };
+    const wrapped = WRAPPED_NATIVE_ADDRESSES[chainId];
+    if (wrapped && lower === wrapped.toLowerCase()) return ETH_ADDRESS as Address;
+    return token;
+  },
 }));
 
 import {
@@ -30,7 +52,6 @@ import {
   MIN_SLIPPAGE_BPS,
   MAX_SLIPPAGE_BPS,
 } from "../src/services/swapShield.js";
-import type { Address } from "viem";
 
 // ── Mock KV namespace ──
 function createMockKV(): KVNamespace {
@@ -55,7 +76,6 @@ function createMockKV(): KVNamespace {
   } as unknown as KVNamespace;
 }
 
-const VAULT = "0x1234567890abcdef1234567890abcdef12345678" as Address;
 const TOKEN_IN = "0xaaaa000000000000000000000000000000000001" as Address;
 const TOKEN_OUT = "0xbbbb000000000000000000000000000000000002" as Address;
 const OPERATOR = "0xcccc000000000000000000000000000000000003";
@@ -64,16 +84,18 @@ const ALCHEMY_KEY = "test-key";
 
 describe("Swap Shield — checkSwapPrice", () => {
   beforeEach(() => {
-    mockReadContract.mockReset();
+    mockConvertTokenAmount.mockReset();
+    mockHasPriceFeed.mockReset();
   });
 
   it("allows swaps within 5% divergence", async () => {
     // Oracle says 1000 tokenOut, DEX gives 960
     // Divergence = (1000 - 960) / 1000 = 4%
-    mockReadContract.mockResolvedValue(1000n * 10n ** 18n);
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockResolvedValue(1000n * 10n ** 18n);
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,       // 1 tokenIn
       960n * 10n ** 18n,
       100,                    // 1% slippage
@@ -83,15 +105,18 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
     expect(parseFloat(result.divergencePct)).toBeLessThan(5);
+    expect(result.deltaBps).toBe(400);
+    expect(result.priceFeedExists).toBe(true);
   });
 
   it("blocks swaps exceeding 5% divergence", async () => {
     // Oracle says 1000, DEX gives 800
     // Divergence = (1000 - 800) / 1000 = 20%
-    mockReadContract.mockResolvedValue(1000n * 10n ** 18n);
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockResolvedValue(1000n * 10n ** 18n);
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       800n * 10n ** 18n,
       100,
@@ -103,15 +128,18 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.code).toBe("BLOCKED");
     expect(parseFloat(result.divergencePct)).toBeGreaterThan(5);
     expect(result.reason).toContain("Swap Shield blocked");
-    expect(result.reason).toContain("TWAP");
+    expect(result.reason).toContain("oracle");
+    expect(result.deltaBps).toBe(2000);
+    expect(result.priceFeedExists).toBe(true);
   });
 
   it("allows swaps where DEX gives moderately MORE than oracle (favorable)", async () => {
     // Oracle says 1000, DEX gives 1050 (5% favorable — within 10% limit)
-    mockReadContract.mockResolvedValue(1000n * 10n ** 18n);
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockResolvedValue(1000n * 10n ** 18n);
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       1050n * 10n ** 18n,
       100,
@@ -121,14 +149,16 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
     expect(result.divergencePct).toBe("-5.00");
+    expect(result.deltaBps).toBe(-500);
   });
 
   it("blocks swaps where DEX gives suspiciously MORE than oracle (>10% favorable)", async () => {
     // Oracle says 1000, DEX gives 1200 (20% favorable — stale oracle / manipulated route)
-    mockReadContract.mockResolvedValue(1000n * 10n ** 18n);
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockResolvedValue(1000n * 10n ** 18n);
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       1200n * 10n ** 18n,
       100,
@@ -138,14 +168,16 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(false);
     expect(result.verified).toBe(true);
     expect(result.code).toBe("BLOCKED");
+    expect(result.deltaBps).toBe(-2000);
   });
 
   it("uses expected DEX output directly for divergence", async () => {
     // Oracle = 1000, DEX quote = 970 → divergence = 3%
-    mockReadContract.mockResolvedValue(1000n);
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockResolvedValue(1000n);
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n,
       970n,
       300, // 3% slippage
@@ -155,17 +187,14 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
     expect(result.divergencePct).toBe("3.00");
+    expect(result.deltaBps).toBe(300);
   });
 
   it("gracefully handles missing price feed (hasPriceFeed returns false)", async () => {
-    // convertTokenAmount reverts, then hasPriceFeed reports feed absent
-    mockReadContract
-      .mockRejectedValueOnce(new Error("execution reverted"))   // convertTokenAmount
-      .mockResolvedValueOnce(false)                              // hasPriceFeed(tokenIn)
-      .mockResolvedValueOnce(true);                             // hasPriceFeed(tokenOut)
+    mockHasPriceFeed.mockResolvedValue(false);
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       1000n * 10n ** 18n,
       100,
@@ -175,17 +204,36 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
     expect(result.code).toBe("NO_PRICE_FEED");
+    expect(result.priceFeedExists).toBe(false);
+    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
+  });
+
+  it("blocks when requirePriceFeed=true and no price feed exists", async () => {
+    mockHasPriceFeed.mockResolvedValue(false);
+
+    const result = await checkSwapPrice(
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      1n * 10n ** 18n,
+      1000n * 10n ** 18n,
+      100,
+      ALCHEMY_KEY,
+      5, // maxDivergencePct
+      true, // requirePriceFeed
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("NO_PRICE_FEED");
+    expect(result.priceFeedExists).toBe(false);
+    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
   });
 
   it("classifies ORACLE_ERROR when hasPriceFeed returns true but convertTokenAmount still reverts", async () => {
-    // convertTokenAmount reverts, but hasPriceFeed says feeds are available → unexpected condition
-    mockReadContract
-      .mockRejectedValueOnce(new Error("execution reverted"))   // convertTokenAmount
-      .mockResolvedValueOnce(true)                               // hasPriceFeed(tokenIn)
-      .mockResolvedValueOnce(true);                             // hasPriceFeed(tokenOut)
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockRejectedValue(new Error("execution reverted"));
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       1000n * 10n ** 18n,
       100,
@@ -195,14 +243,14 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
     expect(result.code).toBe("ORACLE_ERROR");
+    expect(result.priceFeedExists).toBe(true);
   });
 
-  it("classifies ORACLE_ERROR when vault has no EOracle extension (hasPriceFeed also reverts)", async () => {
-    // All readContract calls throw — vault likely doesn't implement EOracle
-    mockReadContract.mockRejectedValue(new Error("execution reverted"));
+  it("classifies ORACLE_ERROR when hasPriceFeed also throws", async () => {
+    mockHasPriceFeed.mockRejectedValue(new Error("execution reverted"));
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       1000n * 10n ** 18n,
       100,
@@ -211,12 +259,13 @@ describe("Swap Shield — checkSwapPrice", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
-    expect(result.code).toBe("ORACLE_ERROR");
+    expect(result.code).toBe("NO_PRICE_FEED");
+    expect(result.priceFeedExists).toBe(false);
   });
 
   it("blocks invalid quote when expected output is zero for non-zero input", async () => {
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       0n,
       100,
@@ -227,12 +276,13 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.verified).toBe(false);
     expect(result.code).toBe("INVALID_QUOTE");
     expect(result.reason).toContain("expected output is zero");
-    expect(mockReadContract).not.toHaveBeenCalled();
+    expect(mockHasPriceFeed).not.toHaveBeenCalled();
+    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
   });
 
   it("rejects negative DEX expected output as INVALID_QUOTE without hitting the oracle", async () => {
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       -1n,
       100,
@@ -242,12 +292,13 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(false);
     expect(result.verified).toBe(false);
     expect(result.code).toBe("INVALID_QUOTE");
-    expect(mockReadContract).not.toHaveBeenCalled();
+    expect(mockHasPriceFeed).not.toHaveBeenCalled();
+    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
   });
 
   it("rejects negative input amount as INVALID_QUOTE without hitting the oracle", async () => {
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       -1n,
       100n,
       100,
@@ -257,17 +308,19 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(false);
     expect(result.verified).toBe(false);
     expect(result.code).toBe("INVALID_QUOTE");
-    expect(mockReadContract).not.toHaveBeenCalled();
+    expect(mockHasPriceFeed).not.toHaveBeenCalled();
+    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
   });
 
   it("treats negative oracle return as ORACLE_ERROR (fail closed, no sign flip)", async () => {
     // If convertTokenAmount somehow returns a negative int256 for a positive
     // input, we must NOT silently flip the sign — doing so could bypass the
     // divergence threshold. Degrade gracefully to ORACLE_ERROR instead.
-    mockReadContract.mockResolvedValueOnce(-1000n * 10n ** 18n);
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockResolvedValue(-1000n * 10n ** 18n);
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       500n * 10n ** 18n,
       100,
@@ -277,15 +330,17 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
     expect(result.code).toBe("ORACLE_ERROR");
+    expect(result.priceFeedExists).toBe(true);
   });
 
   it("emits consistent negative divergencePct for favorable block (no double sign)", async () => {
     // Oracle 1000, DEX 1200 → 20% favorable, blocked.
     // divergencePct must be "-20.00" — never "--20.00".
-    mockReadContract.mockResolvedValue(1000n * 10n ** 18n);
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockResolvedValue(1000n * 10n ** 18n);
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       1200n * 10n ** 18n,
       100,
@@ -296,24 +351,27 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.code).toBe("BLOCKED");
     // Must carry exactly one leading minus — never "--20.00".
     expect(result.divergencePct).toBe("-20.00");
+    expect(result.deltaBps).toBe(-2000);
   });
 
   it("skips check for zero amounts", async () => {
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       0n, 0n, 100, ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
-    expect(mockReadContract).not.toHaveBeenCalled();
+    expect(mockHasPriceFeed).not.toHaveBeenCalled();
+    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
   });
 
   it("skips check when oracle returns zero", async () => {
-    mockReadContract.mockResolvedValue(0n);
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockResolvedValue(0n);
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n * 10n ** 18n,
       1000n * 10n ** 18n,
       100,
@@ -323,20 +381,22 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
     expect(result.code).toBe("ORACLE_ERROR");
+    expect(result.priceFeedExists).toBe(true);
   });
 
   it("normalizes WETH to address(0) for Base chain", async () => {
     const WETH_BASE = "0x4200000000000000000000000000000000000006" as Address;
-    mockReadContract.mockResolvedValue(1000n);
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockResolvedValue(1000n);
 
     await checkSwapPrice(
-      VAULT, 8453, WETH_BASE, TOKEN_OUT,
+      8453, WETH_BASE, TOKEN_OUT,
       1n, 950n, 100, ALCHEMY_KEY,
     );
 
-    // The first arg to readContract should have address(0) as tokenIn
-    const callArgs = mockReadContract.mock.calls[0][0];
-    expect(callArgs.args[0]).toBe("0x0000000000000000000000000000000000000000");
+    // convertTokenAmountViaOracle should be called with address(0) as the tokenIn
+    const callArgs = mockConvertTokenAmount.mock.calls[0];
+    expect(callArgs[1]).toBe("0x0000000000000000000000000000000000000000");
   });
 
   it("skips check for same token (wrap/unwrap) after normalization", async () => {
@@ -344,7 +404,7 @@ describe("Swap Shield — checkSwapPrice", () => {
     const ZERO = "0x0000000000000000000000000000000000000000" as Address;
 
     const result = await checkSwapPrice(
-      VAULT, 8453, WETH_BASE, ZERO,
+      8453, WETH_BASE, ZERO,
       1n * 10n ** 18n,
       1n * 10n ** 18n,
       100,
@@ -353,15 +413,17 @@ describe("Swap Shield — checkSwapPrice", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
-    expect(mockReadContract).not.toHaveBeenCalled();
+    expect(mockHasPriceFeed).not.toHaveBeenCalled();
+    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
   });
 
   it("respects custom maxDivergencePct", async () => {
     // Divergence = 4%, custom threshold 2%
-    mockReadContract.mockResolvedValue(1000n);
+    mockHasPriceFeed.mockResolvedValue(true);
+    mockConvertTokenAmount.mockResolvedValue(1000n);
 
     const result = await checkSwapPrice(
-      VAULT, CHAIN_ID, TOKEN_IN, TOKEN_OUT,
+      CHAIN_ID, TOKEN_IN, TOKEN_OUT,
       1n,
       960n,
       100,
@@ -372,7 +434,6 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("BLOCKED");
   });
-
 });
 
 describe("Swap Shield — tolerance override flow", () => {

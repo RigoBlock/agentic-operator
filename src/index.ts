@@ -17,6 +17,8 @@ import { cors } from "hono/cors";
 import type { Env, AppVariables } from "./types.js";
 import { chat } from "./routes/chat.js";
 import { quote } from "./routes/quote.js";
+import { quoteUniswap } from "./routes/quoteUniswap.js";
+import { quote0x } from "./routes/quote0x.js";
 import { delegation } from "./routes/delegation.js";
 import { gasPolicy } from "./routes/gasPolicy.js";
 import { telegram } from "./routes/telegram.js";
@@ -103,6 +105,8 @@ app.get("/api/session", async (c) => {
 
 app.route("/api/chat", chat);
 app.route("/api/quote", quote);
+app.route("/api/quote/uniswap", quoteUniswap);
+app.route("/api/quote/0x", quote0x);
 app.route("/api/oracle", oracle);
 app.route("/api/tools", toolsRoute);
 app.route("/api/delegation", delegation);

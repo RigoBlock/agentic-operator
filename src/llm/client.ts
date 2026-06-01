@@ -4902,7 +4902,6 @@ async function runSwapShield(
   }
 
   const result = await checkSwapPrice(
-    ctx.vaultAddress as Address,
     ctx.chainId,
     tokenInAddr,
     tokenOutAddr,

@@ -194,8 +194,28 @@ describe("resolveTokenAddress", () => {
     expect(result).toBe("0xaf88d065e77c8cC2239327C5EDb3A432268e5831");
   });
 
-  it("resolves ETH to zero address", async () => {
+  it("resolves ETH to zero address on Ethereum (native)", async () => {
     const result = await resolveTokenAddress(1, "ETH");
+    expect(result).toBe("0x0000000000000000000000000000000000000000");
+  });
+
+  it("resolves ETH to WETH on BNB Chain (bridged ERC-20)", async () => {
+    const result = await resolveTokenAddress(56, "ETH");
+    expect(result).toBe("0x2170Ed0880ac9A755fd29B2688956BD959F933F8");
+  });
+
+  it("resolves ETH to WETH on Polygon (bridged ERC-20)", async () => {
+    const result = await resolveTokenAddress(137, "ETH");
+    expect(result).toBe("0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619");
+  });
+
+  it("resolves BNB to zero address on BNB Chain (native)", async () => {
+    const result = await resolveTokenAddress(56, "BNB");
+    expect(result).toBe("0x0000000000000000000000000000000000000000");
+  });
+
+  it("resolves POL to zero address on Polygon (native)", async () => {
+    const result = await resolveTokenAddress(137, "POL");
     expect(result).toBe("0x0000000000000000000000000000000000000000");
   });
 });
