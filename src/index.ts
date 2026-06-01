@@ -210,6 +210,9 @@ app.get("/api/health", (c) =>
       paidRoutes: {
         "POST /api/chat": "up to $0.10 (billed by usage, ~$0.003-$0.015)",
         "GET /api/quote": "$0.002",
+        "POST /api/quote/uniswap": "$0.002",
+        "GET /api/quote/0x": "$0.002",
+        "POST /api/oracle/refresh": "$0.002",
         "GET /api/tools": "$0.002",
         "POST /api/tools": "$0.002",
       },
@@ -248,6 +251,9 @@ app.get("/api", (c) => {
       endpoints: {
         "POST /api/chat": { price: "up to $0.10 (billed by usage)", description: "Natural language DeFi agent — swap/bridge/LP/stake calldata" },
         "GET /api/quote": { price: "$0.002", description: "DEX price quote across 7 chains" },
+        "POST /api/quote/uniswap": { price: "$0.002", description: "Uniswap Trading API quote with oracle enrichment" },
+        "GET /api/quote/0x": { price: "$0.002", description: "0x API quote with oracle enrichment" },
+        "POST /api/oracle/refresh": { price: "$0.002", description: "BackgeoOracle pool refresh transaction builder" },
         "POST /api/tools": { price: "$0.002", description: "Direct tool invocation — structured input/output" },
         "GET /api/tools": { price: "$0.002", description: "Tool discovery with full parameter schemas" },
       },
@@ -388,6 +394,24 @@ app.get("/.well-known/x402.json", (c) =>
         description: "DEX price quote across 7 chains (Uniswap + 0x aggregator)",
       },
       {
+        path: "/api/quote/uniswap",
+        method: "POST",
+        price: "$0.002",
+        description: "Uniswap Trading API quote with BackgeoOracle spot-price enrichment",
+      },
+      {
+        path: "/api/quote/0x",
+        method: "GET",
+        price: "$0.002",
+        description: "0x API v2 quote with BackgeoOracle spot-price enrichment",
+      },
+      {
+        path: "/api/oracle/refresh",
+        method: "POST",
+        price: "$0.002",
+        description: "BackgeoOracle pool refresh transaction builder",
+      },
+      {
         path: "/api/tools",
         method: "GET",
         price: "$0.002",
@@ -429,6 +453,24 @@ app.get("/.well-known/api-catalog", (c) => {
       },
       {
         anchor: "https://trader.rigoblock.com/api/quote",
+        "service-desc": [
+          { href: "https://trader.rigoblock.com/openapi.json" },
+        ],
+      },
+      {
+        anchor: "https://trader.rigoblock.com/api/quote/uniswap",
+        "service-desc": [
+          { href: "https://trader.rigoblock.com/openapi.json" },
+        ],
+      },
+      {
+        anchor: "https://trader.rigoblock.com/api/quote/0x",
+        "service-desc": [
+          { href: "https://trader.rigoblock.com/openapi.json" },
+        ],
+      },
+      {
+        anchor: "https://trader.rigoblock.com/api/oracle/refresh",
         "service-desc": [
           { href: "https://trader.rigoblock.com/openapi.json" },
         ],
@@ -545,6 +587,8 @@ app.get("/.well-known/openid-configuration", (c) =>
     },
   }),
 );
+
+export { app };
 
 export default {
   fetch: app.fetch,

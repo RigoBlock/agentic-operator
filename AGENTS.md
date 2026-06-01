@@ -8,18 +8,20 @@
 
 ## Overview
 
-The Rigoblock Agentic Operator exposes four x402-gated endpoints. Every operation is an atomic HTTP request.
+The Rigoblock Agentic Operator exposes six x402-gated endpoints. Every operation is an atomic HTTP request.
 
 | Endpoint | Method | Price | What it returns |
 |----------|--------|-------|-----------------|
-| `/api/quote` | GET | $0.002 USDC | DEX price quote (no vault context needed) |
+| `/api/quote` | GET | $0.002 USDC | Simple DEX price quote (no vault context needed) |
+| `/api/quote/uniswap` | POST | $0.002 USDC | Full Uniswap Trading API quote with oracle enrichment |
+| `/api/quote/0x` | GET | $0.002 USDC | Full 0x API quote with oracle enrichment |
 | `/api/tools` | GET | $0.002 USDC | Full tool catalog with JSON schemas for direct invocation |
 | `/api/tools?toolName={name}` | POST | $0.002 USDC | Direct tool execution with structured arguments (no LLM overhead) |
 | `/api/chat` | POST | up to $0.10 USDC (billed by actual usage, typical $0.003–$0.015) | AI-powered DeFi response (swap calldata, positions, analysis) |
 
 Payments are in USDC on **Base mainnet** (`eip155:8453`) via the
 [x402 protocol](https://x402.org) (`upto` scheme for `/api/chat`, `exact` scheme for
-`/api/quote`). The CDP facilitator at `api.cdp.coinbase.com` handles verification
+all `/api/quote*` endpoints). The CDP facilitator at `api.cdp.coinbase.com` handles verification
 and settlement. Callers authorise up to $0.10 for `/api/chat` but are only charged
 the actual inference cost — simple queries cost ~$0.003, complex multi-tool chains
 cost up to $0.015.
@@ -357,6 +359,68 @@ GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base
   "gasFeeUSD": "0.002423",
   "gasLimit": "394000",
   "chainId": 8453
+}
+```
+
+---
+
+## The `/api/quote/uniswap` Endpoint
+
+Full Uniswap Trading API quote with oracle spot-price enrichment. Returns the upstream Uniswap `/quote` response verbatim plus oracle metadata.
+
+```
+POST /api/quote/uniswap
+X-PAYMENT: <x402-payment-header>
+Content-Type: application/json
+
+{
+  "type": "EXACT_INPUT",
+  "amount": "1000000000000000000",
+  "tokenIn": "ETH",
+  "tokenOut": "USDC",
+  "tokenInChainId": 8453,
+  "tokenOutChainId": 8453
+}
+```
+
+**Request body:** Same as the [Uniswap Trading API `/quote`](https://docs.uniswap.org/api/trading/quote) endpoint. All standard parameters are forwarded.
+
+**Response:** Upstream Uniswap quote + oracle enrichment (three extra fields appended to the standard Uniswap response):
+```json
+{
+  // ... full Uniswap Trading API quote response ...
+  "priceFeedExists": true,
+  "deltaBps": 12,
+  "oracleAmount": "2079548076"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `priceFeedExists` | Whether both tokens have an active BackgeoOracle feed |
+| `deltaBps` | Divergence between DEX quote and oracle spot price (positive = DEX worse) |
+| `oracleAmount` | Expected output from oracle spot price, in base units |
+
+---
+
+## The `/api/quote/0x` Endpoint
+
+Full 0x Swap API quote with oracle spot-price enrichment. Returns the upstream 0x `/swap/allowance-holder/quote` response verbatim plus oracle metadata.
+
+```
+GET /api/quote/0x?chainId=8453&sellToken=ETH&buyToken=USDC&sellAmount=1000000000000000000
+X-PAYMENT: <x402-payment-header>
+```
+
+**Query parameters:** Same as the [0x API v2 `/swap/allowance-holder/quote`](https://0x.org/docs/api#tag/Swap/operation/swapAllowanceHolderQuote) endpoint. All standard parameters are forwarded.
+
+**Response:** Upstream 0x quote + oracle enrichment (three extra fields appended to the standard 0x response):
+```json
+{
+  // ... full 0x API quote response ...
+  "priceFeedExists": true,
+  "deltaBps": -8,
+  "oracleAmount": "2081500000"
 }
 ```
 

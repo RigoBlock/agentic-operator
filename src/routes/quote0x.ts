@@ -3,15 +3,15 @@
  *
  * GET /api/quote/0x
  *
- * Accepts the exact same query parameters as the 0x API
- * /swap/allowance-holder/quote endpoint.
- * Forwards to 0x, then enriches the response with oracle spot-price metadata:
+ * Drop-in replacement for the 0x API v2 `/swap/allowance-holder/quote` endpoint.
+ * Forwards query parameters verbatim, then appends oracle spot-price metadata
+ * to the upstream response:
  *   - priceFeedExists: boolean
  *   - deltaBps: divergence from oracle in basis points
  *   - oracleAmount: expected output from oracle spot price
  *
- * Optional query param: requirePriceFeed (default false)
- *   - When true, returns 422 if no oracle feed exists for the token pair.
+ * The caller receives the exact same response they would from 0x, plus
+ * three extra fields. No parameters are stripped or modified.
  *
  * Auth: x402 payment OR authenticated browser session.
  */
@@ -39,18 +39,9 @@ quote0x.get("/", async (c) => {
     return c.json({ error: "Authentication required. Use x402 payment or a verified browser session." }, 401);
   }
 
-  const requirePriceFeed = c.req.query("requirePriceFeed") === "true";
+  // Build upstream URL — pass query params verbatim, no stripping
+  const upstreamUrl = `${ZEROX_API_URL}/swap/allowance-holder/quote?${new URLSearchParams(c.req.query()).toString()}`;
 
-  // Build upstream query params (strip requirePriceFeed)
-  const upstreamParams = new URLSearchParams();
-  for (const [key, value] of Object.entries(c.req.query())) {
-    if (key !== "requirePriceFeed" && value !== undefined) {
-      upstreamParams.set(key, value);
-    }
-  }
-
-  // Forward to 0x API
-  const upstreamUrl = `${ZEROX_API_URL}/swap/allowance-holder/quote?${upstreamParams.toString()}`;
   let upstreamRes: Response;
   try {
     upstreamRes = await fetch(upstreamUrl, { headers: getHeaders(c.env) });
@@ -70,10 +61,11 @@ quote0x.get("/", async (c) => {
   }
 
   // ── Oracle enrichment ──
-  const chainId = Number(upstreamParams.get("chainId") || "1");
-  const tokenIn = (upstreamParams.get("sellToken") || "") as Address;
-  const tokenOut = (upstreamParams.get("buyToken") || "") as Address;
-  const amountIn = upstreamParams.get("sellAmount") || "0";
+  const query = c.req.query();
+  const chainId = Number(query.chainId || "1");
+  const tokenIn = (query.sellToken || "") as Address;
+  const tokenOut = (query.buyToken || "") as Address;
+  const amountIn = query.sellAmount || "0";
   const dexExpectedOut = String(data.buyAmount || "0");
 
   let enrichment;
@@ -88,18 +80,6 @@ quote0x.get("/", async (c) => {
     );
   } catch {
     enrichment = { priceFeedExists: false, deltaBps: 0, oracleAmount: "0" };
-  }
-
-  if (requirePriceFeed && !enrichment.priceFeedExists) {
-    return c.json(
-      {
-        ...data,
-        ...enrichment,
-        error: "Oracle price feed not available for this token pair",
-        code: "NO_PRICE_FEED",
-      },
-      422,
-    );
   }
 
   return c.json({ ...data, ...enrichment });

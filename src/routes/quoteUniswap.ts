@@ -3,14 +3,15 @@
  *
  * POST /api/quote/uniswap
  *
- * Accepts the exact same request body as the Uniswap Trading API /quote endpoint.
- * Forwards to Uniswap, then enriches the response with oracle spot-price metadata:
+ * Drop-in replacement for the Uniswap Trading API /quote endpoint.
+ * Forwards the request body verbatim, then appends oracle spot-price metadata
+ * to the upstream response:
  *   - priceFeedExists: boolean
  *   - deltaBps: divergence from oracle in basis points
  *   - oracleAmount: expected output from oracle spot price
  *
- * Optional field: requirePriceFeed (default false)
- *   - When true, returns 422 if no oracle feed exists for the token pair.
+ * The caller receives the exact same response they would from Uniswap, plus
+ * three extra fields. No parameters are stripped or modified.
  *
  * Auth: x402 payment OR authenticated browser session.
  */
@@ -46,17 +47,13 @@ quoteUniswap.post("/", async (c) => {
     return c.json({ error: "Invalid JSON body." }, 400);
   }
 
-  const requirePriceFeed = body.requirePriceFeed === true || body.requirePriceFeed === "true";
-  const bodyToForward = { ...body };
-  delete bodyToForward.requirePriceFeed;
-
-  // Forward to Uniswap Trading API
+  // Forward to Uniswap Trading API — body is passed verbatim, no stripping
   let upstreamRes: Response;
   try {
     upstreamRes = await fetch(`${TRADING_API_URL}/quote`, {
       method: "POST",
       headers: getHeaders(c.env),
-      body: JSON.stringify(bodyToForward),
+      body: JSON.stringify(body),
     });
   } catch (err) {
     return c.json({ error: sanitizeError(err instanceof Error ? err.message : "Upstream request failed") }, 502);
@@ -74,16 +71,21 @@ quoteUniswap.post("/", async (c) => {
   }
 
   // ── Oracle enrichment ──
-  const chainId = Number(bodyToForward.tokenInChainId || bodyToForward.chainId || 1);
-  const tokenIn = String(bodyToForward.tokenIn || "") as Address;
-  const tokenOut = String(bodyToForward.tokenOut || "") as Address;
-  const amountIn = String(bodyToForward.amount || "");
+  const chainId = Number(body.tokenInChainId || body.chainId || 1);
+  const tokenIn = String(body.tokenIn || "") as Address;
+  const tokenOut = String(body.tokenOut || "") as Address;
+  const amountIn = String(body.amount || "");
 
   // Extract DEX expected output from the response
+  // Uniswap returns different quote objects depending on routing type
   const quoteObj =
     (data.quote as Record<string, unknown>) ||
     (data.classicQuote as Record<string, unknown>) ||
     (data.wrapUnwrapQuote as Record<string, unknown>) ||
+    (data.dutchLimitV2Quote as Record<string, unknown>) ||
+    (data.dutchLimitV3Quote as Record<string, unknown>) ||
+    (data.priorityQuote as Record<string, unknown>) ||
+    (data.chainedQuote as Record<string, unknown>) ||
     {};
   const output = (quoteObj.output as Record<string, string>) || {};
   const dexExpectedOut = output.amount || "0";
@@ -100,18 +102,6 @@ quoteUniswap.post("/", async (c) => {
     );
   } catch {
     enrichment = { priceFeedExists: false, deltaBps: 0, oracleAmount: "0" };
-  }
-
-  if (requirePriceFeed && !enrichment.priceFeedExists) {
-    return c.json(
-      {
-        ...data,
-        ...enrichment,
-        error: "Oracle price feed not available for this token pair",
-        code: "NO_PRICE_FEED",
-      },
-      422,
-    );
   }
 
   return c.json({ ...data, ...enrichment });
