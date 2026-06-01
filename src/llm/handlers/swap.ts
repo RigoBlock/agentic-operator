@@ -56,8 +56,17 @@ import { buildOraclePoolSwapTx } from "../../services/oraclePool.js";
 import { AuthError } from "../../services/auth.js";
 import {
   friendlyError, estimateGas, preCheckNavImpact,
-  resolveChainArg, resolveChainName, resolveSlippage, formatRawAmount, runSwapShield, executeToolCall,
+  resolveChainName, resolveSlippage, runSwapShield, executeToolCall, switchChainIfNeeded,
 } from "../client.js";
+
+/** Format a raw wei amount to a human-readable decimal string (6 places). */
+function formatRawAmount(amount: string, decimals: number): string {
+  const value = BigInt(amount);
+  const divisor = 10n ** BigInt(decimals);
+  const whole = value / divisor;
+  const frac = (value % divisor).toString().padStart(decimals, "0").slice(0, 6);
+  return `${whole}.${frac}`;
+}
 
 export async function handle_get_swap_quote(
   env: Env,
@@ -65,15 +74,7 @@ export async function handle_get_swap_quote(
   args: Record<string, unknown>,
   toolName: string,
 ): Promise<ToolResult> {
-  // Auto-switch chain if specified
-  let chainSwitched: number | undefined;
-  if (args.chain) {
-    const match = resolveChainArg((args.chain as string).trim());
-    if (match.id !== ctx.chainId) {
-      ctx.chainId = match.id;
-      chainSwitched = match.id;
-    }
-  }
+  const chainSwitched = switchChainIfNeeded(args.chain, ctx);
 
   // Resolve slippage: request body → KV stored default → 100 bps
   const resolvedSlippage = await resolveSlippage(env, ctx);
@@ -119,15 +120,7 @@ export async function handle_build_vault_swap(
     );
   }
 
-  // Auto-switch chain if specified
-  let chainSwitched: number | undefined;
-  if (args.chain) {
-    const match = resolveChainArg((args.chain as string).trim());
-    if (match.id !== ctx.chainId) {
-      ctx.chainId = match.id;
-      chainSwitched = match.id;
-    }
-  }
+  const chainSwitched = switchChainIfNeeded(args.chain, ctx);
 
   // Resolve slippage: request body → KV stored default → 100 bps
   const resolvedSlippage = await resolveSlippage(env, ctx);

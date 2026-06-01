@@ -43,7 +43,12 @@ oracle.post("/refresh", async (c) => {
   // Accept numeric amountEth (e.g. 0.001 from JSON) by coercing to string.
   // Use toFixed(18) for numbers instead of String() to avoid scientific-notation
   // output (e.g. String(0.0000001) → "1e-7") which parseUnits rejects.
-  const rawDirection = typeof body.direction === "string" ? body.direction.trim().toLowerCase() : "buy";
+  const rawDirection =
+    body.direction === undefined
+      ? "buy"
+      : typeof body.direction === "string"
+        ? body.direction.trim().toLowerCase()
+        : null;
   if (rawDirection !== "buy" && rawDirection !== "sell") {
     return c.json({ error: "direction must be 'buy' or 'sell'" }, 400);
   }

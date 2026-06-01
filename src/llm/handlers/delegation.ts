@@ -56,7 +56,7 @@ import { buildOraclePoolSwapTx } from "../../services/oraclePool.js";
 import { AuthError } from "../../services/auth.js";
 import {
   friendlyError, estimateGas, preCheckNavImpact,
-  resolveChainArg, resolveChainName, resolveSlippage, formatRawAmount, runSwapShield, executeToolCall,
+  resolveChainArg, resolveChainName, resolveSlippage, runSwapShield, executeToolCall,
 } from "../client.js";
 
 export async function handle_setup_delegation(

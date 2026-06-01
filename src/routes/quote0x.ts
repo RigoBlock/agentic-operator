@@ -65,10 +65,10 @@ quote0x.get("/", async (c) => {
   // to compare against the DEX quote, but exact-output quotes only provide buyAmount.
   const query = c.req.query();
   let enrichment;
-  if (!query.sellAmount) {
+  if (!query.sellAmount || !query.chainId) {
     enrichment = { priceFeedExists: false, deltaBps: 0, oracleAmount: "0" };
   } else {
-    const chainId = Number(query.chainId || "1");
+    const chainId = Number(query.chainId);
     const tokenIn = (query.sellToken || "") as Address;
     const tokenOut = (query.buyToken || "") as Address;
     const amountIn = query.sellAmount;

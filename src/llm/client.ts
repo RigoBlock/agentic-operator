@@ -1890,6 +1890,24 @@ export function resolveChainArg(chainArg: string): { id: number; name: string; s
   );
 }
 
+/**
+ * Switch chain context if the user-specified chain differs from the current one.
+ * Returns the new chainId when a switch happens, otherwise undefined.
+ * Mutates `ctx.chainId` in place.
+ */
+export function switchChainIfNeeded(
+  chainArg: unknown,
+  ctx: RequestContext,
+): number | undefined {
+  if (!chainArg) return undefined;
+  const match = resolveChainArg(String(chainArg).trim());
+  if (match.id !== ctx.chainId) {
+    ctx.chainId = match.id;
+    return match.id;
+  }
+  return undefined;
+}
+
 /** Simple Levenshtein distance for short strings (chain names). */
 export function levenshtein(a: string, b: string): number {
   const m = a.length, n = b.length;
@@ -2090,17 +2108,6 @@ export async function runSwapShield(
     console.warn(`[SwapShield] Non-blocking: ${warning}`);
     return warning;
   }
-}
-
-/**
- * Format a raw token amount (in smallest units) to human-readable.
- */
-export function formatRawAmount(amount: string, decimals: number): string {
-  const value = BigInt(amount);
-  const divisor = 10n ** BigInt(decimals);
-  const whole = value / divisor;
-  const frac = (value % divisor).toString().padStart(decimals, "0").slice(0, 6);
-  return `${whole}.${frac}`;
 }
 
 // ── Swap argument sanitizer ──────────────────────────────────────────
