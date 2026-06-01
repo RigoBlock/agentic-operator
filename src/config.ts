@@ -117,6 +117,28 @@ export function getRpcUrl(chainId: number, alchemyKey?: string): string | undefi
   return undefined; // viem will use the chain's default public RPC
 }
 
+/** Native token symbol per chain. Used to derive wrapped-native mappings dynamically. */
+export const NATIVE_TOKEN: Record<number, string> = {
+  1: "ETH", 10: "ETH", 130: "ETH", 8453: "ETH", 42161: "ETH",
+  56: "BNB", 137: "POL",
+};
+
+/** Get the native token symbol for a chain (e.g., "ETH", "BNB", "POL"). */
+export function getNativeTokenSymbol(chainId: number): string {
+  return NATIVE_TOKEN[chainId] || "ETH";
+}
+
+/**
+ * Get the wrapped-native token address for a chain.
+ * Derives from TOKEN_MAP using the convention W${nativeSymbol} (e.g., WETH, WBNB, WPOL).
+ * This is the single source of truth — oraclePrice.ts and swapShield.ts consume this
+ * instead of maintaining their own hardcoded maps.
+ */
+export function getWrappedNativeAddress(chainId: number): `0x${string}` | undefined {
+  const nativeSymbol = getNativeTokenSymbol(chainId);
+  return TOKEN_MAP[chainId]?.[`W${nativeSymbol}`];
+}
+
 /** Well-known token addresses per chain (extendable) */
 export const TOKEN_MAP: Record<number, Record<string, `0x${string}`>> = {
   1: {
@@ -164,6 +186,7 @@ export const TOKEN_MAP: Record<number, Record<string, `0x${string}`>> = {
     MATIC: "0x0000000000000000000000000000000000000000",
     WMATIC: "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
     WPOL: "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+    ETH: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
     WETH: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
   },
   8453: {

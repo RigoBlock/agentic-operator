@@ -9,6 +9,9 @@ import {
   TOKEN_MAP,
   STAKING_PROXY,
   SUPPORTED_CHAINS,
+  NATIVE_TOKEN,
+  getNativeTokenSymbol,
+  getWrappedNativeAddress,
   sanitizeError,
   resolveTokenAddress,
 } from "../src/config.js";
@@ -194,8 +197,75 @@ describe("resolveTokenAddress", () => {
     expect(result).toBe("0xaf88d065e77c8cC2239327C5EDb3A432268e5831");
   });
 
-  it("resolves ETH to zero address", async () => {
+  it("resolves ETH to zero address on Ethereum (native)", async () => {
     const result = await resolveTokenAddress(1, "ETH");
     expect(result).toBe("0x0000000000000000000000000000000000000000");
+  });
+
+  it("resolves ETH to WETH on BNB Chain (bridged ERC-20)", async () => {
+    const result = await resolveTokenAddress(56, "ETH");
+    expect(result).toBe("0x2170Ed0880ac9A755fd29B2688956BD959F933F8");
+  });
+
+  it("resolves ETH to WETH on Polygon (bridged ERC-20)", async () => {
+    const result = await resolveTokenAddress(137, "ETH");
+    expect(result).toBe("0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619");
+  });
+
+  it("resolves BNB to zero address on BNB Chain (native)", async () => {
+    const result = await resolveTokenAddress(56, "BNB");
+    expect(result).toBe("0x0000000000000000000000000000000000000000");
+  });
+
+  it("resolves POL to zero address on Polygon (native)", async () => {
+    const result = await resolveTokenAddress(137, "POL");
+    expect(result).toBe("0x0000000000000000000000000000000000000000");
+  });
+});
+
+describe("NATIVE_TOKEN consistency", () => {
+  it("every supported chain has a NATIVE_TOKEN entry", () => {
+    for (const chain of SUPPORTED_CHAINS) {
+      expect(NATIVE_TOKEN[chain.id], `Chain ${chain.name} (${chain.id}) missing NATIVE_TOKEN`)
+        .toBeDefined();
+      expect(NATIVE_TOKEN[chain.id]).not.toBe("");
+    }
+  });
+
+  it("every supported chain has native symbol mapped to 0x0 in TOKEN_MAP", () => {
+    for (const chain of SUPPORTED_CHAINS) {
+      const nativeSymbol = getNativeTokenSymbol(chain.id);
+      const tokenMap = TOKEN_MAP[chain.id];
+      expect(tokenMap, `Chain ${chain.name} (${chain.id}) missing TOKEN_MAP`).toBeDefined();
+      expect(
+        tokenMap![nativeSymbol],
+        `Chain ${chain.name}: ${nativeSymbol} must map to 0x0`,
+      ).toBe("0x0000000000000000000000000000000000000000");
+    }
+  });
+
+  it("every supported chain has W${nativeSymbol} in TOKEN_MAP", () => {
+    for (const chain of SUPPORTED_CHAINS) {
+      const nativeSymbol = getNativeTokenSymbol(chain.id);
+      const wrappedKey = `W${nativeSymbol}`;
+      const tokenMap = TOKEN_MAP[chain.id];
+      expect(
+        tokenMap![wrappedKey],
+        `Chain ${chain.name}: ${wrappedKey} must be in TOKEN_MAP`,
+      ).toBeDefined();
+    }
+  });
+
+  it("getWrappedNativeAddress returns consistent addresses for known chains", () => {
+    expect(getWrappedNativeAddress(1)).toBe("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");      // WETH
+    expect(getWrappedNativeAddress(56)).toBe("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c");     // WBNB
+    expect(getWrappedNativeAddress(137)).toBe("0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270");   // WPOL/WMATIC
+    expect(getWrappedNativeAddress(8453)).toBe("0x4200000000000000000000000000000000000006");   // WETH
+  });
+
+  it("getNativeTokenSymbol returns correct symbols", () => {
+    expect(getNativeTokenSymbol(1)).toBe("ETH");
+    expect(getNativeTokenSymbol(56)).toBe("BNB");
+    expect(getNativeTokenSymbol(137)).toBe("POL");
   });
 });

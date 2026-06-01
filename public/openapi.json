@@ -29,7 +29,7 @@
       "get": {
         "operationId": "getDexQuote",
         "summary": "Get DEX swap quote",
-        "description": "Returns a swap quote sourced from Uniswap liquidity for a given token pair and amount on any of the 7 supported chains. No vault, wallet, or operator context required — any agent can call this endpoint with a $0.002 USDC payment.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Typical use:** Price discovery, trade sizing, yield comparison, arbitrage detection.\n\n**Example:** `GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base`",
+        "description": "Returns a swap quote sourced from Uniswap liquidity for a given token pair and amount on any of the 7 supported chains. No vault, wallet, or operator context required — any agent can call this endpoint with a $0.0020 USDC payment.\n\n**Price:** $0.0020 USDC per request (x402, eip155:8453)\n\n**Typical use:** Price discovery, trade sizing, yield comparison, arbitrage detection.\n\n**Example:** `GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base`",
         "tags": [
           "Quotes"
         ],
@@ -124,6 +124,273 @@
         ]
       }
     },
+    "/api/quote/uniswap": {
+      "post": {
+        "operationId": "getUniswapQuote",
+        "summary": "Uniswap Trading API quote with oracle enrichment",
+        "description": "Proxies to the Uniswap Trading API `/quote` endpoint and enriches the response with on-chain BackgeoOracle spot-price metadata. Returns the upstream response verbatim plus `priceFeedExists`, `deltaBps`, and `oracleAmount`.\n\n**Price:** $0.0021 USDC per request (x402 exact scheme, eip155:8453)\n\n**Request body:** Identical to the Uniswap Trading API `/quote` endpoint. All request body fields are forwarded verbatim to Uniswap.",
+        "tags": [
+          "Quotes"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "type",
+                  "amount",
+                  "tokenIn",
+                  "tokenOut",
+                  "tokenInChainId",
+                  "tokenOutChainId"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "description": "Quote type: EXACT_INPUT or EXACT_OUTPUT",
+                    "example": "EXACT_INPUT"
+                  },
+                  "amount": {
+                    "type": "string",
+                    "description": "Amount in base units",
+                    "example": "1000000000000000000"
+                  },
+                  "tokenIn": {
+                    "type": "string",
+                    "description": "Token to sell (address or symbol). Use 0x0000...0000 for native ETH.",
+                    "example": "ETH"
+                  },
+                  "tokenOut": {
+                    "type": "string",
+                    "description": "Token to buy (address or symbol)",
+                    "example": "USDC"
+                  },
+                  "tokenInChainId": {
+                    "type": "integer",
+                    "description": "Chain ID for input token",
+                    "example": 8453
+                  },
+                  "tokenOutChainId": {
+                    "type": "integer",
+                    "description": "Chain ID for output token",
+                    "example": 8453
+                  },
+                  "swapper": {
+                    "type": "string",
+                    "description": "Address of the swapper (vault address)",
+                    "example": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+                  },
+                  "slippageTolerance": {
+                    "type": "number",
+                    "description": "Maximum slippage tolerance in percent",
+                    "example": 0.5
+                  },
+                  "routingPreference": {
+                    "type": "string",
+                    "description": "Routing preference: CLASSIC, BEST_PRICE, FASTEST, or BEST_PRICE_V2",
+                    "example": "CLASSIC"
+                  },
+                  "protocols": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "List of protocols to include (e.g. V2, V3)",
+                    "example": [
+                      "V3"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful quote with oracle enrichment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "type": "object",
+                      "description": "Uniswap Trading API quote response"
+                    },
+                    {
+                      "$ref": "#/components/schemas/OracleEnrichment"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — x402 payment or browser session required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Payment required (x402)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/X402PaymentRequired"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "x402": []
+          }
+        ]
+      }
+    },
+    "/api/quote/0x": {
+      "get": {
+        "operationId": "get0xQuote",
+        "summary": "0x API quote with oracle enrichment",
+        "description": "Proxies to the 0x API v2 `/swap/allowance-holder/quote` endpoint and enriches the response with on-chain BackgeoOracle spot-price metadata. Returns the upstream response verbatim plus `priceFeedExists`, `deltaBps`, and `oracleAmount`.\n\n**Price:** $0.0022 USDC per request (x402 exact scheme, eip155:8453)\n\n**Query parameters:** Identical to the 0x API. All query parameters are forwarded verbatim to 0x.",
+        "tags": [
+          "Quotes"
+        ],
+        "parameters": [
+          {
+            "name": "chainId",
+            "in": "query",
+            "required": true,
+            "description": "Chain ID",
+            "schema": {
+              "type": "integer",
+              "example": 8453
+            }
+          },
+          {
+            "name": "sellToken",
+            "in": "query",
+            "required": true,
+            "description": "Token to sell (address or symbol)",
+            "schema": {
+              "type": "string",
+              "example": "ETH"
+            }
+          },
+          {
+            "name": "buyToken",
+            "in": "query",
+            "required": true,
+            "description": "Token to buy (address or symbol)",
+            "schema": {
+              "type": "string",
+              "example": "USDC"
+            }
+          },
+          {
+            "name": "sellAmount",
+            "in": "query",
+            "required": true,
+            "description": "Amount to sell in base units",
+            "schema": {
+              "type": "string",
+              "example": "1000000000000000000"
+            }
+          },
+          {
+            "name": "taker",
+            "in": "query",
+            "required": false,
+            "description": "Address of the taker (vault address)",
+            "schema": {
+              "type": "string",
+              "example": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+            }
+          },
+          {
+            "name": "slippageBps",
+            "in": "query",
+            "required": false,
+            "description": "Maximum slippage tolerance in basis points (100 = 1%)",
+            "schema": {
+              "type": "integer",
+              "example": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful quote with oracle enrichment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "type": "object",
+                      "description": "0x API quote response"
+                    },
+                    {
+                      "$ref": "#/components/schemas/OracleEnrichment"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — x402 payment or browser session required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Payment required (x402)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/X402PaymentRequired"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "x402": []
+          }
+        ]
+      }
+    },
     "/api/chat": {
       "post": {
         "operationId": "agentChat",
@@ -194,7 +461,7 @@
       "get": {
         "operationId": "listTools",
         "summary": "List all available DeFi tools with schemas",
-        "description": "Returns a machine-readable catalog of every direct-invocation tool: names, descriptions, parameter schemas, categories, and access requirements.\n\nAutonomous agents should call this endpoint first to discover what operations are available and what arguments each tool expects. The response includes full JSON-Schema parameter definitions compatible with OpenAI function calling.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)",
+        "description": "Returns a machine-readable catalog of every direct-invocation tool: names, descriptions, parameter schemas, categories, and access requirements.\n\nAutonomous agents should call this endpoint first to discover what operations are available and what arguments each tool expects. The response includes full JSON-Schema parameter definitions compatible with OpenAI function calling.\n\n**Price:** $0.0024 USDC per request (x402, eip155:8453)",
         "tags": [
           "Tools"
         ],
@@ -239,7 +506,7 @@
       "post": {
         "operationId": "invokeTool",
         "summary": "Invoke a DeFi tool directly",
-        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Discover schemas first:** Call `GET /api/tools` to retrieve the full catalog with parameter schemas for every tool.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Read-only tools:**\n`get_swap_quote`, `get_vault_info`, `get_token_balance`, `get_pool_info`, `get_lp_positions`, `gmx_get_positions`, `gmx_get_markets`, `check_delegation_status`, `get_crosschain_quote`, `get_aggregated_nav`, `get_rebalance_plan`, `verify_bridge_arrival`, `list_twap_orders`, `list_nav_syncs`, `list_strategies`, `switch_chain`\n\n**State-changing tools:**\n`build_vault_swap`, `add_liquidity`, `remove_liquidity`, `collect_lp_fees`, `burn_position`, `gmx_open_position`, `gmx_close_position`, `gmx_increase_position`, `gmx_cancel_order`, `gmx_update_order`, `gmx_claim_funding_fees`, `crosschain_transfer`, `crosschain_sync`, `grg_stake`, `grg_unstake`, `grg_undelegate_stake`, `grg_end_epoch`, `grg_claim_rewards`, `deploy_smart_pool`, `fund_pool`, `create_twap_order`, `cancel_twap_order`, `create_nav_sync`, `cancel_nav_sync`\n\n**Operator-scoped tools (require operatorVerified):**\n`setup_delegation`, `revoke_delegation`, `revoke_selectors`, `list_strategies`, `set_default_slippage`, `set_swap_shield_tolerance`, `enable_swap_shield`\n\n**Oracle tools:**\n`refresh_oracle_feed`\n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
+        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Discover schemas first:** Call `GET /api/tools` to retrieve the full catalog with parameter schemas for every tool.\n\n**Price:** $0.0025 USDC per request (x402, eip155:8453)\n\n**Read-only tools:**\n`get_swap_quote`, `get_vault_info`, `get_token_balance`, `get_pool_info`, `get_lp_positions`, `gmx_get_positions`, `gmx_get_markets`, `check_delegation_status`, `get_crosschain_quote`, `get_aggregated_nav`, `get_rebalance_plan`, `verify_bridge_arrival`, `list_twap_orders`, `list_nav_syncs`, `list_strategies`, `switch_chain`\n\n**State-changing tools:**\n`build_vault_swap`, `add_liquidity`, `remove_liquidity`, `collect_lp_fees`, `burn_position`, `gmx_open_position`, `gmx_close_position`, `gmx_increase_position`, `gmx_cancel_order`, `gmx_update_order`, `gmx_claim_funding_fees`, `crosschain_transfer`, `crosschain_sync`, `grg_stake`, `grg_unstake`, `grg_undelegate_stake`, `grg_end_epoch`, `grg_claim_rewards`, `deploy_smart_pool`, `fund_pool`, `create_twap_order`, `cancel_twap_order`, `create_nav_sync`, `cancel_nav_sync`\n\n**Operator-scoped tools (require operatorVerified):**\n`setup_delegation`, `revoke_delegation`, `revoke_selectors`, `list_strategies`, `set_default_slippage`, `set_swap_shield_tolerance`, `enable_swap_shield`\n\n**Oracle tools:**\n`refresh_oracle_feed`\n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
         "tags": [
           "Tools"
         ],
@@ -460,6 +727,634 @@
             "x402": []
           }
         ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "healthCheck",
+        "summary": "Health check",
+        "description": "Returns service status, version, and feature flags.",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/chains": {
+      "get": {
+        "operationId": "listChains",
+        "summary": "Supported chains",
+        "description": "Returns the list of supported EVM chains.",
+        "tags": [
+          "System"
+        ],
+        "parameters": [
+          {
+            "name": "testnet",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of chains",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "Get session token",
+        "description": "Issues an HMAC-signed session token for browser clients. Rate-limited per IP.",
+        "tags": [
+          "Auth"
+        ],
+        "responses": {
+          "200": {
+            "description": "Session token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not from allowed origin"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        }
+      }
+    },
+    "/api/vault": {
+      "get": {
+        "operationId": "getVaultInfo",
+        "summary": "Vault info",
+        "description": "Returns on-chain vault information. Tries the requested chain first, then all others.",
+        "tags": [
+          "Vault"
+        ],
+        "parameters": [
+          {
+            "name": "address",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chain",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Vault info"
+          },
+          "400": {
+            "description": "Invalid address"
+          },
+          "404": {
+            "description": "Vault not found"
+          }
+        }
+      }
+    },
+    "/api/strategy-events": {
+      "get": {
+        "operationId": "getStrategyEvents",
+        "summary": "Strategy events",
+        "description": "Polling endpoint for web chat notifications (TWAP events).",
+        "tags": [
+          "Strategies"
+        ],
+        "parameters": [
+          {
+            "name": "vault",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events list"
+          },
+          "400": {
+            "description": "Missing vault param"
+          }
+        }
+      }
+    },
+    "/api/oracle/refresh": {
+      "post": {
+        "operationId": "refreshOracle",
+        "summary": "BackgeoOracle pool refresh",
+        "description": "Builds an unsigned swap transaction that updates the on-chain oracle price feed for a given token. Supports EOA and vault paths.\n\n**Price:** $0.0023 USDC per request (x402 exact scheme, eip155:8453)",
+        "tags": [
+          "Oracle"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "token",
+                  "chainId"
+                ],
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "description": "Token symbol or address"
+                  },
+                  "amount": {
+                    "type": "string",
+                    "description": "Amount to swap"
+                  },
+                  "direction": {
+                    "type": "string",
+                    "enum": [
+                      "buy",
+                      "sell"
+                    ],
+                    "description": "Swap direction"
+                  },
+                  "chainId": {
+                    "type": "integer",
+                    "description": "Chain ID"
+                  },
+                  "vaultAddress": {
+                    "type": "string",
+                    "description": "Optional vault address for vault path"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Unsigned transaction"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "402": {
+            "description": "Payment required (x402)"
+          }
+        },
+        "security": [
+          {
+            "x402": []
+          }
+        ]
+      }
+    },
+    "/api/delegation/setup": {
+      "post": {
+        "operationId": "setupDelegation",
+        "summary": "Prepare delegation transaction",
+        "description": "Returns an unsigned transaction to delegate vault function selectors to the agent wallet. Requires operator signature.",
+        "tags": [
+          "Delegation"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Unsigned delegation transaction"
+          },
+          "401": {
+            "description": "Invalid operator signature"
+          }
+        }
+      }
+    },
+    "/api/delegation/confirm": {
+      "post": {
+        "operationId": "confirmDelegation",
+        "summary": "Confirm delegation",
+        "description": "Stores delegation config in KV after the on-chain transaction is confirmed.",
+        "tags": [
+          "Delegation"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Confirmation result"
+          }
+        }
+      }
+    },
+    "/api/delegation/revoke": {
+      "post": {
+        "operationId": "revokeDelegation",
+        "summary": "Revoke delegation",
+        "description": "Returns an unsigned transaction to revoke delegation. Clears KV config on success.",
+        "tags": [
+          "Delegation"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Unsigned revocation transaction"
+          }
+        }
+      }
+    },
+    "/api/delegation/status": {
+      "get": {
+        "operationId": "getDelegationStatus",
+        "summary": "Delegation status",
+        "description": "Returns delegation status from KV and on-chain verification.",
+        "tags": [
+          "Delegation"
+        ],
+        "parameters": [
+          {
+            "name": "vault",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chainId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delegation status"
+          }
+        }
+      }
+    },
+    "/api/delegation/execute": {
+      "post": {
+        "operationId": "executeViaDelegation",
+        "summary": "Execute transaction via delegation",
+        "description": "Executes a transaction on the vault via the agent wallet's delegation. Requires operator auth.",
+        "tags": [
+          "Delegation"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Execution result"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/delegation/balance": {
+      "get": {
+        "operationId": "getAgentBalance",
+        "summary": "Agent wallet balance",
+        "description": "Returns the agent wallet's native token balance.",
+        "tags": [
+          "Delegation"
+        ],
+        "parameters": [
+          {
+            "name": "vault",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Balance info"
+          }
+        }
+      }
+    },
+    "/api/delegation/tx-status": {
+      "get": {
+        "operationId": "getTxStatus",
+        "summary": "Transaction status",
+        "description": "Returns the status of a pending transaction.",
+        "tags": [
+          "Delegation"
+        ],
+        "parameters": [
+          {
+            "name": "txHash",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction status"
+          }
+        }
+      }
+    },
+    "/api/delegation/settings": {
+      "post": {
+        "operationId": "updateDelegationSettings",
+        "summary": "Update delegation settings",
+        "description": "Updates delegation-specific settings (e.g. slippage, gas policy).",
+        "tags": [
+          "Delegation"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated settings"
+          }
+        }
+      }
+    },
+    "/api/delegation/telegram-reset": {
+      "post": {
+        "operationId": "resetTelegramPairing",
+        "summary": "Reset Telegram pairing",
+        "description": "Removes Telegram pairing for a vault.",
+        "tags": [
+          "Delegation"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reset result"
+          }
+        }
+      }
+    },
+    "/api/gas-policy": {
+      "get": {
+        "operationId": "gasPolicyHealth",
+        "summary": "Gas policy health check",
+        "description": "Returns a simple health check for the gas policy webhook endpoint.",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Gas policy endpoint is healthy"
+          }
+        }
+      },
+      "post": {
+        "operationId": "gasPolicyWebhook",
+        "summary": "Alchemy Gas Manager webhook",
+        "description": "Webhook called by Alchemy's Gas Manager to approve or reject gas sponsorship for a UserOperation.",
+        "tags": [
+          "System"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Approval decision"
+          }
+        }
+      }
+    },
+    "/api/telegram/webhook": {
+      "post": {
+        "operationId": "telegramWebhook",
+        "summary": "Telegram Bot webhook",
+        "description": "Receives updates from the Telegram Bot API.",
+        "tags": [
+          "Telegram"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/telegram/unpair": {
+      "post": {
+        "operationId": "telegramUnpair",
+        "summary": "Unpair Telegram",
+        "description": "Removes a vault's Telegram pairing.",
+        "tags": [
+          "Telegram"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Unpair result"
+          }
+        }
+      }
+    },
+    "/api/telegram/pair": {
+      "post": {
+        "operationId": "telegramPair",
+        "summary": "Generate Telegram pairing code",
+        "description": "Generates a pairing code to link a Telegram account to a vault.",
+        "tags": [
+          "Telegram"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pairing code"
+          }
+        }
+      }
+    },
+    "/api/telegram/setup": {
+      "get": {
+        "operationId": "getTelegramSetup",
+        "summary": "Get Telegram webhook setup",
+        "description": "Returns current webhook configuration.",
+        "tags": [
+          "Telegram"
+        ],
+        "responses": {
+          "200": {
+            "description": "Webhook config"
+          }
+        }
+      },
+      "post": {
+        "operationId": "setupTelegramWebhook",
+        "summary": "Setup Telegram webhook",
+        "description": "Registers the webhook URL with Telegram.",
+        "tags": [
+          "Telegram"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Setup result"
+          }
+        }
+      }
+    },
+    "/api/telegram/debug": {
+      "get": {
+        "operationId": "telegramDebug",
+        "summary": "Telegram debug endpoint",
+        "description": "Debug endpoint for Telegram integration diagnostics.",
+        "tags": [
+          "Telegram"
+        ],
+        "responses": {
+          "200": {
+            "description": "Debug info"
+          }
+        }
       }
     }
   },
@@ -796,7 +1691,7 @@
           },
           "price": {
             "type": "string",
-            "example": "$0.002 USDC per call (x402 exact scheme, eip155:8453)"
+            "example": "$0.0020–$0.0025 USDC per call (x402 exact scheme, eip155:8453)"
           },
           "toolCount": {
             "type": "integer",
@@ -807,6 +1702,26 @@
             "items": {
               "$ref": "#/components/schemas/ToolDefinition"
             }
+          }
+        }
+      },
+      "OracleEnrichment": {
+        "type": "object",
+        "description": "On-chain oracle spot-price metadata appended to DEX API responses",
+        "properties": {
+          "priceFeedExists": {
+            "type": "boolean",
+            "description": "Whether both tokens have an active BackgeoOracle price feed"
+          },
+          "deltaBps": {
+            "type": "integer",
+            "description": "Divergence between DEX expected output and oracle spot price, in basis points. Positive = DEX gives less than oracle. Negative = DEX gives more.",
+            "example": 12
+          },
+          "oracleAmount": {
+            "type": "string",
+            "description": "Expected output amount from oracle spot price, in base units (wei/smallest token unit)",
+            "example": "2079548076"
           }
         }
       },

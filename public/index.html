@@ -2003,7 +2003,7 @@
                 }
                 if (!retryData) throw new Error('Retry succeeded but returned no response payload');
                 typingEl.remove();
-                handleChatResponse(retryData);
+                await handleChatResponse(retryData);
                 return;
               }
             }
@@ -2168,13 +2168,13 @@
             }
             // Mark that stream already displayed errors — suppress duplicate toolCall rendering
             if (hasToolErrors) finalResponse._streamShowedErrors = true;
-            handleChatResponse(finalResponse);
+            await handleChatResponse(finalResponse);
           }
         } else {
           // Fallback: non-streaming JSON response
           const data = await res.json();
           typingEl.remove();
-          handleChatResponse(data);
+          await handleChatResponse(data);
         }
       } catch (err) {
         typingEl.remove();
@@ -2190,7 +2190,7 @@
     }
 
     /** Handle the parsed API response — display tool results, reply, chain switch, transaction modal */
-    function handleChatResponse(data) {
+    async function handleChatResponse(data) {
       let modelTraceShown = false;
       const withModelTrace = (extras = {}) => {
         if (!modelTraceShown && data.modelsUsed?.length) {
@@ -2272,7 +2272,8 @@
           localStorage.setItem('rigoblock_testnet', isTestnet);
         }
         appendMessage('system', `Switched to ${CHAIN_NAMES[data.chainSwitch] || 'chain ' + data.chainSwitch}`);
-        refreshDelegationStatus();
+        // Re-fetch delegation status for the new chain so executionMode is accurate
+        await refreshDelegationStatus();
       }
 
       // Update DEX provider (internal tracking only, no badge)
@@ -2687,7 +2688,7 @@
           body: JSON.stringify({
             operatorAddress: connectedAddress,
             vaultAddress: vault,
-            chainId: currentChainId,
+            chainId: tx.chainId,
             authSignature,
             authTimestamp,
             transaction: {
@@ -3093,7 +3094,7 @@
           await signAuthMessage();
 
           // Re-validate vault with ownership check
-          if (vaultInput.value.trim().length === 42) validateVault();
+          if (vaultInput.value.trim().length === 42) await validateVault();
 
           attachProviderListeners(provider);
         }
@@ -3277,33 +3278,38 @@
       // ── Auto-reconnect: silently restore previous session on page reload ──
       const savedRdns = localStorage.getItem('rigoblock_last_provider');
       if (savedRdns && !connectedAddress) {
-        try {
-          // ── External wallet (MetaMask etc.) auto-reconnect ──
-          const match = discoveredProviders.find(p => p.info.rdns === savedRdns);
-          const provider = match ? match.provider : (savedRdns === 'injected' ? window.ethereum : null);
-          if (!provider) return;
-          const accounts = await provider.request({ method: 'eth_accounts' });
-          if (accounts.length === 0) return;
-          const addr = accounts[0];
-          const savedAuth = localStorage.getItem(authKey(addr));
-          if (!savedAuth) return;
-          const cached = JSON.parse(savedAuth);
-          if (!cached || cached.version !== AUTH_MESSAGE_VERSION) return;
-          if (Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return;
-          if (addr.toLowerCase() !== cached.address?.toLowerCase()) return;
-          activeProvider = provider;
-          connectedAddress = addr;
-          authSignature = cached.signature;
-          authTimestamp = cached.timestamp;
-          document.getElementById('wallet-addr').textContent =
-            connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
-          document.getElementById('connect-btn').textContent = 'Disconnect';
-          document.getElementById('connect-btn').classList.add('active');
-          appendMessage('system', `Reconnected: ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)} ✓`);
-          if (vaultInput.value.trim().length === 42) validateVault();
-          if (executionMode === 'delegated') refreshDelegationStatus();
-          attachProviderListeners(provider);
-        } catch { /* silent — auto-reconnect is best-effort */ }
+        (async () => {
+          try {
+            // ── External wallet (MetaMask etc.) auto-reconnect ──
+            const match = discoveredProviders.find(p => p.info.rdns === savedRdns);
+            const provider = match ? match.provider : (savedRdns === 'injected' ? window.ethereum : null);
+            if (!provider) return;
+            const accounts = await provider.request({ method: 'eth_accounts' });
+            if (accounts.length === 0) return;
+            const addr = accounts[0];
+            const savedAuth = localStorage.getItem(authKey(addr));
+            if (!savedAuth) return;
+            const cached = JSON.parse(savedAuth);
+            if (!cached || cached.version !== AUTH_MESSAGE_VERSION) return;
+            if (Date.now() - cached.timestamp > 23 * 60 * 60 * 1000) return;
+            if (addr.toLowerCase() !== cached.address?.toLowerCase()) return;
+            activeProvider = provider;
+            connectedAddress = addr;
+            authSignature = cached.signature;
+            authTimestamp = cached.timestamp;
+            document.getElementById('wallet-addr').textContent =
+              connectedAddress.slice(0, 6) + '…' + connectedAddress.slice(-4);
+            document.getElementById('connect-btn').textContent = 'Disconnect';
+            document.getElementById('connect-btn').classList.add('active');
+            appendMessage('system', `Reconnected: ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)} ✓`);
+            if (vaultInput.value.trim().length === 42) {
+              await validateVault();
+            }
+            // Always refresh delegation status after reconnect so executionMode is accurate
+            await refreshDelegationStatus();
+            attachProviderListeners(provider);
+          } catch { /* silent — auto-reconnect is best-effort */ }
+        })();
       }
     }, 500);
 

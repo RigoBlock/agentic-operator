@@ -8,18 +8,21 @@
 
 ## Overview
 
-The Rigoblock Agentic Operator exposes four x402-gated endpoints. Every operation is an atomic HTTP request.
+The Rigoblock Agentic Operator exposes six x402-gated endpoints. Every operation is an atomic HTTP request.
 
 | Endpoint | Method | Price | What it returns |
 |----------|--------|-------|-----------------|
-| `/api/quote` | GET | $0.002 USDC | DEX price quote (no vault context needed) |
-| `/api/tools` | GET | $0.002 USDC | Full tool catalog with JSON schemas for direct invocation |
-| `/api/tools?toolName={name}` | POST | $0.002 USDC | Direct tool execution with structured arguments (no LLM overhead) |
+| `/api/quote` | GET | $0.0020 USDC | DEX price quote (no vault context needed) |
+| `/api/quote/uniswap` | POST | $0.0021 USDC | Uniswap Trading API quote with oracle enrichment |
+| `/api/quote/0x` | GET | $0.0022 USDC | 0x API quote with oracle enrichment |
+| `/api/oracle/refresh` | POST | $0.0023 USDC | Oracle price-feed refresh transaction builder |
+| `/api/tools` | GET | $0.0024 USDC | Tool catalog with JSON schemas for direct invocation |
+| `/api/tools?toolName={name}` | POST | $0.0025 USDC | Direct tool execution with structured arguments (no LLM overhead) |
 | `/api/chat` | POST | up to $0.10 USDC (billed by actual usage, typical $0.003–$0.015) | AI-powered DeFi response (swap calldata, positions, analysis) |
 
 Payments are in USDC on **Base mainnet** (`eip155:8453`) via the
 [x402 protocol](https://x402.org) (`upto` scheme for `/api/chat`, `exact` scheme for
-`/api/quote`). The CDP facilitator at `api.cdp.coinbase.com` handles verification
+all `/api/quote*` endpoints). The CDP facilitator at `api.cdp.coinbase.com` handles verification
 and settlement. Callers authorise up to $0.10 for `/api/chat` but are only charged
 the actual inference cost — simple queries cost ~$0.003, complex multi-tool chains
 cost up to $0.015.
@@ -211,7 +214,7 @@ provides the safe DeFi execution layer.
 ## Security Model
 
 ### What the x402 payment wallet CAN do:
-- Pay for API access ($0.002–$0.10 per call)
+- Pay for API access ($0.0020–$0.10 per call)
 - Receive unsigned transaction data
 - Query prices, positions, and vault info
 - Get natural language DeFi analysis
@@ -362,6 +365,68 @@ GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base
 
 ---
 
+## The `/api/quote/uniswap` Endpoint
+
+Full Uniswap Trading API quote with oracle spot-price enrichment. Returns the upstream Uniswap `/quote` response verbatim plus oracle metadata.
+
+```
+POST /api/quote/uniswap
+X-PAYMENT: <x402-payment-header>
+Content-Type: application/json
+
+{
+  "type": "EXACT_INPUT",
+  "amount": "1000000000000000000",
+  "tokenIn": "ETH",
+  "tokenOut": "USDC",
+  "tokenInChainId": 8453,
+  "tokenOutChainId": 8453
+}
+```
+
+**Request body:** Same as the [Uniswap Trading API `/quote`](https://docs.uniswap.org/api/trading/quote) endpoint. All standard parameters are forwarded.
+
+**Response:** Upstream Uniswap quote + oracle enrichment (three extra fields appended to the standard Uniswap response):
+```json
+{
+  // ... full Uniswap Trading API quote response ...
+  "priceFeedExists": true,
+  "deltaBps": 12,
+  "oracleAmount": "2079548076"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `priceFeedExists` | Whether both tokens have an active BackgeoOracle feed |
+| `deltaBps` | Divergence between DEX quote and oracle spot price (positive = DEX worse) |
+| `oracleAmount` | Expected output from oracle spot price, in base units |
+
+---
+
+## The `/api/quote/0x` Endpoint
+
+Full 0x Swap API quote with oracle spot-price enrichment. Returns the upstream 0x `/swap/allowance-holder/quote` response verbatim plus oracle metadata.
+
+```
+GET /api/quote/0x?chainId=8453&sellToken=ETH&buyToken=USDC&sellAmount=1000000000000000000
+X-PAYMENT: <x402-payment-header>
+```
+
+**Query parameters:** Same as the [0x API v2 `/swap/allowance-holder/quote`](https://0x.org/docs/api#tag/Swap/operation/swapAllowanceHolderQuote) endpoint. All standard parameters are forwarded.
+
+**Response:** Upstream 0x quote + oracle enrichment (three extra fields appended to the standard 0x response):
+```json
+{
+  // ... full 0x API quote response ...
+  "priceFeedExists": true,
+  "deltaBps": -8,
+  "oracleAmount": "2081500000"
+}
+```
+
+---
+
 ## The `/api/tools` Endpoint — Programmatic Tool Discovery
 
 For autonomous agents that need structured input/output without LLM overhead.
@@ -404,7 +469,7 @@ X-PAYMENT: <x402-payment-header>
 relying on natural language, an agent can call this endpoint once, cache the
 schemas, and then invoke specific tools directly via `POST /api/tools?toolName={toolName}`.
 
-**Price:** $0.002 USDC per request (x402 exact scheme, eip155:8453). Tool discovery is x402-gated to prevent spam and align with the paid execution model.
+**Price:** $0.0024 USDC per request (x402 exact scheme, eip155:8453). Tool discovery is x402-gated to prevent spam and align with the paid execution model.
 
 ### `POST /api/tools?toolName={toolName}` — Direct tool invocation
 
@@ -438,14 +503,14 @@ Content-Type: application/json
   }
 ```
 
-**Price:** $0.002 per call (x402 exact scheme, eip155:8453)
+**Price:** $0.0025 per call (x402 exact scheme, eip155:8453)
 
 **Tool categories:** Spot Trading, Vault Info, GMX Perpetuals, Uniswap v4 LP,
 Cross-Chain, GRG Staking, Vault Management, Delegation, TWAP Orders, NAV Sync,
 Operator Settings, Oracle.
 
 **How autonomous agents should use this:**
-1. Call `GET /api/tools` ($0.002) once to discover schemas
+1. Call `GET /api/tools` ($0.0024) once to discover schemas
 2. Cache the catalog locally
 3. Call `POST /api/tools?toolName={toolName}` with structured arguments for each operation
 4. If the response contains `transaction`, sign and broadcast it (manual mode)

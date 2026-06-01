@@ -6,8 +6,13 @@
  * External AI agents pay per call using the x402 protocol.
  *
  * Pricing:
- *   POST /api/chat  → upto $0.10 USDC (actual cost billed; ~$0.003–$0.015 typical)
- *   GET  /api/quote → exact $0.002 USDC (DEX price quote)
+ *   POST /api/chat          → upto $0.10 USDC (actual cost billed; ~$0.003–$0.015 typical)
+ *   GET  /api/quote         → exact $0.0020 USDC (DEX price quote)
+ *   POST /api/quote/uniswap → exact $0.0021 USDC (Uniswap Trading API quote)
+ *   GET  /api/quote/0x      → exact $0.0022 USDC (0x API quote)
+ *   POST /api/oracle/refresh → exact $0.0023 USDC (oracle refresh tx builder)
+ *   GET  /api/tools         → exact $0.0024 USDC (tool discovery)
+ *   POST /api/tools         → exact $0.0025 USDC (direct tool invocation)
  *
  * The /api/chat endpoint uses the "upto" scheme — clients authorise up to $0.10
  * but are only charged the actual inference cost (determined by token usage).
@@ -57,9 +62,36 @@ const EXEMPT_ORIGINS = new Set([
   "http://localhost:5173",  // vite dev
 ]);
 
+// ── Public API routes (free by design) ────────────────────────────────
+// These /api/* routes are intentionally unprotected. All OTHER /api/* routes
+// must be explicitly listed in PROTECTED_ROUTES or they are blocked (fail closed).
+export const PUBLIC_API_ROUTES: ReadonlySet<string> = new Set([
+  "GET /api/health",
+  "GET /api/chains",
+  "GET /api/session",
+  "GET /api/vault",
+  "GET /api/strategy-events",
+  "GET /api/gas-policy",
+  "POST /api/gas-policy",
+]);
+
+// Public route prefixes — any method+path matching these is exempt from x402.
+// Used for sub-routers that handle their own auth (delegation, telegram).
+const PUBLIC_API_PREFIXES: ReadonlyArray<{ method: string; prefix: string }> = [
+  { method: "POST", prefix: "/api/delegation/" },
+  { method: "GET", prefix: "/api/delegation/" },
+  { method: "POST", prefix: "/api/telegram/" },
+  { method: "GET", prefix: "/api/telegram/" },
+];
+
+export function isPublicApiRoute(method: string, path: string): boolean {
+  if (PUBLIC_API_ROUTES.has(`${method} ${path}`)) return true;
+  return PUBLIC_API_PREFIXES.some((p) => method === p.method && path.startsWith(p.prefix));
+}
+
 // ── Protected route config (v2 format) ────────────────────────────────
 
-const PROTECTED_ROUTES: RoutesConfig = {
+export const PROTECTED_ROUTES: RoutesConfig = {
   "POST /api/chat": {
     resource: "https://trader.rigoblock.com/api/chat",
     accepts: [
@@ -147,7 +179,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.002",
+        price: "$0.0020",
         network: BASE_NETWORK,
       },
     ],
@@ -208,13 +240,143 @@ const PROTECTED_ROUTES: RoutesConfig = {
       },
     },
   },
+  "POST /api/quote/uniswap": {
+    resource: "https://trader.rigoblock.com/api/quote/uniswap",
+    accepts: [
+      {
+        scheme: "exact",
+        payTo: PAY_TO,
+        price: "$0.0021",
+        network: BASE_NETWORK,
+      },
+    ],
+    description: "Uniswap Trading API quote with BackgeoOracle spot-price enrichment. Drop-in proxy for Uniswap /quote — same request body, response includes priceFeedExists, deltaBps, and oracleAmount.",
+    mimeType: "application/json",
+    extensions: {
+      bazaar: {
+        info: {
+          name: "Rigoblock",
+          input: {
+            type: "http",
+            method: "POST",
+            queryParams: {
+              type: "EXACT_INPUT or EXACT_OUTPUT",
+              amount: "Amount in base units (e.g. '1000000000000000000')",
+              tokenIn: "Token to sell (address or symbol)",
+              tokenOut: "Token to buy (address or symbol)",
+              tokenInChainId: "Chain ID (e.g. 8453)",
+              tokenOutChainId: "Chain ID (e.g. 8453)",
+            },
+          },
+          output: {
+            type: "json",
+            example: {
+              routing: "CLASSIC",
+              priceFeedExists: true,
+              deltaBps: 12,
+              oracleAmount: "2079548076",
+            },
+          },
+        },
+        schema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            input: {
+              type: "object",
+              properties: {
+                type: { type: "string", const: "http" },
+                method: { type: "string" },
+                queryParams: { type: "object" },
+              },
+              required: ["type"],
+              additionalProperties: false,
+            },
+            output: {
+              type: "object",
+              properties: {
+                type: { type: "string" },
+                example: { type: "object" },
+              },
+              required: ["type"],
+            },
+          },
+          required: ["input"],
+        },
+      },
+    },
+  },
+  "GET /api/quote/0x": {
+    resource: "https://trader.rigoblock.com/api/quote/0x",
+    accepts: [
+      {
+        scheme: "exact",
+        payTo: PAY_TO,
+        price: "$0.0022",
+        network: BASE_NETWORK,
+      },
+    ],
+    description: "0x API v2 quote with BackgeoOracle spot-price enrichment. Drop-in proxy for 0x /swap/allowance-holder/quote — same query parameters, response includes priceFeedExists, deltaBps, and oracleAmount.",
+    mimeType: "application/json",
+    extensions: {
+      bazaar: {
+        info: {
+          name: "Rigoblock",
+          input: {
+            type: "http",
+            method: "GET",
+            queryParams: {
+              chainId: "Chain ID (e.g. 8453)",
+              sellToken: "Token to sell (address or symbol)",
+              buyToken: "Token to buy (address or symbol)",
+              sellAmount: "Amount to sell in base units",
+            },
+          },
+          output: {
+            type: "json",
+            example: {
+              buyAmount: "2079548076",
+              priceFeedExists: true,
+              deltaBps: -8,
+              oracleAmount: "2081500000",
+            },
+          },
+        },
+        schema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            input: {
+              type: "object",
+              properties: {
+                type: { type: "string", const: "http" },
+                method: { type: "string" },
+                queryParams: { type: "object" },
+              },
+              required: ["type"],
+              additionalProperties: false,
+            },
+            output: {
+              type: "object",
+              properties: {
+                type: { type: "string" },
+                example: { type: "object" },
+              },
+              required: ["type"],
+            },
+          },
+          required: ["input"],
+        },
+      },
+    },
+  },
   "POST /api/oracle/refresh": {
     resource: "https://trader.rigoblock.com/api/oracle/refresh",
     accepts: [
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.002",
+        price: "$0.0023",
         network: BASE_NETWORK,
       },
     ],
@@ -292,7 +454,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.002",
+        price: "$0.0024",
         network: BASE_NETWORK,
       },
     ],
@@ -360,7 +522,7 @@ const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.002",
+        price: "$0.0025",
         network: BASE_NETWORK,
       },
     ],
@@ -570,6 +732,27 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
     }
 
     if (result.type === "no-payment-required") {
+      // SAFETY: fail closed for /api/* routes.
+      // If a developer adds a new /api/ route but forgets to add it to
+      // PROTECTED_ROUTES, external agents would get a confusing 401 from
+      // the route's own auth check (because x402Paid is never set).
+      // Instead, we block explicitly with a clear error.
+      const path = adapter.getPath();
+      const method = adapter.getMethod();
+      if (path.startsWith("/api/") && !isPublicApiRoute(method, path)) {
+        console.error(
+          `[x402] SECURITY BLOCK: API route ${method} ${path} is not in ` +
+          `PROTECTED_ROUTES and not in PUBLIC_API_ROUTES. Blocking request.`,
+        );
+        return c.json(
+          {
+            error: "Route not configured for access",
+            detail: `The endpoint ${method} ${path} is not registered in the payment or public route configuration. ` +
+              "This is a server configuration issue — please contact the operator.",
+          },
+          503,
+        );
+      }
       return next();
     }
 

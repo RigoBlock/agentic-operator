@@ -17,6 +17,8 @@ import { cors } from "hono/cors";
 import type { Env, AppVariables } from "./types.js";
 import { chat } from "./routes/chat.js";
 import { quote } from "./routes/quote.js";
+import { quoteUniswap } from "./routes/quoteUniswap.js";
+import { quote0x } from "./routes/quote0x.js";
 import { delegation } from "./routes/delegation.js";
 import { gasPolicy } from "./routes/gasPolicy.js";
 import { telegram } from "./routes/telegram.js";
@@ -103,6 +105,8 @@ app.get("/api/session", async (c) => {
 
 app.route("/api/chat", chat);
 app.route("/api/quote", quote);
+app.route("/api/quote/uniswap", quoteUniswap);
+app.route("/api/quote/0x", quote0x);
 app.route("/api/oracle", oracle);
 app.route("/api/tools", toolsRoute);
 app.route("/api/delegation", delegation);
@@ -205,9 +209,12 @@ app.get("/api/health", (c) =>
       payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
       paidRoutes: {
         "POST /api/chat": "up to $0.10 (billed by usage, ~$0.003-$0.015)",
-        "GET /api/quote": "$0.002",
-        "GET /api/tools": "$0.002",
-        "POST /api/tools": "$0.002",
+        "GET /api/quote": "$0.0020",
+        "POST /api/quote/uniswap": "$0.0021",
+        "GET /api/quote/0x": "$0.0022",
+        "POST /api/oracle/refresh": "$0.0023",
+        "GET /api/tools": "$0.0024",
+        "POST /api/tools": "$0.0025",
       },
     },
   }),
@@ -243,9 +250,12 @@ app.get("/api", (c) => {
       openApiUrl: "https://trader.rigoblock.com/openapi.json",
       endpoints: {
         "POST /api/chat": { price: "up to $0.10 (billed by usage)", description: "Natural language DeFi agent — swap/bridge/LP/stake calldata" },
-        "GET /api/quote": { price: "$0.002", description: "DEX price quote across 7 chains" },
-        "POST /api/tools": { price: "$0.002", description: "Direct tool invocation — structured input/output" },
-        "GET /api/tools": { price: "$0.002", description: "Tool discovery with full parameter schemas" },
+        "GET /api/quote": { price: "$0.0020", description: "DEX price quote across 7 chains" },
+        "POST /api/quote/uniswap": { price: "$0.0021", description: "Uniswap Trading API quote with oracle enrichment" },
+        "GET /api/quote/0x": { price: "$0.0022", description: "0x API quote with oracle enrichment" },
+        "POST /api/oracle/refresh": { price: "$0.0023", description: "BackgeoOracle pool refresh transaction builder" },
+        "POST /api/tools": { price: "$0.0025", description: "Direct tool invocation — structured input/output" },
+        "GET /api/tools": { price: "$0.0024", description: "Tool discovery with full parameter schemas" },
       },
       accepts: [
         { scheme: "exact", network: "eip155:8453", amount: "2000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37", maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" } },
@@ -347,7 +357,7 @@ app.get("/.well-known/ai-plugin.json", (c) =>
       "Uniswap v4 LP management, GMX perpetuals, GRG staking, vault deployment, " +
       "and aggregated NAV across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain. " +
       "All vault-modifying operations require operator authentication and are protected by a 10% NAV shield. " +
-      "Payment: up to $0.10 USDC per chat request (billed by inference usage, ~$0.003–$0.015), $0.002 per quote/tool call, via x402 on Base.",
+      "Payment: up to $0.10 USDC per chat request (billed by inference usage, ~$0.003–$0.015), $0.0020–$0.0025 per endpoint (exact amount depends on endpoint), via x402 on Base.",
     auth: {
       type: "none",
     },
@@ -380,19 +390,37 @@ app.get("/.well-known/x402.json", (c) =>
       {
         path: "/api/quote",
         method: "GET",
-        price: "$0.002",
+        price: "$0.0020",
         description: "DEX price quote across 7 chains (Uniswap + 0x aggregator)",
+      },
+      {
+        path: "/api/quote/uniswap",
+        method: "POST",
+        price: "$0.0021",
+        description: "Uniswap Trading API quote with BackgeoOracle spot-price enrichment",
+      },
+      {
+        path: "/api/quote/0x",
+        method: "GET",
+        price: "$0.0022",
+        description: "0x API v2 quote with BackgeoOracle spot-price enrichment",
+      },
+      {
+        path: "/api/oracle/refresh",
+        method: "POST",
+        price: "$0.0023",
+        description: "BackgeoOracle pool refresh transaction builder",
       },
       {
         path: "/api/tools",
         method: "GET",
-        price: "$0.002",
+        price: "$0.0024",
         description: "Tool discovery — returns full catalog with JSON schemas for all 40+ direct-invocation tools",
       },
       {
         path: "/api/tools",
         method: "POST",
-        price: "$0.002",
+        price: "$0.0025",
         description: "Direct tool invocation without LLM — get_swap_quote, get_vault_info, build_vault_swap, etc.",
       },
     ],
@@ -430,6 +458,24 @@ app.get("/.well-known/api-catalog", (c) => {
         ],
       },
       {
+        anchor: "https://trader.rigoblock.com/api/quote/uniswap",
+        "service-desc": [
+          { href: "https://trader.rigoblock.com/openapi.json" },
+        ],
+      },
+      {
+        anchor: "https://trader.rigoblock.com/api/quote/0x",
+        "service-desc": [
+          { href: "https://trader.rigoblock.com/openapi.json" },
+        ],
+      },
+      {
+        anchor: "https://trader.rigoblock.com/api/oracle/refresh",
+        "service-desc": [
+          { href: "https://trader.rigoblock.com/openapi.json" },
+        ],
+      },
+      {
         anchor: "https://trader.rigoblock.com/api/tools",
         "service-desc": [
           { href: "https://trader.rigoblock.com/openapi.json" },
@@ -461,7 +507,7 @@ app.get("/.well-known/mcp/server-card.json", (c) =>
     payment: {
       scheme: "x402",
       network: "eip155:8453",
-      price: "$0.002–$0.10 USDC per request (by endpoint; /api/chat billed by usage via x402 upto scheme)",
+      price: "$0.0020–$0.0025 USDC per exact-scheme request; /api/chat up to $0.10 billed by usage via x402 upto scheme",
     },
   }),
 );
@@ -541,6 +587,8 @@ app.get("/.well-known/openid-configuration", (c) =>
     },
   }),
 );
+
+export { app };
 
 export default {
   fetch: app.fetch,

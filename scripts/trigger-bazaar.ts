@@ -2,8 +2,10 @@
 /**
  * Test x402 v2 payment — triggers Bazaar cataloging.
  *
- * Makes real x402 payments to both GET /api/quote and POST /api/chat,
- * which causes the facilitator to auto-catalog each endpoint in the x402 Bazaar.
+ * Makes real x402 payments to all x402-gated endpoints:
+ *   GET /api/quote, POST /api/quote/uniswap, GET /api/quote/0x,
+ *   POST /api/oracle/refresh, POST /api/chat, GET /api/tools, POST /api/tools
+ * This causes the facilitator to auto-catalog each endpoint in the x402 Bazaar.
  *
  * Requirements:
  *   - A wallet with ≥$0.02 USDC on Base mainnet
@@ -22,8 +24,12 @@ import { ExactEvmScheme, PERMIT2_ADDRESS, UptoEvmScheme, toClientEvmSigner } fro
 
 const BASE_URL = "https://trader.rigoblock.com";
 const QUOTE_URL = `${BASE_URL}/api/quote?sell=ETH&buy=USDC&amount=1&chain=base`;
+const QUOTE_UNISWAP_URL = `${BASE_URL}/api/quote/uniswap`;
+const QUOTE_0X_URL = `${BASE_URL}/api/quote/0x?chainId=8453&sellToken=ETH&buyToken=USDC&sellAmount=1000000000000000000`;
 const CHAT_URL = `${BASE_URL}/api/chat`;
-const TOOLS_URL = `${BASE_URL}/api/tools`;
+const TOOLS_GET_URL = `${BASE_URL}/api/tools`;
+const TOOLS_POST_URL = `${BASE_URL}/api/tools?toolName=get_swap_quote`;
+const ORACLE_REFRESH_URL = `${BASE_URL}/api/oracle/refresh`;
 
 /** Standard headers — use a browser-like UA so Cloudflare Bot Fight Mode doesn't block us. */
 const STANDARD_HEADERS: Record<string, string> = {
@@ -175,14 +181,26 @@ async function main() {
 
   // 4. Trigger GET /api/quote — registers the quote endpoint in Bazaar.
   await paidRequest(httpClient, "GET", QUOTE_URL);
-
-  // Wait for quote settlement to be mined (Base: 2s blocks). EIP-2612 permit nonces are
-  // sequential on-chain — if settlement for nonce N is still pending when the next payment
-  // is created with nonce N+1, the CDP facilitator may reject nonce N+1 as a race.
-  // 8s gives 4 block confirmations of headroom.
   await new Promise((r) => setTimeout(r, 8000));
 
-  // 5. Trigger POST /api/chat — registers the full trading chat in Bazaar.
+  // 5. Trigger POST /api/quote/uniswap — registers the Uniswap oracle-enriched quote endpoint.
+  await paidRequest(httpClient, "POST", QUOTE_UNISWAP_URL, {
+    type: "EXACT_INPUT",
+    amount: "1000000000000000000",
+    tokenIn: "0x0000000000000000000000000000000000000000",
+    tokenOut: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    tokenInChainId: 8453,
+    tokenOutChainId: 8453,
+  });
+  await new Promise((r) => setTimeout(r, 8000));
+
+  // 6. Trigger GET /api/quote/0x — registers the 0x oracle-enriched quote endpoint.
+  //    The 0x allowance-holder/quote endpoint requires a taker address.
+  const quote0xUrlWithTaker = `${QUOTE_0X_URL}&taker=0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045`;
+  await paidRequest(httpClient, "GET", quote0xUrlWithTaker);
+  await new Promise((r) => setTimeout(r, 8000));
+
+  // 7. Trigger POST /api/chat — registers the full trading chat in Bazaar.
   //    IMPORTANT: use a message that doesn't invoke any tools (no network calls
   //    to Uniswap/0x/etc.) to guarantee a fast 200 and successful settlement.
   //    "What can you do?" → LLM responds from system prompt, no tools needed.
@@ -195,17 +213,29 @@ async function main() {
     vaultAddress: "0x0000000000000000000000000000000000000000",
     chainId: 8453,
   });
-
-  // Wait for chat settlement to be mined before creating tools payment.
   await new Promise((r) => setTimeout(r, 8000));
 
-  // 6. Trigger GET /api/tools — registers the direct tool invocation endpoint.
-  //    Uses the GET /api/tools discovery endpoint (returns tools listing).
-  //    This is an exact-URL resource (not a wildcard) so the bazaar extension
-  //    can proactively pre-declare it, same as GET /api/quote.
-  //    NOTE: Total spend is ~$0.012-$0.024 USDC (quote $0.002 + chat ~$0.008 + tools $0.002).
-  //    Ensure your wallet has at least $0.03 USDC on Base mainnet.
-  await paidRequest(httpClient, "GET", TOOLS_URL);
+  // 8. Trigger POST /api/oracle/refresh — registers the oracle refresh endpoint.
+  await paidRequest(httpClient, "POST", ORACLE_REFRESH_URL, {
+    token: "GRG",
+    chainId: 8453,
+    direction: "buy",
+    amount: "0.001",
+  });
+  await new Promise((r) => setTimeout(r, 8000));
+
+  // 9. Trigger GET /api/tools — registers the tool discovery endpoint.
+  await paidRequest(httpClient, "GET", TOOLS_GET_URL);
+  await new Promise((r) => setTimeout(r, 8000));
+
+  // 10. Trigger POST /api/tools — registers the direct tool invocation endpoint.
+  //    NOTE: Total spend is ~$0.020-$0.032 USDC (quote $0.0020 + uniswap $0.0021 + 0x $0.0022
+  //    + oracle $0.0023 + chat ~$0.008 + tools GET $0.0024 + tools POST $0.0025).
+  //    Ensure your wallet has at least $0.05 USDC on Base.
+  await paidRequest(httpClient, "POST", TOOLS_POST_URL, {
+    arguments: { tokenIn: "ETH", tokenOut: "USDC", amountIn: "1" },
+    chainId: 8453,
+  });
 
   console.log("\n" + "=".repeat(60));
   console.log("Done. Check Bazaar listings:");
