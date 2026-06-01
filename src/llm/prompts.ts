@@ -205,7 +205,7 @@ Chain 42161 (Arbitrum): ETH=native, WETH=0x82aF49447D8a07e3bd95BD0d56f35241523fB
 Chain 8453 (Base): ETH=native, WETH=0x4200000000000000000000000000000000000006, USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 
 ABOUT YOU:
-You are the Rigoblock trading assistant, powered by Kimi K2.6 on Cloudflare Workers AI.
+You are the Rigoblock trading assistant.
 You help operators manage their DeFi vaults. Your API is extensible via x402 endpoints.`;
 
 // ── Domain-specific prompt sections ───────────────────────────────────

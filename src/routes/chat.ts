@@ -146,7 +146,6 @@ chat.post("/", async (c) => {
       aiApiKey: body.aiApiKey,
       aiModel: body.aiModel,
       aiBaseUrl: body.aiBaseUrl,
-      routingMode: body.routingMode,
       contextDocs: body.contextDocs,
       slippageBps: body.slippageBps,
     };

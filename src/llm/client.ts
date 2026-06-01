@@ -513,7 +513,7 @@ async function callWorkersAI(
   });
 
   // Workers AI returns text in different fields depending on model:
-  // - Legacy format (Llama): result.response (string)
+  // - Legacy format: result.response (string)
   // - OpenAI-compat format (Kimi K2.6, newer models): result.choices[0].message.content
   const rawToolCalls = result.tool_calls ?? result.choices?.[0]?.message?.tool_calls;
   let hasToolCalls = Array.isArray(rawToolCalls) && rawToolCalls.length > 0;
@@ -681,7 +681,6 @@ export async function processChat(
   let openai: OpenAI | null = null;
   let useBinding = false;
   let llmModel: string;
-  let fastModel: string; // For follow-up/chained calls (Workers AI only)
   let finalModel: string | undefined;
   const modelsUsed: string[] = [];
   const recordModel = (model: string) => {
@@ -696,18 +695,17 @@ export async function processChat(
       timeout: 45_000,
     });
     llmModel = ctx.aiModel || "gpt-5-mini";
-    fastModel = llmModel; // Same model for user-provided keys
+    // User-provided key: same model for all calls
   } else if (env.AI) {
     // Workers AI via binding (default — no API key needed, zero-config)
     // Kimi K2.6 as primary: natively handles reasoning + tool calling in one call.
     useBinding = true;
     llmModel = KIMI_MODEL;
-    fastModel = KIMI_MODEL;
   } else if (env.OPENAI_API_KEY) {
     // Fallback to server OpenAI key
     openai = new OpenAI({ apiKey: env.OPENAI_API_KEY, timeout: 45_000 });
     llmModel = ctx.aiModel || "gpt-5-mini";
-    fastModel = llmModel;
+    // Server OpenAI key: same model for all calls
   } else {
     throw new Error("No AI provider configured. Add [ai] binding to wrangler.toml, or set OPENAI_API_KEY.");
   }
@@ -1283,10 +1281,10 @@ ${executionModeNote}${contextDocsBlock}`;
 
       // Continue planning with the fast model using accumulated tool results.
       rollingMessages = toolMessages;
-      console.log(`[LLM] Autonomous follow-up call (fast: ${fastModel}) round ${round}/${MAX_AUTONOMOUS_ROUNDS}`);
+      console.log(`[LLM] Autonomous follow-up call round ${round}/${MAX_AUTONOMOUS_ROUNDS}`);
       onStreamEvent?.({ type: "status", message: `Planning next step (round ${round + 1})…` });
       const followUp = await callLLM({
-        model: fastModel,
+        model: llmModel,
         messages: withRuntimeContext(toolMessages),
         tools: TOOL_DEFINITIONS,
         tool_choice: "auto",
@@ -1316,7 +1314,7 @@ ${executionModeNote}${contextDocsBlock}`;
 
       currentMessage = followUpChoice.message;
       if (!currentMessage.tool_calls || currentMessage.tool_calls.length === 0) {
-        finalModel = fastModel;
+        finalModel = llmModel;
         return {
           reply: currentMessage.content || "Done.",
           toolCalls: toolCallResults,
@@ -1722,6 +1720,7 @@ export async function runSwapShield(
   buyAmountRaw: string,
   resolvedTokenIn?: Address,
   resolvedTokenOut?: Address,
+  oracleEnrichment?: { priceFeedExists: boolean; oracleAmount: string },
 ): Promise<string | undefined> {
   // Check temporary tolerance override
   let maxDivergencePct: number | undefined;
@@ -1778,6 +1777,8 @@ export async function runSwapShield(
     intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
     env.ALCHEMY_API_KEY,
     maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT,
+    oracleEnrichment?.priceFeedExists,
+    oracleEnrichment?.oracleAmount ? BigInt(oracleEnrichment.oracleAmount) : undefined,
   );
 
   if (!result.allowed) {

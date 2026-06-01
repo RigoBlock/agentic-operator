@@ -14,7 +14,7 @@ Telegram Bot      ───┤            ┌───────────�
                      ├──►  POST   │  Hono App                 │          Rigoblock Vault
 External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     │           (Smart Pool)
   (x402 payer)                    │  ├── Operator Auth (EIP-191)│             │
-                                  │  ├── Workers AI (DeepSeek R1 + Llama 3.3) │          │
+                                  │  ├── Workers AI (Kimi K2.6) │          │
                                   │  │   ├── get_swap_quote    │             │
                                   │  │   ├── build_vault_swap  │             │
                                   │  │   ├── get_positions     │             │
@@ -242,7 +242,7 @@ npx wrangler secret put CDP_API_KEY_SECRET        # CDP Server Wallet
 npx wrangler secret put CDP_WALLET_SECRET         # CDP Server Wallet signing
 ```
 
-> **Note:** `OPENAI_API_KEY` is optional — the default LLM is Workers AI (DeepSeek R1 for reasoning + Llama 3.3 70B for fast tool calls). Set `aiApiKey` + `aiModel` per-request to use OpenAI, Anthropic, or any OpenAI-compatible provider.
+> **Note:** `OPENAI_API_KEY` is optional — the default LLM is Workers AI Kimi K2.6. Set `aiApiKey` + `aiModel` per-request to use OpenAI, Anthropic, or any OpenAI-compatible provider.
 
 ### Deploy
 
@@ -256,7 +256,7 @@ npm run deploy
 
 ### AI / LLM Behaviour
 - **The agent can hallucinate.** Like any LLM-based system, the agent may produce incorrect token addresses, amounts, or transaction descriptions.
-- **Different AI models give different results.** The default model is Workers AI (DeepSeek R1 for reasoning, Llama 3.3 70B for fast tool calls). Switching to GPT-4, Claude Sonnet, or other models via `aiApiKey` / `aiModel` in the API request will change the agent's behaviour, tool-calling accuracy, and output quality.
+- **Different AI models give different results.** The default model is Workers AI Kimi K2.6. Switching to GPT-4, Claude Sonnet, or other models via `aiApiKey` / `aiModel` in the API request will change the agent's behaviour, tool-calling accuracy, and output quality.
 - **No multi-step orchestration in a single message.** The `/api/chat` endpoint handles one atomic operation per request. Complex strategies (bridge + swap + LP) require separate messages or an orchestrator agent on your side.
 
 ### Execution & Safety

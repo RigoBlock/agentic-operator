@@ -142,6 +142,8 @@ export async function checkSwapPrice(
   _slippageBps: number,
   alchemyKey: string,
   maxDivergencePct: number = DEFAULT_MAX_DIVERGENCE_PCT,
+  precomputedPriceFeedExists?: boolean,
+  precomputedOracleAmount?: bigint,
 ): Promise<SwapShieldResult> {
   void _slippageBps;
 
@@ -210,10 +212,14 @@ export async function checkSwapPrice(
 
   // ── Check price feed availability ──
   let priceFeedExists: boolean;
-  try {
-    priceFeedExists = await hasPriceFeedForPair(chainId, normalizedIn, normalizedOut, alchemyKey);
-  } catch {
-    priceFeedExists = false;
+  if (precomputedPriceFeedExists !== undefined) {
+    priceFeedExists = precomputedPriceFeedExists;
+  } else {
+    try {
+      priceFeedExists = await hasPriceFeedForPair(chainId, normalizedIn, normalizedOut, alchemyKey);
+    } catch {
+      priceFeedExists = false;
+    }
   }
 
   if (!priceFeedExists) {
@@ -237,14 +243,17 @@ export async function checkSwapPrice(
 
   // ── Call convertTokenAmount via direct oracle spot price ──
   let oracleAmountRaw: bigint;
-  try {
-    oracleAmountRaw = await convertTokenAmountViaOracle(
-      chainId,
-      normalizedIn,
-      amountInRaw,
-      normalizedOut,
-      alchemyKey,
-    );
+  if (precomputedOracleAmount !== undefined) {
+    oracleAmountRaw = precomputedOracleAmount;
+  } else {
+    try {
+      oracleAmountRaw = await convertTokenAmountViaOracle(
+        chainId,
+        normalizedIn,
+        amountInRaw,
+        normalizedOut,
+        alchemyKey,
+      );
 
     // convertTokenAmountViaOracle returns a bigint, but for a positive input amount the
     // output should always be non-negative. A negative return indicates an
@@ -292,6 +301,7 @@ export async function checkSwapPrice(
         `Oracle check failed on chain ${chainId}. ` +
         `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
     };
+  }
   }
 
   // Oracle returned 0 — can't compare meaningfully

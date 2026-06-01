@@ -682,13 +682,6 @@
             <option value="openai">OpenAI (direct)</option>
           </select>
         </div>
-        <div id="ai-routing-row">
-          <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Routing Mode</label>
-          <select id="ai-routing-mode" style="width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;">
-            <option value="">Kimi K2.6 (default — reasoning + tool calling)</option>
-            <option value="llama_only">Llama 3.3 only (faster, no reasoning)</option>
-          </select>
-        </div>
         <div id="ai-key-row" style="display: none;">
           <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">API Key</label>
           <input id="ai-api-key" type="password" placeholder="sk-or-…" autocomplete="off" style="width: 100%; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; font-family: 'SF Mono', 'Fira Code', monospace; outline: none;" />
@@ -1020,7 +1013,6 @@
         { id: 'openai/gpt-4.1-mini', name: 'GPT-4.1 Mini' },
         { id: 'openai/gpt-5-mini', name: 'GPT-5 Mini' },
         { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
-        { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B' },
       ],
       anthropic: [
         { id: 'claude-opus-4-20250514', name: 'Claude Opus 4 (best reasoning)' },
@@ -1042,15 +1034,9 @@
     function loadAiSettings() {
       try {
         const stored = localStorage.getItem(AI_SETTINGS_KEY);
-        const parsed = stored ? JSON.parse(stored) : { provider: 'server', apiKey: '', model: '', routingMode: '' };
-        // Migration: 'deepseek_only' is no longer a valid value; map to '' (default hybrid).
-        if (parsed.routingMode === 'deepseek_only' || parsed.routingMode === 'hybrid_fast_followup') {
-          parsed.routingMode = '';
-          localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify({ ...parsed, _v2: true }));
-        }
-        if (!parsed._v2) parsed._v2 = true;
+        const parsed = stored ? JSON.parse(stored) : { provider: 'server', apiKey: '', model: '' };
         return parsed;
-      } catch { return { provider: 'server', apiKey: '', model: '', routingMode: '' }; }
+      } catch { return { provider: 'server', apiKey: '', model: '' }; }
     }
     function saveAiSettings() {
       localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(aiSettings));
@@ -1064,7 +1050,7 @@
       const provider = document.getElementById('ai-provider').value;
       aiSettings.provider = provider;
       const showCustom = provider !== 'server';
-      document.getElementById('ai-routing-row').style.display = showCustom ? 'none' : '';
+      // Routing mode removed — Kimi K2.6 is the fixed default
       document.getElementById('ai-key-row').style.display = showCustom ? '' : 'none';
       document.getElementById('ai-model-row').style.display = showCustom ? '' : 'none';
       if (showCustom) {
@@ -1087,9 +1073,7 @@
       } else {
         aiSettings.apiKey = '';
         aiSettings.model = '';
-        document.getElementById('ai-status').textContent = aiSettings.routingMode === 'llama_only'
-          ? 'Using Workers AI Llama 3.3 70B only — fastest responses, no reasoning. No API key needed.'
-          : 'Using Workers AI Kimi K2.6 — native reasoning + tool calling. No API key needed.';
+        document.getElementById('ai-status').textContent = 'Using Workers AI Kimi K2.6 — native reasoning + tool calling. No API key needed.';
       }
       saveAiSettings();
     }
@@ -1106,22 +1090,12 @@
       if (modelSel) {
         modelSel.addEventListener('change', () => { aiSettings.model = modelSel.value; saveAiSettings(); });
       }
-      const routingSel = document.getElementById('ai-routing-mode');
-      if (routingSel) {
-        routingSel.value = aiSettings.routingMode || '';
-        routingSel.addEventListener('change', () => {
-          aiSettings.routingMode = routingSel.value;
-          saveAiSettings();
-          onAiProviderChange();
-        });
-      }
+      // Routing mode removed — Kimi K2.6 is the fixed default
     })();
 
     function getAiRequestParams() {
       if (aiSettings.provider === 'server') {
-        return {
-          routingMode: aiSettings.routingMode || '',
-        };
+        return {};
       }
       if (!aiSettings.apiKey) return {};
       return {
@@ -2100,7 +2074,7 @@
                     (/\{/.test(planText) && /"name"\s*:/.test(planText) && /"(?:parameters|arguments)"\s*:/.test(planText));
                   if (planText && !isToolCallJson) {
                     // Reuse existing plan block (overwrite) — prevents duplicate plan display
-                    // when DeepSeek text + Llama retry produce the same or similar content.
+                    // when reasoning text + follow-up produce the same or similar content.
                     let planEl = typingEl.querySelector('.plan-block');
                     if (!planEl) {
                       planEl = document.createElement('div');

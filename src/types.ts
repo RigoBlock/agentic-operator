@@ -312,8 +312,6 @@ export interface RequestContext {
   aiModel?: string;
   /** AI provider base URL */
   aiBaseUrl?: string;
-  /** Force Llama 3.3 70B fast-model routing, bypassing Kimi K2.6. Useful for testing or when a lightweight fast model is preferred over the default orchestration. */
-  routingMode?: "llama_only";
   /** Optional per-request context snippets injected into runtime prompt */
   contextDocs?: string[];
   /** Default slippage tolerance in basis points. Resolved from: request body → KV → 100; only integer values are honored and effective value is clamped to [10, 500]. */

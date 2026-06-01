@@ -368,15 +368,13 @@ async function handleMessage(
 
       case "/model": {
         const pick = args[0]?.toLowerCase();
-        const modelKey = `tg-model:${userId}`;
         if (!pick) {
           await sendMessage(token, chatId,
-            "Current model: <b>Kimi K2.6</b> (fixed — no switching required).\n\n" +
-            "Kimi K2.6 handles reasoning, tool calling, and multi-step planning natively.",
+            "Current model: <b>Kimi K2.6</b>.\n\n" +
+            "The agent handles reasoning, tool calling, and multi-step planning natively.",
           );
           return;
         }
-        // Legacy model switching removed — Kimi K2.6 is the sole model.
         await sendMessage(token, chatId,
           "Model switching is no longer supported. Kimi K2.6 is the fixed model.",
         );
@@ -619,11 +617,6 @@ async function handleMessage(
   const delegationOnAnyChain = delegationOnCurrentChain || await isDelegationActiveAnyChain(env.KV, vault.address);
   const executionMode = delegationOnAnyChain ? "delegated" : "manual";
 
-  // Load per-user model preference (legacy — Kimi K2.6 is now the fixed model).
-  const modelPref = await env.KV.get(`tg-model:${userId}`);
-  // Ignore legacy "llama" / "deepseek" values — they are no longer supported.
-  const effectiveModelPref = (modelPref && modelPref !== "llama" && modelPref !== "deepseek") ? modelPref : undefined;
-
   // Load execution mode preference: "autonomous" = auto-execute, "confirm" (default) = show buttons
   const execModePref = await env.KV.get(`tg-execmode:${userId}`);
   const autoExecuteFromTelegram = execModePref === "autonomous";
@@ -638,7 +631,7 @@ async function handleMessage(
     operatorVerified: true,
     isBrowserRequest: false,
     executionMode,
-    aiModel: effectiveModelPref,
+    aiModel: undefined,
   };
 
   try {
@@ -691,7 +684,7 @@ async function handleMessage(
     // Build the Telegram reply
     let replyParts: string[] = [];
 
-    // DeepSeek reasoning trace (shown first, collapsed in a blockquote)
+    // Reasoning trace (shown first, collapsed in a blockquote)
     if (response.reasoning) {
       // Trim to ~800 chars for Telegram (avoid hitting 4096 char limit)
       const trimmed = response.reasoning.length > 800
@@ -1160,7 +1153,7 @@ async function sendHelpMessage(token: string, chatId: number): Promise<void> {
     "/pools — list paired vaults",
     "/pool &lt;name&gt; — switch active vault",
     "/addpool &lt;0xAddr&gt; — add vault by address",
-    "/model [llama|deepseek] — view or change AI model",
+    "/model — view current AI model (Kimi K2.6, fixed)",
     "/mode [autonomous|confirm] — toggle auto-execute or confirm",
     "/clear — reset conversation",
     "/unpair &lt;addr&gt; — unlink a vault",

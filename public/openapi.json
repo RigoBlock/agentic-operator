@@ -1469,13 +1469,7 @@
               "type": "string"
             }
           },
-          "routingMode": {
-            "type": "string",
-            "description": "Force Llama-only routing. Omit for the default Kimi K2.6 orchestration.",
-            "enum": [
-              "llama_only"
-            ]
-          },
+
           "chain": {
             "type": "string",
             "description": "Target chain context",
@@ -1501,7 +1495,7 @@
           },
           "reasoning": {
             "type": "string",
-            "description": "DeepSeek R1 reasoning trace (contents of <think> block). Only present when using Workers AI DeepSeek model."
+            "description": "Reasoning trace from the model, when available."
           },
           "modelsUsed": {
             "type": "array",
