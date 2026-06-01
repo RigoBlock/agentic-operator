@@ -62,6 +62,7 @@ import {
   hasPriceFeedForPair,
   normalizeTokenAddress,
 } from "./oraclePrice.js";
+import { getWrappedNativeAddress } from "../config.js";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -74,17 +75,6 @@ export const DEFAULT_MAX_DIVERGENCE_PCT = 5;
 
 /** Native ETH address (zero address) — EOracle treats this equivalently to WETH */
 const NATIVE_ETH = "0x0000000000000000000000000000000000000000" as Address;
-
-/** Wrapped native token addresses per chain — mapped to address(0) for EOracle */
-const WRAPPED_NATIVE_ADDRESSES: Record<number, string> = {
-  1: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",     // Ethereum
-  10: "0x4200000000000000000000000000000000000006",      // Optimism
-  56: "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",     // BNB (WBNB)
-  130: "0x4200000000000000000000000000000000000006",     // Unichain
-  137: "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",   // Polygon (WMATIC)
-  8453: "0x4200000000000000000000000000000000000006",    // Base
-  42161: "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",  // Arbitrum
-};
 
 /** KV key prefix for swap shield temporary tolerance override */
 const SWAP_SHIELD_TOLERANCE_PREFIX = "swap-shield-tolerance:";

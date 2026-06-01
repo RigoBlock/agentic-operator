@@ -43,18 +43,8 @@ import {
   type Hex,
 } from "viem";
 import { getClient } from "./vault.js";
-import { resolveTokenAddress, TOKEN_MAP } from "../config.js";
+import { resolveTokenAddress, TOKEN_MAP, NATIVE_TOKEN, getNativeTokenSymbol } from "../config.js";
 import { getTokenDecimals } from "./vault.js";
-
-/** Chain-native token symbol for user-facing strings. */
-const NATIVE_TOKEN: Record<number, string> = {
-  1: "ETH", 10: "ETH", 130: "ETH", 8453: "ETH", 42161: "ETH",
-  56: "BNB", 137: "POL",
-};
-
-export function getNativeTokenSymbol(chainId: number): string {
-  return NATIVE_TOKEN[chainId] || "ETH";
-}
 
 // ── BackgeoOracle contract addresses per chain ─────────────────────────
 // Source: https://github.com/RigoBlock/v3-contracts/blob/development/src/utils/constants.ts
