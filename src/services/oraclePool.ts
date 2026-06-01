@@ -195,14 +195,14 @@ export interface OraclePoolSwapResult {
  *      signs with their personal wallet.
  *
  * @param token - Token symbol or address whose oracle feed is stale (e.g., "GRG").
- * @param amountIn - Amount to swap. For "buy" direction: native token amount (default "0.001").
- *   For "sell" direction: token amount (default "1"). Larger amounts move the pool price
- *   more aggressively toward market, converging the TWAP faster.
+ * @param amountIn - Amount to swap. For "buy" direction: chain's native token amount.
+ *   For "sell" direction: ERC-20 token amount. Default is "0.001" for both directions
+ *   (small enough to be safe for every token, non-zero enough to create a price observation).
  * @param chainId - Chain where the oracle is stale.
  * @param alchemyKey - Alchemy API key for RPC calls.
  * @param vaultAddress - Optional vault address. If provided, the transaction targets
  *   the vault adapter instead of the Universal Router.
- * @param direction - "buy" (native → token, default) or "sell" (token → native).
+ * @param direction - "buy" (chain's native token → ERC-20, default) or "sell" (ERC-20 → chain's native token).
  */
 export async function buildOraclePoolSwapTx(
   token: string,

@@ -4,7 +4,7 @@
  *
  * Makes real x402 payments to all x402-gated endpoints:
  *   GET /api/quote, POST /api/quote/uniswap, GET /api/quote/0x,
- *   POST /api/chat, GET /api/tools
+ *   POST /api/oracle/refresh, POST /api/chat, GET /api/tools, POST /api/tools
  * This causes the facilitator to auto-catalog each endpoint in the x402 Bazaar.
  *
  * Requirements:
@@ -27,7 +27,9 @@ const QUOTE_URL = `${BASE_URL}/api/quote?sell=ETH&buy=USDC&amount=1&chain=base`;
 const QUOTE_UNISWAP_URL = `${BASE_URL}/api/quote/uniswap`;
 const QUOTE_0X_URL = `${BASE_URL}/api/quote/0x?chainId=8453&sellToken=ETH&buyToken=USDC&sellAmount=1000000000000000000`;
 const CHAT_URL = `${BASE_URL}/api/chat`;
-const TOOLS_URL = `${BASE_URL}/api/tools`;
+const TOOLS_GET_URL = `${BASE_URL}/api/tools`;
+const TOOLS_POST_URL = `${BASE_URL}/api/tools?toolName=get_swap_quote`;
+const ORACLE_REFRESH_URL = `${BASE_URL}/api/oracle/refresh`;
 
 /** Standard headers — use a browser-like UA so Cloudflare Bot Fight Mode doesn't block us. */
 const STANDARD_HEADERS: Record<string, string> = {
@@ -213,13 +215,27 @@ async function main() {
   });
   await new Promise((r) => setTimeout(r, 8000));
 
-  // 8. Trigger GET /api/tools — registers the direct tool invocation endpoint.
-  //    Uses the GET /api/tools discovery endpoint (returns tools listing).
-  //    This is an exact-URL resource (not a wildcard) so the bazaar extension
-  //    can proactively pre-declare it, same as GET /api/quote.
-  //    NOTE: Total spend is ~$0.016-$0.028 USDC (quote $0.002 + uniswap $0.002 + 0x $0.002
-  //    + chat ~$0.008 + tools $0.002). Ensure your wallet has at least $0.04 USDC on Base.
-  await paidRequest(httpClient, "GET", TOOLS_URL);
+  // 8. Trigger POST /api/oracle/refresh — registers the oracle refresh endpoint.
+  await paidRequest(httpClient, "POST", ORACLE_REFRESH_URL, {
+    token: "GRG",
+    chainId: 8453,
+    direction: "buy",
+    amount: "0.001",
+  });
+  await new Promise((r) => setTimeout(r, 8000));
+
+  // 9. Trigger GET /api/tools — registers the tool discovery endpoint.
+  await paidRequest(httpClient, "GET", TOOLS_GET_URL);
+  await new Promise((r) => setTimeout(r, 8000));
+
+  // 10. Trigger POST /api/tools — registers the direct tool invocation endpoint.
+  //    NOTE: Total spend is ~$0.020-$0.032 USDC (quote $0.0020 + uniswap $0.0021 + 0x $0.0022
+  //    + oracle $0.0023 + chat ~$0.008 + tools GET $0.0024 + tools POST $0.0025).
+  //    Ensure your wallet has at least $0.05 USDC on Base.
+  await paidRequest(httpClient, "POST", TOOLS_POST_URL, {
+    arguments: { tokenIn: "ETH", tokenOut: "USDC", amountIn: "1" },
+    chainId: 8453,
+  });
 
   console.log("\n" + "=".repeat(60));
   console.log("Done. Check Bazaar listings:");

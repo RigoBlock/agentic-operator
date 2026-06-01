@@ -21,8 +21,8 @@
 import { Hono } from "hono";
 import { parseUnits, isAddress, type Address } from "viem";
 import type { Env, AppVariables } from "../types.js";
-import { buildOraclePoolSwapTx, getNativeTokenSymbol } from "../services/oraclePool.js";
-import { sanitizeError, resolveChainId } from "../config.js";
+import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
+import { sanitizeError, resolveChainId, getNativeTokenSymbol } from "../config.js";
 
 export const oracle = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
@@ -122,7 +122,7 @@ oracle.post("/refresh", async (c) => {
       message: result.message,
     });
   } catch (err) {
-    const msg = sanitizeError(err);
+    const msg = sanitizeError(err instanceof Error ? err.message : String(err));
     // Distinguish client errors (bad token, unsupported chain) from server errors
     const isClientError =
       msg.includes("not deployed on chain") ||

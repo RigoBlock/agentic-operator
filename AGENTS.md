@@ -12,11 +12,12 @@ The Rigoblock Agentic Operator exposes six x402-gated endpoints. Every operation
 
 | Endpoint | Method | Price | What it returns |
 |----------|--------|-------|-----------------|
-| `/api/quote` | GET | $0.002 USDC | Simple DEX price quote (no vault context needed) |
-| `/api/quote/uniswap` | POST | $0.002 USDC | Full Uniswap Trading API quote with oracle enrichment |
-| `/api/quote/0x` | GET | $0.002 USDC | Full 0x API quote with oracle enrichment |
-| `/api/tools` | GET | $0.002 USDC | Full tool catalog with JSON schemas for direct invocation |
-| `/api/tools?toolName={name}` | POST | $0.002 USDC | Direct tool execution with structured arguments (no LLM overhead) |
+| `/api/quote` | GET | $0.0020 USDC | DEX price quote (no vault context needed) |
+| `/api/quote/uniswap` | POST | $0.0021 USDC | Uniswap Trading API quote with oracle enrichment |
+| `/api/quote/0x` | GET | $0.0022 USDC | 0x API quote with oracle enrichment |
+| `/api/oracle/refresh` | POST | $0.0023 USDC | Oracle price-feed refresh transaction builder |
+| `/api/tools` | GET | $0.0024 USDC | Tool catalog with JSON schemas for direct invocation |
+| `/api/tools?toolName={name}` | POST | $0.0025 USDC | Direct tool execution with structured arguments (no LLM overhead) |
 | `/api/chat` | POST | up to $0.10 USDC (billed by actual usage, typical $0.003–$0.015) | AI-powered DeFi response (swap calldata, positions, analysis) |
 
 Payments are in USDC on **Base mainnet** (`eip155:8453`) via the
@@ -213,7 +214,7 @@ provides the safe DeFi execution layer.
 ## Security Model
 
 ### What the x402 payment wallet CAN do:
-- Pay for API access ($0.002–$0.10 per call)
+- Pay for API access ($0.0020–$0.10 per call)
 - Receive unsigned transaction data
 - Query prices, positions, and vault info
 - Get natural language DeFi analysis
@@ -468,7 +469,7 @@ X-PAYMENT: <x402-payment-header>
 relying on natural language, an agent can call this endpoint once, cache the
 schemas, and then invoke specific tools directly via `POST /api/tools?toolName={toolName}`.
 
-**Price:** $0.002 USDC per request (x402 exact scheme, eip155:8453). Tool discovery is x402-gated to prevent spam and align with the paid execution model.
+**Price:** $0.0024 USDC per request (x402 exact scheme, eip155:8453). Tool discovery is x402-gated to prevent spam and align with the paid execution model.
 
 ### `POST /api/tools?toolName={toolName}` — Direct tool invocation
 
@@ -502,14 +503,14 @@ Content-Type: application/json
   }
 ```
 
-**Price:** $0.002 per call (x402 exact scheme, eip155:8453)
+**Price:** $0.0025 per call (x402 exact scheme, eip155:8453)
 
 **Tool categories:** Spot Trading, Vault Info, GMX Perpetuals, Uniswap v4 LP,
 Cross-Chain, GRG Staking, Vault Management, Delegation, TWAP Orders, NAV Sync,
 Operator Settings, Oracle.
 
 **How autonomous agents should use this:**
-1. Call `GET /api/tools` ($0.002) once to discover schemas
+1. Call `GET /api/tools` ($0.0024) once to discover schemas
 2. Cache the catalog locally
 3. Call `POST /api/tools?toolName={toolName}` with structured arguments for each operation
 4. If the response contains `transaction`, sign and broadcast it (manual mode)

@@ -1239,10 +1239,10 @@ export const TOOL_DEFINITIONS = [
           amount: {
             type: "string",
             description:
-              "Amount to swap. For 'buy' direction: amount of native token to spend (e.g., '0.001', '0.01'). " +
-              "For 'sell' direction: amount of the ERC-20 token to sell (e.g., '1', '10'). " +
+              "Amount to swap. For 'buy' direction: amount of the chain's native token to spend (e.g., '0.001', '0.01'). " +
+              "For 'sell' direction: amount of the ERC-20 token to sell (e.g., '0.001', '0.01'). " +
               "Larger amounts move the oracle pool price more aggressively and converge TWAP faster. " +
-              "Defaults to 0.001 native token for buy, or 1 token unit for sell.",
+              "Defaults to 0.001 for both directions (small enough to be safe for every token)."
           },
           amountOut: {
             type: "string",
@@ -1660,9 +1660,14 @@ HOW DO OTHER AGENTS INTERACT WITH YOU? (x402 PROTOCOL)
 External AI agents interact with this service via the x402 payment protocol.
 x402 is an HTTP-native micropayment standard: agents pay small fees (≤$0.01) per call
 to access the API, without needing accounts, API keys, or subscriptions.
-Two endpoints are x402-gated:
-  - GET /api/quote ($0.002) — stateless price quotes, no vault context needed
-  - POST /api/chat ($0.01) — AI-powered DeFi responses (swap calldata, positions, analysis)
+Exact-scheme endpoints are x402-gated:
+  - GET /api/quote ($0.0020) — stateless price quotes, no vault context needed
+  - POST /api/quote/uniswap ($0.0021) — Uniswap Trading API quote with oracle enrichment
+  - GET /api/quote/0x ($0.0022) — 0x API quote with oracle enrichment
+  - POST /api/oracle/refresh ($0.0023) — oracle price-feed refresh transaction builder
+  - GET /api/tools ($0.0024) — tool catalog with JSON schemas
+  - POST /api/tools ($0.0025) — direct tool execution with structured arguments
+  - POST /api/chat (up to $0.10, billed by usage via upto scheme) — AI-powered DeFi responses
 Payment is in USDC on Base (eip155:8453). Verified and settled by the CDP facilitator.
 The x402 payer and the vault operator are typically DIFFERENT wallets —
 payment proves ability to pay, NOT authorization to operate vaults.

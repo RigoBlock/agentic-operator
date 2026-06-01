@@ -126,8 +126,13 @@ External AI agents pay for API access via [x402](https://x402.org) — USDC micr
 
 | Endpoint | Method | Price | Description |
 |----------|--------|-------|-------------|
-| `/api/quote` | GET | $0.002 | DEX price quote (no vault context) |
-| `/api/chat` | POST | $0.01 | AI-powered DeFi response |
+| `/api/quote` | GET | $0.0020 | DEX price quote (no vault context) |
+| `/api/quote/uniswap` | POST | $0.0021 | Uniswap Trading API quote with oracle enrichment |
+| `/api/quote/0x` | GET | $0.0022 | 0x API quote with oracle enrichment |
+| `/api/oracle/refresh` | POST | $0.0023 | Oracle price-feed refresh transaction builder |
+| `/api/tools` | GET | $0.0024 | Tool catalog with JSON schemas |
+| `/api/tools?toolName={name}` | POST | $0.0025 | Direct tool execution |
+| `/api/chat` | POST | up to $0.10 | AI-powered DeFi response (billed by usage) |
 
 Browser and Telegram requests are exempt from x402 (same-origin / webhook).
 

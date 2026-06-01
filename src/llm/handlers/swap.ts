@@ -1,0 +1,459 @@
+/**
+ * Swap Tool Handlers
+ */
+
+/**
+ * Tool Handlers — all tool call handlers + registry.
+ */
+
+import type { Env, RequestContext, SwapIntent, UnsignedTransaction } from "../../types.js";
+import type { ToolResult } from "../client.js";
+import {
+  getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay, calculateVaultGasLimit,
+} from "../../services/uniswapTrading.js";
+import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../../services/zeroXTrading.js";
+import {
+  getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint, getClient,
+} from "../../services/vault.js";
+import { resolveTokenAddress, resolveChainId, sanitizeError, STAKING_PROXY, getNativeTokenSymbol } from "../../config.js";
+import { decodeFunctionData, encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
+import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
+import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../../abi/poolFactory.js";
+import { ERC20_ABI } from "../../abi/erc20.js";
+import {
+  prepareDelegation, prepareRevocation, prepareSelectiveRevocation,
+  checkDelegationOnChain, buildDefaultSelectors, getDelegationConfig, revokeDelegationOnChain,
+} from "../../services/delegation.js";
+import { getAgentWalletInfo } from "../../services/agentWallet.js";
+import {
+  findGmxMarket, getGmxMarkets, getGmxTickers, getGmxTokenPrice,
+  resolveGmxCollateral, getGmxTokenDecimals,
+  buildCreateIncreaseOrderCalldata, buildCreateDecreaseOrderCalldata,
+  buildUpdateOrderCalldata, buildCancelOrderCalldata, buildClaimFundingFeesCalldata,
+} from "../../services/gmxTrading.js";
+import { getGmxPositionsSummary, getGmxPositions } from "../../services/gmxPositions.js";
+import { ARBITRUM_CHAIN_ID, GmxOrderType } from "../../abi/gmx.js";
+import {
+  getCrosschainQuote, buildCrosschainTransfer, buildCrosschainSync,
+  getAggregatedNav, buildRebalancePlan, chainName as crosschainChainName,
+} from "../../services/crosschain.js";
+import {
+  buildAddLiquidityTx, buildRemoveLiquidityTx, buildInitializePoolTx,
+  getVaultLPPositions, buildCollectFeesTx, buildBurnPositionTx,
+  getPoolInfoById, getPositionDirect, POOL_MANAGER,
+} from "../../services/uniswapLP.js";
+import {
+  buildStakeCalldata, buildUndelegateStakeCalldata, buildUnstakeCalldata,
+  buildEndEpochCalldata, buildWithdrawDelegatorRewardsCalldata,
+} from "../../services/grgStaking.js";
+import { checkNavImpact } from "../../services/navGuard.js";
+import {
+  checkSwapPrice, getSwapShieldTolerance, setSwapShieldTolerance, clearSwapShieldTolerance,
+  getStoredSlippage, setStoredSlippage,
+  DEFAULT_SLIPPAGE_BPS, MIN_SLIPPAGE_BPS, MAX_SLIPPAGE_BPS, DEFAULT_MAX_DIVERGENCE_PCT,
+} from "../../services/swapShield.js";
+import { buildOraclePoolSwapTx } from "../../services/oraclePool.js";
+import { AuthError } from "../../services/auth.js";
+import {
+  friendlyError, estimateGas, preCheckNavImpact,
+  resolveChainArg, resolveChainName, resolveSlippage, formatRawAmount, runSwapShield, executeToolCall,
+} from "../client.js";
+
+export async function handle_get_swap_quote(
+  env: Env,
+  ctx: RequestContext,
+  args: Record<string, unknown>,
+  toolName: string,
+): Promise<ToolResult> {
+  // Auto-switch chain if specified
+  let chainSwitched: number | undefined;
+  if (args.chain) {
+    const match = resolveChainArg((args.chain as string).trim());
+    if (match.id !== ctx.chainId) {
+      ctx.chainId = match.id;
+      chainSwitched = match.id;
+    }
+  }
+
+  // Resolve slippage: request body → KV stored default → 100 bps
+  const resolvedSlippage = await resolveSlippage(env, ctx);
+
+  const intent: SwapIntent = {
+    tokenIn: args.tokenIn as string,
+    tokenOut: args.tokenOut as string,
+    amountIn: args.amountIn as string | undefined,
+    amountOut: args.amountOut as string | undefined,
+    slippageBps: resolvedSlippage,
+  };
+  if (!intent.amountIn && !intent.amountOut) {
+    throw new Error("Either amountIn or amountOut must be specified.");
+  }
+  const dex = ((args.dex as string) || "0x").toLowerCase();
+  if (dex === "0x" || dex === "zerox") {
+    const quote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
+    return { message: formatZeroXQuoteForDisplay(intent, quote), chainSwitch: chainSwitched };
+  }
+  const quote = await getUniswapQuote(env, intent, ctx.chainId, ctx.vaultAddress);
+  return { message: formatUniswapQuoteForDisplay(intent, quote), chainSwitch: chainSwitched };
+
+}
+
+export async function handle_build_vault_swap(
+  env: Env,
+  ctx: RequestContext,
+  args: Record<string, unknown>,
+  toolName: string,
+): Promise<ToolResult> {
+  // Verify operator is connected
+  if (!ctx.operatorAddress) {
+    throw new Error("Wallet not connected. Connect your wallet first.");
+  }
+
+  // Reject the zero address — the frontend uses it as a sentinel when no
+  // vault has been selected. Building calldata against 0x000...0 would
+  // waste a Swap Shield oracle call and produce an unusable transaction.
+  const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+  if (!ctx.vaultAddress || ctx.vaultAddress.toLowerCase() === ZERO_ADDRESS) {
+    throw new Error(
+      "No vault selected. Please select or deploy a smart pool before swapping.",
+    );
+  }
+
+  // Auto-switch chain if specified
+  let chainSwitched: number | undefined;
+  if (args.chain) {
+    const match = resolveChainArg((args.chain as string).trim());
+    if (match.id !== ctx.chainId) {
+      ctx.chainId = match.id;
+      chainSwitched = match.id;
+    }
+  }
+
+  // Resolve slippage: request body → KV stored default → 100 bps
+  const resolvedSlippage = await resolveSlippage(env, ctx);
+
+  const intent: SwapIntent = {
+    tokenIn: args.tokenIn as string,
+    tokenOut: args.tokenOut as string,
+    amountIn: args.amountIn as string | undefined,
+    amountOut: args.amountOut as string | undefined,
+    slippageBps: resolvedSlippage,
+  };
+  if (!intent.amountIn && !intent.amountOut) {
+    throw new Error("Either amountIn or amountOut must be specified.");
+  }
+  // Ownership already verified by auth layer (verifyOperatorAuth checks
+  // all supported chains). Skipping redundant on-chain owner() call here
+  // avoids an extra RPC round-trip and prevents errors when the vault
+  // contract doesn't exist on the currently-selected chain.
+
+  // Resolve chain name for display
+  const chainName = resolveChainName(ctx.chainId);
+
+  // ── Balance pre-check for exact-input swaps ──
+  // Prevents wasting time on DEX API calls and confusing the user with
+  // transactions that would inevitably revert (insufficient balance).
+  if (intent.amountIn) {
+    try {
+      const sellAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn);
+      const { balance, decimals, symbol } = await getVaultTokenBalance(
+        ctx.chainId, ctx.vaultAddress as Address, sellAddr as Address, env.ALCHEMY_API_KEY,
+      );
+      const requestedRaw = parseUnits(intent.amountIn, decimals);
+      if (requestedRaw > balance) {
+        const available = formatUnits(balance, decimals);
+        throw new Error(
+          `Insufficient ${symbol} balance. ` +
+          `Requested: ${intent.amountIn} ${symbol}, ` +
+          `Available: ${available} ${symbol} on ${chainName}. ` +
+          `Use a smaller amount or bridge more ${symbol} to this chain first.`,
+        );
+      }
+    } catch (err) {
+      // Re-throw balance errors; swallow resolution errors (let DEX handle)
+      if (err instanceof Error && err.message.includes("Insufficient")) throw err;
+    }
+  }
+
+  // Determine which DEX to use.
+  // Default is 0x — it's an aggregator and generally returns better quotes.
+  // Both AUniswapRouter and A0xRouter adapters are deployed on Rigoblock vaults.
+  const dex = ((args.dex as string) || "0x").toLowerCase();
+
+  if (dex === "0x" || dex === "zerox") {
+    // ── 0x AllowanceHolder flow ──
+    const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
+
+    // ── Swap Shield — oracle price check ──
+    const shieldWarning0x = await runSwapShield(
+      env, ctx, intent,
+      zxQuote.sellAmount, zxQuote.decimalsIn,
+      zxQuote.buyAmount,
+      zxQuote.sellToken as Address,
+      zxQuote.buyToken as Address,
+    );
+
+    // The 0x API returns a complete transaction targeting AllowanceHolder.
+    // For the vault, we send the 0x calldata TO the vault address.
+    // The vault's 0x adapter (when built) will route it through AllowanceHolder.
+    const outputAmount = formatRawAmount(zxQuote.buyAmount, zxQuote.decimalsOut);
+    const inputAmount = formatRawAmount(zxQuote.sellAmount, zxQuote.decimalsIn);
+    const isExactOutput = !!intent.amountOut;
+    // For 0x, even when user requested exact output, the swap is always exact-input internally.
+    // The sell amount was estimated via the 0x price endpoint.
+    const is0xEstimated = isExactOutput;
+
+    // Derive implied price
+    const sellNum = parseFloat(inputAmount);
+    const buyNum = parseFloat(outputAmount);
+    let priceLine = "";
+    if (sellNum > 0 && buyNum > 0) {
+      priceLine = `Price: 1 ${intent.tokenIn} = ${(buyNum / sellNum).toFixed(6)} ${intent.tokenOut}`;
+    }
+
+    const sellDesc = intent.amountIn
+      ? `${intent.amountIn} ${intent.tokenIn}`
+      : `~${inputAmount} ${intent.tokenIn}`;
+    const buyDesc = `~${outputAmount} ${intent.tokenOut}`;
+    const descParts = [`[0x] Sell ${sellDesc} for ${buyDesc}`];
+    if (priceLine) descParts.push(priceLine);
+
+    let zxGas: string;
+    let zxGasFallbackWarning = '';
+    try {
+      zxGas = await estimateGas(
+        ctx.chainId, ctx.vaultAddress as Address,
+        zxQuote.transaction.data as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
+      );
+    } catch (gasErr) {
+      // Gas estimation failed — use a safe fallback and surface a warning.
+      // The vault may still execute on-chain (simulation context can differ from
+      // production: approvals, adapter state, price impact at execution time).
+      zxGas = '0x' + (800_000).toString(16);
+      const errMsg = gasErr instanceof Error ? gasErr.message : String(gasErr);
+      zxGasFallbackWarning = `⚠️ Gas estimation failed (${errMsg.slice(0, 120)}). Using fallback 800k — transaction may still revert on-chain.`;
+      console.warn(`[build_vault_swap 0x] estimateGas failed, using fallback 800k:`, gasErr instanceof Error ? gasErr.message : gasErr);
+    }
+
+    const transaction: UnsignedTransaction = {
+      to: ctx.vaultAddress as Address,
+      data: zxQuote.transaction.data,
+      value: "0x0", // vault uses its own ETH, never pass value
+      chainId: ctx.chainId,
+      gas: zxGas,
+      description: descParts.join(" | "),
+      swapMeta: {
+        sellAmount: inputAmount,
+        sellToken: intent.tokenIn,
+        buyAmount: outputAmount,
+        buyToken: intent.tokenOut,
+        price: sellNum > 0 && buyNum > 0
+          ? `1 ${intent.tokenIn} = ${(buyNum / sellNum).toFixed(6)} ${intent.tokenOut}`
+          : "",
+        dex: "0x Aggregator",
+      },
+      navShieldChecked: true,
+    };
+
+    const sellLine = is0xEstimated
+      ? `Sell: ~${inputAmount} ${intent.tokenIn} (estimated for ~${intent.amountOut} ${intent.tokenOut})`
+      : `Sell: ${intent.amountIn} ${intent.tokenIn}`;
+    const buyLine = isExactOutput
+      ? `Buy: ~${outputAmount} ${intent.tokenOut} (target: ${intent.amountOut} ${intent.tokenOut})`
+      : `Buy: ~${outputAmount} ${intent.tokenOut}`;
+
+    let message = [
+      "✅ Swap ready (0x Aggregator)",
+      sellLine,
+      buyLine,
+      ...(priceLine ? [priceLine] : []),
+      `Slippage: ${intent.slippageBps ? intent.slippageBps / 100 : 1}%`,
+      `Chain: ${chainName}`,
+      `Gas limit: ${parseInt(zxGas, 16)}`,
+      ...(shieldWarning0x ? [shieldWarning0x] : []),
+      ...(zxGasFallbackWarning ? [zxGasFallbackWarning] : []),
+    ].join("\n");
+
+    // NAV shield pre-check — warn if simulation fails, block if NAV drops > 10%.
+    let navWarn0x = await preCheckNavImpact(env, ctx, transaction);
+    if (navWarn0x) message += '\n' + navWarn0x;
+
+    return { message, transaction, chainSwitch: chainSwitched };
+  }
+
+  // ── Uniswap flow (default) ──
+
+  // 2. Get quote from Uniswap Trading API
+  const quote = await getUniswapQuote(env, intent, ctx.chainId, ctx.vaultAddress);
+
+  // ── Swap Shield — oracle price check ──
+  // Pass addresses already resolved by Uniswap API so we avoid a
+  // redundant resolver round-trip and never skip the check on transient failures.
+  // Treat missing amounts as a hard error — an unexpected quote shape must not
+  // silently bypass oracle protection.
+  if (!quote.quote.input?.amount || !quote.quote.output?.amount) {
+    throw new Error(
+      "Uniswap quote returned an unexpected shape — input or output amount is missing. " +
+      "Cannot validate swap price. Please retry.",
+    );
+  }
+  const shieldWarningUni = await runSwapShield(
+    env, ctx, intent,
+    quote.quote.input.amount, quote.decimalsIn,
+    quote.quote.output.amount,
+    quote.quote.input.token as Address,
+    quote.quote.output.token as Address,
+  );
+
+  // ── Balance pre-check for exact-output swaps ──
+  // For exact-output, we only know required input after the quote. Check here
+  // before calling the heavier swapCalldata endpoint to give a clear error.
+  if (intent.amountOut && quote.quote.input?.amount) {
+    try {
+      const sellAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn);
+      const { balance, symbol } = await getVaultTokenBalance(
+        ctx.chainId, ctx.vaultAddress as Address, sellAddr as Address, env.ALCHEMY_API_KEY,
+      );
+      const requiredIn = BigInt(quote.quote.input.amount);
+      if (requiredIn > balance) {
+        const available = formatUnits(balance, quote.decimalsIn);
+        const needed = formatUnits(requiredIn, quote.decimalsIn);
+        throw new Error(
+          `Insufficient ${symbol} balance. ` +
+          `Need ~${needed} ${symbol} to buy ${intent.amountOut} ${intent.tokenOut}, ` +
+          `but vault only has ${available} ${symbol} on ${chainName}. ` +
+          `Use a smaller amount or bridge more ${symbol} to this chain first.`,
+        );
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Insufficient")) throw err;
+    }
+  }
+
+  // 3. Get executable swap calldata from Uniswap Trading API
+  const swapTx = await getUniswapSwapCalldata(env, quote._raw);
+
+  // 4. Decode the Universal Router execute(commands, inputs, deadline) calldata
+  const decoded = decodeFunctionData({
+    abi: RIGOBLOCK_VAULT_ABI,
+    data: swapTx.data,
+  });
+
+  if (decoded.functionName !== "execute") {
+    throw new Error(
+      `Unexpected function from Uniswap API: ${decoded.functionName}. Expected execute().`,
+    );
+  }
+
+  // 5. Re-encode as a call to the vault's execute()
+  let vaultCalldata: Hex;
+  const decodedArgs = decoded.args as unknown as unknown[];
+  if (decodedArgs.length === 3) {
+    vaultCalldata = encodeVaultExecute(
+      decodedArgs[0] as Hex,
+      decodedArgs[1] as Hex[],
+      decodedArgs[2] as bigint,
+    );
+  } else {
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 1800);
+    vaultCalldata = encodeVaultExecute(
+      decodedArgs[0] as Hex,
+      decodedArgs[1] as Hex[],
+      deadline,
+    );
+  }
+
+  // The operator calls vault.execute() — the vault uses its OWN ETH balance.
+  // Value is always 0 regardless of what Uniswap API returns.
+
+  const outputAmount = quote.quote.output?.amount
+    ? formatRawAmount(quote.quote.output.amount, quote.decimalsOut)
+    : "?";
+  const inputAmount = quote.quote.input?.amount
+    ? formatRawAmount(quote.quote.input.amount, quote.decimalsIn)
+    : "?";
+
+  const isExactOutput = !!intent.amountOut;
+
+  // Derive implied price
+  const sellNum = parseFloat(inputAmount);
+  const buyNum = parseFloat(outputAmount);
+  let priceLine = "";
+  if (sellNum > 0 && buyNum > 0) {
+    priceLine = `Price: 1 ${intent.tokenIn} = ${(buyNum / sellNum).toFixed(6)} ${intent.tokenOut}`;
+  }
+
+  const descParts = [
+    isExactOutput
+      ? `[Uniswap] Buy ${intent.amountOut} ${intent.tokenOut} with ~${inputAmount} ${intent.tokenIn}`
+      : `[Uniswap] Sell ${intent.amountIn} ${intent.tokenIn} for ~${outputAmount} ${intent.tokenOut}`,
+  ];
+  if (priceLine) descParts.push(priceLine);
+
+  // 7. Build the unsigned transaction for the frontend
+  let uniGas: string;
+  let uniGasFallbackWarning = '';
+  try {
+    uniGas = await estimateGas(
+      ctx.chainId, ctx.vaultAddress as Address,
+      vaultCalldata as Hex, "0x0",
+      ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
+    );
+  } catch (gasErr) {
+    // Fallback to Uniswap API's own gas estimate + vault overhead and surface a warning.
+    const fallback = calculateVaultGasLimit(quote.quote.gasUseEstimate);
+    uniGas = '0x' + fallback.toString(16);
+    const errMsg = gasErr instanceof Error ? gasErr.message : String(gasErr);
+    uniGasFallbackWarning = `⚠️ Gas estimation failed (${errMsg.slice(0, 120)}). Using Uniswap API estimate — transaction may still revert on-chain.`;
+    console.warn(`[build_vault_swap uni] estimateGas failed, using uniswap estimate fallback:`,
+      gasErr instanceof Error ? gasErr.message : gasErr);
+  }
+
+  const transaction: UnsignedTransaction = {
+    to: ctx.vaultAddress as Address,
+    data: vaultCalldata,
+    value: "0x0",
+    chainId: ctx.chainId,
+    gas: uniGas,
+    description: descParts.join(" | "),
+    swapMeta: {
+      sellAmount: inputAmount,
+      sellToken: intent.tokenIn,
+      buyAmount: outputAmount,
+      buyToken: intent.tokenOut,
+      price: sellNum > 0 && buyNum > 0
+        ? `1 ${intent.tokenIn} = ${(buyNum / sellNum).toFixed(6)} ${intent.tokenOut}`
+        : "",
+      dex: "Uniswap",
+    },
+    navShieldChecked: true,
+  };
+
+  const sellLine = isExactOutput
+    ? `Sell: ~${inputAmount} ${intent.tokenIn} (estimated)`
+    : `Sell: ${intent.amountIn} ${intent.tokenIn}`;
+  const buyLine = isExactOutput
+    ? `Buy: ${intent.amountOut} ${intent.tokenOut}`
+    : `Buy: ~${outputAmount} ${intent.tokenOut}`;
+
+  let message = [
+    "✅ Swap ready (Uniswap)",
+    sellLine,
+    buyLine,
+    ...(priceLine ? [priceLine] : []),
+    `Slippage: ${intent.slippageBps ? intent.slippageBps / 100 : 1}%`,
+    `Chain: ${chainName}`,
+    `Gas limit: ${parseInt(uniGas, 16)}`,
+    ...(shieldWarningUni ? [shieldWarningUni] : []),
+    ...(uniGasFallbackWarning ? [uniGasFallbackWarning] : []),
+  ].join("\n");
+
+  // NAV shield pre-check — warn if simulation fails, block if NAV drops > 10%.
+  let navWarnUni = await preCheckNavImpact(env, ctx, transaction);
+  if (navWarnUni) message += '\n' + navWarnUni;
+
+  return { message, transaction, chainSwitch: chainSwitched };
+
+}
+

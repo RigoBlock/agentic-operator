@@ -7,11 +7,12 @@
  *
  * Pricing:
  *   POST /api/chat          → upto $0.10 USDC (actual cost billed; ~$0.003–$0.015 typical)
- *   GET  /api/quote         → exact $0.002 USDC (DEX price quote)
- *   POST /api/quote/uniswap → exact $0.002 USDC (Uniswap Trading API quote)
- *   GET  /api/quote/0x      → exact $0.002 USDC (0x API quote)
- *   GET  /api/tools         → exact $0.002 USDC (tool discovery)
- *   POST /api/tools         → exact $0.002 USDC (direct tool invocation)
+ *   GET  /api/quote         → exact $0.0020 USDC (DEX price quote)
+ *   POST /api/quote/uniswap → exact $0.0021 USDC (Uniswap Trading API quote)
+ *   GET  /api/quote/0x      → exact $0.0022 USDC (0x API quote)
+ *   POST /api/oracle/refresh → exact $0.0023 USDC (oracle refresh tx builder)
+ *   GET  /api/tools         → exact $0.0024 USDC (tool discovery)
+ *   POST /api/tools         → exact $0.0025 USDC (direct tool invocation)
  *
  * The /api/chat endpoint uses the "upto" scheme — clients authorise up to $0.10
  * but are only charged the actual inference cost (determined by token usage).
@@ -178,7 +179,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.002",
+        price: "$0.0020",
         network: BASE_NETWORK,
       },
     ],
@@ -245,7 +246,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.002",
+        price: "$0.0021",
         network: BASE_NETWORK,
       },
     ],
@@ -311,7 +312,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.002",
+        price: "$0.0022",
         network: BASE_NETWORK,
       },
     ],
@@ -375,7 +376,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.002",
+        price: "$0.0023",
         network: BASE_NETWORK,
       },
     ],
@@ -453,7 +454,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.002",
+        price: "$0.0024",
         network: BASE_NETWORK,
       },
     ],
@@ -521,7 +522,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.002",
+        price: "$0.0025",
         network: BASE_NETWORK,
       },
     ],

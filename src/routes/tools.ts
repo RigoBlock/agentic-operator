@@ -60,7 +60,7 @@ function getToolCategory(name: string): string {
 
 // GET /api/tools — x402-gated tool discovery for autonomous agents.
 // Returns the full catalog with schemas so agents know what each tool does
-// and what arguments to pass. Requires x402 payment (exact scheme, $0.002 USDC).
+// and what arguments to pass. Requires x402 payment (exact scheme, $0.0024 USDC).
 tools.get("/", async (c) => {
   // Local auth guard: if x402 middleware failed to initialize or payment was
   // skipped, require browser verification. This prevents the paid catalog from
@@ -88,7 +88,7 @@ tools.get("/", async (c) => {
   return c.json({
     description: "Rigoblock direct DeFi tool invocation. POST to /api/tools?toolName={name} with arguments object.",
     usage: "POST /api/tools?toolName={toolName}",
-    price: "$0.002 USDC per call (x402 exact scheme, eip155:8453)",
+    price: "$0.0024 USDC per call (x402 exact scheme, eip155:8453)",
     toolCount: toolCatalog.length,
     tools: toolCatalog,
   });

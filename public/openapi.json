@@ -29,7 +29,7 @@
       "get": {
         "operationId": "getDexQuote",
         "summary": "Get DEX swap quote",
-        "description": "Returns a swap quote sourced from Uniswap liquidity for a given token pair and amount on any of the 7 supported chains. No vault, wallet, or operator context required — any agent can call this endpoint with a $0.002 USDC payment.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Typical use:** Price discovery, trade sizing, yield comparison, arbitrage detection.\n\n**Example:** `GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base`",
+        "description": "Returns a swap quote sourced from Uniswap liquidity for a given token pair and amount on any of the 7 supported chains. No vault, wallet, or operator context required — any agent can call this endpoint with a $0.0020 USDC payment.\n\n**Price:** $0.0020 USDC per request (x402, eip155:8453)\n\n**Typical use:** Price discovery, trade sizing, yield comparison, arbitrage detection.\n\n**Example:** `GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base`",
         "tags": [
           "Quotes"
         ],
@@ -128,7 +128,7 @@
       "post": {
         "operationId": "getUniswapQuote",
         "summary": "Uniswap Trading API quote with oracle enrichment",
-        "description": "Proxies to the Uniswap Trading API `/quote` endpoint and enriches the response with on-chain BackgeoOracle spot-price metadata. Returns the upstream response verbatim plus `priceFeedExists`, `deltaBps`, and `oracleAmount`.\n\n**Price:** $0.002 USDC per request (x402 exact scheme, eip155:8453)\n\n**Request body:** Identical to the Uniswap Trading API `/quote` endpoint. All request body fields are forwarded verbatim to Uniswap.",
+        "description": "Proxies to the Uniswap Trading API `/quote` endpoint and enriches the response with on-chain BackgeoOracle spot-price metadata. Returns the upstream response verbatim plus `priceFeedExists`, `deltaBps`, and `oracleAmount`.\n\n**Price:** $0.0021 USDC per request (x402 exact scheme, eip155:8453)\n\n**Request body:** Identical to the Uniswap Trading API `/quote` endpoint. All request body fields are forwarded verbatim to Uniswap.",
         "tags": [
           "Quotes"
         ],
@@ -268,7 +268,7 @@
       "get": {
         "operationId": "get0xQuote",
         "summary": "0x API quote with oracle enrichment",
-        "description": "Proxies to the 0x API v2 `/swap/allowance-holder/quote` endpoint and enriches the response with on-chain BackgeoOracle spot-price metadata. Returns the upstream response verbatim plus `priceFeedExists`, `deltaBps`, and `oracleAmount`.\n\n**Price:** $0.002 USDC per request (x402 exact scheme, eip155:8453)\n\n**Query parameters:** Identical to the 0x API. All query parameters are forwarded verbatim to 0x.",
+        "description": "Proxies to the 0x API v2 `/swap/allowance-holder/quote` endpoint and enriches the response with on-chain BackgeoOracle spot-price metadata. Returns the upstream response verbatim plus `priceFeedExists`, `deltaBps`, and `oracleAmount`.\n\n**Price:** $0.0022 USDC per request (x402 exact scheme, eip155:8453)\n\n**Query parameters:** Identical to the 0x API. All query parameters are forwarded verbatim to 0x.",
         "tags": [
           "Quotes"
         ],
@@ -461,7 +461,7 @@
       "get": {
         "operationId": "listTools",
         "summary": "List all available DeFi tools with schemas",
-        "description": "Returns a machine-readable catalog of every direct-invocation tool: names, descriptions, parameter schemas, categories, and access requirements.\n\nAutonomous agents should call this endpoint first to discover what operations are available and what arguments each tool expects. The response includes full JSON-Schema parameter definitions compatible with OpenAI function calling.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)",
+        "description": "Returns a machine-readable catalog of every direct-invocation tool: names, descriptions, parameter schemas, categories, and access requirements.\n\nAutonomous agents should call this endpoint first to discover what operations are available and what arguments each tool expects. The response includes full JSON-Schema parameter definitions compatible with OpenAI function calling.\n\n**Price:** $0.0024 USDC per request (x402, eip155:8453)",
         "tags": [
           "Tools"
         ],
@@ -506,7 +506,7 @@
       "post": {
         "operationId": "invokeTool",
         "summary": "Invoke a DeFi tool directly",
-        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Discover schemas first:** Call `GET /api/tools` to retrieve the full catalog with parameter schemas for every tool.\n\n**Price:** $0.002 USDC per request (x402, eip155:8453)\n\n**Read-only tools:**\n`get_swap_quote`, `get_vault_info`, `get_token_balance`, `get_pool_info`, `get_lp_positions`, `gmx_get_positions`, `gmx_get_markets`, `check_delegation_status`, `get_crosschain_quote`, `get_aggregated_nav`, `get_rebalance_plan`, `verify_bridge_arrival`, `list_twap_orders`, `list_nav_syncs`, `list_strategies`, `switch_chain`\n\n**State-changing tools:**\n`build_vault_swap`, `add_liquidity`, `remove_liquidity`, `collect_lp_fees`, `burn_position`, `gmx_open_position`, `gmx_close_position`, `gmx_increase_position`, `gmx_cancel_order`, `gmx_update_order`, `gmx_claim_funding_fees`, `crosschain_transfer`, `crosschain_sync`, `grg_stake`, `grg_unstake`, `grg_undelegate_stake`, `grg_end_epoch`, `grg_claim_rewards`, `deploy_smart_pool`, `fund_pool`, `create_twap_order`, `cancel_twap_order`, `create_nav_sync`, `cancel_nav_sync`\n\n**Operator-scoped tools (require operatorVerified):**\n`setup_delegation`, `revoke_delegation`, `revoke_selectors`, `list_strategies`, `set_default_slippage`, `set_swap_shield_tolerance`, `enable_swap_shield`\n\n**Oracle tools:**\n`refresh_oracle_feed`\n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
+        "description": "Direct tool invocation without LLM overhead. Useful when you know exactly which operation to perform and want structured input/output without natural language parsing. Each call is atomic.\n\n**Discover schemas first:** Call `GET /api/tools` to retrieve the full catalog with parameter schemas for every tool.\n\n**Price:** $0.0025 USDC per request (x402, eip155:8453)\n\n**Read-only tools:**\n`get_swap_quote`, `get_vault_info`, `get_token_balance`, `get_pool_info`, `get_lp_positions`, `gmx_get_positions`, `gmx_get_markets`, `check_delegation_status`, `get_crosschain_quote`, `get_aggregated_nav`, `get_rebalance_plan`, `verify_bridge_arrival`, `list_twap_orders`, `list_nav_syncs`, `list_strategies`, `switch_chain`\n\n**State-changing tools:**\n`build_vault_swap`, `add_liquidity`, `remove_liquidity`, `collect_lp_fees`, `burn_position`, `gmx_open_position`, `gmx_close_position`, `gmx_increase_position`, `gmx_cancel_order`, `gmx_update_order`, `gmx_claim_funding_fees`, `crosschain_transfer`, `crosschain_sync`, `grg_stake`, `grg_unstake`, `grg_undelegate_stake`, `grg_end_epoch`, `grg_claim_rewards`, `deploy_smart_pool`, `fund_pool`, `create_twap_order`, `cancel_twap_order`, `create_nav_sync`, `cancel_nav_sync`\n\n**Operator-scoped tools (require operatorVerified):**\n`setup_delegation`, `revoke_delegation`, `revoke_selectors`, `list_strategies`, `set_default_slippage`, `set_swap_shield_tolerance`, `enable_swap_shield`\n\n**Oracle tools:**\n`refresh_oracle_feed`\n\n**Orchestration pattern:** External agents compose atomic operations from this endpoint into multi-step strategies. Each call returns either a result (reads) or unsigned calldata (writes). The full safety stack (NAV shield, Swap Shield, slippage protection) applies to all write operations.",
         "tags": [
           "Tools"
         ],
@@ -890,7 +890,7 @@
       "post": {
         "operationId": "refreshOracle",
         "summary": "BackgeoOracle pool refresh",
-        "description": "Builds an unsigned swap transaction that updates the on-chain oracle price feed for a given token. Supports EOA and vault paths.\n\n**Price:** $0.002 USDC per request (x402 exact scheme, eip155:8453)",
+        "description": "Builds an unsigned swap transaction that updates the on-chain oracle price feed for a given token. Supports EOA and vault paths.\n\n**Price:** $0.0023 USDC per request (x402 exact scheme, eip155:8453)",
         "tags": [
           "Oracle"
         ],
@@ -1691,7 +1691,7 @@
           },
           "price": {
             "type": "string",
-            "example": "$0.002 USDC per call (x402 exact scheme, eip155:8453)"
+            "example": "$0.0020–$0.0025 USDC per call (x402 exact scheme, eip155:8453)"
           },
           "toolCount": {
             "type": "integer",

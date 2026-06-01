@@ -175,7 +175,7 @@ export async function getOracleSpotTick(
     abi: ORACLE_ABI,
     functionName: "observe",
     args: [poolKey, [0, 1]],
-  })) as [bigint[], bigint[]];
+  })) as unknown as [bigint[], bigint[]];
 
   const tickCumulatives = result[0];
   // tick = (cumulative_at_now - cumulative_at_1s_ago) / 1_second
