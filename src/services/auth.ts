@@ -67,15 +67,6 @@ export interface AuthParams {
 }
 
 /**
- * Verify that the caller is an authenticated vault operator.
- *
- * 1. Check timestamp is within 24h
- * 2. Verify signature matches claimed operatorAddress
- * 3. Verify signer is the vault owner on ANY supported chain
- *
- * Throws descriptive error on failure.
- */
-/**
  * Shared signature verification — throws AuthError with specific messages.
  * Used by both verifyOperatorAuth (route handlers) and verifyOperatorSignatureOnly (middleware).
  */
@@ -153,6 +144,13 @@ export async function verifyOperatorSignatureOnly(
   }
 }
 
+/**
+ * Verify that the caller is an authenticated vault operator.
+ * 1. Verify signature via _verifyOperatorSignature
+ * 2. Verify signer is the vault owner on ANY supported chain
+ *
+ * Throws descriptive AuthError on failure.
+ */
 export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   const { operatorAddress, vaultAddress, authSignature, authTimestamp } = params;
   await _verifyOperatorSignature(operatorAddress, authSignature, authTimestamp);

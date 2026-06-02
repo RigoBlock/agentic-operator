@@ -70,14 +70,12 @@ chat.post("/", async (c) => {
     // x402 payment = API access fee (external agents). Operator auth = vault authorization.
     // operatorAuthVerified = operator signature verified by x402 middleware (skips payment).
     //
-    //   x402 + no auth         → manual mode (unsigned tx data)
-    //   x402 + auth (owner)    → manual or delegated
-    //   session + no auth      → browser request allowed without operator verification;
-    //                            may include vault context, but remains limited to
-    //                            non-owner/manual flows (vault-tx tools are gated)
-    //   session + auth (owner) → manual or delegated
-    //   auth only, non-owner   → 403
-    //   no x402, no session    → 401
+    //   x402 + no auth                  → manual mode (unsigned tx data)
+    //   x402 + auth (owner)             → manual or delegated
+    //   operatorAuthVerified + no auth  → manual mode (unsigned tx data)
+    //   operatorAuthVerified + auth     → manual or delegated
+    //   auth only, non-owner            → 403
+    //   no x402, no operatorAuth        → 401
     //
     // Delegated execution and vault-tx tool execution ALWAYS require proven vault
     // ownership (operatorVerified).

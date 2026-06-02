@@ -728,14 +728,16 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
               const rateLimit = await checkRateLimit(c.env.KV, operatorAddress);
               if (!rateLimit.allowed) {
                 setRateLimitHeaders(c, 0, rateLimit.resetAt);
-                return c.json(
-                  {
-                    error: "Rate limit exceeded",
-                    detail: `Authenticated operators are limited to ${RATE_LIMIT_MAX} requests per 4-hour window.`,
-                    retryAfter: Math.ceil((rateLimit.resetAt - Date.now()) / 1000),
-                  },
-                  429,
-                );
+              const retryAfterSec = Math.ceil((rateLimit.resetAt - Date.now()) / 1000);
+              c.header("Retry-After", String(retryAfterSec));
+              return c.json(
+                {
+                  error: "Rate limit exceeded",
+                  detail: `Authenticated operators are limited to ${RATE_LIMIT_MAX} requests per 4-hour window.`,
+                  retryAfter: retryAfterSec,
+                },
+                429,
+              );
               }
 
               c.set("operatorAuthVerified", true);

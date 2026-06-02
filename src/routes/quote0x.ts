@@ -36,7 +36,7 @@ export const quote0x = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 quote0x.get("/", async (c) => {
   // Auth gate — skip when request was paid via x402 (agent access)
   if (!c.get("x402Paid") && !c.get("operatorAuthVerified")) {
-    return c.json({ error: "Authentication required. Use x402 payment or a verified browser session." }, 401);
+    return c.json({ error: "Authentication required. Use x402 payment or provide X-Operator-Address, X-Auth-Signature, and X-Auth-Timestamp headers." }, 401);
   }
 
   // Build upstream URL — pass query params verbatim, no stripping

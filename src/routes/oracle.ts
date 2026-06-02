@@ -27,9 +27,9 @@ import { sanitizeError, resolveChainId } from "../config.js";
 export const oracle = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 oracle.post("/refresh", async (c) => {
-  // Auth gate — requires x402 payment OR authenticated browser session.
+  // Auth gate — requires x402 payment OR operator signature verification.
   if (!c.get("x402Paid") && !c.get("operatorAuthVerified")) {
-    return c.json({ error: "Authentication required. Use x402 payment or a verified browser session." }, 401);
+    return c.json({ error: "Authentication required. Use x402 payment or provide X-Operator-Address, X-Auth-Signature, and X-Auth-Timestamp headers." }, 401);
   }
 
   let body: Record<string, unknown>;
