@@ -9,12 +9,15 @@
  *
  * Requirements:
  *   - A wallet with ≥$0.02 USDC on Base mainnet
- *   - Set TEST_PRIVATE_KEY env var
+ *   - Interactive terminal (for hidden private-key prompt) OR TEST_PRIVATE_KEY env var
  *
  * Usage:
- *   TEST_PRIVATE_KEY=0x... npx tsx scripts/trigger-bazaar.ts
+ *   npm run register:bazaar
+ *   # or with env var (CI / non-TTY):
+ *   TEST_PRIVATE_KEY=0x... npm run register:bazaar
  */
 
+import { createInterface } from "readline";
 import { createWalletClient, http, maxUint256, parseAbi, type Hex } from "viem";
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
@@ -25,114 +28,204 @@ import { ExactEvmScheme, PERMIT2_ADDRESS, UptoEvmScheme, toClientEvmSigner } fro
 const BASE_URL = "https://trader.rigoblock.com";
 const QUOTE_URL = `${BASE_URL}/api/quote?sell=ETH&buy=USDC&amount=1&chain=base`;
 const QUOTE_UNISWAP_URL = `${BASE_URL}/api/quote/uniswap`;
-const QUOTE_0X_URL = `${BASE_URL}/api/quote/0x?chainId=8453&sellToken=ETH&buyToken=USDC&sellAmount=1000000000000000000`;
+// 0x API uses 0xEeee... for native ETH, not zero address (query params forwarded verbatim)
+const QUOTE_0X_URL = `${BASE_URL}/api/quote/0x?chainId=8453&sellToken=0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE&buyToken=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&sellAmount=1000000000000000000`;
 const CHAT_URL = `${BASE_URL}/api/chat`;
 const TOOLS_GET_URL = `${BASE_URL}/api/tools`;
 const TOOLS_POST_URL = `${BASE_URL}/api/tools?toolName=get_swap_quote`;
 const ORACLE_REFRESH_URL = `${BASE_URL}/api/oracle/refresh`;
 
-/** Standard headers — use a browser-like UA so Cloudflare Bot Fight Mode doesn't block us. */
+/** Minimal headers. DO NOT add Origin or Referer — the Worker exempts its own frontends. */
 const STANDARD_HEADERS: Record<string, string> = {
   "user-agent": "Mozilla/5.0 (compatible; RigoblockBazaarTrigger/1.0; +https://trader.rigoblock.com)",
   "accept": "application/json",
 };
 
-/** Makes a paid x402 request and logs settlement result. */
+/** Prompt for hidden input (password-style). Falls back to plain readline in non-TTY. */
+async function promptHidden(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    const stdout = process.stdout;
+    const stdin = process.stdin;
+
+    stdout.write(question);
+
+    if (!stdin.isTTY) {
+      const rl = createInterface({ input: stdin, output: stdout });
+      rl.question("", (answer) => {
+        rl.close();
+        resolve(answer.trim());
+      });
+      return;
+    }
+
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding("utf8");
+
+    let input = "";
+
+    const onData = (chunk: string) => {
+      for (const ch of chunk) {
+        if (ch === "\n" || ch === "\r" || ch === "\u0004") {
+          stdin.off("data", onData);
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdout.write("\n");
+          resolve(input);
+          return;
+        } else if (ch === "\u0003") {
+          process.exit(1);
+        } else if (ch === "\u007f") {
+          if (input.length > 0) {
+            input = input.slice(0, -1);
+            stdout.write("\b \b");
+          }
+        } else {
+          input += ch;
+          stdout.write("*");
+        }
+      }
+    };
+
+    stdin.on("data", onData);
+  });
+}
+
+/** Fetch private key from env or prompt interactively. */
+async function getPrivateKey(): Promise<string> {
+  const envPk = process.env.TEST_PRIVATE_KEY;
+  if (envPk) {
+    console.log("Using TEST_PRIVATE_KEY from environment.\n");
+    return envPk;
+  }
+  return promptHidden("Enter private key (with 0x prefix): ");
+}
+
+/** Makes a paid x402 request. Returns true only if payment was required, made, and settled. */
 async function paidRequest(
   httpClient: x402HTTPClient,
   method: "GET" | "POST",
   url: string,
   body?: Record<string, unknown>,
-): Promise<void> {
+  timeoutMs = 30000,
+): Promise<boolean> {
   const label = `${method} ${new URL(url).pathname}`;
   console.log(`\n${"=".repeat(60)}`);
   console.log(`→ ${label}`);
 
-  // 1. Initial request — expect 402
-  const initOpts: RequestInit = { method, headers: { ...STANDARD_HEADERS } };
-  if (body) {
-    (initOpts.headers as Record<string, string>)["content-type"] = "application/json";
-    initOpts.body = JSON.stringify(body);
-  }
-  const res = await fetch(url, initOpts);
-  console.log(`← ${res.status} ${res.statusText}`);
+  try {
+    // 1. Initial request — expect 402
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (res.status !== 402) {
-    console.log("Not behind paywall. Body:", await res.text());
-    return;
-  }
-
-  // 2. Parse 402 payment requirements
-  const resBody = await res.json() as Record<string, unknown>;
-  const paymentRequired = httpClient.getPaymentRequiredResponse(
-    (name: string) => res.headers.get(name),
-    resBody,
-  );
-  console.log("Price:", JSON.stringify(paymentRequired.accepts?.[0], null, 2));
-
-  // 3. Create payment payload (signs USDC transfer authorization)
-  const paymentPayload = await httpClient.createPaymentPayload(paymentRequired);
-  const payHeaders = httpClient.encodePaymentSignatureHeader(paymentPayload);
-
-  // 4. Retry with payment (merge standard + content-type for POST)
-  const paidOpts: RequestInit = { method, headers: { ...STANDARD_HEADERS, ...payHeaders } };
-  if (body) {
-    (paidOpts.headers as Record<string, string>)["content-type"] = "application/json";
-    paidOpts.body = JSON.stringify(body);
-  }
-  const paidRes = await fetch(url, paidOpts);
-  console.log(`← ${paidRes.status} ${paidRes.statusText}`);
-
-  if (!paidRes.ok) {
-    const errorText = await paidRes.text();
-    console.log(`\n❌ ${label} — Worker returned ${paidRes.status}. Settlement SKIPPED.`);
-    console.log("Response body:", errorText.slice(0, 500));
-    // Decode the new payment-required header (if any) for diagnostics
-    const newPayHdr = paidRes.headers.get("payment-required");
-    if (newPayHdr) {
-      try {
-        const decoded = JSON.parse(Buffer.from(newPayHdr, "base64").toString());
-        console.log("  payment-required error:", decoded?.error ?? "?");
-        console.log("  payment-required resource:", decoded?.resource?.url ?? "?");
-        console.log("  payment-required accepts:", JSON.stringify(decoded?.accepts?.[0]).slice(0, 200));
-      } catch { /* ignore */ }
+    const initOpts: RequestInit = {
+      method,
+      headers: { ...STANDARD_HEADERS },
+      signal: controller.signal,
+    };
+    if (body) {
+      (initOpts.headers as Record<string, string>)["content-type"] = "application/json";
+      initOpts.body = JSON.stringify(body);
     }
-    console.log("  payment-payload accepted:", JSON.stringify((paymentPayload as any).accepted).slice(0, 200));
-    console.log("Fix: check Worker logs with: wrangler tail");
-    return;
-  }
+    const res = await fetch(url, initOpts);
+    clearTimeout(timer);
+    console.log(`← ${res.status} ${res.statusText}`);
 
-  const responseText = await paidRes.text();
-  // Truncate long LLM responses for readability
-  console.log("Response:", responseText.length > 500 ? responseText.slice(0, 500) + "…" : responseText);
+    if (res.status !== 402) {
+      const bodyText = await res.text();
+      console.log("❌ Not behind paywall — x402 was skipped. Body:", bodyText.slice(0, 300));
+      console.log("   Common causes:");
+      console.log("   1. Origin/Referer headers match the Worker’s exempt origins (removed in this script)");
+      console.log("   2. Cloudflare WAF blocked the request before the Worker");
+      console.log("   3. The route returned an auth error before x402 could run");
+      return false;
+    }
 
-  // 5. Check settlement
-  const settle = paidRes.headers.get("PAYMENT-RESPONSE") || paidRes.headers.get("X-PAYMENT-RESPONSE");
-  console.log("\nPayment headers:");
-  paidRes.headers.forEach((v, k) => {
-    if (k.toLowerCase().includes("payment")) console.log(`  ${k}: ${v.slice(0, 80)}…`);
-  });
-  if (settle) {
-    console.log(`\n✅ ${label} — payment settled! Bazaar will catalog this endpoint.`);
-  } else {
-    console.log(`\n❌ ${label} — NO settlement header.`);
-    console.log("   Possible causes:");
-    console.log("   1. Route returned 4xx/5xx — settlement is skipped on non-2xx responses");
-    console.log("   2. CDP facilitator rejected the settlement (bad CDP_API_KEY_ID/SECRET in Worker)");
-    console.log("   3. Workers AI binding unavailable (check Cloudflare dashboard)");
-    console.log("   Check the deployed Worker's logs: wrangler tail --env production");
+    // 2. Parse 402 payment requirements
+    const resBody = await res.json() as Record<string, unknown>;
+    const paymentRequired = httpClient.getPaymentRequiredResponse(
+      (name: string) => res.headers.get(name),
+      resBody,
+    );
+    console.log("Price:", JSON.stringify(paymentRequired.accepts?.[0], null, 2));
+
+    // 3. Create payment payload (signs USDC transfer authorization)
+    const paymentPayload = await httpClient.createPaymentPayload(paymentRequired);
+    const payHeaders = httpClient.encodePaymentSignatureHeader(paymentPayload);
+
+    // 4. Retry with payment
+    const paidController = new AbortController();
+    const paidTimer = setTimeout(() => paidController.abort(), timeoutMs);
+
+    const paidOpts: RequestInit = {
+      method,
+      headers: { ...STANDARD_HEADERS, ...payHeaders },
+      signal: paidController.signal,
+    };
+    if (body) {
+      (paidOpts.headers as Record<string, string>)["content-type"] = "application/json";
+      paidOpts.body = JSON.stringify(body);
+    }
+    const paidRes = await fetch(url, paidOpts);
+    clearTimeout(paidTimer);
+    console.log(`← ${paidRes.status} ${paidRes.statusText}`);
+
+    if (!paidRes.ok) {
+      const errorText = await paidRes.text();
+      console.log(`\n❌ ${label} — Worker returned ${paidRes.status}. Settlement SKIPPED.`);
+      console.log("Response body:", errorText.slice(0, 500));
+      const newPayHdr = paidRes.headers.get("payment-required");
+      if (newPayHdr) {
+        try {
+          const decoded = JSON.parse(Buffer.from(newPayHdr, "base64").toString());
+          console.log("  payment-required error:", decoded?.error ?? "?");
+        } catch { /* ignore */ }
+      }
+      return false;
+    }
+
+    const responseText = await paidRes.text();
+    console.log("Response:", responseText.length > 500 ? responseText.slice(0, 500) + "…" : responseText);
+
+    // 5. Check settlement
+    const settle = paidRes.headers.get("PAYMENT-RESPONSE") || paidRes.headers.get("X-PAYMENT-RESPONSE");
+    console.log("\nPayment headers:");
+    paidRes.headers.forEach((v, k) => {
+      if (k.toLowerCase().includes("payment")) console.log(`  ${k}: ${v.slice(0, 80)}…`);
+    });
+    if (settle) {
+      console.log(`\n✅ ${label} — payment settled! Bazaar will catalog this endpoint.`);
+      return true;
+    } else {
+      console.log(`\n❌ ${label} — NO settlement header. Payment was NOT cataloged.`);
+      return false;
+    }
+  } catch (err: any) {
+    console.log(`\n❌ ${label} — Request failed: ${err.message ?? err}`);
+    if (err.cause) console.log("   Cause:", err.cause.message ?? err.cause);
+    return false;
   }
 }
 
 async function main() {
-  const pk = process.env.TEST_PRIVATE_KEY;
-  if (!pk) {
-    console.error("Set TEST_PRIVATE_KEY env var (private key with USDC on Base)");
+  let pkInput = await getPrivateKey();
+  if (!pkInput || !pkInput.startsWith("0x")) {
+    console.error("Private key must start with 0x");
     process.exit(1);
   }
 
-  // 1. Create viem signer on Base mainnet
-  const account = privateKeyToAccount(pk as Hex);
+  // Create viem account and wallet immediately, then discard the raw key
+  let account = privateKeyToAccount(pkInput as Hex);
+
+  // Overwrite the raw key string (best-effort; strings are immutable in JS)
+  // We reassign and null out every reference we control.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  let _wiped = pkInput;
+  _wiped = "0x" + "0".repeat(64);
+  // @ts-ignore — force drop the binding from this scope
+  pkInput = undefined;
+  _wiped = ""; // final overwrite
+
   const walletClient = createWalletClient({
     account,
     chain: base,
@@ -141,18 +234,15 @@ async function main() {
 
   const signer = toClientEvmSigner(account, walletClient);
 
-  // 2. Build x402 v2 client — register both exact (quote, tools) and upto (chat) schemes
+  // Build x402 v2 client
   const client = new x402Client();
   client.register("eip155:8453", new ExactEvmScheme(signer));
   client.register("eip155:8453", new UptoEvmScheme(signer));
   const httpClient = new x402HTTPClient(client);
 
-  // 3. Ensure USDC is approved for the Permit2 contract.
-  //    The upto scheme uses permit2 PermitBatch to sign a spending authorisation.
-  //    Permit2 needs an ERC-20 allowance before it can move USDC on the payer's behalf.
-  //    This approval is a one-time on-chain transaction; subsequent runs skip it.
+  // Ensure USDC is approved for Permit2
   const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-  const minAllowance = 100_000n; // $0.10 in µUSDC (the max upto authorisation amount)
+  const minAllowance = 100_000n;
   const erc20Abi = parseAbi([
     "function allowance(address owner, address spender) view returns (uint256)",
     "function approve(address spender, uint256 amount) returns (bool)",
@@ -176,71 +266,81 @@ async function main() {
     await walletClient.waitForTransactionReceipt({ hash });
     console.log(`  Permit2 approval confirmed.`);
   } else {
-    console.log(`  Allowance OK (${currentAllowance} µUSDC). No approval needed.`);
+    console.log(`  Allowance OK. No approval needed.`);
   }
 
-  // 4. Trigger GET /api/quote — registers the quote endpoint in Bazaar.
-  await paidRequest(httpClient, "GET", QUOTE_URL);
-  await new Promise((r) => setTimeout(r, 8000));
+  const endpoints = [
+    { label: "GET /api/quote", fn: () => paidRequest(httpClient, "GET", QUOTE_URL) },
+    {
+      label: "POST /api/quote/uniswap",
+      fn: () => paidRequest(httpClient, "POST", QUOTE_UNISWAP_URL, {
+        type: "EXACT_INPUT",
+        amount: "1000000000000000000",
+        tokenIn: "0x0000000000000000000000000000000000000000",
+        tokenOut: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        tokenInChainId: 8453,
+        tokenOutChainId: 8453,
+        swapper: account.address,
+      }),
+    },
+    {
+      label: "GET /api/quote/0x",
+      fn: () => paidRequest(httpClient, "GET", `${QUOTE_0X_URL}&taker=${account.address}`),
+    },
+    {
+      label: "POST /api/chat",
+      fn: () => paidRequest(httpClient, "POST", CHAT_URL, {
+        messages: [{ role: "user", content: "What can you help me with? Briefly describe your capabilities." }],
+        vaultAddress: "0x0000000000000000000000000000000000000000",
+        chainId: 8453,
+      }, 60000),
+    },
+    {
+      label: "POST /api/oracle/refresh",
+      fn: () => paidRequest(httpClient, "POST", ORACLE_REFRESH_URL, {
+        token: "GRG",
+        chainId: 8453,
+        direction: "buy",
+        amount: "0.001",
+      }),
+    },
+    { label: "GET /api/tools", fn: () => paidRequest(httpClient, "GET", TOOLS_GET_URL) },
+    {
+      label: "POST /api/tools",
+      fn: () => paidRequest(httpClient, "POST", TOOLS_POST_URL, {
+        arguments: { tokenIn: "ETH", tokenOut: "USDC", amountIn: "1" },
+        chainId: 8453,
+      }),
+    },
+  ];
 
-  // 5. Trigger POST /api/quote/uniswap — registers the Uniswap oracle-enriched quote endpoint.
-  await paidRequest(httpClient, "POST", QUOTE_UNISWAP_URL, {
-    type: "EXACT_INPUT",
-    amount: "1000000000000000000",
-    tokenIn: "0x0000000000000000000000000000000000000000",
-    tokenOut: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    tokenInChainId: 8453,
-    tokenOutChainId: 8453,
-  });
-  await new Promise((r) => setTimeout(r, 8000));
+  let settledCount = 0;
+  let failedCount = 0;
 
-  // 6. Trigger GET /api/quote/0x — registers the 0x oracle-enriched quote endpoint.
-  //    The 0x allowance-holder/quote endpoint requires a taker address.
-  const quote0xUrlWithTaker = `${QUOTE_0X_URL}&taker=0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045`;
-  await paidRequest(httpClient, "GET", quote0xUrlWithTaker);
-  await new Promise((r) => setTimeout(r, 8000));
-
-  // 7. Trigger POST /api/chat — registers the full trading chat in Bazaar.
-  //    IMPORTANT: use a message that doesn't invoke any tools (no network calls
-  //    to Uniswap/0x/etc.) to guarantee a fast 200 and successful settlement.
-  //    "What can you do?" → LLM responds from system prompt, no tools needed.
-  //    No operator auth → manual mode only (unsigned tx data, never executes).
-  //    Payment is via upto scheme: authorises up to $0.10 but only charges actual
-  //    inference cost (~$0.003-$0.015). The Settlement-Overrides header on the
-  //    200 response carries the exact billed amount back to the CDP facilitator.
-  await paidRequest(httpClient, "POST", CHAT_URL, {
-    messages: [{ role: "user", content: "What can you help me with? Briefly describe your capabilities." }],
-    vaultAddress: "0x0000000000000000000000000000000000000000",
-    chainId: 8453,
-  });
-  await new Promise((r) => setTimeout(r, 8000));
-
-  // 8. Trigger POST /api/oracle/refresh — registers the oracle refresh endpoint.
-  await paidRequest(httpClient, "POST", ORACLE_REFRESH_URL, {
-    token: "GRG",
-    chainId: 8453,
-    direction: "buy",
-    amount: "0.001",
-  });
-  await new Promise((r) => setTimeout(r, 8000));
-
-  // 9. Trigger GET /api/tools — registers the tool discovery endpoint.
-  await paidRequest(httpClient, "GET", TOOLS_GET_URL);
-  await new Promise((r) => setTimeout(r, 8000));
-
-  // 10. Trigger POST /api/tools — registers the direct tool invocation endpoint.
-  //    NOTE: Total spend is ~$0.020-$0.032 USDC (quote $0.0020 + uniswap $0.0021 + 0x $0.0022
-  //    + oracle $0.0023 + chat ~$0.008 + tools GET $0.0024 + tools POST $0.0025).
-  //    Ensure your wallet has at least $0.05 USDC on Base.
-  await paidRequest(httpClient, "POST", TOOLS_POST_URL, {
-    arguments: { tokenIn: "ETH", tokenOut: "USDC", amountIn: "1" },
-    chainId: 8453,
-  });
+  for (const ep of endpoints) {
+    const settled = await ep.fn();
+    if (settled) {
+      settledCount++;
+    } else {
+      failedCount++;
+    }
+    // 8s delay between endpoints (skip if this was the last one)
+    const isLast = endpoints.indexOf(ep) === endpoints.length - 1;
+    if (!isLast) {
+      await new Promise((r) => setTimeout(r, 8000));
+    }
+  }
 
   console.log("\n" + "=".repeat(60));
-  console.log("Done. Check Bazaar listings:");
-  console.log("  curl 'https://api.cdp.coinbase.com/platform/v2/x402/discovery/search?query=rigoblock' | jq '.'")
-  console.log("  https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources");
+  console.log(`Done. ${settledCount} payments settled (Bazaar cataloged), ${failedCount} failed.`);
+  if (settledCount > 0) {
+    console.log("Check Bazaar listings:");
+    console.log("  curl 'https://api.cdp.coinbase.com/platform/v2/x402/discovery/search?query=rigoblock' | jq '.'")
+    console.log("  https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources");
+  }
+
+  // Drop account reference so the signing key can be GC'd
+  account = null as any;
 
   // Force exit — viem keeps HTTP handles alive, preventing clean shutdown
   process.exit(0);

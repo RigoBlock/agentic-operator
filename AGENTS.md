@@ -789,3 +789,54 @@ requests it. Each slice is treated as a fresh independent operation.
 For full technical specifications including data model, KV schema, execution
 context, and DEX integrator requirements, see
 [content/twap-orders.md](content/twap-orders.md).
+
+---
+
+## Operations: Cloudflare WAF & New Endpoints
+
+When adding a new x402-gated endpoint, the route will work locally (`wrangler dev`) but may be blocked by Cloudflare edge security rules once deployed. You **must** verify and potentially whitelist the new path before Bazaar registration will succeed.
+
+### Symptoms of a blocked endpoint
+
+| Symptom | Likely cause |
+|---------|--------------|
+| `403 Forbidden` with Cloudflare HTML error page | Bot Fight Mode or a WAF rule blocked the request before it reached the Worker |
+| `400 Bad Request` from the Worker (not Cloudflare) | The request reached the Worker but payload/params are invalid |
+| `ConnectTimeoutError` | Network-level block or the origin is unreachable |
+
+### What to check in the Cloudflare dashboard
+
+1. **Bot Fight Mode** — `Security → Bots`
+   - If enabled, Cloudflare may challenge/block non-browser POST requests.
+   - Either disable Bot Fight Mode for `trader.rigoblock.com` or create a **WAF exception** for the new path.
+
+2. **WAF Custom Rules** — `Security → WAF → Custom rules`
+   - Look for any rule that blocks requests based on path patterns, content-type, or body size.
+   - Add an exception for the new endpoint path (e.g. `/api/quote/uniswap`).
+
+3. **Rate Limiting** — `Security → WAF → Rate limiting rules`
+   - The Bazaar trigger script fires 7 requests in rapid succession.
+   - Ensure no rate-limit rule is throttling or blocking the client IP.
+
+4. **Security Events** — `Security → Events`
+   - Filter by the Ray ID from the error page (e.g. `a054f3700fd9bb0e`).
+   - This shows exactly which rule triggered the block.
+
+### Registration script checklist
+
+Before running `npm run register:bazaar` after adding a new endpoint:
+
+- [ ] Deploy the Worker with the new route
+- [ ] Verify the route returns `402 Payment Required` (not `403` or `5xx`) via curl:
+  ```bash
+  curl -I https://trader.rigoblock.com/api/your-new-endpoint
+  ```
+- [ ] If `403`, check Cloudflare Security Events for the Ray ID and adjust WAF/Bot rules
+- [ ] Update `scripts/trigger-bazaar.ts` to include the new endpoint in the `endpoints` array
+- [ ] Ensure the request payload uses real addresses (not symbols like `ETH`/`USDC`) for any route that forwards to upstream DEX APIs (0x, Uniswap)
+- [ ] Run the script and confirm `✅ … payment settled!` for the new endpoint
+
+### Historical issues
+
+- **`POST /api/quote/uniswap`** — Blocked by Cloudflare with `403 Forbidden` (Bot Fight Mode). Required whitelisting the `/api/quote/uniswap` path in WAF rules.
+- **`GET /api/quote/0x`** — Returned `400` because the registration script passed `sellToken=ETH&buyToken=USDC` (symbols) instead of actual contract addresses. The 0x API validates addresses strictly.
