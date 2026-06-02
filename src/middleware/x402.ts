@@ -43,7 +43,7 @@ import { bazaarResourceServerExtension } from "@x402/extensions";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler } from "hono";
 import type { Env, AppVariables } from "../types.js";
-import { verifySessionToken, SESSION_HEADER } from "../utils/session.js";
+import { verifySessionToken, SESSION_HEADER, verifyAppCookie } from "../utils/session.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
 
@@ -595,6 +595,14 @@ let httpServer: x402HTTPResourceServer | null = null;
 let initPromise: Promise<void> | null = null;
 
 function buildHttpServer(env: Env): x402HTTPResourceServer {
+  if (!env.SESSION_SECRET) {
+    console.error(
+      "[x402] SECURITY WARNING: SESSION_SECRET is not configured. " +
+      "Frontend requests will require x402 payment. " +
+      "Set it with: wrangler secret put SESSION_SECRET"
+    );
+  }
+
   // CDP facilitator (Base mainnet — USDC payments)
   const facilitatorConfig = createFacilitatorConfig(
     env.CDP_API_KEY_ID,
@@ -611,7 +619,7 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
 
   // Exempt own-frontend requests from payment.
   // When SESSION_SECRET is set (production): validate HMAC session token.
-  // When SESSION_SECRET is absent (dev): fall back to Origin/Referer headers.
+  // When SESSION_SECRET is absent: NO fallback. Everyone pays. Fail closed.
   server.onProtectedRequest(async (ctx) => {
     const adapter = ctx.adapter;
 
@@ -620,22 +628,11 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
       if (token && await verifySessionToken(token, env.SESSION_SECRET)) {
         return { grantAccess: true };
       }
-      // No valid session token → proceed to payment flow
-      return;
     }
 
-    // Dev fallback: Origin/Referer (spoofable, acceptable for local development)
-    const origin = adapter.getHeader("origin");
-    if (origin && EXEMPT_ORIGINS.has(origin)) {
-      return { grantAccess: true };
-    }
-    const referer = adapter.getHeader("referer");
-    if (referer) {
-      try {
-        if (EXEMPT_ORIGINS.has(new URL(referer).origin)) return { grantAccess: true };
-      } catch { /* ignore malformed */ }
-    }
-    // Continue to payment flow
+    // No valid session token (or no SESSION_SECRET) → proceed to payment flow
+    // There is NO Origin/Referer fallback. It was removed because it is trivially
+    // spoofable and bypasses x402 for any attacker who sets the right header.
   });
 
   return server;
@@ -707,6 +704,16 @@ export function isExemptBrowserRequest(getHeader: (name: string) => string | und
  */
 export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
   return async (c, next) => {
+    // Fast path: same-origin frontend requests carry a signed HttpOnly cookie.
+    // If valid, skip x402 entirely — no CDP call, no latency.
+    if (c.env.SESSION_SECRET) {
+      const cookieHeader = c.req.header("cookie");
+      if (cookieHeader && await verifyAppCookie(cookieHeader, c.env.SESSION_SECRET)) {
+        c.set("browserVerified", true);
+        return next();
+      }
+    }
+
     let server: x402HTTPResourceServer;
     try {
       server = await getHttpServer(c.env);

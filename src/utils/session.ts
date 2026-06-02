@@ -1,17 +1,15 @@
 /**
- * HMAC-based session tokens for browser origin verification.
- *
- * The Worker mints a short-lived token when the browser calls GET /api/session.
- * This token is included in all subsequent API requests as X-Rigoblock-Session.
- * Because only the Worker knows SESSION_SECRET, external agents cannot forge it.
- *
- * An agent CAN call GET /api/session to obtain a token, but that endpoint is
- * IP-rate-limited (20/hour), making automated abuse expensive to scale.
+ * HMAC-based session tokens and cookies for browser origin verification.
  *
  * Token format: {timestamp_b36}.{nonce_hex}.{hmac_hex}
+ *
+ * Cookies (HttpOnly, SameSite=Strict) replace the old header-based session
+ * tokens. Because the cookie is set by the server when serving HTML and is
+ * SameSite=Strict, cross-site attackers cannot obtain or forge it.
  */
 
 export const SESSION_HEADER = "x-rigoblock-session";
+export const APP_COOKIE_NAME = "__rgapp";
 
 const EXPIRY_MS = 60 * 60 * 1000; // 1 hour
 
@@ -62,4 +60,18 @@ export async function verifySessionToken(token: string, secret: string): Promise
   } catch {
     return false;
   }
+}
+
+/** Generate a Set-Cookie header value for the frontend app cookie. */
+export async function generateAppCookie(secret: string): Promise<string> {
+  const token = await generateSessionToken(secret);
+  return `${APP_COOKIE_NAME}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/`;
+}
+
+/** Verify the app cookie from a Cookie header string. */
+export async function verifyAppCookie(cookieHeader: string | null, secret: string): Promise<boolean> {
+  if (!cookieHeader) return false;
+  const match = cookieHeader.match(new RegExp(`${APP_COOKIE_NAME}=([^;]+)`));
+  if (!match) return false;
+  return verifySessionToken(match[1], secret);
 }

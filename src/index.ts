@@ -28,8 +28,8 @@ import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
 import { createX402Middleware } from "./middleware/x402.js";
-import { generateSessionToken, verifySessionToken, SESSION_HEADER } from "./utils/session.js";
-import { isExemptBrowserRequest } from "./middleware/x402.js";
+import { generateAppCookie } from "./utils/session.js";
+
 import { runAllSkills } from "./skills/index.js";
 import { getTwapEvents } from "./skills/twap.js";
 import { processChat } from "./llm/client.js";
@@ -51,57 +51,7 @@ app.use("*", async (c, next) => {
 // Own-user requests (browser UI, Telegram webhook) are exempt.
 app.use("*", createX402Middleware());
 
-// Browser session middleware — runs after x402.
-// When SESSION_SECRET is set (production): validates X-Rigoblock-Session HMAC token.
-// When SESSION_SECRET is absent (dev): falls back to Origin/Referer check.
-// Sets c.var.browserVerified for routes to consume.
-app.use("/api/*", async (c, next) => {
-  if (c.env.SESSION_SECRET) {
-    const token = c.req.header(SESSION_HEADER);
-    if (token && await verifySessionToken(token, c.env.SESSION_SECRET)) {
-      c.set("browserVerified", true);
-    }
-  } else {
-    if (isExemptBrowserRequest(c.req.header.bind(c.req))) {
-      c.set("browserVerified", true);
-    }
-  }
-  await next();
-});
-
 // ── API Routes ────────────────────────────────────────────────────────
-
-// Session token endpoint — issues HMAC-signed tokens to browser clients.
-// Rate-limited per IP (20/hour) to limit abuse; token expires in 1 hour.
-// Restricted to known frontend origins so automated agents cannot bypass x402
-// by fetching a session token and including it in paid-endpoint requests.
-app.get("/api/session", async (c) => {
-  if (!c.env.SESSION_SECRET) {
-    return c.json({ token: null }, 200);
-  }
-  // Only issue tokens to requests from known frontend origins.
-  // Automated agents (curl, SDKs, etc.) send no Origin header and are rejected.
-  const origin = c.req.header("origin");
-  const referer = c.req.header("referer");
-  const ALLOWED: Set<string> = new Set(["https://trader.rigoblock.com", "http://localhost:8787", "http://localhost:3000"]);
-  const fromFrontend =
-    (origin && ALLOWED.has(origin)) ||
-    (referer && (() => { try { return ALLOWED.has(new URL(referer).origin); } catch { return false; } })());
-  if (!fromFrontend) {
-    return c.json({ error: "Session tokens are only issued to the Rigoblock frontend." }, 403);
-  }
-  const ip = c.req.header("cf-connecting-ip");
-  if (ip && c.env.KV) {
-    const rlKey = `session-rl:${ip}`;
-    const count = parseInt((await c.env.KV.get(rlKey)) ?? "0");
-    if (count >= 20) {
-      return c.json({ error: "Rate limit exceeded." }, 429);
-    }
-    await c.env.KV.put(rlKey, String(count + 1), { expirationTtl: 3600 });
-  }
-  const token = await generateSessionToken(c.env.SESSION_SECRET);
-  return c.json({ token, expiresIn: 3600 });
-});
 
 app.route("/api/chat", chat);
 app.route("/api/quote", quote);
@@ -281,6 +231,12 @@ app.get("/", async (c) => {
       '</sitemap.xml>; rel="sitemap"',
     ].join(", "),
   );
+  // Set a signed HttpOnly cookie so the frontend can call /api/* without x402.
+  // SameSite=Strict means cross-site attackers cannot obtain or forge it.
+  if (c.env.SESSION_SECRET) {
+    const cookie = await generateAppCookie(c.env.SESSION_SECRET);
+    headers.append("Set-Cookie", cookie);
+  }
   return new Response(response.body, { status: response.status, headers });
 });
 

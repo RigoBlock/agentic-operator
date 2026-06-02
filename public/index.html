@@ -940,38 +940,14 @@
     let connectedAddress = null;
     let authSignature = null;  // EIP-191 sig proving wallet ownership
     let authTimestamp = null;  // timestamp used in signed message
-    let sessionToken = null;   // HMAC session token minted by /api/session (browser identity)
+    // Session tokens removed — cookie-based auth is handled automatically by the browser.
     let providerListenersAttached = false; // prevent duplicate event listeners
     let strategyPollTimer = null; // strategy events polling interval
     let lastEventTimestamp = 0;  // last seen strategy event timestamp
     let multiStepActive = false; // true when agent response indicates a multi-step plan
 
-    // ── Session token (minted by /api/session — browser identity, not spoofable) ──
-    let sessionTokenTimer = null;
-    let sessionTokenInflight = null;
-    async function fetchSessionToken() {
-      try {
-        const res = await fetch('/api/session');
-        if (res.ok) {
-          const data = await res.json();
-          sessionToken = data.token || null;
-          if (sessionToken) {
-            // Refresh 5 minutes before the 1-hour expiry
-            if (sessionTokenTimer) clearTimeout(sessionTokenTimer);
-            sessionTokenTimer = setTimeout(ensureSessionToken, 55 * 60 * 1000);
-          }
-        }
-      } catch { /* best-effort — fallback to Origin header in dev */ }
-    }
-    async function ensureSessionToken() {
-      if (sessionTokenInflight) return sessionTokenInflight;
-      sessionTokenInflight = fetchSessionToken().finally(() => { sessionTokenInflight = null; });
-      return sessionTokenInflight;
-    }
     function apiHeaders(extra) {
-      const h = Object.assign({ 'Content-Type': 'application/json' }, extra);
-      if (sessionToken) h['X-Rigoblock-Session'] = sessionToken;
-      return h;
+      return Object.assign({ 'Content-Type': 'application/json' }, extra);
     }
 
     // ── Chat persistence (sessionStorage — survives refresh, clears on tab close) ──
@@ -1879,9 +1855,7 @@
 
       const updateTypingStatus = (msg) => { typingContent.textContent = msg; };
 
-      // Ensure session token is ready before the first API call (guards the race window
-      // between page load and the 500ms init timer completing).
-      await ensureSessionToken();
+      // Cookie-based auth is handled automatically by the browser — no session token needed.
 
       // 2-minute timeout — matches the Worker cpu_ms limit
       const controller = new AbortController();
@@ -3239,7 +3213,7 @@
 
     // Legacy fallback after a brief delay + auto-reconnect
     setTimeout(async () => {
-      await ensureSessionToken(); // await so sessionToken is set before first API call
+      // Cookie-based auth is handled automatically by the browser.
 
       if (discoveredProviders.length === 0 && window.ethereum) {
         discoveredProviders.push({
