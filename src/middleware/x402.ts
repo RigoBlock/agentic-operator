@@ -89,6 +89,10 @@ export function isPublicApiRoute(method: string, path: string): boolean {
   return PUBLIC_API_PREFIXES.some((p) => method === p.method && path.startsWith(p.prefix));
 }
 
+export function isProtectedRoute(method: string, path: string): boolean {
+  return `${method} ${path}` in PROTECTED_ROUTES;
+}
+
 // ── Protected route config (v2 format) ────────────────────────────────
 
 export const PROTECTED_ROUTES: RoutesConfig = {
@@ -739,7 +743,7 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
       // Instead, we block explicitly with a clear error.
       const path = adapter.getPath();
       const method = adapter.getMethod();
-      if (path.startsWith("/api/") && !isPublicApiRoute(method, path)) {
+      if (path.startsWith("/api/") && !isPublicApiRoute(method, path) && !isProtectedRoute(method, path)) {
         console.error(
           `[x402] SECURITY BLOCK: API route ${method} ${path} is not in ` +
           `PROTECTED_ROUTES and not in PUBLIC_API_ROUTES. Blocking request.`,
