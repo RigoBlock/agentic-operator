@@ -232,13 +232,13 @@ async function main() {
     transport: http(),
   }).extend(publicActions);
 
-  const signer = toClientEvmSigner(account, walletClient);
+  let signer = toClientEvmSigner(account, walletClient);
 
   // Build x402 v2 client
-  const client = new x402Client();
+  let client = new x402Client();
   client.register("eip155:8453", new ExactEvmScheme(signer));
   client.register("eip155:8453", new UptoEvmScheme(signer));
-  const httpClient = new x402HTTPClient(client);
+  let httpClient = new x402HTTPClient(client);
 
   // Ensure USDC is approved for Permit2
   const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -339,8 +339,16 @@ async function main() {
     console.log("  https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources");
   }
 
-  // Drop account reference so the signing key can be GC'd
+  // Wipe every object that touches or references the private key
+  // @ts-ignore
+  signer = null;
+  // @ts-ignore
+  client = null;
+  // @ts-ignore
+  httpClient = null;
   account = null as any;
+  // walletClient extends the account — dropping the above is enough
+  // for GC to collect the whole graph once we exit.
 
   // Force exit — viem keeps HTTP handles alive, preventing clean shutdown
   process.exit(0);

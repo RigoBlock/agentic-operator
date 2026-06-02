@@ -43,7 +43,7 @@ import { bazaarResourceServerExtension } from "@x402/extensions";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler } from "hono";
 import type { Env, AppVariables } from "../types.js";
-import { verifySessionToken, SESSION_HEADER } from "../utils/session.js";
+import { verifyOperatorSignatureOnly } from "../services/auth.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
 
@@ -53,22 +53,12 @@ const PAY_TO = "0xA0F9C380ad1E1be09046319fd907335B2B452B37";
 /** Base mainnet — USDC payments (CAIP-2) */
 const BASE_NETWORK = "eip155:8453";
 
-// ── Exempt origins (our own frontends) ────────────────────────────────
-
-const EXEMPT_ORIGINS = new Set([
-  "https://trader.rigoblock.com",
-  "https://agentic-operator.gabriele-rigo.workers.dev",
-  "http://localhost:8787",  // wrangler dev
-  "http://localhost:5173",  // vite dev
-]);
-
 // ── Public API routes (free by design) ────────────────────────────────
 // These /api/* routes are intentionally unprotected. All OTHER /api/* routes
 // must be explicitly listed in PROTECTED_ROUTES or they are blocked (fail closed).
 export const PUBLIC_API_ROUTES: ReadonlySet<string> = new Set([
   "GET /api/health",
   "GET /api/chains",
-  "GET /api/session",
   "GET /api/vault",
   "GET /api/strategy-events",
   "GET /api/gas-policy",
@@ -110,7 +100,8 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       "AI-powered DeFi trading agent for Rigoblock smart vaults. Natural language to safe swap/bridge " +
       "calldata or delegated execution. Supports Uniswap, 0x, GMX perpetuals, Across bridging, " +
       "Uniswap v4 LP, GRG staking, and pool deployment across 7 chains. Protected by NAV Shield " +
-      "(10% max loss cap), Swap Shield (oracle price comparison), and 7-point execution validation.",
+      "(10% max loss per trade), Swap Shield (oracle vs DEX price divergence check), slippage " +
+      "protection, delegation verification, and transaction simulation.",
     mimeType: "application/json",
     // Raw bazaar extension: mirrors the GET/query format that CDP Bazaar indexes
     // successfully. Using queryParams field (like /api/quote) with a permissive
@@ -127,13 +118,13 @@ export const PROTECTED_ROUTES: RoutesConfig = {
             type: "http",
             method: "GET",
             queryParams: {
-              messages: "Array of {role, content} chat messages",
-              vaultAddress: "Rigoblock vault contract address (0x...)",
-              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
-              executionMode: "manual | delegated (default: manual)",
-              confirmExecution: "Set to true for auto-execute in delegated mode",
-              operatorAddress: "Vault owner wallet address (optional)",
-              authSignature: "EIP-191 signature signed by operatorAddress (optional)",
+              messages: "Array of {role, content} chat messages (POST body)",
+              vaultAddress: "Rigoblock vault contract address (POST body)",
+              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130) (POST body)",
+              executionMode: "manual | delegated, default manual (POST body)",
+              confirmExecution: "Set true for auto-execute in delegated mode (POST body)",
+              operatorAddress: "Vault owner wallet address (POST body)",
+              authSignature: "EIP-191 signature signed by operatorAddress (POST body)",
             },
           },
           output: {
@@ -187,7 +178,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
         network: BASE_NETWORK,
       },
     ],
-    description: "Rigoblock price oracle — DEX price quotes from Uniswap across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).",
+    description:
+      "DEX price quote across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain). " +
+      "Returns sell/buy amounts, price, routing, and gas estimate.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -254,7 +247,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
         network: BASE_NETWORK,
       },
     ],
-    description: "Uniswap Trading API quote with BackgeoOracle spot-price enrichment. Drop-in proxy for Uniswap /quote — same request body, response includes priceFeedExists, deltaBps, and oracleAmount.",
+    description:
+      "Uniswap Trading API quote with on-chain oracle price comparison. Drop-in proxy for Uniswap /quote " +
+      "— same request body, response includes priceFeedExists, deltaBps, and oracleAmount.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -270,6 +265,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
               tokenOut: "Token to buy (address or symbol)",
               tokenInChainId: "Chain ID (e.g. 8453)",
               tokenOutChainId: "Chain ID (e.g. 8453)",
+              swapper: "Swapper address (required by Uniswap Trading API)",
             },
           },
           output: {
@@ -320,7 +316,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
         network: BASE_NETWORK,
       },
     ],
-    description: "0x API v2 quote with BackgeoOracle spot-price enrichment. Drop-in proxy for 0x /swap/allowance-holder/quote — same query parameters, response includes priceFeedExists, deltaBps, and oracleAmount.",
+    description:
+      "0x API v2 quote with on-chain oracle price comparison. Drop-in proxy for 0x /swap/allowance-holder/quote " +
+      "— same query parameters, response includes priceFeedExists, deltaBps, and oracleAmount.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -385,9 +383,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       },
     ],
     description:
-      "Build an unsigned OPERATOR EOA transaction that swaps ETH on the BackgeoOracle's " +
+      "Build an unsigned operator EOA transaction that swaps ETH on the on-chain oracle's " +
       "dedicated Uniswap V4 pool to create a fresh price observation and fix a stale TWAP feed. " +
-      "Use when the Rigoblock Swap Shield blocks a trade due to oracle price divergence.",
+      "Use when the Swap Shield blocks a trade due to oracle price divergence.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -464,7 +462,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
     ],
     description:
       "Rigoblock DeFi tool discovery. Returns the full catalog with JSON schemas, categories, " +
-      "and access requirements for all 40+ direct-invocation tools.",
+      "and access requirements for all direct-invocation tools.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -542,9 +540,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
             method: "POST",
             queryParams: {
               toolName: "Tool name (e.g. get_swap_quote, get_vault_info, build_vault_swap)",
-              arguments: "Tool arguments object",
-              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
-              vaultAddress: "Rigoblock vault address (optional)",
+              arguments: "Tool arguments object (POST body)",
+              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130) (POST body)",
+              vaultAddress: "Rigoblock vault address, optional (POST body)",
             },
           },
           output: {
@@ -608,36 +606,6 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
     .registerExtension(bazaarResourceServerExtension);
 
   const server = new x402HTTPResourceServer(resourceServer, PROTECTED_ROUTES);
-
-  // Exempt own-frontend requests from payment.
-  // When SESSION_SECRET is set (production): validate HMAC session token.
-  // When SESSION_SECRET is absent (dev): fall back to Origin/Referer headers.
-  server.onProtectedRequest(async (ctx) => {
-    const adapter = ctx.adapter;
-
-    if (env.SESSION_SECRET) {
-      const token = adapter.getHeader(SESSION_HEADER);
-      if (token && await verifySessionToken(token, env.SESSION_SECRET)) {
-        return { grantAccess: true };
-      }
-      // No valid session token → proceed to payment flow
-      return;
-    }
-
-    // Dev fallback: Origin/Referer (spoofable, acceptable for local development)
-    const origin = adapter.getHeader("origin");
-    if (origin && EXEMPT_ORIGINS.has(origin)) {
-      return { grantAccess: true };
-    }
-    const referer = adapter.getHeader("referer");
-    if (referer) {
-      try {
-        if (EXEMPT_ORIGINS.has(new URL(referer).origin)) return { grantAccess: true };
-      } catch { /* ignore malformed */ }
-    }
-    // Continue to payment flow
-  });
-
   return server;
 }
 
@@ -669,32 +637,6 @@ function honoAdapter(c: { req: { header(name: string): string | undefined; metho
 // ── Middleware factory ─────────────────────────────────────────────────
 
 /**
- * Returns true if the request appears to originate from one of our own frontends.
- * Used by routes to allow unauthenticated manual-mode access (browser users viewing
- * a vault they don't own) without requiring x402 payment.
- *
- * ⚠️  Origin and Referer are client-supplied headers and CAN be spoofed by any
- * non-browser HTTP client. The consequence of spoofing is financial (free API calls),
- * NOT a security issue — delegated vault execution still requires a valid EIP-191
- * operator signature + on-chain ownership verification. A proper server-verifiable
- * mechanism (httpOnly session cookie minted by the Worker, or Cloudflare Access JWT)
- * would close this gap; until then this function is a browser-convention heuristic.
- */
-export function isExemptBrowserRequest(getHeader: (name: string) => string | undefined): boolean {
-  const origin = getHeader("origin");
-  if (origin && EXEMPT_ORIGINS.has(origin)) return true;
-  const referer = getHeader("referer");
-  if (referer) {
-    try {
-      if (EXEMPT_ORIGINS.has(new URL(referer).origin)) return true;
-    } catch {
-      // Ignore malformed Referer values
-    }
-  }
-  return false;
-}
-
-/**
  * Creates the x402 v2 payment middleware for Hono.
  *
  * Flow:
@@ -705,8 +647,110 @@ export function isExemptBrowserRequest(getHeader: (name: string) => string | und
  *    - "payment-verified"     → next(), then settle
  *    - "payment-error"        → return 402 with payment instructions
  */
+// ── Rate limiting (non-paid requests only) ────────────────────────────
+
+const RATE_LIMIT_WINDOW_MS = 4 * 60 * 60 * 1000; // 4 hours
+const RATE_LIMIT_MAX = 100;
+const RATE_LIMIT_WARNING_THRESHOLD = 10;
+
+interface RateLimitState {
+  count: number;
+  windowStart: number;
+}
+
+async function checkRateLimit(
+  kv: KVNamespace | undefined,
+  operatorAddress: string,
+): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
+  if (!kv) {
+    return { allowed: true, remaining: RATE_LIMIT_MAX, resetAt: Date.now() + RATE_LIMIT_WINDOW_MS };
+  }
+  const key = `rate-limit:${operatorAddress.toLowerCase()}`;
+  const now = Date.now();
+  const data = await kv.get<RateLimitState>(key, "json");
+
+  if (!data || now - data.windowStart > RATE_LIMIT_WINDOW_MS) {
+    // New window
+    const state: RateLimitState = { count: 1, windowStart: now };
+    await kv.put(key, JSON.stringify(state), {
+      expirationTtl: Math.ceil(RATE_LIMIT_WINDOW_MS / 1000) + 60,
+    });
+    return { allowed: true, remaining: RATE_LIMIT_MAX - 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
+  }
+
+  if (data.count >= RATE_LIMIT_MAX) {
+    return { allowed: false, remaining: 0, resetAt: data.windowStart + RATE_LIMIT_WINDOW_MS };
+  }
+
+  const state: RateLimitState = { count: data.count + 1, windowStart: data.windowStart };
+  await kv.put(key, JSON.stringify(state), {
+    expirationTtl: Math.ceil((data.windowStart + RATE_LIMIT_WINDOW_MS - now) / 1000) + 60,
+  });
+  return { allowed: true, remaining: RATE_LIMIT_MAX - data.count - 1, resetAt: data.windowStart + RATE_LIMIT_WINDOW_MS };
+}
+
+function setRateLimitHeaders(
+  c: { header: (k: string, v: string) => void },
+  remaining: number,
+  resetAt: number,
+): void {
+  c.header("X-RateLimit-Limit", String(RATE_LIMIT_MAX));
+  c.header("X-RateLimit-Remaining", String(remaining));
+  c.header("X-RateLimit-Reset", String(Math.ceil(resetAt / 1000)));
+  if (remaining < RATE_LIMIT_WARNING_THRESHOLD) {
+    const resetIso = new Date(resetAt).toISOString();
+    c.header("X-RateLimit-Warning", `${remaining} requests remaining before rate limit. Resets at ${resetIso}`);
+  }
+}
+
 export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
   return async (c, next) => {
+    // Fast path: authenticated operators skip x402 payment.
+    // The frontend sends the operator's EIP-191 signature in headers only.
+    // If valid (timestamp within 24h + signature verifies), skip x402 entirely.
+    const operatorAddress = c.req.header("x-operator-address");
+    const authSignature = c.req.header("x-auth-signature");
+    const authTimestamp = c.req.header("x-auth-timestamp");
+
+    if (operatorAddress && authSignature && authTimestamp) {
+      const ts = Number(authTimestamp);
+      if (!isNaN(ts)) {
+        try {
+          const valid = await verifyOperatorSignatureOnly(operatorAddress, authSignature, ts);
+          if (valid) {
+            // Fail-closed safety: only bypass x402 for explicitly protected routes.
+            const path = new URL(c.req.url).pathname;
+            const method = c.req.method;
+            if (!isProtectedRoute(method, path)) {
+              // Signature is valid but route is not protected — fall through to normal flow
+            } else {
+              // Rate limit check (non-paid requests only)
+              const rateLimit = await checkRateLimit(c.env.KV, operatorAddress);
+              if (!rateLimit.allowed) {
+                setRateLimitHeaders(c, 0, rateLimit.resetAt);
+              const retryAfterSec = Math.ceil((rateLimit.resetAt - Date.now()) / 1000);
+              c.header("Retry-After", String(retryAfterSec));
+              return c.json(
+                {
+                  error: "Rate limit exceeded",
+                  detail: `Authenticated operators are limited to ${RATE_LIMIT_MAX} requests per 4-hour window.`,
+                  retryAfter: retryAfterSec,
+                },
+                429,
+              );
+              }
+
+              c.set("operatorAuthVerified", true);
+              setRateLimitHeaders(c, rateLimit.remaining, rateLimit.resetAt);
+              return next();
+            }
+          }
+        } catch {
+          // Invalid signature — fall through to x402 payment
+        }
+      }
+    }
+
     let server: x402HTTPResourceServer;
     try {
       server = await getHttpServer(c.env);

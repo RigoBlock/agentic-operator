@@ -24,8 +24,8 @@ function createApp() {
     if (c.req.header("x-test-x402-paid") === "true") {
       c.set("x402Paid", true);
     }
-    if (c.req.header("x-test-browser-verified") === "true") {
-      c.set("browserVerified", true);
+    if (c.req.header("x-test-operator-auth-verified") === "true") {
+      c.set("operatorAuthVerified", true);
     }
     await next();
   });

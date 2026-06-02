@@ -36,8 +36,8 @@ export const quoteUniswap = new Hono<{ Bindings: Env; Variables: AppVariables }>
 
 quoteUniswap.post("/", async (c) => {
   // Auth gate — skip when request was paid via x402 (agent access)
-  if (!c.get("x402Paid") && !c.get("browserVerified")) {
-    return c.json({ error: "Authentication required. Use x402 payment or a verified browser session." }, 401);
+  if (!c.get("x402Paid") && !c.get("operatorAuthVerified")) {
+    return c.json({ error: "Authentication required. Use x402 payment or provide X-Operator-Address, X-Auth-Signature, and X-Auth-Timestamp headers." }, 401);
   }
 
   let body: Record<string, unknown>;

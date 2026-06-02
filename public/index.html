@@ -940,38 +940,20 @@
     let connectedAddress = null;
     let authSignature = null;  // EIP-191 sig proving wallet ownership
     let authTimestamp = null;  // timestamp used in signed message
-    let sessionToken = null;   // HMAC session token minted by /api/session (browser identity)
+    // Auth is handled via cached wallet signature headers (X-Auth-*) sent with every request.
     let providerListenersAttached = false; // prevent duplicate event listeners
     let strategyPollTimer = null; // strategy events polling interval
     let lastEventTimestamp = 0;  // last seen strategy event timestamp
     let multiStepActive = false; // true when agent response indicates a multi-step plan
 
-    // ── Session token (minted by /api/session — browser identity, not spoofable) ──
-    let sessionTokenTimer = null;
-    let sessionTokenInflight = null;
-    async function fetchSessionToken() {
-      try {
-        const res = await fetch('/api/session');
-        if (res.ok) {
-          const data = await res.json();
-          sessionToken = data.token || null;
-          if (sessionToken) {
-            // Refresh 5 minutes before the 1-hour expiry
-            if (sessionTokenTimer) clearTimeout(sessionTokenTimer);
-            sessionTokenTimer = setTimeout(ensureSessionToken, 55 * 60 * 1000);
-          }
-        }
-      } catch { /* best-effort — fallback to Origin header in dev */ }
-    }
-    async function ensureSessionToken() {
-      if (sessionTokenInflight) return sessionTokenInflight;
-      sessionTokenInflight = fetchSessionToken().finally(() => { sessionTokenInflight = null; });
-      return sessionTokenInflight;
-    }
     function apiHeaders(extra) {
-      const h = Object.assign({ 'Content-Type': 'application/json' }, extra);
-      if (sessionToken) h['X-Rigoblock-Session'] = sessionToken;
-      return h;
+      const headers = { 'Content-Type': 'application/json' };
+      if (connectedAddress) headers['X-Operator-Address'] = connectedAddress;
+      if (authSignature) {
+        headers['X-Auth-Signature'] = authSignature;
+        headers['X-Auth-Timestamp'] = String(authTimestamp);
+      }
+      return Object.assign(headers, extra);
     }
 
     // ── Chat persistence (sessionStorage — survives refresh, clears on tab close) ──
@@ -1879,9 +1861,7 @@
 
       const updateTypingStatus = (msg) => { typingContent.textContent = msg; };
 
-      // Ensure session token is ready before the first API call (guards the race window
-      // between page load and the 500ms init timer completing).
-      await ensureSessionToken();
+      // Auth is handled via cached wallet signature headers (X-Auth-*); no session token is used.
 
       // 2-minute timeout — matches the Worker cpu_ms limit
       const controller = new AbortController();
@@ -1906,7 +1886,7 @@
           chatBody.operatorAddress = connectedAddress;
         }
         // Include signed credentials only for vault owners — needed for delegated mode
-        // and vault-specific tools. Non-owners use session token for browser access.
+        // and vault-specific tools. Non-owners do not send auth headers (x402 payment required).
         if (isOwner && authSignature) {
           chatBody.authSignature = authSignature;
           chatBody.authTimestamp = authTimestamp;
@@ -3239,7 +3219,7 @@
 
     // Legacy fallback after a brief delay + auto-reconnect
     setTimeout(async () => {
-      await ensureSessionToken(); // await so sessionToken is set before first API call
+      // Auth is handled via cached wallet signature headers (X-Auth-*) sent with every request.
 
       if (discoveredProviders.length === 0 && window.ethereum) {
         discoveredProviders.push({

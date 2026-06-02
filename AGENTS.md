@@ -840,3 +840,5 @@ Before running `npm run register:bazaar` after adding a new endpoint:
 
 - **`POST /api/quote/uniswap`** — Blocked by Cloudflare with `403 Forbidden` (Bot Fight Mode). Required whitelisting the `/api/quote/uniswap` path in WAF rules.
 - **`GET /api/quote/0x`** — Returned `400` because the registration script passed `sellToken=ETH&buyToken=USDC` (symbols) instead of actual contract addresses. The 0x API validates addresses strictly.
+
+

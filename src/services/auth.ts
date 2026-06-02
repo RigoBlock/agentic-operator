@@ -67,22 +67,18 @@ export interface AuthParams {
 }
 
 /**
- * Verify that the caller is an authenticated vault operator.
- *
- * 1. Check timestamp is within 24h
- * 2. Verify signature matches claimed operatorAddress
- * 3. Verify signer is the vault owner on ANY supported chain
- *
- * Throws descriptive error on failure.
+ * Shared signature verification — throws AuthError with specific messages.
+ * Used by both verifyOperatorAuth (route handlers) and verifyOperatorSignatureOnly (middleware).
  */
-export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
-  const { operatorAddress, vaultAddress, authSignature, authTimestamp } = params;
-
+async function _verifyOperatorSignature(
+  operatorAddress: string,
+  authSignature: string,
+  authTimestamp: number,
+): Promise<void> {
   if (!operatorAddress || !authSignature || authTimestamp == null) {
     throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
   }
 
-  // 1. Validate timestamp type before arithmetic
   if (
     typeof authTimestamp !== "number" ||
     !Number.isFinite(authTimestamp) ||
@@ -91,7 +87,6 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
     throw new AuthError("Invalid auth timestamp. Expected an integer timestamp in milliseconds.", 401);
   }
 
-  // 2. Check expiry
   const now = Date.now();
   if (now - authTimestamp > AUTH_EXPIRY_MS) {
     throw new AuthError("Authentication expired. Please reconnect your wallet.", 401);
@@ -100,14 +95,6 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
     throw new AuthError("Invalid auth timestamp (future).", 401);
   }
 
-  // 2. Verify signature (wallet-wide, no vault in message)
-  // The signed message MUST include the timestamp to prevent replay attacks.
-  // An attacker cannot reuse an old signature with a fresh timestamp because
-  // the timestamp is cryptographically bound.
-
-  // Validate address format before casting — an invalid address would cause
-  // verifyMessage to throw a generic error that could be mistaken for a
-  // signature-format problem.
   if (!isAddress(operatorAddress)) {
     throw new AuthError(
       "Invalid operator address format. Expected a valid EVM address (0x + 40 hex chars).",
@@ -115,18 +102,22 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
     );
   }
 
-  let valid = false;
   try {
     const message = buildAuthMessage(operatorAddress, authTimestamp);
-    valid = await verifyMessage({
+    const valid = await verifyMessage({
       address: operatorAddress as Address,
       message,
       signature: authSignature as `0x${string}`,
     });
+    if (!valid) {
+      throw new AuthError(
+        "Signature verification failed. The signature does not match the operator address or the timestamp. " +
+        "Ensure your client includes the authTimestamp in the signed message.",
+        403,
+      );
+    }
   } catch (err) {
-    // verifyMessage throws when the signature is malformed (wrong length, bad encoding, etc.).
-    // This is distinct from a well-formed signature that simply doesn't verify — report 401
-    // so callers know the problem is format, not ownership.
+    if (err instanceof AuthError) throw err;
     throw new AuthError(
       "Invalid signature format: " +
       (err instanceof Error ? err.message : "signature could not be decoded") +
@@ -134,16 +125,37 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
       401,
     );
   }
+}
 
-  if (!valid) {
-    throw new AuthError(
-      "Signature verification failed. The signature does not match the operator address or the timestamp. " +
-      "Ensure your client includes the authTimestamp in the signed message.",
-      403,
-    );
+/**
+ * Lightweight signature verification — returns boolean instead of throwing.
+ * Used by x402 middleware to skip payment for authenticated operators.
+ */
+export async function verifyOperatorSignatureOnly(
+  operatorAddress: string,
+  authSignature: string,
+  authTimestamp: number,
+): Promise<boolean> {
+  try {
+    await _verifyOperatorSignature(operatorAddress, authSignature, authTimestamp);
+    return true;
+  } catch {
+    return false;
   }
+}
 
-  // 3. Vault ownership check — skip when no vault is provided (operator-scoped tools
+/**
+ * Verify that the caller is an authenticated vault operator.
+ * 1. Verify signature via _verifyOperatorSignature
+ * 2. Verify signer is the vault owner on ANY supported chain
+ *
+ * Throws descriptive AuthError on failure.
+ */
+export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
+  const { operatorAddress, vaultAddress, authSignature, authTimestamp } = params;
+  await _verifyOperatorSignature(operatorAddress, authSignature, authTimestamp);
+
+  // Vault ownership check — skip when no vault is provided (operator-scoped tools
   // like set_swap_shield_tolerance don't require a vault context).
   if (!vaultAddress) {
     return; // signature verified, no vault to own

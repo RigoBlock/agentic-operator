@@ -25,13 +25,13 @@ import { quote0x } from "../src/routes/quote0x.js";
 function createApp() {
   const app = new Hono<{ Bindings: Record<string, unknown>; Variables: Record<string, unknown> }>();
 
-  // Test helper middleware: sets x402Paid / browserVerified from headers
+  // Test helper middleware: sets x402Paid / operatorAuthVerified from headers
   app.use("/api/quote/*", async (c, next) => {
     if (c.req.header("x-test-x402-paid") === "true") {
       c.set("x402Paid", true);
     }
-    if (c.req.header("x-test-browser-verified") === "true") {
-      c.set("browserVerified", true);
+    if (c.req.header("x-test-operator-auth-verified") === "true") {
+      c.set("operatorAuthVerified", true);
     }
     await next();
   });

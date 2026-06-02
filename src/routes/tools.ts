@@ -63,10 +63,10 @@ function getToolCategory(name: string): string {
 // and what arguments to pass. Requires x402 payment (exact scheme, $0.0024 USDC).
 tools.get("/", async (c) => {
   // Local auth guard: if x402 middleware failed to initialize or payment was
-  // skipped, require browser verification. This prevents the paid catalog from
+  // skipped, require operator signature verification. This prevents the paid catalog from
   // becoming publicly accessible during a facilitator outage.
-  const isBrowserRequest = c.get("browserVerified") ?? false;
-  if (!c.get("x402Paid") && !isBrowserRequest) {
+  const isOperatorAuth = c.get("operatorAuthVerified") ?? false;
+  if (!c.get("x402Paid") && !isOperatorAuth) {
     return c.json({ error: "Authentication required" }, 401);
   }
 
@@ -133,7 +133,7 @@ tools.post("/", async (c) => {
 
     // Auth gate — same model as chat.ts
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
-    const isBrowserRequest = c.get("browserVerified") ?? false;
+    const isOperatorAuth = c.get("operatorAuthVerified") ?? false;
     let operatorVerified = false;
 
     if (hasAuthCredentials) {
@@ -146,7 +146,7 @@ tools.post("/", async (c) => {
         alchemyKey: c.env.ALCHEMY_API_KEY,
       });
       operatorVerified = true;
-    } else if (!c.get("x402Paid") && !isBrowserRequest) {
+    } else if (!c.get("x402Paid") && !isOperatorAuth) {
       throw new AuthError("Authentication required", 401);
     }
 
@@ -162,7 +162,7 @@ tools.post("/", async (c) => {
       chainId: body.chainId,
       operatorAddress: body.operatorAddress as Address | undefined,
       operatorVerified,
-      isBrowserRequest,
+      isBrowserRequest: isOperatorAuth,
       executionMode,
     };
 
