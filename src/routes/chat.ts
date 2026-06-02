@@ -68,7 +68,7 @@ chat.post("/", async (c) => {
 
     // ── Auth gate ──
     // x402 payment = API access fee (external agents). Operator auth = vault authorization.
-    // Session token (X-Rigoblock-Session, set by browserVerified middleware) = verified browser.
+    // operatorAuthVerified = operator signature verified by x402 middleware (skips payment).
     //
     //   x402 + no auth         → manual mode (unsigned tx data)
     //   x402 + auth (owner)    → manual or delegated
@@ -83,7 +83,7 @@ chat.post("/", async (c) => {
     // ownership (operatorVerified).
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
     let operatorVerified = false;
-    const isBrowserRequest = c.get("browserVerified") ?? false;
+    const isBrowserRequest = c.get("operatorAuthVerified") ?? false;
 
     if (hasAuthCredentials) {
       await verifyOperatorAuth({

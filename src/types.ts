@@ -15,7 +15,7 @@ export type AppVariables = {
   /** Set to true by x402 middleware when payment is verified */
   x402Paid?: boolean;
   /** Set to true by x402 middleware when operator signature is verified (skips payment) */
-  browserVerified?: boolean;
+  operatorAuthVerified?: boolean;
 };
 
 // ── Environment bindings ──────────────────────────────────────────────

@@ -65,7 +65,7 @@ tools.get("/", async (c) => {
   // Local auth guard: if x402 middleware failed to initialize or payment was
   // skipped, require browser verification. This prevents the paid catalog from
   // becoming publicly accessible during a facilitator outage.
-  const isBrowserRequest = c.get("browserVerified") ?? false;
+  const isBrowserRequest = c.get("operatorAuthVerified") ?? false;
   if (!c.get("x402Paid") && !isBrowserRequest) {
     return c.json({ error: "Authentication required" }, 401);
   }
@@ -133,7 +133,7 @@ tools.post("/", async (c) => {
 
     // Auth gate — same model as chat.ts
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
-    const isBrowserRequest = c.get("browserVerified") ?? false;
+    const isBrowserRequest = c.get("operatorAuthVerified") ?? false;
     let operatorVerified = false;
 
     if (hasAuthCredentials) {

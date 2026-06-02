@@ -647,23 +647,70 @@ function honoAdapter(c: { req: { header(name: string): string | undefined; metho
  *    - "payment-verified"     → next(), then settle
  *    - "payment-error"        → return 402 with payment instructions
  */
+// ── Rate limiting (non-paid requests only) ────────────────────────────
+
+const RATE_LIMIT_WINDOW_MS = 4 * 60 * 60 * 1000; // 4 hours
+const RATE_LIMIT_MAX = 100;
+const RATE_LIMIT_WARNING_THRESHOLD = 10;
+
+interface RateLimitState {
+  count: number;
+  windowStart: number;
+}
+
+async function checkRateLimit(
+  kv: KVNamespace | undefined,
+  operatorAddress: string,
+): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
+  if (!kv) {
+    return { allowed: true, remaining: RATE_LIMIT_MAX, resetAt: Date.now() + RATE_LIMIT_WINDOW_MS };
+  }
+  const key = `rate-limit:${operatorAddress.toLowerCase()}`;
+  const now = Date.now();
+  const data = await kv.get<RateLimitState>(key, "json");
+
+  if (!data || now - data.windowStart > RATE_LIMIT_WINDOW_MS) {
+    // New window
+    const state: RateLimitState = { count: 1, windowStart: now };
+    await kv.put(key, JSON.stringify(state), {
+      expirationTtl: Math.ceil(RATE_LIMIT_WINDOW_MS / 1000) + 60,
+    });
+    return { allowed: true, remaining: RATE_LIMIT_MAX - 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
+  }
+
+  if (data.count >= RATE_LIMIT_MAX) {
+    return { allowed: false, remaining: 0, resetAt: data.windowStart + RATE_LIMIT_WINDOW_MS };
+  }
+
+  const state: RateLimitState = { count: data.count + 1, windowStart: data.windowStart };
+  await kv.put(key, JSON.stringify(state), {
+    expirationTtl: Math.ceil((data.windowStart + RATE_LIMIT_WINDOW_MS - now) / 1000) + 60,
+  });
+  return { allowed: true, remaining: RATE_LIMIT_MAX - data.count - 1, resetAt: data.windowStart + RATE_LIMIT_WINDOW_MS };
+}
+
+function setRateLimitHeaders(
+  c: { header: (k: string, v: string) => void },
+  remaining: number,
+  resetAt: number,
+): void {
+  c.header("X-RateLimit-Limit", String(RATE_LIMIT_MAX));
+  c.header("X-RateLimit-Remaining", String(remaining));
+  c.header("X-RateLimit-Reset", String(Math.ceil(resetAt / 1000)));
+  if (remaining < RATE_LIMIT_WARNING_THRESHOLD) {
+    const resetIso = new Date(resetAt).toISOString();
+    c.header("X-RateLimit-Warning", `${remaining} requests remaining before rate limit. Resets at ${resetIso}`);
+  }
+}
+
 export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
   return async (c, next) => {
     // Fast path: authenticated operators skip x402 payment.
-    // The frontend sends the operator's EIP-191 signature in headers.
+    // The frontend sends the operator's EIP-191 signature in headers only.
     // If valid (timestamp within 24h + signature verifies), skip x402 entirely.
-    const operatorAddress =
-      c.req.header("x-operator-address") ||
-      c.req.query("operatorAddress") ||
-      c.req.query("operator");
-    const authSignature =
-      c.req.header("x-auth-signature") ||
-      c.req.query("authSignature") ||
-      c.req.query("sig");
-    const authTimestamp =
-      c.req.header("x-auth-timestamp") ||
-      c.req.query("authTimestamp") ||
-      c.req.query("ts");
+    const operatorAddress = c.req.header("x-operator-address");
+    const authSignature = c.req.header("x-auth-signature");
+    const authTimestamp = c.req.header("x-auth-timestamp");
 
     if (operatorAddress && authSignature && authTimestamp) {
       const ts = Number(authTimestamp);
@@ -671,8 +718,30 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
         try {
           const valid = await verifyOperatorSignatureOnly(operatorAddress, authSignature, ts);
           if (valid) {
-            c.set("browserVerified", true);
-            return next();
+            // Fail-closed safety: only bypass x402 for explicitly protected routes.
+            const path = new URL(c.req.url).pathname;
+            const method = c.req.method;
+            if (!isProtectedRoute(method, path)) {
+              // Signature is valid but route is not protected — fall through to normal flow
+            } else {
+              // Rate limit check (non-paid requests only)
+              const rateLimit = await checkRateLimit(c.env.KV, operatorAddress);
+              if (!rateLimit.allowed) {
+                setRateLimitHeaders(c, 0, rateLimit.resetAt);
+                return c.json(
+                  {
+                    error: "Rate limit exceeded",
+                    detail: `Authenticated operators are limited to ${RATE_LIMIT_MAX} requests per 4-hour window.`,
+                    retryAfter: Math.ceil((rateLimit.resetAt - Date.now()) / 1000),
+                  },
+                  429,
+                );
+              }
+
+              c.set("operatorAuthVerified", true);
+              setRateLimitHeaders(c, rateLimit.remaining, rateLimit.resetAt);
+              return next();
+            }
           }
         } catch {
           // Invalid signature — fall through to x402 payment

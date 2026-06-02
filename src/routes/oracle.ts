@@ -28,7 +28,7 @@ export const oracle = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 oracle.post("/refresh", async (c) => {
   // Auth gate — requires x402 payment OR authenticated browser session.
-  if (!c.get("x402Paid") && !c.get("browserVerified")) {
+  if (!c.get("x402Paid") && !c.get("operatorAuthVerified")) {
     return c.json({ error: "Authentication required. Use x402 payment or a verified browser session." }, 401);
   }
 

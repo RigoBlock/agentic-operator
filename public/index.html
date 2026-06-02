@@ -940,7 +940,7 @@
     let connectedAddress = null;
     let authSignature = null;  // EIP-191 sig proving wallet ownership
     let authTimestamp = null;  // timestamp used in signed message
-    // Session tokens removed — cookie-based auth is handled automatically by the browser.
+    // Auth is handled via cached wallet signature headers (X-Auth-*) sent with every request.
     let providerListenersAttached = false; // prevent duplicate event listeners
     let strategyPollTimer = null; // strategy events polling interval
     let lastEventTimestamp = 0;  // last seen strategy event timestamp
@@ -1861,7 +1861,7 @@
 
       const updateTypingStatus = (msg) => { typingContent.textContent = msg; };
 
-      // Cookie-based auth is handled automatically by the browser — no session token needed.
+      // Auth is handled via cached wallet signature headers (X-Auth-*); no session token is used.
 
       // 2-minute timeout — matches the Worker cpu_ms limit
       const controller = new AbortController();
@@ -1886,7 +1886,7 @@
           chatBody.operatorAddress = connectedAddress;
         }
         // Include signed credentials only for vault owners — needed for delegated mode
-        // and vault-specific tools. Non-owners use session token for browser access.
+        // and vault-specific tools. Non-owners pay x402 per request.
         if (isOwner && authSignature) {
           chatBody.authSignature = authSignature;
           chatBody.authTimestamp = authTimestamp;
