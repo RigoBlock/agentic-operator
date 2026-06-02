@@ -11,3 +11,4 @@ dist/
 public/wdk-evm.js
 public/wdk-secret-manager.js
 content/
+package-lock.json

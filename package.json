@@ -4,6 +4,7 @@
   "description": "Agentic trading operator for Rigoblock vaults — Cloudflare Worker + EIP-7702 delegation",
   "license": "Apache-2.0",
   "private": true,
+  "packageManager": "yarn@1.22.22",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",

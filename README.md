@@ -224,9 +224,9 @@ public/
 ### Install & Run
 
 ```bash
-npm install
+yarn install
 cp .dev.vars.example .dev.vars   # fill in API keys
-npm run dev                      # → http://localhost:8787
+yarn dev                         # → http://localhost:8787
 ```
 
 ### Secrets (production)
@@ -247,7 +247,7 @@ npx wrangler secret put CDP_WALLET_SECRET         # CDP Server Wallet signing
 ### Deploy
 
 ```bash
-npm run deploy
+yarn deploy
 ```
 
 ## Known Limitations
