@@ -162,7 +162,7 @@ tools.post("/", async (c) => {
       chainId: body.chainId,
       operatorAddress: body.operatorAddress as Address | undefined,
       operatorVerified,
-      isOperatorAuth,
+      isBrowserRequest: isOperatorAuth,
       executionMode,
     };
 
