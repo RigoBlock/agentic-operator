@@ -28,7 +28,6 @@ import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
 import { createX402Middleware } from "./middleware/x402.js";
-import { generateAppCookie } from "./utils/session.js";
 
 import { runAllSkills } from "./skills/index.js";
 import { getTwapEvents } from "./skills/twap.js";
@@ -201,9 +200,9 @@ app.get("/api", (c) => {
       endpoints: {
         "POST /api/chat": { price: "up to $0.10 (billed by usage)", description: "Natural language DeFi agent — swap/bridge/LP/stake calldata" },
         "GET /api/quote": { price: "$0.0020", description: "DEX price quote across 7 chains" },
-        "POST /api/quote/uniswap": { price: "$0.0021", description: "Uniswap Trading API quote with oracle enrichment" },
-        "GET /api/quote/0x": { price: "$0.0022", description: "0x API quote with oracle enrichment" },
-        "POST /api/oracle/refresh": { price: "$0.0023", description: "BackgeoOracle pool refresh transaction builder" },
+        "POST /api/quote/uniswap": { price: "$0.0021", description: "Uniswap Trading API quote with on-chain oracle price comparison" },
+        "GET /api/quote/0x": { price: "$0.0022", description: "0x API quote with on-chain oracle price comparison" },
+        "POST /api/oracle/refresh": { price: "$0.0023", description: "On-chain oracle pool refresh transaction builder" },
         "POST /api/tools": { price: "$0.0025", description: "Direct tool invocation — structured input/output" },
         "GET /api/tools": { price: "$0.0024", description: "Tool discovery with full parameter schemas" },
       },
@@ -231,12 +230,6 @@ app.get("/", async (c) => {
       '</sitemap.xml>; rel="sitemap"',
     ].join(", "),
   );
-  // Set a signed HttpOnly cookie so the frontend can call /api/* without x402.
-  // SameSite=Strict means cross-site attackers cannot obtain or forge it.
-  if (c.env.SESSION_SECRET) {
-    const cookie = await generateAppCookie(c.env.SESSION_SECRET);
-    headers.append("Set-Cookie", cookie);
-  }
   return new Response(response.body, { status: response.status, headers });
 });
 
@@ -353,19 +346,19 @@ app.get("/.well-known/x402.json", (c) =>
         path: "/api/quote/uniswap",
         method: "POST",
         price: "$0.0021",
-        description: "Uniswap Trading API quote with BackgeoOracle spot-price enrichment",
+        description: "Uniswap Trading API quote with on-chain oracle price comparison",
       },
       {
         path: "/api/quote/0x",
         method: "GET",
         price: "$0.0022",
-        description: "0x API v2 quote with BackgeoOracle spot-price enrichment",
+        description: "0x API v2 quote with on-chain oracle price comparison",
       },
       {
         path: "/api/oracle/refresh",
         method: "POST",
         price: "$0.0023",
-        description: "BackgeoOracle pool refresh transaction builder",
+        description: "On-chain oracle pool refresh transaction builder",
       },
       {
         path: "/api/tools",

@@ -43,7 +43,7 @@ import { bazaarResourceServerExtension } from "@x402/extensions";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler } from "hono";
 import type { Env, AppVariables } from "../types.js";
-import { verifySessionToken, SESSION_HEADER, verifyAppCookie } from "../utils/session.js";
+import { verifyOperatorSignatureOnly } from "../services/auth.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
 
@@ -53,22 +53,12 @@ const PAY_TO = "0xA0F9C380ad1E1be09046319fd907335B2B452B37";
 /** Base mainnet — USDC payments (CAIP-2) */
 const BASE_NETWORK = "eip155:8453";
 
-// ── Exempt origins (our own frontends) ────────────────────────────────
-
-const EXEMPT_ORIGINS = new Set([
-  "https://trader.rigoblock.com",
-  "https://agentic-operator.gabriele-rigo.workers.dev",
-  "http://localhost:8787",  // wrangler dev
-  "http://localhost:5173",  // vite dev
-]);
-
 // ── Public API routes (free by design) ────────────────────────────────
 // These /api/* routes are intentionally unprotected. All OTHER /api/* routes
 // must be explicitly listed in PROTECTED_ROUTES or they are blocked (fail closed).
 export const PUBLIC_API_ROUTES: ReadonlySet<string> = new Set([
   "GET /api/health",
   "GET /api/chains",
-  "GET /api/session",
   "GET /api/vault",
   "GET /api/strategy-events",
   "GET /api/gas-policy",
@@ -110,7 +100,8 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       "AI-powered DeFi trading agent for Rigoblock smart vaults. Natural language to safe swap/bridge " +
       "calldata or delegated execution. Supports Uniswap, 0x, GMX perpetuals, Across bridging, " +
       "Uniswap v4 LP, GRG staking, and pool deployment across 7 chains. Protected by NAV Shield " +
-      "(10% max loss cap), Swap Shield (oracle price comparison), and 7-point execution validation.",
+      "(10% max loss per trade), Swap Shield (oracle vs DEX price divergence check), slippage " +
+      "protection, delegation verification, and transaction simulation.",
     mimeType: "application/json",
     // Raw bazaar extension: mirrors the GET/query format that CDP Bazaar indexes
     // successfully. Using queryParams field (like /api/quote) with a permissive
@@ -127,13 +118,13 @@ export const PROTECTED_ROUTES: RoutesConfig = {
             type: "http",
             method: "GET",
             queryParams: {
-              messages: "Array of {role, content} chat messages",
-              vaultAddress: "Rigoblock vault contract address (0x...)",
-              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
-              executionMode: "manual | delegated (default: manual)",
-              confirmExecution: "Set to true for auto-execute in delegated mode",
-              operatorAddress: "Vault owner wallet address (optional)",
-              authSignature: "EIP-191 signature signed by operatorAddress (optional)",
+              messages: "Array of {role, content} chat messages (POST body)",
+              vaultAddress: "Rigoblock vault contract address (POST body)",
+              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130) (POST body)",
+              executionMode: "manual | delegated, default manual (POST body)",
+              confirmExecution: "Set true for auto-execute in delegated mode (POST body)",
+              operatorAddress: "Vault owner wallet address (POST body)",
+              authSignature: "EIP-191 signature signed by operatorAddress (POST body)",
             },
           },
           output: {
@@ -187,7 +178,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
         network: BASE_NETWORK,
       },
     ],
-    description: "Rigoblock price oracle — DEX price quotes from Uniswap across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain).",
+    description:
+      "DEX price quote across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain). " +
+      "Returns sell/buy amounts, price, routing, and gas estimate.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -254,7 +247,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
         network: BASE_NETWORK,
       },
     ],
-    description: "Uniswap Trading API quote with BackgeoOracle spot-price enrichment. Drop-in proxy for Uniswap /quote — same request body, response includes priceFeedExists, deltaBps, and oracleAmount.",
+    description:
+      "Uniswap Trading API quote with on-chain oracle price comparison. Drop-in proxy for Uniswap /quote " +
+      "— same request body, response includes priceFeedExists, deltaBps, and oracleAmount.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -270,6 +265,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
               tokenOut: "Token to buy (address or symbol)",
               tokenInChainId: "Chain ID (e.g. 8453)",
               tokenOutChainId: "Chain ID (e.g. 8453)",
+              swapper: "Swapper address (required by Uniswap Trading API)",
             },
           },
           output: {
@@ -320,7 +316,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
         network: BASE_NETWORK,
       },
     ],
-    description: "0x API v2 quote with BackgeoOracle spot-price enrichment. Drop-in proxy for 0x /swap/allowance-holder/quote — same query parameters, response includes priceFeedExists, deltaBps, and oracleAmount.",
+    description:
+      "0x API v2 quote with on-chain oracle price comparison. Drop-in proxy for 0x /swap/allowance-holder/quote " +
+      "— same query parameters, response includes priceFeedExists, deltaBps, and oracleAmount.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -385,9 +383,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       },
     ],
     description:
-      "Build an unsigned OPERATOR EOA transaction that swaps ETH on the BackgeoOracle's " +
+      "Build an unsigned operator EOA transaction that swaps ETH on the on-chain oracle's " +
       "dedicated Uniswap V4 pool to create a fresh price observation and fix a stale TWAP feed. " +
-      "Use when the Rigoblock Swap Shield blocks a trade due to oracle price divergence.",
+      "Use when the Swap Shield blocks a trade due to oracle price divergence.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -464,7 +462,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
     ],
     description:
       "Rigoblock DeFi tool discovery. Returns the full catalog with JSON schemas, categories, " +
-      "and access requirements for all 40+ direct-invocation tools.",
+      "and access requirements for all direct-invocation tools.",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -542,9 +540,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
             method: "POST",
             queryParams: {
               toolName: "Tool name (e.g. get_swap_quote, get_vault_info, build_vault_swap)",
-              arguments: "Tool arguments object",
-              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
-              vaultAddress: "Rigoblock vault address (optional)",
+              arguments: "Tool arguments object (POST body)",
+              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130) (POST body)",
+              vaultAddress: "Rigoblock vault address, optional (POST body)",
             },
           },
           output: {
@@ -595,14 +593,6 @@ let httpServer: x402HTTPResourceServer | null = null;
 let initPromise: Promise<void> | null = null;
 
 function buildHttpServer(env: Env): x402HTTPResourceServer {
-  if (!env.SESSION_SECRET) {
-    console.error(
-      "[x402] SECURITY WARNING: SESSION_SECRET is not configured. " +
-      "Frontend requests will require x402 payment. " +
-      "Set it with: wrangler secret put SESSION_SECRET"
-    );
-  }
-
   // CDP facilitator (Base mainnet — USDC payments)
   const facilitatorConfig = createFacilitatorConfig(
     env.CDP_API_KEY_ID,
@@ -616,25 +606,6 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
     .registerExtension(bazaarResourceServerExtension);
 
   const server = new x402HTTPResourceServer(resourceServer, PROTECTED_ROUTES);
-
-  // Exempt own-frontend requests from payment.
-  // When SESSION_SECRET is set (production): validate HMAC session token.
-  // When SESSION_SECRET is absent: NO fallback. Everyone pays. Fail closed.
-  server.onProtectedRequest(async (ctx) => {
-    const adapter = ctx.adapter;
-
-    if (env.SESSION_SECRET) {
-      const token = adapter.getHeader(SESSION_HEADER);
-      if (token && await verifySessionToken(token, env.SESSION_SECRET)) {
-        return { grantAccess: true };
-      }
-    }
-
-    // No valid session token (or no SESSION_SECRET) → proceed to payment flow
-    // There is NO Origin/Referer fallback. It was removed because it is trivially
-    // spoofable and bypasses x402 for any attacker who sets the right header.
-  });
-
   return server;
 }
 
@@ -666,32 +637,6 @@ function honoAdapter(c: { req: { header(name: string): string | undefined; metho
 // ── Middleware factory ─────────────────────────────────────────────────
 
 /**
- * Returns true if the request appears to originate from one of our own frontends.
- * Used by routes to allow unauthenticated manual-mode access (browser users viewing
- * a vault they don't own) without requiring x402 payment.
- *
- * ⚠️  Origin and Referer are client-supplied headers and CAN be spoofed by any
- * non-browser HTTP client. The consequence of spoofing is financial (free API calls),
- * NOT a security issue — delegated vault execution still requires a valid EIP-191
- * operator signature + on-chain ownership verification. A proper server-verifiable
- * mechanism (httpOnly session cookie minted by the Worker, or Cloudflare Access JWT)
- * would close this gap; until then this function is a browser-convention heuristic.
- */
-export function isExemptBrowserRequest(getHeader: (name: string) => string | undefined): boolean {
-  const origin = getHeader("origin");
-  if (origin && EXEMPT_ORIGINS.has(origin)) return true;
-  const referer = getHeader("referer");
-  if (referer) {
-    try {
-      if (EXEMPT_ORIGINS.has(new URL(referer).origin)) return true;
-    } catch {
-      // Ignore malformed Referer values
-    }
-  }
-  return false;
-}
-
-/**
  * Creates the x402 v2 payment middleware for Hono.
  *
  * Flow:
@@ -704,13 +649,34 @@ export function isExemptBrowserRequest(getHeader: (name: string) => string | und
  */
 export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
   return async (c, next) => {
-    // Fast path: same-origin frontend requests carry a signed HttpOnly cookie.
-    // If valid, skip x402 entirely — no CDP call, no latency.
-    if (c.env.SESSION_SECRET) {
-      const cookieHeader = c.req.header("cookie");
-      if (cookieHeader && await verifyAppCookie(cookieHeader, c.env.SESSION_SECRET)) {
-        c.set("browserVerified", true);
-        return next();
+    // Fast path: authenticated operators skip x402 payment.
+    // The frontend sends the operator's EIP-191 signature in headers.
+    // If valid (timestamp within 24h + signature verifies), skip x402 entirely.
+    const operatorAddress =
+      c.req.header("x-operator-address") ||
+      c.req.query("operatorAddress") ||
+      c.req.query("operator");
+    const authSignature =
+      c.req.header("x-auth-signature") ||
+      c.req.query("authSignature") ||
+      c.req.query("sig");
+    const authTimestamp =
+      c.req.header("x-auth-timestamp") ||
+      c.req.query("authTimestamp") ||
+      c.req.query("ts");
+
+    if (operatorAddress && authSignature && authTimestamp) {
+      const ts = Number(authTimestamp);
+      if (!isNaN(ts)) {
+        try {
+          const valid = await verifyOperatorSignatureOnly(operatorAddress, authSignature, ts);
+          if (valid) {
+            c.set("browserVerified", true);
+            return next();
+          }
+        } catch {
+          // Invalid signature — fall through to x402 payment
+        }
       }
     }
 

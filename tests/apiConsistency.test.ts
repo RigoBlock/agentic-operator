@@ -29,7 +29,6 @@ function mockEnv(): Record<string, string> {
     ALCHEMY_API_KEY: "test",
     CDP_API_KEY_ID: "test",
     CDP_API_KEY_SECRET: "test",
-    SESSION_SECRET: "test-secret-for-consistency-tests",
   };
 }
 

@@ -215,6 +215,40 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
 }
 
 /**
+ * Lightweight signature verification — checks timestamp expiry and EIP-191 signature validity.
+ * Does NOT check vault ownership (that's done by route handlers). Used by x402 middleware
+ * to skip payment for authenticated operators.
+ */
+export async function verifyOperatorSignatureOnly(
+  operatorAddress: string,
+  authSignature: string,
+  authTimestamp: number,
+): Promise<boolean> {
+  if (!operatorAddress || !authSignature || authTimestamp == null) return false;
+  if (
+    typeof authTimestamp !== "number" ||
+    !Number.isFinite(authTimestamp) ||
+    !Number.isInteger(authTimestamp)
+  ) {
+    return false;
+  }
+  const now = Date.now();
+  if (now - authTimestamp > AUTH_EXPIRY_MS) return false;
+  if (authTimestamp > now + 60_000) return false;
+  if (!isAddress(operatorAddress)) return false;
+  try {
+    const message = buildAuthMessage(operatorAddress, authTimestamp);
+    return await verifyMessage({
+      address: operatorAddress as Address,
+      message,
+      signature: authSignature as `0x${string}`,
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Custom error with HTTP status code.
  */
 export class AuthError extends Error {

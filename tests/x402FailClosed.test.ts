@@ -28,7 +28,6 @@ describe("x402 middleware fail-closed logic", () => {
 
     expect(isPublicApiRoute("GET", "/api/health")).toBe(true);
     expect(isPublicApiRoute("GET", "/api/chains")).toBe(true);
-    expect(isPublicApiRoute("GET", "/api/session")).toBe(true);
 
     expect(isPublicApiRoute("GET", "/api/quote")).toBe(false);
     expect(isPublicApiRoute("POST", "/api/chat")).toBe(false);

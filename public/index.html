@@ -947,7 +947,13 @@
     let multiStepActive = false; // true when agent response indicates a multi-step plan
 
     function apiHeaders(extra) {
-      return Object.assign({ 'Content-Type': 'application/json' }, extra);
+      const headers = { 'Content-Type': 'application/json' };
+      if (connectedAddress) headers['X-Operator-Address'] = connectedAddress;
+      if (authSignature) {
+        headers['X-Auth-Signature'] = authSignature;
+        headers['X-Auth-Timestamp'] = String(authTimestamp);
+      }
+      return Object.assign(headers, extra);
     }
 
     // ── Chat persistence (sessionStorage — survives refresh, clears on tab close) ──

@@ -14,8 +14,7 @@ export type ExecutionMode = "manual" | "delegated";
 export type AppVariables = {
   /** Set to true by x402 middleware when payment is verified */
   x402Paid?: boolean;
-  /** Set to true by session middleware when a valid X-Rigoblock-Session token is present
-   *  (or Origin/Referer match in dev environments where SESSION_SECRET is not configured) */
+  /** Set to true by x402 middleware when operator signature is verified (skips payment) */
   browserVerified?: boolean;
 };
 
@@ -44,9 +43,7 @@ export interface Env {
   CDP_API_KEY_ID: string;             // Coinbase Developer Platform API key ID
   CDP_API_KEY_SECRET: string;  // Coinbase Developer Platform API key secret
   CDP_WALLET_SECRET: string;   // Coinbase Developer Platform wallet secret (agent wallet signing)
-  /** HMAC secret for browser session tokens. When set, X-Rigoblock-Session header is
-   *  required for browser access instead of the spoofable Origin/Referer fallback. */
-  SESSION_SECRET?: string;
+
 }
 
 // ── Telegram types ────────────────────────────────────────────────────
