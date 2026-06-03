@@ -170,16 +170,19 @@ export async function getOracleSpotTick(
   const poolKey = buildOraclePoolKey(chainId, normalizedToken);
   const client = getClient(chainId, alchemyKey);
 
+  const SECONDS_AGOS = [0, 1] as const;
   const result = (await client.readContract({
     address: oracle,
     abi: ORACLE_ABI,
     functionName: "observe",
-    args: [poolKey, [0, 1]],
+    args: [poolKey, SECONDS_AGOS],
   })) as unknown as [bigint[], bigint[]];
 
   const tickCumulatives = result[0];
-  // tick = (cumulative_at_now - cumulative_at_1s_ago) / 1_second
-  const tick = Number(tickCumulatives[0] - tickCumulatives[1]);
+  const deltaSeconds = SECONDS_AGOS[1] - SECONDS_AGOS[0];
+  // tick = delta_cumulative / delta_seconds — must divide explicitly so the
+  // formula stays correct if the observation window is ever widened.
+  const tick = Number(tickCumulatives[0] - tickCumulatives[1]) / deltaSeconds;
   return tick;
 }
 

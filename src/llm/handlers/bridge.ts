@@ -158,13 +158,8 @@ export async function handle_crosschain_sync(
   const navEqContext = eq
     ? [
         `NAV equalization${eq.directionAutoSwapped ? ' (direction auto-corrected)' : ''}:`,
-        `  ${effectiveSrcName} NAV: ${eq.srcNavFormatted} (${eq.srcDecimals}-dec pool)`,
-        `  ${effectiveDstName} NAV: ${eq.dstNavFormatted} (${eq.dstDecimals}-dec pool)`,
-        `  Pre-bridge divergence: ${(eq.divergenceBps / 100).toFixed(2)}%`,
-        `  Bridge: ${eq.bridgeAmountFormatted} ${eq.bridgeToken.symbol}`,
-        `  Post-bridge projected NAV: ${effectiveSrcName}=${eq.postSrcNav}, ${effectiveDstName}=${eq.postDstNav}`,
-        `  Target NAV: ${eq.targetNav}`,
-        `  Post-bridge divergence: ${(eq.postDivergenceBps / 100).toFixed(2)}%`,
+        `  ${effectiveSrcName} NAV: ${eq.srcNavFormatted} | ${effectiveDstName} NAV: ${eq.dstNavFormatted}`,
+        `  Divergence: ${(eq.divergenceBps / 100).toFixed(2)}% → ~${(eq.postDivergenceBps / 100).toFixed(2)}% after sync`,
         ...(eq.capped ? [`  ⚠ ${eq.capReason}`] : []),
       ].join('\n')
     : '';
