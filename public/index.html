@@ -191,7 +191,7 @@
     .reasoning-content {
       padding: 0 12px 10px; font-size: 13px; line-height: 1.6;
       color: var(--muted); white-space: pre-wrap; word-break: break-word;
-      max-height: 300px; overflow-y: auto; overflow-x: hidden; display: block;
+      max-height: 300px; overflow-y: auto; overflow-x: hidden; display: none;
     }
     .reasoning-content.open { display: block; }
     .model-trace {
@@ -1642,6 +1642,25 @@
       sendMessage();
     }
 
+    /** Build a collapsible reasoning block — shared by appendMessage and streaming paths. */
+    function makeReasoningBlock(text, startOpen = true) {
+      const block = document.createElement('div');
+      block.className = 'reasoning-block';
+      const toggle = document.createElement('button');
+      toggle.className = 'reasoning-toggle';
+      toggle.innerHTML = `<span class="arrow${startOpen ? ' open' : ''}">▶</span> Reasoning`;
+      const contentEl = document.createElement('div');
+      contentEl.className = 'reasoning-content' + (startOpen ? ' open' : '');
+      contentEl.textContent = text;
+      toggle.onclick = () => {
+        const isOpen = contentEl.classList.toggle('open');
+        toggle.querySelector('.arrow').classList.toggle('open', isOpen);
+      };
+      block.appendChild(toggle);
+      block.appendChild(contentEl);
+      return block;
+    }
+
     function appendMessage(role, content, extras, isRestore) {
       const div = document.createElement('div');
       div.className = `msg ${role}`;
@@ -1670,22 +1689,7 @@
         div.appendChild(tc);
       }
       if (extras?.reasoning) {
-        const block = document.createElement('div');
-        block.className = 'reasoning-block';
-        const toggle = document.createElement('button');
-        toggle.className = 'reasoning-toggle';
-        toggle.innerHTML = '<span class="arrow open">▶</span> Reasoning';
-        const contentEl = document.createElement('div');
-        contentEl.className = 'reasoning-content open';
-        contentEl.textContent = extras.reasoning;
-        toggle.onclick = () => {
-          const arrow = toggle.querySelector('.arrow');
-          const isOpen = contentEl.classList.toggle('open');
-          arrow.classList.toggle('open', isOpen);
-        };
-        block.appendChild(toggle);
-        block.appendChild(contentEl);
-        div.appendChild(block);
+        div.appendChild(makeReasoningBlock(extras.reasoning, true));
       }
       if (extras?.toolResult) {
         const tr = document.createElement('div');
@@ -1989,25 +1993,16 @@
                   updateTypingStatus(event.message);
                 } else if (event.type === 'reasoning') {
                   const reasoningText = String(event.content || '').trim();
-                  // Show reasoning visible (not collapsed) so the user can follow agent thinking.
-                  // These blocks are persisted into the chat when typingEl is removed.
+                  const truncated = reasoningText.length > 3000 ? reasoningText.slice(0, 3000) + '...' : reasoningText;
                   let reasoningEl = typingEl.querySelector('.reasoning-block');
                   if (!reasoningEl) {
-                    reasoningEl = document.createElement('div');
-                    reasoningEl.className = 'reasoning-block';
-                    reasoningEl.style.cssText = 'margin-top:6px;font-size:0.82em;opacity:0.75;max-height:300px;overflow-y:auto;overflow-x:hidden;border-left:2px solid #a78bfa;padding-left:8px;';
-                    const label = document.createElement('div');
-                    label.textContent = '\uD83E\uDDE0 Agent reasoning:';
-                    label.style.cssText = 'font-weight:600;margin-bottom:4px;color:#a78bfa;';
-                    reasoningEl.appendChild(label);
-                    const pre = document.createElement('pre');
-                    pre.className = 'reasoning-text';
-                    pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;margin:0;';
-                    reasoningEl.appendChild(pre);
+                    reasoningEl = makeReasoningBlock(truncated, true);
                     typingEl.appendChild(reasoningEl);
+                  } else {
+                    // Update text in place as tokens stream in
+                    const contentEl = reasoningEl.querySelector('.reasoning-content');
+                    if (contentEl) contentEl.textContent = truncated;
                   }
-                  const pre = reasoningEl.querySelector('.reasoning-text');
-                  if (pre) pre.textContent = reasoningText.length > 3000 ? reasoningText.slice(0, 3000) + '...' : reasoningText;
                   updateTypingStatus('Reasoning...');
                   chatEl.scrollTop = chatEl.scrollHeight;
                 } else if (event.type === 'tool_call') {
@@ -2097,7 +2092,13 @@
             thinkingContent.className = 'msg-content';
             thinkingContent.style.cssText = 'opacity:0.85;font-size:0.9em;';
             for (const block of persistBlocks) {
-              thinkingContent.appendChild(block.cloneNode(true));
+              if (block.classList.contains('reasoning-block')) {
+                // Rebuild with live event listeners — cloneNode(true) copies DOM but not onclick.
+                const text = block.querySelector('.reasoning-content')?.textContent || block.textContent || '';
+                thinkingContent.appendChild(makeReasoningBlock(text, false));
+              } else {
+                thinkingContent.appendChild(block.cloneNode(true));
+              }
             }
             thinkingMsg.appendChild(thinkingContent);
             chatEl.appendChild(thinkingMsg);
