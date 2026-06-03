@@ -206,23 +206,16 @@ export async function handle_refresh_oracle_feed(
     direction,
   );
 
-  // Vault path: estimate gas from the operator's address (same pattern as bridge/swap handlers).
-  // Falls back to the hardcoded 400k if estimation fails — the NAV shield pre-check in
-  // processChat will still catch value-destroying operations.
+  // Vault path: estimate gas — throws if the transaction would revert on-chain.
+  // Never fall back to a hardcoded limit: a gas estimation failure means the
+  // transaction will fail on-chain, and the user must not be allowed to sign it.
   if (viaVault && env.ALCHEMY_API_KEY && ctx.operatorAddress) {
-    try {
-      const vaultGas = await estimateGas(
-        ctx.chainId, vaultAddr as Address,
-        result.transaction.data as Hex, "0x0",
-        ctx.operatorAddress, env.ALCHEMY_API_KEY, "oracle refresh",
-      );
-      result.transaction.gas = vaultGas;
-    } catch (gasErr) {
-      console.warn(
-        `[oracle] Vault gas estimation failed, using 400k fallback: ` +
-        `${gasErr instanceof Error ? gasErr.message.slice(0, 120) : gasErr}`,
-      );
-    }
+    const vaultGas = await estimateGas(
+      ctx.chainId, vaultAddr as Address,
+      result.transaction.data as Hex, "0x0",
+      ctx.operatorAddress, env.ALCHEMY_API_KEY, "oracle refresh",
+    );
+    result.transaction.gas = vaultGas;
   }
 
   // EOA path: simulate the transaction to catch reverts early and provide accurate gas

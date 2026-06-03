@@ -9,7 +9,7 @@
 import type { Env, RequestContext, SwapIntent, UnsignedTransaction } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import {
-  getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay, calculateVaultGasLimit,
+  getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay,
 } from "../../services/uniswapTrading.js";
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../../services/zeroXTrading.js";
 import { getVaultTokenBalance, encodeVaultExecute } from "../../services/vault.js";
@@ -184,23 +184,11 @@ export async function handle_build_vault_swap(
     const descParts = [`[0x] Sell ${sellDesc} for ${buyDesc}`];
     if (priceLine) descParts.push(priceLine);
 
-    let zxGas: string;
-    let zxGasFallbackWarning = '';
-    try {
-      zxGas = await estimateGas(
-        ctx.chainId, ctx.vaultAddress as Address,
-        zxQuote.transaction.data as Hex, "0x0",
-        ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
-      );
-    } catch (gasErr) {
-      // Gas estimation failed — use a safe fallback and surface a warning.
-      // The vault may still execute on-chain (simulation context can differ from
-      // production: approvals, adapter state, price impact at execution time).
-      zxGas = '0x' + (800_000).toString(16);
-      const errMsg = gasErr instanceof Error ? gasErr.message : String(gasErr);
-      zxGasFallbackWarning = `⚠️ Gas estimation failed (${errMsg.slice(0, 120)}). Using fallback 800k — transaction may still revert on-chain.`;
-      console.warn(`[build_vault_swap 0x] estimateGas failed, using fallback 800k:`, gasErr instanceof Error ? gasErr.message : gasErr);
-    }
+    const zxGas = await estimateGas(
+      ctx.chainId, ctx.vaultAddress as Address,
+      zxQuote.transaction.data as Hex, "0x0",
+      ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
+    );
 
     const transaction: UnsignedTransaction = {
       to: ctx.vaultAddress as Address,
@@ -238,7 +226,6 @@ export async function handle_build_vault_swap(
       `Chain: ${chainName}`,
       `Gas limit: ${parseInt(zxGas, 16)}`,
       ...(shieldWarning0x ? [shieldWarning0x] : []),
-      ...(zxGasFallbackWarning ? [zxGasFallbackWarning] : []),
     ].join("\n");
 
     // NAV shield pre-check — warn if simulation fails, block if NAV drops > 10%.
@@ -368,23 +355,11 @@ export async function handle_build_vault_swap(
   if (priceLine) descParts.push(priceLine);
 
   // 7. Build the unsigned transaction for the frontend
-  let uniGas: string;
-  let uniGasFallbackWarning = '';
-  try {
-    uniGas = await estimateGas(
-      ctx.chainId, ctx.vaultAddress as Address,
-      vaultCalldata as Hex, "0x0",
-      ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
-    );
-  } catch (gasErr) {
-    // Fallback to Uniswap API's own gas estimate + vault overhead and surface a warning.
-    const fallback = calculateVaultGasLimit(quote.quote.gasUseEstimate);
-    uniGas = '0x' + fallback.toString(16);
-    const errMsg = gasErr instanceof Error ? gasErr.message : String(gasErr);
-    uniGasFallbackWarning = `⚠️ Gas estimation failed (${errMsg.slice(0, 120)}). Using Uniswap API estimate — transaction may still revert on-chain.`;
-    console.warn(`[build_vault_swap uni] estimateGas failed, using uniswap estimate fallback:`,
-      gasErr instanceof Error ? gasErr.message : gasErr);
-  }
+  const uniGas = await estimateGas(
+    ctx.chainId, ctx.vaultAddress as Address,
+    vaultCalldata as Hex, "0x0",
+    ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
+  );
 
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
@@ -422,7 +397,6 @@ export async function handle_build_vault_swap(
     `Chain: ${chainName}`,
     `Gas limit: ${parseInt(uniGas, 16)}`,
     ...(shieldWarningUni ? [shieldWarningUni] : []),
-    ...(uniGasFallbackWarning ? [uniGasFallbackWarning] : []),
   ].join("\n");
 
   // NAV shield pre-check — warn if simulation fails, block if NAV drops > 10%.

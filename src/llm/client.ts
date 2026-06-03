@@ -15,7 +15,6 @@ import { getSkillTools, getSkillSystemPrompt } from "../skills/index.js";
 
 // Merge skill tools into the base definitions (skill tools are always available for dispatch)
 const ALL_TOOL_DEFINITIONS = [...BASE_TOOL_DEFINITIONS, ...getSkillTools()];
-import { getUniswapQuote, getUniswapSwapCalldata, formatUniswapQuoteForDisplay, calculateVaultGasLimit } from "../services/uniswapTrading.js";
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../services/zeroXTrading.js";
 import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint, getClient } from "../services/vault.js";
 import { resolveTokenAddress, resolveChainId, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, STAKING_PROXY, getNativeTokenSymbol } from "../config.js";
