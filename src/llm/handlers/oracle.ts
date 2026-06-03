@@ -8,12 +8,21 @@
 
 import type { Env, RequestContext } from "../../types.js";
 import type { ToolResult } from "../client.js";
+import { estimateGas } from "../client.js";
 import { getTokenDecimals, getClient } from "../../services/vault.js";
 import { resolveTokenAddress, resolveChainId, getNativeTokenSymbol } from "../../config.js";
-import { parseUnits, formatUnits, type Address } from "viem";
+import { parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import { buildOraclePoolSwapTx } from "../../services/oraclePool.js";
 import { AuthError } from "../../services/auth.js";
+
+/** Round a computed decimal string to 4 significant figures for display. */
+function roundAmount(raw: string): string {
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n) || n === 0) return raw;
+  const s = n.toPrecision(4);
+  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;
+}
 
 export async function handle_refresh_oracle_feed(
   env: Env,
@@ -126,7 +135,7 @@ export async function handle_refresh_oracle_feed(
         }) as bigint;
         if (estimatedIn > 0n) {
           const buffered = (estimatedIn * 105n) / 100n;
-          amountIn = formatUnits(buffered, 18);
+          amountIn = roundAmount(formatUnits(buffered, 18));
           console.log(
             `[oracle] Estimated ${amountOut} ${tokenArg} → ${amountIn} ${nativeSymbol} ` +
             `(via vault oracle, +5% buffer)`
@@ -146,7 +155,7 @@ export async function handle_refresh_oracle_feed(
         }) as bigint;
         if (estimatedIn > 0n) {
           const buffered = (estimatedIn * 105n) / 100n;
-          amountIn = formatUnits(buffered, decimalsOut);
+          amountIn = roundAmount(formatUnits(buffered, decimalsOut));
           console.log(
             `[oracle] Estimated ${amountOut} ${nativeSymbol} → ${amountIn} ${tokenArg} ` +
             `(via vault oracle, +5% buffer)`
@@ -196,6 +205,25 @@ export async function handle_refresh_oracle_feed(
     vaultAddr,
     direction,
   );
+
+  // Vault path: estimate gas from the operator's address (same pattern as bridge/swap handlers).
+  // Falls back to the hardcoded 400k if estimation fails — the NAV shield pre-check in
+  // processChat will still catch value-destroying operations.
+  if (viaVault && env.ALCHEMY_API_KEY && ctx.operatorAddress) {
+    try {
+      const vaultGas = await estimateGas(
+        ctx.chainId, vaultAddr as Address,
+        result.transaction.data as Hex, "0x0",
+        ctx.operatorAddress, env.ALCHEMY_API_KEY, "oracle refresh",
+      );
+      result.transaction.gas = vaultGas;
+    } catch (gasErr) {
+      console.warn(
+        `[oracle] Vault gas estimation failed, using 400k fallback: ` +
+        `${gasErr instanceof Error ? gasErr.message.slice(0, 120) : gasErr}`,
+      );
+    }
+  }
 
   // EOA path: simulate the transaction to catch reverts early and provide accurate gas
   if (!viaVault && env.ALCHEMY_API_KEY && ctx.operatorAddress) {

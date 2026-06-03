@@ -229,6 +229,7 @@ const EXPLORER_TX_URL: Record<number, string> = {
   1: "https://etherscan.io/tx/",
   10: "https://optimistic.etherscan.io/tx/",
   56: "https://bscscan.com/tx/",
+  130: "https://uniscan.xyz/tx/",
   137: "https://polygonscan.com/tx/",
   8453: "https://basescan.org/tx/",
   42161: "https://arbiscan.io/tx/",

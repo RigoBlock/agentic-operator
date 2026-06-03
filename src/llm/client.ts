@@ -1294,15 +1294,17 @@ ${executionModeNote}${contextDocsBlock}`;
         break;
       }
 
-      // Stream the model's plan/thinking text so the user sees what it decided.
-      // This replaces the old "Continuing plan…" hardcoded message.
       const followUpReasoning = (followUp as any)._reasoning as string | undefined;
       if (followUpReasoning) {
         onStreamEvent?.({ type: "reasoning", content: followUpReasoning });
       }
-      const followUpText = followUpChoice.message.content?.trim();
-      if (followUpText) {
-        // Suppress text that just echoes an already-shown error (prevents 3x+ duplication)
+      currentMessage = followUpChoice.message;
+      const followUpHasMoreToolCalls = !!(currentMessage.tool_calls?.length);
+      const followUpText = currentMessage.content?.trim();
+      // Only emit follow-up text as a streaming plan-block when more tool calls follow.
+      // If this is the final response (no tool calls), data.reply handles display — emitting
+      // it here too would show the same text twice (once in plan-block, once as reply).
+      if (followUpText && followUpHasMoreToolCalls) {
         const isErrorEcho = /^(error:|insufficient|.*revert|.*failed)/i.test(followUpText);
         const isRepeatOfToolResult = toolCallResults.some(
           tc => tc.error && tc.result && followUpText.includes(tc.result.replace(/^Error:\s*/i, '').slice(0, 50)),
@@ -1312,8 +1314,7 @@ ${executionModeNote}${contextDocsBlock}`;
         }
       }
 
-      currentMessage = followUpChoice.message;
-      if (!currentMessage.tool_calls || currentMessage.tool_calls.length === 0) {
+      if (!followUpHasMoreToolCalls) {
         finalModel = llmModel;
         return {
           reply: currentMessage.content || "Done.",

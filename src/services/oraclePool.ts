@@ -400,27 +400,15 @@ export async function buildOraclePoolSwapTx(
 
   if (viaVault) {
     const vaultDescription = isBuy
-      ? `Oracle pool refresh: swap ${amountIn} ${nativeSymbol} → ${tokenSymbol} on BackgeoOracle V4 pool (chain ${chainId}) via vault. Creates a new price observation.`
-      : `Oracle pool refresh: swap ${amountIn} ${tokenSymbol} → ${nativeSymbol} on BackgeoOracle V4 pool (chain ${chainId}) via vault. Creates a new price observation.`;
+      ? `Oracle refresh: ${amountIn} ${nativeSymbol} → ${tokenSymbol} (vault)`
+      : `Oracle refresh: ${amountIn} ${tokenSymbol} → ${nativeSymbol} (vault)`;
 
     const message = [
-      `🔄 Oracle Refresh Transaction Ready (Vault)`,
-      ``,
-      `This swaps a small amount on the BackgeoOracle's dedicated Uniswap V4 pool`,
-      `to create a fresh price observation. The 5-minute TWAP will start converging`,
-      `toward the current market price after this swap is confirmed.`,
-      ``,
-      `Token: ${tokenSymbol}`,
+      `🔄 Oracle Refresh Ready (Vault)`,
       `Direction: ${isBuy ? `${nativeSymbol} → ${tokenSymbol}` : `${tokenSymbol} → ${nativeSymbol}`}`,
       `Amount: ${amountIn} ${isBuy ? nativeSymbol : tokenSymbol}`,
-      `Pool: fee=0, tickSpacing=32767, hooks=${oracle.slice(0, 10)}…`,
-      `Oracle: ${oracle}`,
-      `Pool ID: ${poolId.slice(0, 18)}…`,
-      `Cardinality: ${cardinality} observations stored`,
-      `Chain: ${chainId}`,
       ``,
-      `This transaction goes through the vault adapter and can be executed via delegation.`,
-      `Gas limit: ${ORACLE_SWAP_GAS_LIMIT.toString()}`,
+      `Executes through the vault adapter — eligible for delegation.`,
     ].join("\n");
 
     return {
@@ -446,28 +434,15 @@ export async function buildOraclePoolSwapTx(
 
   // EOA path
   const eoaDescription = isBuy
-    ? `Oracle pool refresh: swap ${amountIn} ${nativeSymbol} → ${tokenSymbol} on BackgeoOracle V4 pool (chain ${chainId}) to create a new price observation. Sign with your operator wallet (EOA).`
-    : `Oracle pool refresh: swap ${amountIn} ${tokenSymbol} → ${nativeSymbol} on BackgeoOracle V4 pool (chain ${chainId}) to create a new price observation. Sign with your operator wallet (EOA).`;
+    ? `Oracle refresh: ${amountIn} ${nativeSymbol} → ${tokenSymbol} (EOA)`
+    : `Oracle refresh: ${amountIn} ${tokenSymbol} → ${nativeSymbol} (EOA)`;
 
   const message = [
-    `🔄 Oracle Refresh Transaction Ready`,
-    ``,
-    `This swaps a small amount on the BackgeoOracle's dedicated Uniswap V4 pool`,
-    `to create a fresh price observation. The 5-minute TWAP will start converging`,
-    `toward the current market price after this swap is confirmed.`,
-    ``,
-    `Token: ${tokenSymbol}`,
+    `🔄 Oracle Refresh Ready`,
     `Direction: ${isBuy ? `${nativeSymbol} → ${tokenSymbol}` : `${tokenSymbol} → ${nativeSymbol}`}`,
     `Amount: ${amountIn} ${isBuy ? nativeSymbol : tokenSymbol}`,
-    `Pool: fee=0, tickSpacing=32767, hooks=${oracle.slice(0, 10)}…`,
-    `Oracle: ${oracle}`,
-    `Pool ID: ${poolId.slice(0, 18)}…`,
-    `Cardinality: ${cardinality} observations stored`,
-    `Chain: ${chainId}`,
     ``,
-    `⚠️ Sign this with your OPERATOR WALLET (EOA).`,
-    `The transaction goes directly to the Universal Router.`,
-    `Gas limit: ${ORACLE_SWAP_GAS_LIMIT.toString()}`,
+    `⚠️ Sign with your operator wallet — sent directly to the Universal Router.`,
   ].join("\n");
 
   return {
