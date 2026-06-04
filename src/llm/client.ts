@@ -10,74 +10,26 @@
 import OpenAI from "openai";
 import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, RequestContext, StreamEvent } from "../types.js";
 import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS, RUNTIME_CONTEXT_PACK } from "./tools.js";
-import { detectDomains, buildSystemPrompt, filterToolsForDomains, type DomainKey } from "./prompts.js";
+import { detectDomains, buildSystemPrompt, filterToolsForDomains } from "./prompts.js";
 import { getSkillTools, getSkillSystemPrompt } from "../skills/index.js";
 
 // Merge skill tools into the base definitions (skill tools are always available for dispatch)
 const ALL_TOOL_DEFINITIONS = [...BASE_TOOL_DEFINITIONS, ...getSkillTools()];
-import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../services/zeroXTrading.js";
-import { getVaultInfo, getVaultTokenBalance, encodeVaultExecute, getTokenDecimals, getPoolData, getNavData, encodeMint, getClient } from "../services/vault.js";
-import { resolveTokenAddress, resolveChainId, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, STAKING_PROXY, getNativeTokenSymbol } from "../config.js";
+import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
 import { AuthError } from "../services/auth.js";
-import { decodeFunctionData, encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
+import { formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
-import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../abi/poolFactory.js";
-import { ERC20_ABI } from "../abi/erc20.js";
-import {
-  prepareDelegation,
-  prepareRevocation,
-  prepareSelectiveRevocation,
-  checkDelegationOnChain,
-  buildDefaultSelectors,
-  getDelegationConfig,
-  revokeDelegationOnChain,
-} from "../services/delegation.js";
-import { getAgentWalletInfo } from "../services/agentWallet.js";
-import {
-  findGmxMarket,
-  getGmxMarkets,
-  getGmxTickers,
-  getGmxTokenPrice,
-  resolveGmxCollateral,
-  getGmxTokenDecimals,
-  buildCreateIncreaseOrderCalldata,
-  buildCreateDecreaseOrderCalldata,
-  buildUpdateOrderCalldata,
-  buildCancelOrderCalldata,
-  buildClaimFundingFeesCalldata,
-} from "../services/gmxTrading.js";
-import { getGmxPositionsSummary, getGmxPositions } from "../services/gmxPositions.js";
-import { ARBITRUM_CHAIN_ID, GmxOrderType } from "../abi/gmx.js";
-import {
-  getCrosschainQuote,
-  buildCrosschainTransfer,
-  buildCrosschainSync,
-  getAggregatedNav,
-  buildRebalancePlan,
-  chainName as crosschainChainName,
-} from "../services/crosschain.js";
-import { buildAddLiquidityTx, buildRemoveLiquidityTx, buildInitializePoolTx, getVaultLPPositions, buildCollectFeesTx, buildBurnPositionTx, getPoolInfoById, getPositionDirect, POOL_MANAGER } from "../services/uniswapLP.js";
-import {
-  buildStakeCalldata,
-  buildUndelegateStakeCalldata,
-  buildUnstakeCalldata,
-  buildEndEpochCalldata,
-  buildWithdrawDelegatorRewardsCalldata,
-} from "../services/grgStaking.js";
+import { getClient } from "../services/vault.js";
 import { checkNavImpact } from "../services/navGuard.js";
 import {
-  checkSwapPrice,
   getSwapShieldTolerance,
-  setSwapShieldTolerance,
-  clearSwapShieldTolerance,
   getStoredSlippage,
-  setStoredSlippage,
   DEFAULT_SLIPPAGE_BPS,
   MIN_SLIPPAGE_BPS,
   MAX_SLIPPAGE_BPS,
   DEFAULT_MAX_DIVERGENCE_PCT,
+  checkSwapPrice,
 } from "../services/swapShield.js";
-import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
 import { TOOL_HANDLER_REGISTRY } from "./handlers/index.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
@@ -851,6 +803,7 @@ ${executionModeNote}${contextDocsBlock}`;
     (hasVault ? tryFastPathSwapShieldToggle(effectiveMsg) : null) ||
     (hasVault ? tryFastPathStrategyQueries(effectiveMsg) : null) ||
     (hasVault ? tryFastPathTwapCreate(effectiveMsg) : null) ||
+    (hasVault ? tryFastPathBridge(effectiveMsg) : null) ||
     (hasVault ? tryFastPathSwap(effectiveMsg) : null);
   if (immediateFastPath) {
     console.log(`[LLM] Immediate fast-path (no LLM): ${immediateFastPath.name}(${JSON.stringify(immediateFastPath.args)})`);
@@ -2084,6 +2037,52 @@ function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
 // handles it. Bypassing the LLM avoids hallucinating non-existent tool names
 // like "sell_token" or "schedule_swap".
 
+/**
+ * Detect unambiguous cross-chain bridge commands where the destination token
+ * form differs from the source (ETH→WETH or WETH→ETH). These set
+ * shouldUnwrapOnDestination deterministically so the LLM can't get it wrong.
+ *
+ * "bridge 0.1 eth to weth from ethereum to arbitrum"
+ * "transfer 0.5 weth to eth from arbitrum to base"
+ */
+function tryFastPathBridge(msg: string): FastPathResult | null {
+  const m = msg.trim();
+
+  // ETH (source native) → WETH (destination wrapped) — shouldUnwrapOnDestination=false
+  const ethToWeth = m.match(
+    /^(?:bridge|transfer|send|move)\s+([\d.,]+)\s+eth\s+(?:to|as)\s+weth\s+(?:from\s+(\w[\w\s]*?)\s+)?to\s+(\w[\w\s]*)$/i,
+  );
+  if (ethToWeth) {
+    const args: Record<string, unknown> = {
+      token: "WETH",
+      amount: ethToWeth[1].replace(/,/g, ""),
+      destinationChain: ethToWeth[3].trim(),
+      useNativeEth: true,
+      shouldUnwrapOnDestination: false,
+    };
+    if (ethToWeth[2]) args.sourceChain = ethToWeth[2].trim();
+    return { name: "crosschain_transfer", args };
+  }
+
+  // WETH (source wrapped) → ETH (destination native) — shouldUnwrapOnDestination=true
+  const wethToEth = m.match(
+    /^(?:bridge|transfer|send|move)\s+([\d.,]+)\s+weth\s+(?:to|as)\s+eth\s+(?:from\s+(\w[\w\s]*?)\s+)?to\s+(\w[\w\s]*)$/i,
+  );
+  if (wethToEth) {
+    const args: Record<string, unknown> = {
+      token: "WETH",
+      amount: wethToEth[1].replace(/,/g, ""),
+      destinationChain: wethToEth[3].trim(),
+      useNativeEth: false,
+      shouldUnwrapOnDestination: true,
+    };
+    if (wethToEth[2]) args.sourceChain = wethToEth[2].trim();
+    return { name: "crosschain_transfer", args };
+  }
+
+  return null;
+}
+
 function tryFastPathTwapCreate(msg: string): FastPathResult | null {
   const m = msg;
 
@@ -2272,14 +2271,11 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
     return { name: "build_vault_swap", args };
   }
 
-  // ── "unwrap <amount> [token]" ── wrapped-native → native (ETH/BNB/POL etc.)
-  // If user says "unwrap 0.1 ETH" or "unwrap 0.1 WETH" or "unwrap 0.1 BNB" →
-  // tokenIn = wrapped form (WETH/WBNB/WPOL), tokenOut = native (ETH/BNB/POL).
-  // Handler detects the pair by address and uses AUniswap.unwrapWETH9() directly.
-  const unwrapMatch = m.match(/^unwrap\s+([\d.,]+)\s*([a-z]+)?$/i);
+  // ── "unwrap <amount> [token] [to <token>]" ── wrapped-native → native
+  // Matches: "unwrap 0.1 weth", "unwrap 0.1 eth", "unwrap 0.1 weth to eth"
+  const unwrapMatch = m.match(/^unwrap\s+([\d.,]+)\s*([a-z]+)?(?:\s+to\s+[a-z]+)?$/i);
   if (unwrapMatch) {
     const sym = (unwrapMatch[2] || "ETH").toUpperCase();
-    // If user wrote the wrapped form (starts with W), strip W for the output; otherwise add W for input
     const tokenIn  = sym.startsWith("W") ? sym : `W${sym}`;
     const tokenOut = sym.startsWith("W") ? sym.slice(1) : sym;
     const args: Record<string, unknown> = { tokenIn, tokenOut, amountIn: unwrapMatch[1].replace(/,/g, "") };
@@ -2287,9 +2283,9 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
     return { name: "build_vault_swap", args };
   }
 
-  // ── "wrap <amount> [token]" ── native → wrapped-native
-  // Handler detects the pair by address and uses AUniswap.wrapETH() directly.
-  const wrapMatch = m.match(/^wrap\s+([\d.,]+)\s*([a-z]+)?$/i);
+  // ── "wrap <amount> [token] [to <token>]" ── native → wrapped-native
+  // Matches: "wrap 0.8 eth", "wrap 0.8 eth to weth", "wrap 0.8 weth to eth" (user confusion)
+  const wrapMatch = m.match(/^wrap\s+([\d.,]+)\s*([a-z]+)?(?:\s+to\s+[a-z]+)?$/i);
   if (wrapMatch) {
     const sym = (wrapMatch[2] || "ETH").toUpperCase();
     const tokenIn  = sym.startsWith("W") ? sym.slice(1) : sym;

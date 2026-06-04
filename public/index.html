@@ -1754,13 +1754,7 @@
         tr.textContent = extras.toolResult;
         div.appendChild(tr);
       }
-      if (extras?.modelsUsed?.length) {
-        const mt = document.createElement('div');
-        mt.className = 'model-trace';
-        const finalPart = extras.finalModel ? ` | final: ${extras.finalModel}` : '';
-        mt.textContent = `model trace: ${extras.modelsUsed.join(' -> ')}${finalPart}`;
-        div.appendChild(mt);
-      }
+      // model trace intentionally not shown to users
       if (extras?.suggestions?.length) {
         const chips = document.createElement('div');
         chips.className = 'suggestions';
