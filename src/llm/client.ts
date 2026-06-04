@@ -2260,26 +2260,29 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
     return { name: "build_vault_swap", args };
   }
 
-  // ── "unwrap <amount> [weth|eth]" ── WETH → ETH (always, regardless of how user names it)
-  const unwrapMatch = m.match(/^unwrap\s+([\d.,]+)\s*(weth|eth)?$/i);
+  // ── "unwrap <amount> [token]" ── wrapped-native → native (ETH/BNB/POL etc.)
+  // If user says "unwrap 0.1 ETH" or "unwrap 0.1 WETH" or "unwrap 0.1 BNB" →
+  // tokenIn = wrapped form (WETH/WBNB/WPOL), tokenOut = native (ETH/BNB/POL).
+  // Handler detects the pair by address and uses AUniswap.unwrapWETH9() directly.
+  const unwrapMatch = m.match(/^unwrap\s+([\d.,]+)\s*([a-z]+)?$/i);
   if (unwrapMatch) {
-    const args: Record<string, unknown> = {
-      tokenIn: "WETH",
-      tokenOut: "ETH",
-      amountIn: unwrapMatch[1].replace(/,/g, ""),
-    };
+    const sym = (unwrapMatch[2] || "ETH").toUpperCase();
+    // If user wrote the wrapped form (starts with W), strip W for the output; otherwise add W for input
+    const tokenIn  = sym.startsWith("W") ? sym : `W${sym}`;
+    const tokenOut = sym.startsWith("W") ? sym.slice(1) : sym;
+    const args: Record<string, unknown> = { tokenIn, tokenOut, amountIn: unwrapMatch[1].replace(/,/g, "") };
     if (chain) args.chain = chain;
     return { name: "build_vault_swap", args };
   }
 
-  // ── "wrap <amount> [eth|weth]" ── ETH → WETH
-  const wrapMatch = m.match(/^wrap\s+([\d.,]+)\s*(eth|weth)?$/i);
+  // ── "wrap <amount> [token]" ── native → wrapped-native
+  // Handler detects the pair by address and uses AUniswap.wrapETH() directly.
+  const wrapMatch = m.match(/^wrap\s+([\d.,]+)\s*([a-z]+)?$/i);
   if (wrapMatch) {
-    const args: Record<string, unknown> = {
-      tokenIn: "ETH",
-      tokenOut: "WETH",
-      amountIn: wrapMatch[1].replace(/,/g, ""),
-    };
+    const sym = (wrapMatch[2] || "ETH").toUpperCase();
+    const tokenIn  = sym.startsWith("W") ? sym.slice(1) : sym;
+    const tokenOut = sym.startsWith("W") ? sym : `W${sym}`;
+    const args: Record<string, unknown> = { tokenIn, tokenOut, amountIn: wrapMatch[1].replace(/,/g, "") };
     if (chain) args.chain = chain;
     return { name: "build_vault_swap", args };
   }

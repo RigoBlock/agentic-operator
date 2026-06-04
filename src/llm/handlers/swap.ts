@@ -13,13 +13,20 @@ import {
 } from "../../services/uniswapTrading.js";
 import { getZeroXQuote, formatZeroXQuoteForDisplay } from "../../services/zeroXTrading.js";
 import { getVaultTokenBalance, encodeVaultExecute } from "../../services/vault.js";
-import { resolveTokenAddress } from "../../config.js";
-import { decodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
+import { resolveTokenAddress, getWrappedNativeAddress, getNativeTokenSymbol } from "../../config.js";
+import { encodeFunctionData, decodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import {
   estimateGas, preCheckNavImpact, resolveChainName, resolveSlippage, runSwapShield, switchChainIfNeeded,
 } from "../client.js";
 import { enrichQuoteWithOracle } from "../../services/quoteEnrichment.js";
+
+const AUNISWAP_ABI = [
+  { name: "wrapETH",     type: "function", stateMutability: "nonpayable", inputs: [{ name: "value",         type: "uint256" }], outputs: [] },
+  { name: "unwrapWETH9", type: "function", stateMutability: "nonpayable", inputs: [{ name: "amountMinimum", type: "uint256" }], outputs: [] },
+] as const;
+
+const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 
 /** Format a raw wei amount to a human-readable decimal string (6 places). */
 function formatRawAmount(amount: string, decimals: number): string {
@@ -127,6 +134,59 @@ export async function handle_build_vault_swap(
     } catch (err) {
       // Re-throw balance errors; swallow resolution errors (let DEX handle)
       if (err instanceof Error && err.message.includes("Insufficient")) throw err;
+    }
+  }
+
+  // ── Wrap / Unwrap — direct AUniswap adapter call ──────────────────
+  // wrapETH / unwrapWETH9 are exposed directly on the vault via the AUniswap
+  // adapter. DO NOT route through DEX APIs: Universal Router execute() is NOT
+  // whitelisted for wrap/unwrap and reverts with PoolMethodNotAllowed (0x1f62c4e2).
+  {
+    const wrappedNative = getWrappedNativeAddress(ctx.chainId);
+    if (wrappedNative) {
+      const sellAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn).catch(() => null);
+      const buyAddr  = await resolveTokenAddress(ctx.chainId, intent.tokenOut).catch(() => null);
+      const nativeSym = getNativeTokenSymbol(ctx.chainId);
+
+      const isWrap   = sellAddr?.toLowerCase() === ZERO_ADDR && buyAddr?.toLowerCase() === wrappedNative.toLowerCase();
+      const isUnwrap = sellAddr?.toLowerCase() === wrappedNative.toLowerCase() && buyAddr?.toLowerCase() === ZERO_ADDR;
+
+      if (isWrap || isUnwrap) {
+        if (!intent.amountIn) throw new Error(`Amount required for ${isWrap ? "wrap" : "unwrap"}.`);
+        const amountRaw = parseUnits(intent.amountIn, 18);
+        const calldata = isWrap
+          ? encodeFunctionData({ abi: AUNISWAP_ABI, functionName: "wrapETH",     args: [amountRaw] })
+          : encodeFunctionData({ abi: AUNISWAP_ABI, functionName: "unwrapWETH9", args: [amountRaw] });
+
+        const gas = await estimateGas(
+          ctx.chainId, ctx.vaultAddress as Address,
+          calldata, "0x0",
+          ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
+        );
+
+        const wrappedSym = `W${nativeSym}`;
+        const [fromSym, toSym] = isWrap ? [nativeSym, wrappedSym] : [wrappedSym, nativeSym];
+        const transaction: UnsignedTransaction = {
+          to: ctx.vaultAddress as Address,
+          data: calldata,
+          value: "0x0",
+          chainId: ctx.chainId,
+          gas,
+          description: `${isWrap ? "Wrap" : "Unwrap"} ${intent.amountIn} ${fromSym} → ${toSym}`,
+        };
+
+        let message = [
+          `✅ ${isWrap ? "Wrap" : "Unwrap"} ready`,
+          `${isWrap ? "Deposit" : "Withdraw"}: ${intent.amountIn} ${fromSym} → ${intent.amountIn} ${toSym} (1:1)`,
+          `Chain: ${chainName}`,
+          `Gas limit: ${parseInt(gas, 16)}`,
+        ].join("\n");
+
+        const navWarn = await preCheckNavImpact(env, ctx, transaction);
+        if (navWarn) message += '\n' + navWarn;
+
+        return { message, transaction, chainSwitch: chainSwitched };
+      }
     }
   }
 
