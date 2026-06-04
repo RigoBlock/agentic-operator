@@ -15,7 +15,7 @@ export const TOOL_DEFINITIONS = [
       name: "get_swap_quote",
       description:
         "Get a price-only quote WITHOUT building a transaction. Use ONLY when the user explicitly asks for a price or quote without wanting to execute. " +
-        "For actual swap requests (buy/sell/swap), use build_vault_swap instead.",
+        "For actual conversions (swap/buy/sell/wrap/unwrap), use build_vault_swap instead.",
       parameters: {
         type: "object",
         properties: {
@@ -58,9 +58,10 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "build_vault_swap",
       description:
-        "Build an unsigned swap transaction for the operator to sign. Call this DIRECTLY when the user wants to swap/buy/sell tokens. " +
-        "Internally fetches a quote and builds the transaction in one step. " +
-        "The frontend will show a confirmation modal with the quote details. " +
+        "Build an unsigned token conversion transaction for the operator to sign. " +
+        "Handles ALL token conversions: swap/buy/sell, wrap ETH→WETH, unwrap WETH→ETH. " +
+        "Call this DIRECTLY — it fetches a quote and builds the transaction in one step. " +
+        "The frontend shows a confirmation modal with the full quote details. " +
         "If the user mentions a target chain, include the chain parameter — do NOT call switch_chain separately.",
       parameters: {
         type: "object",
@@ -1365,8 +1366,14 @@ GMX PERPETUALS:
 - claimFundingFees: use gmx_claim_funding_fees to claim accumulated funding.
 - Available markets: use gmx_get_markets to see what's tradeable.
 
+WRAP / UNWRAP:
+"wrap ETH" or "wrap N ETH" → build_vault_swap(tokenIn="ETH", tokenOut="WETH", amountIn="N")
+"unwrap WETH" or "unwrap N WETH" → build_vault_swap(tokenIn="WETH", tokenOut="ETH", amountIn="N")
+These are 1:1 conversions routed through the Uniswap Universal Router WRAP/UNWRAP commands.
+Use build_vault_swap — NOT a bridge, NOT a custom tool.
+
 ONE-STEP FLOW:
-When the user wants to swap, buy, or sell tokens, call build_vault_swap DIRECTLY.
+When the user wants to swap, buy, sell, wrap, or unwrap tokens, call build_vault_swap DIRECTLY.
 Do NOT call get_swap_quote first. The build tool fetches the quote internally and
 the frontend shows a confirmation modal with full details.
 Only use get_swap_quote if the user explicitly asks for a price check without executing.
