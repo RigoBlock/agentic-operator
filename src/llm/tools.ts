@@ -549,7 +549,10 @@ export const TOOL_DEFINITIONS = [
           },
           shouldUnwrapOnDestination: {
             type: "boolean",
-            description: "If true, unwrap WETH to native token on the destination chain. Default: false (receive WETH).",
+            description: "Controls destination token form for ETH/WETH bridges. " +
+              "OMIT for same-token default (ETH→ETH, WETH→WETH). " +
+              "Set false when user explicitly wants WETH on destination with ETH on source (e.g., 'bridge ETH to WETH'). " +
+              "Set true when user explicitly wants ETH on destination with WETH on source (e.g., 'bridge WETH to ETH').",
           },
         },
         required: ["destinationChain", "token", "amount"],

@@ -29,7 +29,11 @@ export async function handle_crosschain_transfer(
   const tokenSymbol = args.token as string;
   const amount = args.amount as string;
   const useNativeEth = args.useNativeEth === true || args.useNativeEth === "true";
-  const shouldUnwrapOnDestination = args.shouldUnwrapOnDestination === true || args.shouldUnwrapOnDestination === "true";
+  // Default: same token on both sides (ETH→ETH when useNativeEth, WETH→WETH otherwise).
+  // LLM overrides explicitly for cross-form requests: ETH→WETH (false) or WETH→ETH (true).
+  const shouldUnwrapOnDestination = args.shouldUnwrapOnDestination !== undefined
+    ? (args.shouldUnwrapOnDestination === true || args.shouldUnwrapOnDestination === "true")
+    : useNativeEth;
 
   if (!destChainArg || !tokenSymbol || !amount) {
     throw new Error("destinationChain, token, and amount are all required.");
@@ -57,9 +61,7 @@ export async function handle_crosschain_transfer(
     tokenSymbol,
     amount,
     useNativeEth,
-    // If vault wraps native ETH→WETH for bridging, unwrap on destination too.
-    // If user is sending actual WETH tokens, they want WETH on destination.
-    shouldUnwrapOnDestination: shouldUnwrapOnDestination || useNativeEth,
+    shouldUnwrapOnDestination,
     alchemyKey: env.ALCHEMY_API_KEY,
     operatorAddress: ctx.operatorAddress,
   });

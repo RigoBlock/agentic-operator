@@ -59,6 +59,7 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "set_swap_shield_tolerance": handle_set_swap_shield_tolerance,
   "enable_swap_shield": handle_enable_swap_shield,
   "refresh_oracle_feed": handle_refresh_oracle_feed,
+  "gmx_open_position": handle_gmx_increase_position,
   "gmx_increase_position": handle_gmx_increase_position,
   "gmx_close_position": handle_gmx_close_position,
   "gmx_get_positions": handle_gmx_get_positions,

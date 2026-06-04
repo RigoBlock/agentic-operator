@@ -1586,6 +1586,9 @@ export async function executeToolCall(
 
   const handler = TOOL_HANDLER_REGISTRY[resolvedName];
   if (!handler) {
+    const { handleSkillToolCall } = await import("../skills/index.js");
+    const skillResult = await handleSkillToolCall(resolvedName, args, env, ctx);
+    if (skillResult) return skillResult as ToolResult;
     throw new Error(`Unknown tool: ${name}`);
   }
   return await handler(env, ctx, args, resolvedName);
