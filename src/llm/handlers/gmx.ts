@@ -12,6 +12,7 @@ import { getVaultTokenBalance } from "../../services/vault.js";
 import { parseUnits, formatUnits, type Address, type Hex } from "viem";
 import {
   findGmxMarket, getGmxMarkets, getGmxTickers, getGmxTokenPrice,
+  getGmxExecutionPrice,
   resolveGmxCollateral, getGmxTokenDecimals, warmTokenDecimalsCache, warmDecimalsForAddresses,
   buildCreateIncreaseOrderCalldata, buildCreateDecreaseOrderCalldata,
   buildUpdateOrderCalldata, buildCancelOrderCalldata, buildClaimFundingFeesCalldata,
@@ -209,6 +210,30 @@ export async function handle_gmx_increase_position(
     // RPC failure — proceed, on-chain execution will validate
   }
 
+  // Get realistic execution price including OI-imbalance price impact.
+  // GMX v2 is oracle-based: executionPrice = oraclePrice ± priceImpact.
+  // We use this both for user display and to compute a more accurate acceptablePrice.
+  const execResult = await getGmxExecutionPrice(market, sizeDeltaUsd, isLong, env.ALCHEMY_API_KEY);
+  const executionPrice = execResult.executionPrice;
+  const priceImpactUsd = execResult.priceImpactUsd;
+
+  const oraclePrice = indexTokenPrice.mid;
+
+  // Acceptable price: use the worse of oracleMid and executionPrice as the basis,
+  // then add the 1% slippage buffer. This ensures the bound is never tighter than
+  // the oracle-based bound, but widens when the execution price is already worse
+  // due to adverse OI imbalance.
+  // Longs:  max(oracle, execution) * 1.01   (higher = more lenient max)
+  // Shorts: min(oracle, execution) * 0.99   (lower  = more lenient min)
+  let acceptablePriceUsd: string;
+  if (isLong) {
+    const basis = Math.max(oraclePrice, executionPrice);
+    acceptablePriceUsd = (basis * 1.01).toFixed(4);
+  } else {
+    const basis = Math.min(oraclePrice, executionPrice);
+    acceptablePriceUsd = (basis * 0.99).toFixed(4);
+  }
+
   const calldata = buildCreateIncreaseOrderCalldata({
     market: market.marketToken as Address,
     collateralToken: collateralAddr,
@@ -216,7 +241,8 @@ export async function handle_gmx_increase_position(
     collateralDecimals,
     sizeDeltaUsd,
     isLong,
-    indexTokenPriceUsd: indexTokenPrice.mid.toString(),
+    indexTokenPriceUsd: oraclePrice.toString(),
+    acceptablePriceUsd,
   });
 
   const leverage = args.leverage || (parseFloat(sizeDeltaUsd) / (parseFloat(collateralAmount) * collateralPrice.mid)).toFixed(1);
@@ -237,16 +263,23 @@ export async function handle_gmx_increase_position(
     description: `[GMX] ${isLong ? "Long" : "Short"} ${marketSymbol} ${leverage}x — ${collateralAmount} ${collateralSymbol} collateral (~$${collateralValueUsdDisplay}), $${sizeDeltaUsd} size`,
   };
 
+  const priceImpactLabel = priceImpactUsd >= 0 ? "🟢 Favorable" : "🔴 Adverse";
+  const priceImpactDisplay = Math.abs(priceImpactUsd).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const acceptableLabel = isLong ? "max" : "min";
+
   const message = [
     `✅ GMX ${toolName === "gmx_increase_position" ? "Increase" : "Open"} Position ready`,
     `Direction: ${isLong ? "🟢 LONG" : "🔴 SHORT"} ${marketSymbol}/USD`,
+    `Oracle price: $${oraclePrice.toFixed(4)}`,
+    `Execution price: $${executionPrice.toFixed(4)} (${priceImpactLabel} $${priceImpactDisplay})`,
+    `Acceptable ${acceptableLabel}: $${acceptablePriceUsd} (1% bound)`,
     `Size (notional): $${parseFloat(sizeDeltaUsd).toLocaleString()}`,
     `Collateral: ${collateralAmount} ${collateralSymbol} (~$${collateralValueUsdDisplay})`,
     `Leverage: ~${leverage}x`,
     `Market: ${market.marketToken}`,
     `Chain: Arbitrum`,
     ``,
-    `💡 Collateral is the amount deposited into the position. Size is the leveraged notional exposure.`,
+    `💡 GMX executes at the oracle price when the keeper picks up the order. The acceptable price is the worst-case execution bound.`,
     ...(cappedNote ? [cappedNote] : []),
     ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
   ].join("\n");

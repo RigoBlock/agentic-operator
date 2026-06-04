@@ -135,6 +135,8 @@ describe("execution validation invariants", () => {
       "0x13b4312f": "createIncreaseOrder(...)",                // GMX
       "0xdd5baad2": "updateOrder(...)",                        // GMX
       "0x770d096f": "depositV3(...)",                          // Across bridge
+      "0x1c58db4f": "wrapETH()",                                // AUniswap wrap native
+      "0x49616997": "unwrapWETH9(uint256)",                     // AUniswap unwrap native
       "0xa694fc3a": "stake(uint256)",                          // GRG staking
       "0x4aace835": "undelegateStake(uint256)",                // GRG staking
       "0x2e17de78": "unstake(uint256)",                        // GRG staking

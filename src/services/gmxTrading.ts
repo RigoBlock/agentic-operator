@@ -20,11 +20,13 @@
 import {
   encodeFunctionData,
   parseUnits,
+  readContract,
   type Address,
   type Hex,
 } from "viem";
 import {
   RIGOBLOCK_GMX_ABI,
+  GMX_READER_ABI,
   GMX_API_URL,
   GMX_ADDRESSES,
   GmxOrderType,
@@ -260,6 +262,95 @@ export async function getGmxTokenPrice(
   const min = Number(BigInt(ticker.minPrice)) / divisor;
   const max = Number(BigInt(ticker.maxPrice)) / divisor;
   return { min, max, mid: (min + max) / 2 };
+}
+
+/**
+ * Get the GMX v2 execution price for a position increase, including OI-imbalance
+ * price impact. Returns the realistic fill price (not just oracle mid).
+ *
+ * GMX v2 is oracle-based, not vAMM. Price impact comes from open-interest
+ * imbalance: `(initialDiff^exponent * factor) - (nextDiff^exponent * factor)`.
+ *
+ * @param market - GMX market info (marketToken, indexToken, longToken, shortToken)
+ * @param sizeDeltaUsd - Position size delta in USD (human-readable, e.g. "5000")
+ * @param isLong - true for long, false for short
+ * @param alchemyKey - Alchemy API key for RPC
+ * @returns executionPrice (human-readable USD), priceImpactUsd (human-readable USD), and raw result fields
+ */
+export async function getGmxExecutionPrice(
+  market: GmxMarketInfo,
+  sizeDeltaUsd: string,
+  isLong: boolean,
+  alchemyKey: string,
+): Promise<{
+  executionPrice: number;
+  priceImpactUsd: number;
+  balanceWasImproved: boolean;
+  raw: {
+    priceImpactUsd: bigint;
+    executionPrice: bigint;
+    balanceWasImproved: boolean;
+    proportionalPendingImpactUsd: bigint;
+    totalImpactUsd: bigint;
+    priceImpactDiffUsd: bigint;
+  };
+}> {
+  const tickers = await getGmxTickers();
+
+  const getRaw = (addr: string) => {
+    const t = tickers.find((x) => x.tokenAddress.toLowerCase() === addr.toLowerCase());
+    if (!t) throw new Error(`No GMX ticker for ${addr}`);
+    return { min: BigInt(t.minPrice), max: BigInt(t.maxPrice) };
+  };
+
+  const indexRaw = getRaw(market.indexToken);
+  const longRaw = getRaw(market.longToken);
+  const shortRaw = getRaw(market.shortToken);
+
+  const sizeRaw = parseUnits(sizeDeltaUsd, USD_DECIMALS);
+
+  const client = getClient(ARBITRUM_CHAIN_ID, alchemyKey);
+
+  const result = await readContract(client, {
+    address: GMX_ADDRESSES.READER,
+    abi: GMX_READER_ABI,
+    functionName: "getExecutionPrice",
+    args: [
+      GMX_ADDRESSES.DATA_STORE,
+      market.marketToken as Address,
+      {
+        indexTokenPrice: { min: indexRaw.min, max: indexRaw.max },
+        longTokenPrice: { min: longRaw.min, max: longRaw.max },
+        shortTokenPrice: { min: shortRaw.min, max: shortRaw.max },
+      },
+      0n,           // positionSizeInUsd — 0 for new position
+      0n,           // positionSizeInTokens — 0 for new position
+      sizeRaw,      // sizeDeltaUsd (positive = increase)
+      0n,           // pendingImpactAmount — 0 for new position
+      isLong,
+    ],
+  });
+
+  const [priceImpactUsdRaw, executionPriceRaw, balanceWasImproved] = result;
+
+  const indexDecimals = getGmxTokenDecimals(market.indexToken);
+  const priceDivisor = 10 ** (30 - indexDecimals);
+  const executionPrice = Number(executionPriceRaw) / priceDivisor;
+  const priceImpactUsd = Number(priceImpactUsdRaw) / 10 ** 30;
+
+  return {
+    executionPrice,
+    priceImpactUsd,
+    balanceWasImproved,
+    raw: {
+      priceImpactUsd: priceImpactUsdRaw,
+      executionPrice: executionPriceRaw,
+      balanceWasImproved,
+      proportionalPendingImpactUsd: result[3],
+      totalImpactUsd: result[4],
+      priceImpactDiffUsd: result[5],
+    },
+  };
 }
 
 /**

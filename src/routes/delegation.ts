@@ -32,6 +32,7 @@ import {
   prepareRevocation,
 } from "../services/delegation.js";
 import { getAgentWalletInfo, syncAgentWallet, deleteAgentWallet } from "../services/agentWallet.js";
+import { SUPPORTED_CHAINS } from "../config.js";
 import { checkAgentBalance, checkPendingTxStatus, executeViaDelegation, ExecutionError } from "../services/execution.js";
 import { sanitizeError } from "../config.js";
 import { getTelegramUser, getTelegramUserIdByAddress } from "../services/telegramPairing.js";
@@ -259,15 +260,18 @@ delegation.post("/revoke", async (c) => {
 });
 
 /**
- * GET /api/delegation/status?vaultAddress=0x…&chainId=42161&verify=true
+ * GET /api/delegation/status?vaultAddress=0x…&chainId=42161&verify=true&allChains=true
  *
  * Check delegation status for a vault.
  * If verify=true, also checks on-chain via getDelegatedSelectors.
+ * If allChains=true, checks on-chain status for ALL supported chains and returns
+ * a per-chain breakdown so the UI can show which chains need updates.
  */
 delegation.get("/status", async (c) => {
   const vaultAddress = c.req.query("vaultAddress");
   const chainId = Number(c.req.query("chainId") || "0");
   const verifyOnChain = c.req.query("verify") === "true";
+  const allChains = c.req.query("allChains") === "true";
 
   if (!vaultAddress) {
     return c.json({ error: "vaultAddress query param required" }, 400);
@@ -275,10 +279,10 @@ delegation.get("/status", async (c) => {
 
   const config = await getDelegationConfig(c.env.KV, vaultAddress);
 
-  // When verify=true, sync the agent wallet address with CDP to detect credential
-  // rotation early — the status page is the first place the user notices a mismatch.
-  // Falls back to KV-only read if CDP is unreachable.
-  const syncResult = verifyOnChain
+  // When verify=true OR allChains=true, sync the agent wallet address with CDP
+  // to detect credential rotation early.
+  const needSync = verifyOnChain || allChains;
+  const syncResult = needSync
     ? await syncAgentWallet(c.env.KV, vaultAddress, c.env)
     : await getAgentWalletInfo(c.env.KV, vaultAddress);
 
@@ -293,7 +297,7 @@ delegation.get("/status", async (c) => {
   const activeChains = config ? getActiveChains(config) : [];
   const chainDelegation = chainId ? config?.chains?.[String(chainId)] : undefined;
 
-  // Optional on-chain verification (uses the now-synced wallet address)
+  // Optional on-chain verification for the requested chain
   let onChainStatus = null;
   if (verifyOnChain && walletInfo?.address && chainId && vaultAddress) {
     try {
@@ -307,6 +311,37 @@ delegation.get("/status", async (c) => {
       );
     } catch (err) {
       console.warn("[delegation/status] On-chain check failed:", err);
+    }
+  }
+
+  // allChains=true: check EVERY supported mainnet chain in parallel
+  let allChainsStatus: Record<string, { delegatedCount: number; missingCount: number; allDelegated: boolean }> | null = null;
+  if (allChains && walletInfo?.address && vaultAddress) {
+    const selectors = buildDefaultSelectors();
+    const mainnetChainIds = SUPPORTED_CHAINS.map((c) => c.id);
+    const results = await Promise.allSettled(
+      mainnetChainIds.map(async (cid) => {
+        const status = await checkDelegationOnChain(
+          cid,
+          vaultAddress as Address,
+          walletInfo.address,
+          selectors,
+          c.env.ALCHEMY_API_KEY,
+        );
+        return {
+          chainId: cid,
+          delegatedCount: status.delegatedSelectors.length,
+          missingCount: status.undelegatedSelectors.length,
+          allDelegated: status.allDelegated,
+        };
+      }),
+    );
+    allChainsStatus = {};
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        const { chainId: cid, delegatedCount, missingCount, allDelegated } = r.value;
+        allChainsStatus[String(cid)] = { delegatedCount, missingCount, allDelegated };
+      }
     }
   }
 
@@ -330,6 +365,7 @@ delegation.get("/status", async (c) => {
           delegateTxHash: chainDelegation.delegateTxHash,
         }
       : null,
+    allChainsStatus,
     // Wallet change fields — non-null only when CDP credential rotation detected
     walletChanged: walletChanged || false,
     previousAgentAddress: previousAgentAddress ?? null,

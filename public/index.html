@@ -1917,10 +1917,10 @@
 
       // Auth is handled via cached wallet signature headers (X-Auth-*); no session token is used.
 
-      // 2-minute timeout — matches the Worker cpu_ms limit
+      // 3-minute timeout — GMX and complex multi-RPC operations need more headroom
       const controller = new AbortController();
       let userStopped = false;
-      const timeoutId = setTimeout(() => controller.abort(), 120000);
+      const timeoutId = setTimeout(() => controller.abort(), 180000);
       enterStoppingMode(controller, () => { userStopped = true; controller.abort(); });
 
       try {
@@ -2176,10 +2176,30 @@
           await handleChatResponse(data);
         }
       } catch (err) {
+        // Persist any reasoning/thinking blocks BEFORE removing typingEl
+        // so the user can inspect what the agent was doing when it timed out.
+        const persistBlocks = typingEl.querySelectorAll('.reasoning-block, .plan-block, .tool-error-block');
+        if (persistBlocks.length > 0) {
+          const thinkingMsg = document.createElement('div');
+          thinkingMsg.className = 'msg assistant thinking-trace';
+          const thinkingContent = document.createElement('div');
+          thinkingContent.className = 'msg-content';
+          thinkingContent.style.cssText = 'opacity:0.85;font-size:0.9em;';
+          for (const block of persistBlocks) {
+            if (block.classList.contains('reasoning-block')) {
+              const text = block.querySelector('.reasoning-content')?.textContent || block.textContent || '';
+              thinkingContent.appendChild(makeReasoningBlock(text, false));
+            } else {
+              thinkingContent.appendChild(block.cloneNode(true));
+            }
+          }
+          thinkingMsg.appendChild(thinkingContent);
+          chatEl.appendChild(thinkingMsg);
+        }
         typingEl.remove();
         if (err.name === 'AbortError') {
           if (!userStopped) {
-            appendMessage('system', 'Request timed out after 2 minutes. The agent may be overloaded — please try again.');
+            appendMessage('system', 'Request timed out after 3 minutes. The agent may be overloaded — please try again.');
           }
           // User-initiated stop: just restore state silently
         } else {
@@ -2723,7 +2743,7 @@
             const actionsDiv = document.createElement('div');
             actionsDiv.className = 'confirm-actions';
             const updateBtn = err.code === 'AGENT_NOT_DELEGATED'
-              ? `<button class="btn-agent-exec approve" style="background:var(--accent);" onclick="openDelegationSetup();this.closest('.msg').remove()">Update Delegation</button>`
+              ? `<button class="btn-agent-exec approve" style="background:var(--accent);" onclick="openDelegationSetup(${tx.chainId});this.closest('.msg').remove()">Update Delegation</button>`
               : '';
             actionsDiv.innerHTML = updateBtn +
               `<button class="btn-agent-exec approve" onclick="signManualTxCard(this)">Sign with Wallet</button>
@@ -3345,6 +3365,27 @@
     /* ================================================================
        Delegation Status & Management
        ================================================================ */
+
+    /**
+     * Fetch on-chain delegation status for ALL supported chains.
+     * Caches the result in delegationState.allChainsStatus for the modal.
+     */
+    async function fetchAllDelegationStatuses(vault) {
+      try {
+        const res = await fetch(`/api/delegation/status?vaultAddress=${vault}&allChains=true`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        // Merge allChainsStatus into the existing delegationState
+        if (delegationState && data.allChainsStatus) {
+          delegationState.allChainsStatus = data.allChainsStatus;
+        }
+        return data.allChainsStatus;
+      } catch (err) {
+        console.warn('[Delegation] Failed to fetch all-chain status:', err);
+        return null;
+      }
+    }
+
     async function refreshDelegationStatus() {
       const vault = vaultInput.value.trim();
       if (!vault || vault.length !== 42) {
@@ -3427,7 +3468,7 @@
           hint.style.display = 'flex';
           hintText.innerHTML = '<strong>Agent not enabled on this chain</strong> — Delegate for the best experience';
           hintBtn.textContent = 'Delegate';
-          hintBtn.onclick = openDelegationSetup;
+          hintBtn.onclick = () => openDelegationSetup(currentChainId);
         }
       }
     }
@@ -3486,17 +3527,36 @@
           statusText.textContent = 'Active';
         }
 
-        // Setup button: shown when not on current chain, or selectors are missing
+        // Compute total missing selectors across ALL chains (if allChainsStatus is available)
+        let totalMissingAcrossAllChains = missingCount;
+        let anyChainNeedsSetup = !isOnChain;
+        if (state.allChainsStatus) {
+          for (const cid of Object.keys(state.allChainsStatus)) {
+            const cs = state.allChainsStatus[cid];
+            if (cs.missingCount > 0) {
+              anyChainNeedsSetup = true;
+              totalMissingAcrossAllChains += cs.missingCount;
+            }
+          }
+        }
+
+        // Setup button: shown when current chain needs setup OR any chain has missing selectors.
+        // If we haven't fetched allChainsStatus yet, always show the button so the user can
+        // open the modal and check other chains.
         if (!isOnChain) {
           setupBtn.style.display = '';
           setupBtn.textContent = 'Delegate';
-          setupBtn.title = 'Set up delegation on additional chains';
-          setupBtn.onclick = () => openDelegationSetup();
-        } else if (missingCount > 0) {
+          setupBtn.title = 'Set up delegation on this chain';
+          setupBtn.onclick = () => openDelegationSetup(currentChainId);
+        } else if (anyChainNeedsSetup || !state.allChainsStatus) {
           setupBtn.style.display = '';
-          setupBtn.textContent = `Update (${missingCount} new)`;
-          setupBtn.title = `${missingCount} new function selector${missingCount > 1 ? 's are' : ' is'} available`;
-          setupBtn.onclick = () => openDelegationSetup();
+          // If current chain is complete but others need updates (or status unknown), show generic label
+          const label = missingCount > 0 ? `Update (${missingCount} new)` : 'Update Delegation';
+          setupBtn.textContent = label;
+          setupBtn.title = missingCount > 0
+            ? `${missingCount} new function selector${missingCount > 1 ? 's are' : ' is'} available`
+            : 'Check and update delegation across chains';
+          setupBtn.onclick = () => openDelegationSetup(currentChainId);
         } else {
           setupBtn.style.display = 'none';
         }
@@ -3780,7 +3840,12 @@
     /* ================================================================
        Delegation Setup Flow
        ================================================================ */
-    function openDelegationSetup() {
+    /**
+     * Open the delegation setup/update modal.
+     * Fetches all-chain status if not cached, then shows only chains that need action.
+     * @param targetChainId  When set, pre-checks that chain among the ones needing action.
+     */
+    async function openDelegationSetup(targetChainId) {
       if (!connectedAddress) {
         appendMessage('system', 'Connect your wallet first to set up delegation.');
         openWalletPicker();
@@ -3791,6 +3856,7 @@
         appendMessage('system', 'Enter a valid vault address first.');
         return;
       }
+
       // Reset modal state
       document.getElementById('delegation-agent-info').style.display = 'none';
       document.getElementById('delegation-setup-status').textContent = '';
@@ -3798,36 +3864,60 @@
       document.getElementById('delegation-chain-progress').innerHTML = '';
       const confirmBtn = document.getElementById('delegation-confirm-btn');
       confirmBtn.disabled = false;
-      confirmBtn.textContent = 'Set Up Agent';
-      confirmBtn.onclick = startDelegationSetup; // restore handler (overwritten on success)
+      confirmBtn.textContent = 'Update Delegation';
+      confirmBtn.onclick = startDelegationSetup;
 
-      // Populate chain selection.
-      // - Inactive chains: checked by default (new setup)
-      // - Active chains with missing selectors: checked, labelled "Update (N new)"
-      // - Active chains fully up to date: disabled with ✓
+      // Ensure we have all-chain status before opening the modal
+      if (!delegationState?.allChainsStatus) {
+        document.getElementById('delegation-setup-status').textContent = 'Checking delegation status across all chains…';
+        await fetchAllDelegationStatuses(vault);
+      }
+
+      const allChainsStatus = delegationState?.allChainsStatus || {};
       const activeSet = new Set(delegationState?.delegatedChains || []);
-      const missingCount = delegationState?.onChainStatus?.undelegatedSelectors?.length || 0;
+      // Current chain missing count from the most recent single-chain fetch
+      const currentMissing = delegationState?.onChainStatus?.undelegatedSelectors?.length || 0;
+
       const grid = document.getElementById('delegation-chain-checkboxes');
       if (grid) {
-        grid.innerHTML = MAINNET_CHAINS_LIST.map(function(c) {
-          const alreadyActive = activeSet.has(c.id);
-          const needsUpdate = alreadyActive && missingCount > 0;
-          const fullyDone = alreadyActive && !needsUpdate;
-          const label = fullyDone
-            ? c.name + ' ✓'
-            : needsUpdate
-              ? c.name + ' — Update (' + missingCount + ' new)'
-              : c.name;
-          return '<label class="chain-check-item' + (fullyDone ? ' already-active' : '') + '">' +
-            '<input type="checkbox" value="' + c.id + '"' +
-            (fullyDone ? ' disabled' : ' checked') + '>' +
-            label +
-            '</label>';
-        }).join('');
+        const items = [];
+        for (const c of MAINNET_CHAINS_LIST) {
+          const chainStatus = allChainsStatus[String(c.id)];
+          const hasOnChainData = !!chainStatus;
+          const isFullyDelegated = hasOnChainData ? chainStatus.allDelegated : activeSet.has(c.id);
+          const missingHere = hasOnChainData ? chainStatus.missingCount : (activeSet.has(c.id) ? 0 : 20);
+          const isTarget = c.id === targetChainId;
+
+          // HIDE chains where delegation is fully complete (all selectors on-chain)
+          if (isFullyDelegated && missingHere === 0) {
+            continue;
+          }
+
+          // Pre-check chains that need action:
+          //   - Target chain (if specified)
+          //   - Chains with missing selectors
+          //   - Inactive chains (fresh setup)
+          const checked = isTarget || missingHere > 0 || !activeSet.has(c.id);
+
+          let label = c.name;
+          if (missingHere > 0) {
+            label += ' — Update (' + missingHere + ' new)';
+          } else if (activeSet.has(c.id)) {
+            label += ' — Update';
+          }
+
+          items.push('<label class="chain-check-item' + (activeSet.has(c.id) ? ' already-active' : '') + '">' +
+            '<input type="checkbox" value="' + c.id + '"' + (checked ? ' checked' : '') + '>' +
+            label + '</label>');
+        }
+
+        if (items.length === 0) {
+          grid.innerHTML = '<p style="color:var(--success);margin:0;">✓ All chains are fully delegated. Nothing to update.</p>';
+          confirmBtn.disabled = true;
+        } else {
+          grid.innerHTML = items.join('');
+        }
       }
-      // Update the button label to reflect intent
-      document.getElementById('delegation-confirm-btn').textContent =
-        activeSet.size > 0 && missingCount > 0 ? 'Update Delegation' : 'Set Up Agent';
 
       document.getElementById('delegation-modal').classList.add('visible');
     }

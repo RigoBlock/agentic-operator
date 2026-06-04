@@ -317,6 +317,60 @@ export const GMX_READER_ABI = [
       },
     ],
   },
+
+  // getExecutionPrice(DataStore, address marketKey, MarketPrices, uint256 positionSizeInUsd, uint256 positionSizeInTokens, int256 sizeDeltaUsd, int256 pendingImpactAmount, bool isLong)
+  {
+    name: "getExecutionPrice",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "dataStore", type: "address" },
+      { name: "marketKey", type: "address" },
+      {
+        name: "prices",
+        type: "tuple",
+        components: [
+          {
+            name: "indexTokenPrice",
+            type: "tuple",
+            components: [
+              { name: "min", type: "uint256" },
+              { name: "max", type: "uint256" },
+            ],
+          },
+          {
+            name: "longTokenPrice",
+            type: "tuple",
+            components: [
+              { name: "min", type: "uint256" },
+              { name: "max", type: "uint256" },
+            ],
+          },
+          {
+            name: "shortTokenPrice",
+            type: "tuple",
+            components: [
+              { name: "min", type: "uint256" },
+              { name: "max", type: "uint256" },
+            ],
+          },
+        ],
+      },
+      { name: "positionSizeInUsd", type: "uint256" },
+      { name: "positionSizeInTokens", type: "uint256" },
+      { name: "sizeDeltaUsd", type: "int256" },
+      { name: "pendingImpactAmount", type: "int256" },
+      { name: "isLong", type: "bool" },
+    ],
+    outputs: [
+      { name: "priceImpactUsd", type: "int256" },
+      { name: "executionPrice", type: "uint256" },
+      { name: "balanceWasImproved", type: "bool" },
+      { name: "proportionalPendingImpactUsd", type: "int256" },
+      { name: "totalImpactUsd", type: "int256" },
+      { name: "priceImpactDiffUsd", type: "uint256" },
+    ],
+  },
 ] as const;
 
 // ── GMX Chainlink Price Feed Provider ABI ──

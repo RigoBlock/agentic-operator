@@ -273,20 +273,38 @@ INTENT PARSING — CRITICAL:
 
   gmx: `GMX PERPETUALS (Arbitrum only):
 - GMX is ONLY available on Arbitrum. If on another chain, auto-switch.
-- To open: gmx_open_position. Requires market (e.g. "ETH") and isLong.
-- To close: gmx_close_position. sizeDeltaUsd="all" closes the full position.
-- To increase: gmx_increase_position (same flow as open).
-- To view: gmx_get_positions. Shows dashboard with PnL, leverage, entry/mark prices.
-- To cancel: gmx_cancel_order with the orderKey from gmx_get_positions.
-- Stop-loss/take-profit: gmx_close_position with orderType="stop_loss"/"limit" and triggerPrice.
-- Default collateral: ALWAYS USDC unless user specifies otherwise.
+- When the user mentions "gmx", "perp", "perpetual", "long", "short", "leverage", or "position", ALWAYS use a GMX tool. NEVER use swap tools for these requests.
+
+TOOL SELECTION — CRITICAL:
+- OPEN a new position → gmx_open_position
+- INCREASE an existing position size or add collateral → gmx_increase_position
+- CLOSE a position fully or partially → gmx_close_position
+- VIEW open positions and pending orders → gmx_get_positions
+- CANCEL a pending order → gmx_cancel_order
+- UPDATE a limit/stop order → gmx_update_order
+- CLAIM funding fees → gmx_claim_funding_fees
+- LIST available markets → gmx_get_markets
+
+WHEN THE USER WANTS TO INCREASE A POSITION:
+Call gmx_increase_position directly. Do NOT call gmx_get_positions first unless the user asks to see their positions.
+Required: market (e.g. "ETH", "BTC", "LIT"), isLong (true/false).
+Use notionalUsd + leverage when the user says "increase by $1500" or "add $1500".
+Use collateralAmount + leverage when the user says "add 0.5 WETH collateral".
+Default collateral: USDC unless user specifies otherwise (e.g. "using WETH").
+
+WHEN INFORMATION IS MISSING:
+- If the user says "increase my LIT position" but does NOT specify long/short → ASK: "Is your LIT position long or short?"
+- If the user says "increase my position" but does NOT specify the market → ASK: "Which market's position would you like to increase?"
+- If the user says "close my position" but does NOT specify the market → ASK: "Which position would you like to close?"
+- If leverage is not specified and cannot be inferred, ask the user.
 
 NOTIONAL (USD) SYNTAX: "long 1000 ETHUSDC 5x" means notionalUsd=1000, leverage=5, collateral=200 USDC.
 COLLATERAL SYNTAX: "long ETH 5x with 0.5 ETH" means collateral 0.5 ETH, leverage 5x.
 
 GMX INTENT PARSING:
-- "long 1000 ETHUSDC 5x" → market="ETH", isLong=true, notionalUsd="1000", leverage="5"
-- "short BTC 10x with 5000 USDC" → market="BTC", isLong=false, collateralAmount="5000", leverage="10"
+- "increase my LIT long by 1500 usd 10x using weth" → gmx_increase_position: market="LIT", isLong=true, notionalUsd="1500", leverage="10", collateral="WETH"
+- "long 1000 ETHUSDC 5x" → gmx_open_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5"
+- "short BTC 10x with 5000 USDC" → gmx_open_position: market="BTC", isLong=false, collateralAmount="5000", leverage="10"
 - "close my ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all"
 - "set stop loss on ETH long at $3000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all", orderType="stop_loss", triggerPrice="3000"`,
 

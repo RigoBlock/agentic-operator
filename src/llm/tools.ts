@@ -151,40 +151,41 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "gmx_open_position",
       description:
-        "Open a new leveraged perpetual position on GMX v2 (Arbitrum only). " +
+        "Open a NEW leveraged perpetual position on GMX v2 (Arbitrum only). " +
+        "Use this when the user wants to open a position they do not already have. " +
         "Builds an unsigned createIncreaseOrder transaction. " +
         "If not on Arbitrum, auto-switches. The vault must have sufficient collateral. " +
-        "The adapter handles execution fees automatically. Default collateral is always USDC.",
+        "Default collateral is always USDC unless the user explicitly specifies another token.",
       parameters: {
         type: "object",
         properties: {
           market: {
             type: "string",
-            description: "Market to trade — index token symbol (e.g., 'ETH', 'BTC', 'ARB', 'SOL', 'LINK'). May include 'USD'/'USDC' suffix (e.g. 'ETHUSDC') — the suffix is ignored.",
+            description: "Market to trade — index token symbol (e.g., 'ETH', 'BTC', 'LIT', 'SOL', 'LINK'). Strip any 'USD'/'USDC'/'USDT' suffix (e.g. 'ETHUSDC' → 'ETH').",
           },
           collateral: {
             type: "string",
-            description: "Collateral token symbol (e.g., 'USDC', 'WETH', 'USDT'). Default: USDC for all positions.",
+            description: "Collateral token symbol (e.g., 'USDC', 'WETH', 'USDT'). Default: USDC.",
           },
           collateralAmount: {
             type: "string",
-            description: "Amount of collateral in human-readable units (e.g., '200' USDC). If notionalUsd and leverage are given instead, collateral = notionalUsd / leverage.",
+            description: "Amount of collateral in human-readable units (e.g., '200' USDC). Alternative to notionalUsd.",
           },
           notionalUsd: {
             type: "string",
-            description: "Notional position size in USD (e.g., '1000'). When used with leverage, collateral is derived as notionalUsd / leverage. Use when user says 'long 1000 ETHUSDC 5x'.",
+            description: "Notional position size in USD (e.g., '1500'). When used with leverage, collateral = notionalUsd / leverage. Preferred when user says 'long 1000 ETH 5x' or 'increase by $1500'.",
           },
           sizeDeltaUsd: {
             type: "string",
-            description: "Position size in USD (e.g., '5000' for $5,000 position). Determines leverage = sizeDeltaUsd / collateralValue.",
+            description: "Position size in USD. Alternative to notionalUsd.",
           },
           isLong: {
             type: "boolean",
-            description: "true for long (profit when price rises), false for short (profit when price falls)",
+            description: "true for long (profit when price rises), false for short (profit when price falls). REQUIRED — if the user does not specify, ask them.",
           },
           leverage: {
             type: "string",
-            description: "Desired leverage (e.g., '5' for 5x). If provided without sizeDeltaUsd, the system computes sizeDeltaUsd = collateralValue * leverage.",
+            description: "Desired leverage multiplier (e.g., '5' for 5x, '10' for 10x). If omitted, defaults to 2x.",
           },
         },
         required: ["market", "isLong"],
@@ -241,37 +242,42 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "gmx_increase_position",
       description:
-        "Increase an existing GMX v2 position size or add collateral. " +
-        "Same as gmx_open_position but intended for adding to existing positions.",
+        "Increase the size of an existing GMX v2 perpetual position or add collateral to it. " +
+        "Use this when the user already has an open position and wants to add to it (e.g. 'increase my LIT long by $1500'). " +
+        "Parameters are the same as gmx_open_position: either notionalUsd + leverage, or collateralAmount + leverage.",
       parameters: {
         type: "object",
         properties: {
           market: {
             type: "string",
-            description: "Market index token symbol (e.g., 'ETH', 'BTC')",
+            description: "Market index token symbol (e.g., 'ETH', 'BTC', 'LIT')",
           },
           collateral: {
             type: "string",
-            description: "Collateral token symbol",
+            description: "Collateral token symbol (e.g., 'WETH', 'USDC'). Default: USDC",
           },
           collateralAmount: {
             type: "string",
-            description: "Additional collateral amount to add",
+            description: "Additional collateral amount in human-readable units (e.g., '200' USDC). If notionalUsd is given instead, collateral is derived automatically.",
+          },
+          notionalUsd: {
+            type: "string",
+            description: "Additional notional position size in USD (e.g., '1500'). When used with leverage, collateral = notionalUsd / leverage. Preferred when user says 'increase by $1500'.",
           },
           sizeDeltaUsd: {
             type: "string",
-            description: "Additional position size in USD",
+            description: "Additional position size in USD (alternative to notionalUsd)",
           },
           isLong: {
             type: "boolean",
-            description: "true for long, false for short",
+            description: "true for long, false for short — must match the existing position",
           },
           leverage: {
             type: "string",
-            description: "Desired leverage for the additional size",
+            description: "Desired leverage multiplier (e.g., '10' for 10x). If omitted, existing position leverage is maintained.",
           },
         },
-        required: ["market", "collateralAmount", "isLong"],
+        required: ["market", "isLong"],
       },
     },
   },

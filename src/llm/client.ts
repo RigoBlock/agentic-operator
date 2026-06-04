@@ -2324,22 +2324,29 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
 function tryFastPathGmxIncrease(msg: string): FastPathResult | null {
   const m = msg.trim();
 
-  // "increase [by] N usd [MARKET] [Nx] position [using COLLATERAL]"
+  // "increase [by] N usd [long|short] [MARKET] [Nx] position [on gmx] [using COLLATERAL]"
+  // Word order is flexible — some users say "long LIT/USD", others say "LIT/USD long".
   const incMatch = m.match(
-    /^(?:increase|add)(?:\s+by)?\s+([\d.,]+)\s+(?:usd|usdc|usdt)?\s*([A-Z]{2,8})?(?:\/USD)?\s*(\d+(?:\.\d+)?x)?\s*(?:long|short)?\s*position(?:\s+.*)?$/i,
+    /^(?:increase|add)(?:\s+by)?\s+([\d.,]+)\s+(?:usd|usdc|usdt)?\b.*\bposition\b/i,
   );
   if (incMatch) {
     const args: Record<string, unknown> = {
       notionalUsd: incMatch[1].replace(/,/g, ""),
     };
-    if (incMatch[2]) args.market = incMatch[2].toUpperCase().replace(/USD[CT]?$/i, "");
-    if (incMatch[3]) args.leverage = incMatch[3].replace(/x$/i, "");
+
+    // Extract market symbol — look for a token symbol before or after direction
+    const marketMatch = m.match(/\b([A-Z]{2,8})(?:\/USD[CT]?)?\b/i);
+    if (marketMatch) args.market = marketMatch[1].toUpperCase();
+
+    // Extract leverage: "10x", "5.5x"
+    const leverageMatch = m.match(/(\d+(?:\.\d+)?)\s*x/);
+    if (leverageMatch) args.leverage = leverageMatch[1];
 
     // Extract collateral from "using WETH/ETH/USDC" suffix
     const collateralMatch = m.match(/using\s+(\w+)/i);
     if (collateralMatch) args.collateral = collateralMatch[1].toUpperCase();
 
-    // isLong defaults to true (increase is on existing position — keep same direction)
+    // Direction: default true (increase keeps existing position direction)
     args.isLong = true;
     const shortMatch = m.match(/\bshort\b/i);
     if (shortMatch) args.isLong = false;

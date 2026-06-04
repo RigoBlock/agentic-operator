@@ -133,8 +133,10 @@ export async function prepareDelegation(
   const walletResult = await createAgentWallet(env.KV, vaultAddress, env);
   const { walletChanged, previousAddress } = walletResult;
 
-  // 2. Build selector list — use only missing selectors for delta updates, all for fresh setup
-  const selectors = onlySelectors ?? buildDefaultSelectors();
+  // 2. Build selector list — use only missing selectors for delta updates, all for fresh setup.
+  //    CRITICAL: when the wallet changed, the new agent address has ZERO delegation on-chain.
+  //    We must delegate ALL selectors to the new wallet, not just a delta.
+  const selectors = (walletChanged || !onlySelectors) ? buildDefaultSelectors() : onlySelectors;
 
   // 3. Encode pool.updateDelegation(Delegation[]) for the NEW agent
   const delegations = selectors.map((selector) => ({
