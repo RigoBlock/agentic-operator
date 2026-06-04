@@ -2260,6 +2260,30 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
     return { name: "build_vault_swap", args };
   }
 
+  // ── "unwrap <amount> [weth|eth]" ── WETH → ETH (always, regardless of how user names it)
+  const unwrapMatch = m.match(/^unwrap\s+([\d.,]+)\s*(weth|eth)?$/i);
+  if (unwrapMatch) {
+    const args: Record<string, unknown> = {
+      tokenIn: "WETH",
+      tokenOut: "ETH",
+      amountIn: unwrapMatch[1].replace(/,/g, ""),
+    };
+    if (chain) args.chain = chain;
+    return { name: "build_vault_swap", args };
+  }
+
+  // ── "wrap <amount> [eth|weth]" ── ETH → WETH
+  const wrapMatch = m.match(/^wrap\s+([\d.,]+)\s*(eth|weth)?$/i);
+  if (wrapMatch) {
+    const args: Record<string, unknown> = {
+      tokenIn: "ETH",
+      tokenOut: "WETH",
+      amountIn: wrapMatch[1].replace(/,/g, ""),
+    };
+    if (chain) args.chain = chain;
+    return { name: "build_vault_swap", args };
+  }
+
   return null;
 }
 

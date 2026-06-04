@@ -222,6 +222,8 @@
     }
     #send:hover { background: #1a7aff; }
     #send:disabled { opacity: 0.4; cursor: not-allowed; }
+    #send.stopping { background: #dc2626; }
+    #send.stopping:hover { background: #b91c1c; }
 
     /* ── Transaction confirm modal ──────────────────────── */
     .modal-overlay {
@@ -916,8 +918,11 @@
     <div id="input-wrapper">
       <textarea id="input" placeholder="Ask anything, e.g. Swap 0.5 ETH for USDT" rows="1" maxlength="8000"></textarea>
       <button id="send" onclick="sendMessage()" title="Send">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <svg id="send-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M12 19V5M5 12l7-7 7 7" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <svg id="stop-icon" width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:none">
+          <rect x="4" y="4" width="12" height="12" rx="2" fill="#fff"/>
         </svg>
       </button>
     </div>
@@ -930,7 +935,31 @@
     const chatEl = document.getElementById('chat');
     const inputEl = document.getElementById('input');
     const sendBtn = document.getElementById('send');
+    const sendIcon = document.getElementById('send-icon');
+    const stopIcon = document.getElementById('stop-icon');
     const vaultInput = document.getElementById('vault-input');
+
+    let activeAbortController = null;
+
+    function enterStoppingMode(controller, onStop) {
+      activeAbortController = controller;
+      sendBtn.disabled = false;
+      sendBtn.classList.add('stopping');
+      sendBtn.title = 'Stop';
+      sendBtn.onclick = onStop || (() => controller.abort());
+      sendIcon.style.display = 'none';
+      stopIcon.style.display = '';
+    }
+
+    function exitStoppingMode() {
+      activeAbortController = null;
+      sendBtn.disabled = false;
+      sendBtn.classList.remove('stopping');
+      sendBtn.title = 'Send';
+      sendBtn.onclick = sendMessage;
+      sendIcon.style.display = '';
+      stopIcon.style.display = 'none';
+    }
 
     let currentChainId = 1;
     let conversationHistory = [];
@@ -1848,7 +1877,6 @@
 
       inputEl.value = '';
       inputEl.style.height = 'auto';
-      sendBtn.disabled = true;
 
       appendMessage('user', text);
       conversationHistory.push({ role: 'user', content: text });
@@ -1869,7 +1897,9 @@
 
       // 2-minute timeout — matches the Worker cpu_ms limit
       const controller = new AbortController();
+      let userStopped = false;
       const timeoutId = setTimeout(() => controller.abort(), 120000);
+      enterStoppingMode(controller, () => { userStopped = true; controller.abort(); });
 
       try {
         const chatBody = {
@@ -2052,22 +2082,14 @@
                     // when reasoning text + follow-up produce the same or similar content.
                     let planEl = typingEl.querySelector('.plan-block');
                     if (!planEl) {
-                      planEl = document.createElement('div');
-                      planEl.className = 'plan-block';
-                      planEl.style.cssText = 'margin-top:6px;font-size:0.85em;opacity:0.85;border-left:2px solid #60a5fa;padding-left:8px;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto;overflow-x:hidden;';
-                      const label = document.createElement('div');
-                      label.textContent = '\uD83D\uDCAC Agent plan:';
-                      label.style.cssText = 'font-weight:600;margin-bottom:2px;color:#60a5fa;font-size:0.92em;';
-                      planEl.appendChild(label);
-                      const textNode = document.createElement('span');
-                      textNode.className = 'plan-text';
-                      planEl.appendChild(textNode);
+                      planEl = makeReasoningBlock('', true);
+                      planEl.classList.add('plan-block');
+                      const toggle = planEl.querySelector('.reasoning-toggle');
+                      if (toggle) { const nodes = toggle.childNodes; if (nodes[1]) nodes[1].textContent = ' Agent thinking\u2026'; }
                       typingEl.appendChild(planEl);
                     }
-                    const textNode = planEl.querySelector('.plan-text');
-                    if (textNode) {
-                      textNode.textContent = planText.length > 2000 ? planText.slice(0, 2000) + '...' : planText;
-                    }
+                    const contentEl = planEl.querySelector('.reasoning-content');
+                    if (contentEl) contentEl.textContent = planText.length > 3000 ? planText.slice(0, 3000) + '...' : planText;
                     chatEl.scrollTop = chatEl.scrollHeight;
                   }
                   updateTypingStatus('Agent thinking...');
@@ -2133,13 +2155,17 @@
         }
       } catch (err) {
         typingEl.remove();
-        const msg = err.name === 'AbortError'
-          ? 'Request timed out after 2 minutes. The agent may be overloaded — please try again.'
-          : `Error: ${err.message}`;
-        appendMessage('system', msg);
+        if (err.name === 'AbortError') {
+          if (!userStopped) {
+            appendMessage('system', 'Request timed out after 2 minutes. The agent may be overloaded — please try again.');
+          }
+          // User-initiated stop: just restore state silently
+        } else {
+          appendMessage('system', `Error: ${err.message}`);
+        }
       } finally {
         clearTimeout(timeoutId);
-        sendBtn.disabled = false;
+        exitStoppingMode();
         inputEl.focus();
       }
     }
