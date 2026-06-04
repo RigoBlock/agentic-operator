@@ -3875,6 +3875,11 @@
 
         try {
           // ── Step 1: Backend setup → get unsigned updateDelegation() tx ──
+          // Pass undelegatedSelectors from the already-fetched status so the server
+          // doesn't need to re-check on-chain (avoids a duplicate RPC call).
+          const undelegatedHint = chainId === currentChainId
+            ? (delegationState?.onChainStatus?.undelegatedSelectors || null)
+            : null;
           const setupRes = await fetch('/api/delegation/setup', {
             method: 'POST',
             headers: apiHeaders(),
@@ -3884,6 +3889,7 @@
               chainId: chainId,
               authSignature,
               authTimestamp,
+              ...(undelegatedHint && undelegatedHint.length > 0 ? { undelegatedSelectors: undelegatedHint } : {}),
             }),
           });
           if (!setupRes.ok) {

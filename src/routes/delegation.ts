@@ -55,6 +55,8 @@ delegation.post("/setup", async (c) => {
       chainId: number;
       authSignature: string;
       authTimestamp: number;
+      /** Missing selectors from a prior /status call — avoids a duplicate on-chain check. */
+      undelegatedSelectors?: string[];
     }>();
 
     // Auth gate
@@ -67,11 +69,39 @@ delegation.post("/setup", async (c) => {
       alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
+    // Determine which selectors to include in the updateDelegation call.
+    // updateDelegation is additive — only pass missing selectors for delta updates.
+    // If the caller already has them from a /status response, use those directly.
+    // Otherwise fall back to a fresh on-chain check (first-time setup has no prior status).
+    let onlySelectors: Hex[] | undefined;
+    if (body.undelegatedSelectors && body.undelegatedSelectors.length > 0 &&
+        body.undelegatedSelectors.length < buildDefaultSelectors().length) {
+      onlySelectors = body.undelegatedSelectors as Hex[];
+    } else if (!body.undelegatedSelectors) {
+      // No hint from caller — check on-chain (first-time setup or caller didn't pass it)
+      try {
+        const agentInfo = await getAgentWalletInfo(c.env.KV, body.vaultAddress);
+        if (agentInfo?.address) {
+          const { undelegatedSelectors } = await checkDelegationOnChain(
+            body.chainId,
+            body.vaultAddress as Address,
+            agentInfo.address,
+            buildDefaultSelectors(),
+            c.env.ALCHEMY_API_KEY,
+          );
+          if (undelegatedSelectors.length > 0 && undelegatedSelectors.length < buildDefaultSelectors().length) {
+            onlySelectors = undelegatedSelectors;
+          }
+        }
+      } catch { /* fresh setup — use all selectors */ }
+    }
+
     const result = await prepareDelegation(
       c.env,
       body.operatorAddress as Address,
       body.vaultAddress as Address,
       body.chainId,
+      onlySelectors,
     );
 
     const message = result.walletChanged

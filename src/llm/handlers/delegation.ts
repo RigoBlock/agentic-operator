@@ -38,21 +38,36 @@ export async function handle_setup_delegation(
 
   const chainName = resolveChainName(ctx.chainId);
 
-  // Check if delegation already exists — if so, this is an "update" (add missing selectors)
-  const existingConfig = await getDelegationConfig(env.KV, ctx.vaultAddress as string);
-  const isUpdate = existingConfig?.enabled && !!existingConfig.chains?.[String(ctx.chainId)];
-  const existingSelectors = existingConfig?.chains?.[String(ctx.chainId)]?.delegatedSelectors || [];
+  // Determine missing selectors via on-chain check — reused by both browser and x402 paths.
+  // This is a single RPC call; result drives both the calldata and the display message.
+  let onlySelectors: Hex[] | undefined;
+  let isUpdate = false;
+  const agentInfo = await getAgentWalletInfo(env.KV, ctx.vaultAddress as string);
+  if (agentInfo?.address) {
+    isUpdate = true;
+    try {
+      const { undelegatedSelectors } = await checkDelegationOnChain(
+        ctx.chainId,
+        ctx.vaultAddress as Address,
+        agentInfo.address,
+        buildDefaultSelectors(),
+        env.ALCHEMY_API_KEY,
+      );
+      if (undelegatedSelectors.length > 0 && undelegatedSelectors.length < buildDefaultSelectors().length) {
+        onlySelectors = undelegatedSelectors;
+      }
+    } catch { /* on-chain check failed — fall back to all selectors */ }
+  }
 
   const result = await prepareDelegation(
     env,
     ctx.operatorAddress,
     ctx.vaultAddress as Address,
     ctx.chainId,
+    onlySelectors,
   );
 
-  // Compute which selectors are new vs already delegated
-  const existingSet = new Set(existingSelectors.map(s => s.toLowerCase()));
-  const newSelectors = result.selectors.filter(s => !existingSet.has(s.toLowerCase()));
+  const newSelectors = result.selectors; // already filtered to only missing ones
 
   const gas = await estimateGas(
     ctx.chainId, ctx.vaultAddress as Address,
