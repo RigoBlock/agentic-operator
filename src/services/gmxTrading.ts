@@ -20,7 +20,6 @@
 import {
   encodeFunctionData,
   parseUnits,
-  readContract,
   type Address,
   type Hex,
 } from "viem";
@@ -311,7 +310,7 @@ export async function getGmxExecutionPrice(
 
   const client = getClient(ARBITRUM_CHAIN_ID, alchemyKey);
 
-  const result = await readContract(client, {
+  const result = await client.readContract({
     address: GMX_ADDRESSES.READER,
     abi: GMX_READER_ABI,
     functionName: "getExecutionPrice",
