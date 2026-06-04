@@ -18,7 +18,7 @@ import {
 } from "../../services/gmxTrading.js";
 import { getGmxPositionsSummary, getGmxPositions } from "../../services/gmxPositions.js";
 import { ARBITRUM_CHAIN_ID, GmxOrderType } from "../../abi/gmx.js";
-import { estimateGas, executeToolCall } from "../client.js";
+import { estimateGas, executeToolCall, txActionLine } from "../client.js";
 
 export async function handle_gmx_increase_position(
   env: Env,
@@ -246,6 +246,7 @@ export async function handle_gmx_increase_position(
     ``,
     `💡 Collateral is the amount deposited into the position. Size is the leveraged notional exposure.`,
     ...(cappedNote ? [cappedNote] : []),
+    ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
   ].join("\n");
 
   return { message, transaction, chainSwitch: chainSwitched };
@@ -348,6 +349,7 @@ export async function handle_gmx_close_position(
     ...(args.triggerPrice ? [`Trigger: $${args.triggerPrice}`] : []),
     `Order type: ${orderLabel}`,
     `Chain: Arbitrum`,
+    ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
   ].join("\n");
 
   return { message, transaction, chainSwitch: chainSwitched };
@@ -421,8 +423,9 @@ export async function handle_gmx_cancel_order(
     description: `[GMX] Cancel order ${orderKey.slice(0, 10)}…`,
   };
 
+  const cancelLine = txActionLine(ctx);
   return {
-    message: `✅ Cancel order ready\nOrder: ${orderKey}\nNote: GMX enforces a 300-second delay before cancellation.`,
+    message: [`✅ Cancel order ready`, `Order: ${orderKey}`, `Note: GMX enforces a 300-second delay before cancellation.`, ...(cancelLine ? [cancelLine] : [])].join("\n"),
     transaction,
     chainSwitch: chainSwitched,
   };
@@ -474,6 +477,7 @@ export async function handle_gmx_update_order(
       `New size: $${args.sizeDeltaUsd}`,
       `New trigger: $${args.triggerPrice}`,
       `New acceptable: $${args.acceptablePrice}`,
+      ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
     ].join("\n"),
     transaction,
     chainSwitch: chainSwitched,
@@ -532,8 +536,9 @@ export async function handle_gmx_claim_funding_fees(
     description: `[GMX] Claim funding fees from ${claimMarkets.length} market(s)`,
   };
 
+  const claimLine = txActionLine(ctx);
   return {
-    message: `✅ Claim funding fees ready\nMarkets: ${claimMarkets.length}\nTokens are sent to the vault.`,
+    message: [`✅ Claim funding fees ready`, `Markets: ${claimMarkets.length}`, `Tokens are sent to the vault.`, ...(claimLine ? [claimLine] : [])].join("\n"),
     transaction,
     chainSwitch: chainSwitched,
   };

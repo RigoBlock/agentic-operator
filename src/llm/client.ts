@@ -1421,6 +1421,18 @@ export async function estimateGas(
   return `0x${buffered.toString(16)}`;
 }
 
+/**
+ * Returns the appropriate action line to append to a transaction message.
+ * In delegated mode the agent executes automatically — no sign prompt needed.
+ * In manual mode the operator must sign from their wallet.
+ * Use this in every handler that returns a transaction instead of hardcoding.
+ */
+export function txActionLine(ctx: Pick<RequestContext, "executionMode">): string {
+  return ctx.executionMode === "delegated"
+    ? ""
+    : "Sign with your wallet to execute.";
+}
+
 export interface ToolResult {
   message: string;
   transaction?: UnsignedTransaction;

@@ -15,7 +15,7 @@ import {
   getVaultLPPositions, buildCollectFeesTx, buildBurnPositionTx,
   getPoolInfoById, getPositionDirect, POOL_MANAGER,
 } from "../../services/uniswapLP.js";
-import { estimateGas, resolveChainArg, resolveChainName } from "../client.js";
+import { estimateGas, resolveChainArg, resolveChainName, txActionLine } from "../client.js";
 
 export async function handle_get_pool_info(
   env: Env,
@@ -109,6 +109,7 @@ export async function handle_add_liquidity(
     `${result.description}`,
     `Tick range: [${result.tickLower}, ${result.tickUpper}]`,
     `Chain: ${chainName}`,
+    ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
   ].join("\n");
 
   return { message, transaction, chainSwitch: chainSwitched };
@@ -236,7 +237,7 @@ export async function handle_remove_liquidity(
     : `ℹ️ Position NFT #${tokenId} persists with 0 liquidity. ` +
       `Use collect_lp_fees to harvest any accrued fees, then burn_position to permanently delete it.`;
   return {
-    message: `✅ Remove Liquidity ready\n${result.description}\nChain: ${chainName}\n\n💡 Review and sign to remove the LP position.\n${burnNote}`,
+    message: [`✅ Remove Liquidity ready`, result.description, `Chain: ${chainName}`, burnNote, ...(txActionLine(ctx) ? [txActionLine(ctx)] : [])].join("\n"),
     transaction,
     chainSwitch: chainSwitched,
   };
@@ -374,7 +375,7 @@ export async function handle_collect_lp_fees(
 
   const chainName = resolveChainName(ctx.chainId);
   return {
-    message: `✅ Fee Collection ready\n${result.description}\nChain: ${chainName}\n\n💡 Sign to collect accrued trading fees from this LP position.`,
+    message: [`✅ Fee Collection ready`, result.description, `Chain: ${chainName}`, ...(txActionLine(ctx) ? [txActionLine(ctx)] : [])].join("\n"),
     transaction,
     chainSwitch: chainSwitched,
   };
@@ -470,7 +471,7 @@ export async function handle_burn_position(
       ``,
       `⚠️ This is PERMANENT and IRREVERSIBLE. The position NFT #${tokenId} will be deleted.`,
       `Make sure you have collected all fees first (collect_lp_fees) — uncollected fees will be lost.`,
-      `Sign to confirm.`,
+      ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
     ].join("\n"),
     transaction,
     chainSwitch: chainSwitched,

@@ -14,7 +14,7 @@ import {
   buildStakeCalldata, buildUndelegateStakeCalldata, buildUnstakeCalldata,
   buildEndEpochCalldata, buildWithdrawDelegatorRewardsCalldata,
 } from "../../services/grgStaking.js";
-import { estimateGas } from "../client.js";
+import { estimateGas, txActionLine } from "../client.js";
 
 export async function handle_grg_stake(
   env: Env,
@@ -51,8 +51,9 @@ export async function handle_grg_stake(
     description: `[GRG Staking] Stake ${amount} GRG`,
   };
 
+  const action = txActionLine(ctx);
   return {
-    message: `✅ GRG Stake ready\nAmount: ${amount} GRG\nChain: Ethereum\n\n💡 Staking earns operator rewards (30%+ share) and attracts third-party delegated stake.`,
+    message: [`✅ GRG Stake ready`, `Amount: ${amount} GRG`, `Chain: Ethereum`, ``, `💡 Staking earns operator rewards (30%+ share) and attracts third-party delegated stake.`, ...(action ? [action] : [])].join("\n"),
     transaction,
     chainSwitch: chainSwitched,
   };
@@ -93,8 +94,9 @@ export async function handle_grg_unstake(
     description: `[GRG Staking] Unstake ${amount} GRG`,
   };
 
+  const action = txActionLine(ctx);
   return {
-    message: `✅ GRG Unstake ready\nAmount: ${amount} GRG\nChain: Ethereum\n\n⚠️ Make sure you called undelegate first and waited for the epoch to end before unstaking.`,
+    message: [`✅ GRG Unstake ready`, `Amount: ${amount} GRG`, `Chain: Ethereum`, ``, `⚠️ Make sure you called undelegate first and waited for the epoch to end before unstaking.`, ...(action ? [action] : [])].join("\n"),
     transaction,
     chainSwitch: chainSwitched,
   };
@@ -135,8 +137,9 @@ export async function handle_grg_undelegate_stake(
     description: `[GRG Staking] Undelegate ${amount} GRG`,
   };
 
+  const action = txActionLine(ctx);
   return {
-    message: `✅ GRG Undelegate ready\nAmount: ${amount} GRG\nChain: Ethereum\n\n💡 After undelegation, wait for the current epoch to end, then call unstake to withdraw.`,
+    message: [`✅ GRG Undelegate ready`, `Amount: ${amount} GRG`, `Chain: Ethereum`, ``, `💡 After undelegation, wait for the current epoch to end, then call unstake to withdraw.`, ...(action ? [action] : [])].join("\n"),
     transaction,
     chainSwitch: chainSwitched,
   };
@@ -179,6 +182,7 @@ export async function handle_grg_end_epoch(
     chainId: 1,
     gas,
     description: `[GRG Staking] Finalize epoch on staking proxy`,
+    operatorOnly: true,
   };
 
   return {
@@ -222,11 +226,11 @@ export async function handle_grg_claim_rewards(
     description: `[GRG Staking] Claim delegator rewards`,
   };
 
+  const action = txActionLine(ctx);
   return {
-    message: `✅ Claim Rewards ready\nChain: Ethereum\n\n💡 This claims accumulated delegator staking rewards back to the vault.`,
+    message: [`✅ Claim Rewards ready`, `Chain: Ethereum`, ``, `💡 This claims accumulated delegator staking rewards back to the vault.`, ...(action ? [action] : [])].join("\n"),
     transaction,
     chainSwitch: chainSwitched,
   };
 
 }
-

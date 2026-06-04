@@ -17,7 +17,7 @@ import { resolveTokenAddress, getWrappedNativeAddress, getNativeTokenSymbol } fr
 import { encodeFunctionData, decodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import {
-  estimateGas, preCheckNavImpact, resolveChainName, resolveSlippage, runSwapShield, switchChainIfNeeded,
+  estimateGas, preCheckNavImpact, resolveChainName, resolveSlippage, runSwapShield, switchChainIfNeeded, txActionLine,
 } from "../client.js";
 import { enrichQuoteWithOracle } from "../../services/quoteEnrichment.js";
 
@@ -180,6 +180,7 @@ export async function handle_build_vault_swap(
           `${isWrap ? "Deposit" : "Withdraw"}: ${intent.amountIn} ${fromSym} → ${intent.amountIn} ${toSym} (1:1)`,
           `Chain: ${chainName}`,
           `Gas limit: ${parseInt(gas, 16)}`,
+          ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
         ].join("\n");
 
         const navWarn = await preCheckNavImpact(env, ctx, transaction);
@@ -286,6 +287,7 @@ export async function handle_build_vault_swap(
       `Chain: ${chainName}`,
       `Gas limit: ${parseInt(zxGas, 16)}`,
       ...(shieldWarning0x ? [shieldWarning0x] : []),
+      ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
     ].join("\n");
 
     // NAV shield pre-check — warn if simulation fails, block if NAV drops > 10%.
@@ -457,6 +459,7 @@ export async function handle_build_vault_swap(
     `Chain: ${chainName}`,
     `Gas limit: ${parseInt(uniGas, 16)}`,
     ...(shieldWarningUni ? [shieldWarningUni] : []),
+    ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
   ].join("\n");
 
   // NAV shield pre-check — warn if simulation fails, block if NAV drops > 10%.

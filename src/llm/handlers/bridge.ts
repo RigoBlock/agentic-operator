@@ -15,7 +15,7 @@ import {
   getAggregatedNav, buildRebalancePlan, chainName as crosschainChainName,
 } from "../../services/crosschain.js";
 import {
-  friendlyError, estimateGas, resolveChainArg, resolveChainName,
+  friendlyError, estimateGas, resolveChainArg, resolveChainName, txActionLine,
 } from "../client.js";
 
 export async function handle_crosschain_transfer(
@@ -88,8 +88,7 @@ export async function handle_crosschain_transfer(
     `Receive: ~${parseFloat(result.quote.outputAmount).toFixed(6)} ${result.quote.outputToken.symbol}`,
     `Bridge fee: ${result.quote.feePct}`,
     `Estimated time: ${result.quote.estimatedTime}`,
-    "",
-    "Sign this transaction to initiate the cross-chain transfer.",
+    ...(txActionLine(ctx) ? ["", txActionLine(ctx)] : []),
   ].join("\n");
 
   return {
@@ -246,8 +245,7 @@ export async function handle_crosschain_sync(
     `Bridge fee: ${result.quote.feePct}`,
     `Estimated time: ${result.quote.estimatedTime}`,
     ...(navEqContext ? ['', navEqContext] : []),
-    "",
-    "Sign this transaction to synchronise NAV across chains.",
+    ...(txActionLine(ctx) ? ["", txActionLine(ctx)] : []),
   ].join("\n");
 
   return {

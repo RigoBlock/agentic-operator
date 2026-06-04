@@ -422,6 +422,29 @@
       transition: background 0.15s;
     }
     .btn-delegation:hover { background: rgba(31,111,235,0.18); }
+
+    /* ── Delegation hint bar ───────────────────────────────── */
+    #delegation-hint {
+      display: none;
+      align-items: center; gap: 10px;
+      padding: 7px 12px; margin-bottom: 6px;
+      background: rgba(245,158,11,0.10); border: 1px solid rgba(245,158,11,0.30);
+      border-radius: 8px; font-size: 12px; color: #d97706;
+    }
+    #delegation-hint .hint-icon { font-size: 14px; flex-shrink: 0; }
+    #delegation-hint .hint-text { flex: 1; line-height: 1.4; }
+    #delegation-hint .hint-text strong { color: #b45309; }
+    #delegation-hint .hint-cta {
+      flex-shrink: 0; padding: 3px 10px; border-radius: 5px; border: 1px solid #d97706;
+      background: rgba(217,119,6,0.15); color: #b45309; font-size: 11px; font-weight: 600;
+      cursor: pointer; white-space: nowrap; transition: background 0.15s;
+    }
+    #delegation-hint .hint-cta:hover { background: rgba(217,119,6,0.28); }
+    #delegation-hint.active-other-chain { background: rgba(99,102,241,0.08); border-color: rgba(99,102,241,0.28); color: #6366f1; }
+    #delegation-hint.active-other-chain .hint-text strong { color: #4f46e5; }
+    #delegation-hint.active-other-chain .hint-cta { border-color: #6366f1; background: rgba(99,102,241,0.12); color: #4f46e5; }
+    #delegation-hint.active-other-chain .hint-cta:hover { background: rgba(99,102,241,0.22); }
+
     .btn-delegation.danger {
       border-color: var(--error); background: rgba(248,81,73,0.08); color: var(--error);
     }
@@ -909,6 +932,11 @@
   </div>
 
   <div id="input-area">
+    <div id="delegation-hint">
+      <span class="hint-icon">⚡</span>
+      <span class="hint-text" id="delegation-hint-text"><strong>Agent execution off</strong> — Enable to trade without signing every transaction</span>
+      <button class="hint-cta" id="delegation-hint-btn" onclick="openDelegationSetup()">Enable</button>
+    </div>
     <div id="chat-mode-bar" style="display:none; padding: 0 0 6px; align-items: center; gap: 8px; font-size: 12px; color: var(--dimmed);">
       <label class="sponsor-toggle" title="When ON, the agent executes trades immediately. When OFF, you confirm each trade." style="margin:0;">
         <input type="checkbox" id="chat-mode-checkbox" onchange="toggleExecMode(this.checked)" />
@@ -3370,7 +3398,43 @@
       }
     }
 
+    function updateDelegationHint(state) {
+      const hint = document.getElementById('delegation-hint');
+      const hintText = document.getElementById('delegation-hint-text');
+      const hintBtn = document.getElementById('delegation-hint-btn');
+      if (!hint) return;
+
+      const vault = vaultInput.value.trim();
+      if (!vault || vault.length !== 42 || !connectedAddress) {
+        hint.style.display = 'none';
+        return;
+      }
+
+      if (!state || (!state.agentAddress && !state.isActiveOnChain)) {
+        // No delegation at all
+        hint.className = '';
+        hint.style.display = 'flex';
+        hintText.innerHTML = '<strong>Agent execution off</strong> — Enable to trade without signing every transaction';
+        hintBtn.textContent = 'Enable';
+        hintBtn.onclick = openDelegationSetup;
+      } else {
+        const isActive = state.isActiveOnChain != null ? state.isActiveOnChain : (state.isActiveInKV || false);
+        if (isActive) {
+          // Delegation active on current chain — hide hint
+          hint.style.display = 'none';
+        } else {
+          // Agent exists but not on this chain
+          hint.className = 'active-other-chain';
+          hint.style.display = 'flex';
+          hintText.innerHTML = '<strong>Agent not enabled on this chain</strong> — Delegate for the best experience';
+          hintBtn.textContent = 'Delegate';
+          hintBtn.onclick = openDelegationSetup;
+        }
+      }
+    }
+
     function updateDelegationUI(state) {
+      updateDelegationHint(state);
       const badge = document.getElementById('delegation-status-badge');
       const statusText = document.getElementById('delegation-status-text');
       const setupBtn = document.getElementById('delegation-setup-btn');
