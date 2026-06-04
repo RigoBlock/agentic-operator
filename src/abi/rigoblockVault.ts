@@ -423,6 +423,9 @@ export const ALLOWED_VAULT_SELECTORS = {
   updateOrder: "0xdd5baad2" as `0x${string}`,
   // ── AIntents Adapter (cross-chain) ──
   depositV3: "0x770d096f" as `0x${string}`,
+  // ── AUniswap Adapter (wrap/unwrap native ↔ wrapped-native) ──
+  wrapETH:     "0x1c58db4f" as `0x${string}`,
+  unwrapWETH9: "0x49616997" as `0x${string}`,
   // ── AStaking Adapter (GRG staking) ──
   stake: "0xa694fc3a" as `0x${string}`,
   undelegateStake: "0x4aace835" as `0x${string}`,

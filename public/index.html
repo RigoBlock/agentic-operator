@@ -2708,21 +2708,26 @@
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
           // If delegation not active on this chain, fall back to manual wallet signing
-          if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.code === 'METHOD_NOT_ALLOWED' || err.fallbackToManual) {
+          if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.code === 'METHOD_NOT_ALLOWED' || err.code === 'AGENT_NOT_DELEGATED' || err.fallbackToManual) {
             container.innerHTML = '';
             const manualMsg = document.createElement('div');
             manualMsg.style.cssText = 'color:var(--muted);font-size:13px;margin-bottom:12px;';
-            manualMsg.textContent = err.code === 'METHOD_NOT_ALLOWED'
-              ? 'This selector is not delegated — sign manually:'
-              : 'Sign with your wallet to execute:';
+            manualMsg.textContent =
+              (err.code === 'AGENT_NOT_DELEGATED')
+                ? 'This function is not in your current on-chain delegation:'
+                : err.code === 'METHOD_NOT_ALLOWED'
+                  ? 'This selector is not in the allowed function list — sign manually:'
+                  : 'Delegation not active on this chain — sign manually:';
             container.appendChild(manualMsg);
             // Re-render as manual tx card inline
             const actionsDiv = document.createElement('div');
             actionsDiv.className = 'confirm-actions';
-            actionsDiv.innerHTML = `
-              <button class="btn-agent-exec approve" onclick="signManualTxCard(this)">Sign with Wallet</button>
-              <button class="btn-agent-exec reject" onclick="this.closest('.msg').remove()">Dismiss</button>
-            `;
+            const updateBtn = err.code === 'AGENT_NOT_DELEGATED'
+              ? `<button class="btn-agent-exec approve" style="background:var(--accent);" onclick="openDelegationSetup();this.closest('.msg').remove()">Update Delegation</button>`
+              : '';
+            actionsDiv.innerHTML = updateBtn +
+              `<button class="btn-agent-exec approve" onclick="signManualTxCard(this)">Sign with Wallet</button>
+              <button class="btn-agent-exec reject" onclick="this.closest('.msg').remove()">Dismiss</button>`;
             container.appendChild(actionsDiv);
             const newStatusEl = document.createElement('div');
             newStatusEl.className = 'exec-status';
@@ -3796,19 +3801,33 @@
       confirmBtn.textContent = 'Set Up Agent';
       confirmBtn.onclick = startDelegationSetup; // restore handler (overwritten on success)
 
-      // Populate chain selection — pre-check chains not yet active, grey-out active ones.
+      // Populate chain selection.
+      // - Inactive chains: checked by default (new setup)
+      // - Active chains with missing selectors: checked, labelled "Update (N new)"
+      // - Active chains fully up to date: disabled with ✓
       const activeSet = new Set(delegationState?.delegatedChains || []);
+      const missingCount = delegationState?.onChainStatus?.undelegatedSelectors?.length || 0;
       const grid = document.getElementById('delegation-chain-checkboxes');
       if (grid) {
         grid.innerHTML = MAINNET_CHAINS_LIST.map(function(c) {
           const alreadyActive = activeSet.has(c.id);
-          return '<label class="chain-check-item' + (alreadyActive ? ' already-active' : '') + '">' +
+          const needsUpdate = alreadyActive && missingCount > 0;
+          const fullyDone = alreadyActive && !needsUpdate;
+          const label = fullyDone
+            ? c.name + ' ✓'
+            : needsUpdate
+              ? c.name + ' — Update (' + missingCount + ' new)'
+              : c.name;
+          return '<label class="chain-check-item' + (fullyDone ? ' already-active' : '') + '">' +
             '<input type="checkbox" value="' + c.id + '"' +
-            (alreadyActive ? ' disabled' : ' checked') + '>' +
-            c.name + (alreadyActive ? ' ✓' : '') +
+            (fullyDone ? ' disabled' : ' checked') + '>' +
+            label +
             '</label>';
         }).join('');
       }
+      // Update the button label to reflect intent
+      document.getElementById('delegation-confirm-btn').textContent =
+        activeSet.size > 0 && missingCount > 0 ? 'Update Delegation' : 'Set Up Agent';
 
       document.getElementById('delegation-modal').classList.add('visible');
     }
