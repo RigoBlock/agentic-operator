@@ -119,9 +119,10 @@
     .msg {
       max-width: 1200px; padding: 12px 18px; border-radius: 10px;
       line-height: 1.5; font-size: 15px; white-space: pre-wrap; word-break: break-word;
+      box-sizing: border-box;
     }
     .msg.user { align-self: flex-end; background: var(--accent-dim); border-bottom-right-radius: 4px; }
-    .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+    .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; max-width: 100%; }
     .msg.compact { width: fit-content; min-width: 240px; max-width: 480px; white-space: normal; box-sizing: border-box; }
     .msg.system { align-self: center; color: var(--muted); font-size: 13px; background: none; padding: 2px 0; white-space: normal; }
     .msg .tool-call {
@@ -142,9 +143,13 @@
       color: var(--accent); text-decoration: none; word-break: break-all;
     }
     .msg.assistant .msg-content a:hover { text-decoration: underline; }
+    .msg.assistant .msg-content {
+      overflow-x: auto;
+      max-width: 100%;
+    }
     .msg.assistant .msg-content table {
-      border-collapse: collapse; margin: 8px 0; font-size: 14px; width: 100%;
-      white-space: nowrap; display: block; overflow-x: auto;
+      border-collapse: collapse; margin: 8px 0; font-size: 14px;
+      white-space: nowrap;
     }
     .msg.assistant .msg-content th,
     .msg.assistant .msg-content td {
@@ -760,7 +765,7 @@
           <span id="agent-balance-display" class="agent-balance" style="display:none;"></span>
           <label id="sponsor-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, gas fees are sponsored (no agent funding needed). When disabled, the agent pays gas from its own ETH balance.">
             <input type="checkbox" id="sponsor-toggle" onchange="toggleSponsoredGas(this.checked)" />
-            <span>Sponsored gas</span>
+            <span id="sponsor-toggle-text">Sponsored gas</span>
           </label>
           <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
           <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
@@ -1833,7 +1838,7 @@
 
         // Close table if we were in one
         if (inTable) {
-          html += '</table>';
+          html += '</table></div>';
           inTable = false;
         }
 
@@ -1841,7 +1846,7 @@
         html += linkifyUrls(escapeHtml(line)) + '\n';
       }
 
-      if (inTable) html += '</table>';
+      if (inTable) html += '</table></div>';
       return html;
     }
 
@@ -2695,11 +2700,23 @@
         tradeHtml = `<div class="trade-meta">${escapeHtml(tx.description || 'Execute transaction')} · ${CHAIN_NAMES[tx.chainId] || tx.chainId}</div>`;
       }
 
+      // Determine default sponsorship state for this transaction:
+      // per-chain setting > global setting > true
+      const defaultSponsored = delegationState?.chainSponsoredGas !== undefined
+        ? delegationState.chainSponsoredGas
+        : (delegationState?.sponsoredGas !== false);
+
       const div = document.createElement('div');
       div.className = 'msg assistant compact';
       div.innerHTML = `
         <div class="delegated-confirm">
           ${tradeHtml}
+          <div class="sponsor-tx-toggle" style="margin:8px 0;font-size:13px;color:var(--muted);">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input type="checkbox" class="sponsor-tx-checkbox" ${defaultSponsored ? 'checked' : ''} />
+              <span>Sponsored gas (${CHAIN_NAMES[tx.chainId] || tx.chainId})</span>
+            </label>
+          </div>
           <div class="confirm-actions">
             <button class="btn-agent-exec approve" onclick="confirmDelegatedExecution(this)">Execute</button>
             <button class="btn-agent-exec reject" onclick="rejectDelegatedExecution(this)">Cancel</button>
@@ -2722,6 +2739,32 @@
 
       const statusEl = container.querySelector('.exec-status');
       const buttons = container.querySelectorAll('.btn-agent-exec');
+
+      // Read per-transaction sponsorship toggle
+      const sponsorCheckbox = container.querySelector('.sponsor-tx-checkbox');
+      const txSponsored = sponsorCheckbox ? sponsorCheckbox.checked : true;
+
+      // Pre-check: if sponsored gas is OFF, verify agent has ETH before calling execute
+      if (!txSponsored) {
+        statusEl.style.color = 'var(--muted)';
+        statusEl.textContent = 'Checking agent balance…';
+        try {
+          const vault = vaultInput.value.trim();
+          const balRes = await fetch(`/api/delegation/balance?vaultAddress=${vault}&chainId=${tx.chainId}`);
+          if (balRes.ok) {
+            const balData = await balRes.json();
+            if (!balData.sufficient) {
+              statusEl.style.color = 'var(--error)';
+              statusEl.innerHTML = `Agent wallet has no ETH for gas on ${CHAIN_NAMES[tx.chainId] || tx.chainId}. ` +
+                `<a href="#" onclick="event.preventDefault();document.getElementById('settings-btn').click();" style="color:var(--accent);">Enable sponsored gas</a> or fund ${balData.agentAddress?.slice(0,6)}…${balData.agentAddress?.slice(-4)}.`;
+              buttons.forEach(b => b.disabled = false);
+              btn.textContent = 'Execute';
+              return;
+            }
+          }
+        } catch { /* proceed anyway — backend will catch it */ }
+      }
+
       buttons.forEach(b => b.disabled = true);
       btn.textContent = 'Executing…';
       statusEl.style.color = 'var(--accent)';
@@ -2740,6 +2783,7 @@
             chainId: tx.chainId,
             authSignature,
             authTimestamp,
+            sponsoredGas: txSponsored,
             transaction: {
               to: tx.to,
               data: tx.data,
@@ -3613,10 +3657,13 @@
           balanceEl.style.display = 'none';
         }
 
-        // Gas sponsoring toggle — only visible when active on current chain
+        // Gas sponsoring toggle — per-chain, only visible when active on current chain
         if (sponsorLabel && sponsorToggle) {
           if (isOnChain) {
-            sponsorToggle.checked = state.sponsoredGas !== false;
+            const chainSponsored = state.chainSponsoredGas !== undefined ? state.chainSponsoredGas : (state.sponsoredGas !== false);
+            sponsorToggle.checked = chainSponsored;
+            const sponsorText = document.getElementById('sponsor-toggle-text');
+            if (sponsorText) sponsorText.textContent = `Sponsored gas (${CHAIN_NAMES[currentChainId] || currentChainId})`;
             sponsorLabel.style.display = '';
           } else {
             sponsorLabel.style.display = 'none';
@@ -3717,6 +3764,7 @@
           body: JSON.stringify({
             operatorAddress: connectedAddress,
             vaultAddress: vault,
+            chainId: currentChainId,
             sponsoredGas: checked,
             authSignature,
             authTimestamp,
@@ -3724,10 +3772,17 @@
         });
         if (!res.ok) throw new Error('Failed to update');
         // Update cached state
-        if (delegationState) delegationState.sponsoredGas = checked;
+        if (delegationState) {
+          delegationState.chainSponsoredGas = checked;
+          if (delegationState.allChainsStatus) {
+            const cs = delegationState.allChainsStatus[String(currentChainId)];
+            if (cs) cs.sponsoredGas = checked;
+          }
+        }
+        const chainName = CHAIN_NAMES[currentChainId] || currentChainId;
         appendMessage('system', checked
-          ? 'Gas sponsoring enabled — no agent funding needed.'
-          : 'Gas sponsoring disabled — agent will pay gas from its own ETH balance.');
+          ? `Gas sponsoring enabled on ${chainName} — no agent funding needed.`
+          : `Gas sponsoring disabled on ${chainName} — agent will pay gas from its own ETH balance.`);
       } catch (err) {
         appendMessage('system', `Failed to update gas setting: ${err.message}`);
         document.getElementById('sponsor-toggle').checked = !checked; // revert

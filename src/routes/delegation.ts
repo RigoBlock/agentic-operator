@@ -345,11 +345,17 @@ delegation.get("/status", async (c) => {
     }
   }
 
+  // Resolve per-chain sponsoredGas: chain-specific override, or global default
+  const chainSponsoredGas = chainDelegation?.sponsoredGas !== undefined
+    ? chainDelegation.sponsoredGas
+    : (config?.sponsoredGas ?? true);
+
   return c.json({
     enabled: config?.enabled || false,
     agentAddress: walletInfo?.address || null,
     activeChains,
     sponsoredGas: config?.sponsoredGas ?? true,
+    chainSponsoredGas,
     // Consider delegation active on-chain if at least one selector is delegated
     // (some selectors may be missing for newly-added adapters, but the vault is functional)
     isActiveOnChain: verifyOnChain
@@ -363,6 +369,7 @@ delegation.get("/status", async (c) => {
           confirmedAt: chainDelegation.confirmedAt,
           delegatedSelectors: chainDelegation.delegatedSelectors,
           delegateTxHash: chainDelegation.delegateTxHash,
+          sponsoredGas: chainDelegation.sponsoredGas,
         }
       : null,
     allChainsStatus,
@@ -402,6 +409,8 @@ delegation.post("/execute", async (c) => {
       gas?: string;
       description?: string;
     };
+    /** Optional per-transaction override for sponsored gas */
+    sponsoredGas?: boolean;
   } | undefined;
   let tx: UnsignedTransaction | undefined;
 
@@ -444,7 +453,7 @@ delegation.post("/execute", async (c) => {
     };
 
     console.log(`[delegation/execute] Executing tx: to=${tx.to} chainId=${tx.chainId} selector=${tx.data.slice(0,10)} vault=${body.vaultAddress}`);
-    const result = await executeViaDelegation(c.env, tx, body.vaultAddress);
+    const result = await executeViaDelegation(c.env, tx, body.vaultAddress, body.sponsoredGas);
     console.log(`[delegation/execute] Success: txHash=${result.txHash} confirmed=${result.confirmed}`);
     return c.json({ executionResult: result });
   } catch (err) {
@@ -568,6 +577,7 @@ delegation.post("/settings", async (c) => {
     const body = await c.req.json<{
       operatorAddress: string;
       vaultAddress: string;
+      chainId?: number;
       sponsoredGas?: boolean;
       authSignature: string;
       authTimestamp: number;
@@ -587,7 +597,15 @@ delegation.post("/settings", async (c) => {
       return c.json({ error: "No delegation config found. Set up delegation first." }, 404);
     }
 
-    if (body.sponsoredGas !== undefined) {
+    if (body.chainId !== undefined && body.sponsoredGas !== undefined) {
+      // Per-chain setting
+      const chainKey = String(body.chainId);
+      if (!config.chains[chainKey]) {
+        config.chains[chainKey] = { confirmedAt: Date.now(), delegatedSelectors: [] };
+      }
+      config.chains[chainKey].sponsoredGas = body.sponsoredGas;
+    } else if (body.sponsoredGas !== undefined) {
+      // Global fallback setting
       config.sponsoredGas = body.sponsoredGas;
     }
 

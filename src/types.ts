@@ -234,6 +234,8 @@ export interface ChainDelegation {
   delegatedSelectors: Hex[];
   /** Transaction hash of the updateDelegation() call */
   delegateTxHash?: Hex;
+  /** Per-chain override for sponsored gas. If undefined, falls back to DelegationConfig.sponsoredGas */
+  sponsoredGas?: boolean;
 }
 
 /** Delegation configuration for a vault */

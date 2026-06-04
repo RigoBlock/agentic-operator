@@ -66,16 +66,13 @@ const DEFAULT_FILL_DEADLINE_SECS = 6 * 60 * 60; // 21 600
 /** Default NAV tolerance for Sync ops (100 bps = 1%) */
 const DEFAULT_NAV_TOLERANCE_BPS = 100;
 
-/** NAV tolerance for Transfer ops (8700 bps = 87%).
- *  On-chain MINIMUM_SUPPLY_RATIO = 8 → effective supply must stay ≥ totalSupply/8
- *  → max bridgeable = 87.5% of total. We use 8700 bps (87%) with margin. */
-const TRANSFER_NAV_TOLERANCE_BPS = 8700;
-
-/** Max bridgeable fraction of vault balance (7/8 = 87.5%).
- *  On-chain NavImpactLib.MINIMUM_SUPPLY_RATIO = 8 means effective supply
- *  must be ≥ totalSupply / 8 after bridging. */
-const MAX_BRIDGE_FRACTION_NUM = 7n;
-const MAX_BRIDGE_FRACTION_DEN = 8n;
+// NOTE: There is NO off-chain cap on bridge amount for Transfer ops.
+// The on-chain contract enforces NavImpactLib.MINIMUM_SUPPLY_RATIO = 20
+// (effective supply must stay ≥ totalSupply / 20 after bridging).
+// If the user tries to bridge too much, the pre-broadcast simulation
+// catches EffectiveSupplyTooLow and surfaces it. We do NOT attempt to
+// replicate the virtual-supply math off-chain — it depends on live NAV
+// and pool-share calculations that are complex and error-prone.
 
 /** Across suggested-fees API base URL */
 const ACROSS_API = "https://app.across.to/api/suggested-fees";
@@ -175,9 +172,11 @@ export interface AggregatedNav {
 }
 
 /** A single bridge operation recommended by the rebalancer */
-/** Maximum bridge fraction of a chain's value (7/8 = 87.5%).
- *  Matches on-chain NavImpactLib.MINIMUM_SUPPLY_RATIO = 8. */
-const MAX_BRIDGE_NAV_IMPACT_PCT = 87n;
+/** Maximum bridge fraction of a chain's value in a single rebalance.
+ *  Conservative cap (50%) to avoid draining a chain in one operation.
+ *  The on-chain MINIMUM_SUPPLY_RATIO = 20 allows up to 95%, but we
+ *  keep rebalance ops smaller for safety. */
+const MAX_REBALANCE_BRIDGE_PCT = 50n;
 
 export interface BridgeRecommendation {
   srcChainId: number;
@@ -473,16 +472,18 @@ export async function buildRebalancePlan(params: {
         const pct = (normalised * 100n) / totalChainValue;
         impactPct = `${pct.toString()}%`;
 
-        // If bridging the full amount would exceed NAV shield, cap at safe amount
-        if (pct > MAX_BRIDGE_NAV_IMPACT_PCT) {
-          const safeNormalised = (totalChainValue * MAX_BRIDGE_NAV_IMPACT_PCT) / 100n;
+        // Cap at 50% of chain value to avoid draining a chain in one rebalance op.
+        // The on-chain MINIMUM_SUPPLY_RATIO = 20 allows up to 95%, but we stay
+        // conservative for rebalancing.
+        if (pct > MAX_REBALANCE_BRIDGE_PCT) {
+          const safeNormalised = (totalChainValue * MAX_REBALANCE_BRIDGE_PCT) / 100n;
           bridgeAmount = safeNormalised / (10n ** (18n - BigInt(bal.token.decimals)));
           const divisor = 10n ** BigInt(bal.token.decimals);
           const whole = bridgeAmount / divisor;
           const frac = (bridgeAmount % divisor).toString().padStart(bal.token.decimals, "0").slice(0, 6);
           bridgeFormatted = `${whole}.${frac}`;
           capped = true;
-          impactPct = `~${MAX_BRIDGE_NAV_IMPACT_PCT}% (capped from ${pct}%)`;
+          impactPct = `~${MAX_REBALANCE_BRIDGE_PCT}% (capped from ${pct}%)`;
         }
       }
 
@@ -1075,6 +1076,12 @@ export async function buildCrosschainTransfer(params: {
   quote: CrosschainQuote;
   calldata: Hex;
   description: string;
+  /** True if the requested amount was capped due to on-chain MINIMUM_SUPPLY_RATIO */
+  wasCapped: boolean;
+  /** Original amount requested by the user */
+  requestedAmount: string;
+  /** Actual amount after capping (same as quote.inputAmount) */
+  cappedAmount: string;
 }> {
   // Prevent same-chain transfers (AIntents enforces this too)
   if (params.srcChainId === params.dstChainId) {
@@ -1108,21 +1115,6 @@ export async function buildCrosschainTransfer(params: {
         `Available: ${available}, requested: ${params.amount}.`,
       );
     }
-    // The on-chain MINIMUM_SUPPLY_RATIO = 8 check only applies when
-    // totalSupply > 0 (virtual supply cannot exceed 87.5% of total supply).
-    // When totalSupply = 0, the ratio check is irrelevant — no cap needed.
-    const totalSupply = await getClient(params.srcChainId, params.alchemyKey).readContract({
-      address: params.vaultAddress,
-      abi: [{ name: "totalSupply", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] }] as const,
-      functionName: "totalSupply",
-    }).catch(() => 0n) as bigint;
-    if (totalSupply > 0n) {
-      const maxBridge = (ethBalance * MAX_BRIDGE_FRACTION_NUM) / MAX_BRIDGE_FRACTION_DEN;
-      if (inputAmountRaw > maxBridge) {
-        inputAmountRaw = maxBridge;
-        bridgeAmount = formatUnits(inputAmountRaw, 18);
-      }
-    }
   } else {
     const { balance } = await getVaultTokenBalance(
       params.srcChainId,
@@ -1137,19 +1129,8 @@ export async function buildCrosschainTransfer(params: {
         `Available: ${available}, requested: ${params.amount}.`,
       );
     }
-    // Only cap when totalSupply > 0 — see comment above
-    const totalSupply = await getClient(params.srcChainId, params.alchemyKey).readContract({
-      address: params.vaultAddress,
-      abi: [{ name: "totalSupply", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] }] as const,
-      functionName: "totalSupply",
-    }).catch(() => 0n) as bigint;
-    if (totalSupply > 0n) {
-      const maxBridge = (balance * MAX_BRIDGE_FRACTION_NUM) / MAX_BRIDGE_FRACTION_DEN;
-      if (inputAmountRaw > maxBridge) {
-        inputAmountRaw = maxBridge;
-        bridgeAmount = formatUnits(inputAmountRaw, inputToken.decimals);
-      }
-    }
+    // No off-chain cap — the on-chain contract enforces MINIMUM_SUPPLY_RATIO = 20.
+    // If the amount exceeds the limit, eth_call simulation catches EffectiveSupplyTooLow.
   }
 
   // Get initial quote (without destination message simulation)
@@ -1172,7 +1153,7 @@ export async function buildCrosschainTransfer(params: {
     exclusiveRelayer: quote.fee.exclusiveRelayer,
     exclusivityDeadline: quote.fee.exclusivityDeadline,
     opType: OpType.Transfer,
-    navToleranceBps: TRANSFER_NAV_TOLERANCE_BPS,
+    navToleranceBps: DEFAULT_NAV_TOLERANCE_BPS,
     sourceNativeAmount: useNative ? inputAmountRaw : undefined,
     shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
   });
@@ -1208,7 +1189,7 @@ export async function buildCrosschainTransfer(params: {
         exclusiveRelayer: quote.fee.exclusiveRelayer,
         exclusivityDeadline: quote.fee.exclusivityDeadline,
         opType: OpType.Transfer,
-        navToleranceBps: TRANSFER_NAV_TOLERANCE_BPS,
+        navToleranceBps: DEFAULT_NAV_TOLERANCE_BPS,
         sourceNativeAmount: useNative ? inputAmountRaw : undefined,
         shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
       });
@@ -1220,8 +1201,7 @@ export async function buildCrosschainTransfer(params: {
   const dstName = chainName(params.dstChainId);
   const description =
     `Bridge ${bridgeAmount} ${quote.inputToken.symbol} from ${srcName} → ${dstName}` +
-    ` (receive ~${quote.outputAmount} ${quote.outputToken.symbol}, fee ${quote.feePct}, ${quote.estimatedTime})` +
-    (bridgeAmount !== params.amount ? ` [capped to 87.5% of supply — on-chain MINIMUM_SUPPLY_RATIO]` : "");
+    ` (receive ~${quote.outputAmount} ${quote.outputToken.symbol}, fee ${quote.feePct}, ${quote.estimatedTime})`;
 
   return { quote, calldata, description };
 }
@@ -1465,12 +1445,7 @@ export async function computeNavEqualization(params: {
   let capped = false;
   let capReason: string | undefined;
 
-  const maxRaw = bestBalance * MAX_BRIDGE_FRACTION_NUM / MAX_BRIDGE_FRACTION_DEN;
-  if (bridgeAmountRaw > maxRaw) {
-    bridgeAmountRaw = maxRaw;
-    capped = true;
-    capReason = `Capped at 87.5% of balance (${formatUnits(bestBalance, bridgeTokenDec)} ${bestToken.symbol})`;
-  }
+  // Can't bridge more than available balance
   if (bridgeAmountRaw > bestBalance) {
     bridgeAmountRaw = bestBalance;
     capped = true;

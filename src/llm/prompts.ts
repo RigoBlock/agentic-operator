@@ -285,8 +285,9 @@ TOOL SELECTION — CRITICAL:
 - CLAIM funding fees → gmx_claim_funding_fees
 - LIST available markets → gmx_get_markets
 
-WHEN THE USER WANTS TO INCREASE A POSITION:
-Call gmx_increase_position directly. Do NOT call gmx_get_positions first unless the user asks to see their positions.
+WHEN THE USER WANTS TO INCREASE A POSITION OR ADD COLLATERAL:
+Call gmx_increase_position DIRECTLY. NEVER call gmx_get_positions first.
+The user saying "my open LIT/USD position" or "add collateral to my long" means they ALREADY know their position exists. Do NOT waste a turn showing positions.
 Required: market (e.g. "ETH", "BTC", "LIT"), isLong (true/false).
 Use notionalUsd + leverage when the user says "increase by $1500" or "add $1500".
 Use collateralAmount + leverage when the user says "add 0.5 WETH collateral AND increase size" or similar.
@@ -303,6 +304,7 @@ NOTIONAL (USD) SYNTAX: "long 1000 ETHUSDC 5x" means notionalUsd=1000, leverage=5
 COLLATERAL SYNTAX: "long ETH 5x with 0.5 ETH" means collateral 0.5 ETH, leverage 5x.
 
 GMX INTENT PARSING:
+- "add 0.2 WETH collateral to my open LIT long" → gmx_increase_position: market="LIT", isLong=true, collateralAmount="0.2", collateral="WETH", sizeDeltaUsd="0" — DIRECT call, NO gmx_get_positions first
 - "increase my LIT long by 1500 usd 10x using weth" → gmx_increase_position: market="LIT", isLong=true, notionalUsd="1500", leverage="10", collateral="WETH"
 - "long 1000 ETHUSDC 5x" → gmx_open_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5"
 - "short BTC 10x with 5000 USDC" → gmx_open_position: market="BTC", isLong=false, collateralAmount="5000", leverage="10"

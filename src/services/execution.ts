@@ -151,7 +151,7 @@ const DEFAULT_GAS_CAP = { maxFeePerGas: parseGwei("10"), maxPriorityFee: parseGw
  * (Ethereum allows max ~12.5% base fee increase per block).
  * A 1.25x buffer would fail to land txs during base fee spikes.
  */
-const BASE_FEE_MULTIPLIER = 200n; // 200% = 2x (divided by 100)
+const BASE_FEE_MULTIPLIER = 150n; // 150% = 1.5x (divided by 100)
 
 /** Maximum number of resubmission attempts */
 const MAX_RESUBMIT_ATTEMPTS = 2;
@@ -292,6 +292,7 @@ export async function executeViaDelegation(
   env: Env,
   tx: UnsignedTransaction,
   vaultAddress: string,
+  sponsoredGasOverride?: boolean,
 ): Promise<ExecutionResult> {
   // 1. Load the delegation config
   const config = await getDelegationConfig(env.KV, vaultAddress);
@@ -426,9 +427,13 @@ export async function executeViaDelegation(
   }
 
   // 7. Execute the transaction
-  // Choose execution path: sponsored (ERC-4337 bundler) or direct broadcast
-  const useSponsored = config.sponsoredGas && !!env.ALCHEMY_GAS_POLICY_ID;
-  // Path chosen: sponsored if config says so AND policy ID exists, otherwise direct
+  // Choose execution path: sponsored (ERC-4337 bundler) or direct broadcast.
+  // Priority: per-transaction override > per-chain setting > global config.
+  const chainSponsored = chainDelegation.sponsoredGas !== undefined
+    ? chainDelegation.sponsoredGas
+    : config.sponsoredGas;
+  const effectiveSponsored = sponsoredGasOverride !== undefined ? sponsoredGasOverride : chainSponsored;
+  const useSponsored = effectiveSponsored && !!env.ALCHEMY_GAS_POLICY_ID;
 
   // Track whether the NAV shield ran as operator and confirmed the transaction is valid.
   // We use this to distinguish "trade is bad" (SIMULATION_FAILED from NAV shield) from
