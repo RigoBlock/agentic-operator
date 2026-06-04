@@ -394,10 +394,38 @@ export async function checkNavImpact(
   // ── Step 5: Enforce threshold ──
   const maxDrop = Number(maxDropPct);
   if (dropFromRefPct > maxDrop) {
+    const isBelowBaseline = baselineUnitaryValue && baselineUnitaryValue > preNav.unitaryValue;
+    const tradeImprovesNav = postNav.unitaryValue > preNav.unitaryValue;
+    const baselineDropPct = isBelowBaseline
+      ? Number(((baselineUnitaryValue - preNav.unitaryValue) * 10000n) / baselineUnitaryValue) / 100
+      : 0;
+
     console.warn(
-      `[NavShield] ✗ BLOCKED: NAV would drop ${dropFromRefPct.toFixed(2)}% ` +
-      `(max allowed: ${maxDrop}%) reference=${referenceValue} post=${postNav.unitaryValue}`,
+      `[NavShield] ✗ BLOCKED: NAV would drop ${dropFromRefPct.toFixed(2)}% from reference ` +
+      `(max allowed: ${maxDrop}%) reference=${referenceValue} pre=${preNav.unitaryValue} post=${postNav.unitaryValue}`,
     );
+
+    let reason: string;
+    if (isBelowBaseline && tradeImprovesNav) {
+      reason = (
+        `NAV is already ${baselineDropPct.toFixed(2)}% below the 24h baseline. ` +
+        `This trade would improve NAV by ${(Number(((postNav.unitaryValue - preNav.unitaryValue) * 10000n) / preNav.unitaryValue) / 100).toFixed(2)}%, ` +
+        `but the post-trade NAV would still be ${dropFromRefPct.toFixed(2)}% below baseline ` +
+        `(limit: ${maxDrop}%). All trading is paused while NAV is below baseline.`
+      );
+    } else if (isBelowBaseline) {
+      reason = (
+        `NAV is already ${baselineDropPct.toFixed(2)}% below the 24h baseline. ` +
+        `This trade would worsen it to ${dropFromRefPct.toFixed(2)}% below baseline ` +
+        `(limit: ${maxDrop}%). Trading is paused while NAV is below baseline.`
+      );
+    } else {
+      reason = (
+        `Trade would reduce pool unit price by ${dropFromRefPct.toFixed(2)}% ` +
+        `(limit: ${maxDrop}%). This protects the pool from excessive value impact.`
+      );
+    }
+
     return {
       allowed: false,
       verified: true,
@@ -406,8 +434,7 @@ export async function checkNavImpact(
       postNavUnitaryValue: postNav.unitaryValue.toString(),
       dropPct: dropFromRefPct.toFixed(2),
       baselineUnitaryValue: baselineUnitaryValue?.toString(),
-      reason: `Trade would reduce pool unit price by ${dropFromRefPct.toFixed(2)}% ` +
-        `(max allowed: ${maxDrop}%). This protects the pool from excessive value impact.`,
+      reason,
     };
   }
 

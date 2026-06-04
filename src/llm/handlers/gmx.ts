@@ -210,14 +210,23 @@ export async function handle_gmx_increase_position(
     // RPC failure — proceed, on-chain execution will validate
   }
 
+  const oraclePrice = indexTokenPrice.mid;
+  const isPureCollateralAdd = sizeDeltaUsd === "0" || parseFloat(sizeDeltaUsd) === 0;
+
   // Get realistic execution price including OI-imbalance price impact.
   // GMX v2 is oracle-based: executionPrice = oraclePrice ± priceImpact.
-  // We use this both for user display and to compute a more accurate acceptablePrice.
-  const execResult = await getGmxExecutionPrice(market, sizeDeltaUsd, isLong, env.ALCHEMY_API_KEY);
-  const executionPrice = execResult.executionPrice;
-  const priceImpactUsd = execResult.priceImpactUsd;
-
-  const oraclePrice = indexTokenPrice.mid;
+  // For pure collateral adds (sizeDeltaUsd = 0) there is no price impact,
+  // so we skip the contract call and use the oracle price directly.
+  let executionPrice: number;
+  let priceImpactUsd: number;
+  if (isPureCollateralAdd) {
+    executionPrice = oraclePrice;
+    priceImpactUsd = 0;
+  } else {
+    const execResult = await getGmxExecutionPrice(market, sizeDeltaUsd, isLong, env.ALCHEMY_API_KEY);
+    executionPrice = execResult.executionPrice;
+    priceImpactUsd = execResult.priceImpactUsd;
+  }
 
   // Acceptable price: use the worse of oracleMid and executionPrice as the basis,
   // then add the 1% slippage buffer. This ensures the bound is never tighter than
@@ -254,35 +263,49 @@ export async function handle_gmx_increase_position(
     ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
   );
 
+  const actionLabel = isPureCollateralAdd ? "Add Collateral" : (toolName === "gmx_increase_position" ? "Increase" : "Open");
+  const txDescription = isPureCollateralAdd
+    ? `[GMX] Add ${collateralAmount} ${collateralSymbol} collateral to ${isLong ? "Long" : "Short"} ${marketSymbol}`
+    : `[GMX] ${isLong ? "Long" : "Short"} ${marketSymbol} ${leverage}x — ${collateralAmount} ${collateralSymbol} collateral (~$${collateralValueUsdDisplay}), $${sizeDeltaUsd} size`;
+
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
     gas: gmxGas,
-    description: `[GMX] ${isLong ? "Long" : "Short"} ${marketSymbol} ${leverage}x — ${collateralAmount} ${collateralSymbol} collateral (~$${collateralValueUsdDisplay}), $${sizeDeltaUsd} size`,
+    description: txDescription,
   };
 
   const priceImpactLabel = priceImpactUsd >= 0 ? "🟢 Favorable" : "🔴 Adverse";
   const priceImpactDisplay = Math.abs(priceImpactUsd).toLocaleString(undefined, { maximumFractionDigits: 2 });
   const acceptableLabel = isLong ? "max" : "min";
 
-  const message = [
-    `✅ GMX ${toolName === "gmx_increase_position" ? "Increase" : "Open"} Position ready`,
+  const messageLines = [
+    `✅ GMX ${actionLabel} ready`,
     `Direction: ${isLong ? "🟢 LONG" : "🔴 SHORT"} ${marketSymbol}/USD`,
     `Oracle price: $${oraclePrice.toFixed(4)}`,
-    `Execution price: $${executionPrice.toFixed(4)} (${priceImpactLabel} $${priceImpactDisplay})`,
-    `Acceptable ${acceptableLabel}: $${acceptablePriceUsd} (1% bound)`,
-    `Size (notional): $${parseFloat(sizeDeltaUsd).toLocaleString()}`,
+  ];
+  if (!isPureCollateralAdd) {
+    messageLines.push(
+      `Execution price: $${executionPrice.toFixed(4)} (${priceImpactLabel} $${priceImpactDisplay})`,
+      `Acceptable ${acceptableLabel}: $${acceptablePriceUsd} (1% bound)`,
+      `Size (notional): $${parseFloat(sizeDeltaUsd).toLocaleString()}`,
+      `Leverage: ~${leverage}x`,
+    );
+  }
+  messageLines.push(
     `Collateral: ${collateralAmount} ${collateralSymbol} (~$${collateralValueUsdDisplay})`,
-    `Leverage: ~${leverage}x`,
     `Market: ${market.marketToken}`,
     `Chain: Arbitrum`,
     ``,
-    `💡 GMX executes at the oracle price when the keeper picks up the order. The acceptable price is the worst-case execution bound.`,
+    isPureCollateralAdd
+      ? `💡 Adding collateral reduces liquidation risk without increasing position size.`
+      : `💡 GMX executes at the oracle price when the keeper picks up the order. The acceptable price is the worst-case execution bound.`,
     ...(cappedNote ? [cappedNote] : []),
     ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
-  ].join("\n");
+  );
+  const message = messageLines.join("\n");
 
   return { message, transaction, chainSwitch: chainSwitched };
 

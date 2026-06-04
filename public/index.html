@@ -144,7 +144,7 @@
     .msg.assistant .msg-content a:hover { text-decoration: underline; }
     .msg.assistant .msg-content table {
       border-collapse: collapse; margin: 8px 0; font-size: 14px; width: 100%;
-      white-space: nowrap;
+      white-space: nowrap; display: block; overflow-x: auto;
     }
     .msg.assistant .msg-content th,
     .msg.assistant .msg-content td {
@@ -154,8 +154,7 @@
       background: var(--bg); font-weight: 600; font-size: 13px; color: var(--muted);
     }
     .msg.assistant .msg-content td { font-size: 13px; }
-    .msg.assistant .msg-content pre,
-    .msg.assistant .msg-content table {
+    .msg.assistant .msg-content pre {
       overflow-x: auto;
     }
 
@@ -1019,6 +1018,17 @@
       try {
         const vault = vaultInput.value.trim();
         if (!vault) return;
+        // Deduplicate: never save two identical adjacent messages.
+        // This prevents duplicates when the same response is rendered twice
+        // (e.g. streaming plan block + final reply with identical text).
+        const deduped = [];
+        for (const msg of conversationHistory) {
+          const last = deduped[deduped.length - 1];
+          if (!last || last.role !== msg.role || last.content !== msg.content) {
+            deduped.push(msg);
+          }
+        }
+        conversationHistory = deduped;
         sessionStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({
           vault, chainId: currentChainId, messages: conversationHistory.slice(-40),
         }));
@@ -1032,11 +1042,23 @@
         const vault = vaultInput.value.trim();
         if (saved.vault?.toLowerCase() !== vault?.toLowerCase()) return false;
         conversationHistory = saved.messages || [];
-        // Re-render saved messages
+        if (conversationHistory.length === 0) return false;
+        // Clear any existing messages (prevents duplication when browser restores from bfcache).
+        // bfcache can preserve the full DOM including previously-rendered messages; without
+        // this clear they would be duplicated by the loop below.
+        const onboarding = document.getElementById('pool-onboarding');
+        chatEl.innerHTML = '';
+        if (onboarding) chatEl.appendChild(onboarding);
+        // Re-render saved messages with dedup guard (belt + suspenders).
+        // We track rendered keys to ensure the same message is never appended twice.
+        const rendered = new Set();
         for (const msg of conversationHistory) {
+          const key = `${msg.role}:${msg.content}`;
+          if (rendered.has(key)) continue;
+          rendered.add(key);
           appendMessage(msg.role, msg.content, null, true);
         }
-        return conversationHistory.length > 0;
+        return true;
       } catch { return false; }
     }
 
@@ -2613,6 +2635,8 @@
     /** Poll receipt for a manual tx card */
     async function pollManualTxReceipt(txHash, tx, statusEl) {
       const meta = tx.swapMeta;
+      const explorerUrl = getExplorerUrl(tx.chainId, txHash);
+      const explorerLink = `<a href="${explorerUrl}" target="_blank" rel="noopener">${txHash.slice(0,10)}…${txHash.slice(-6)} ↗</a>`;
       for (let i = 0; i < 60; i++) {
         await new Promise(r => setTimeout(r, 2000));
         try {
@@ -2624,9 +2648,11 @@
             const success = receipt.status === '0x1';
             statusEl.style.color = success ? 'var(--success)' : 'var(--error)';
             if (success && meta) {
-              statusEl.textContent = `✓ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}`;
+              statusEl.innerHTML = `✓ Swapped ${escapeHtml(meta.sellAmount)} ${escapeHtml(meta.sellToken)} for ${escapeHtml(meta.buyAmount)} ${escapeHtml(meta.buyToken)} · ${explorerLink}`;
             } else {
-              statusEl.textContent = success ? '✓ Transaction confirmed' : '✗ Transaction reverted';
+              statusEl.innerHTML = success
+                ? `✓ Transaction confirmed · ${explorerLink}`
+                : `✗ Transaction reverted · ${explorerLink}`;
             }
             if (success) {
               // Refresh delegation status (handles chat-based delegation setup)
@@ -2645,7 +2671,7 @@
         } catch (e) { /* retry */ }
       }
       statusEl.style.color = 'var(--warn)';
-      statusEl.textContent = 'Tx still pending. Check explorer.';
+      statusEl.innerHTML = `Tx still pending. ${explorerLink}`;
     }
 
     /* ================================================================
@@ -2731,21 +2757,29 @@
           if (err.code === 'DELEGATION_NOT_ON_CHAIN' || err.code === 'METHOD_NOT_ALLOWED' || err.code === 'AGENT_NOT_DELEGATED' || err.fallbackToManual) {
             container.innerHTML = '';
             const manualMsg = document.createElement('div');
-            manualMsg.style.cssText = 'color:var(--muted);font-size:13px;margin-bottom:12px;';
-            manualMsg.textContent =
-              (err.code === 'AGENT_NOT_DELEGATED')
-                ? 'This function is not in your current on-chain delegation:'
-                : err.code === 'METHOD_NOT_ALLOWED'
-                  ? 'This selector is not in the allowed function list — sign manually:'
-                  : 'Delegation not active on this chain — sign manually:';
+            manualMsg.style.cssText = 'color:var(--muted);font-size:13px;margin-bottom:12px;white-space:pre-wrap;';
+            if (err.code === 'SPONSORED_FAILED') {
+              manualMsg.textContent = err.error || 'Gas sponsorship failed. You can fund the agent wallet, disable sponsored gas, or sign manually.';
+            } else if (err.code === 'AGENT_NOT_DELEGATED') {
+              manualMsg.textContent = 'This function is not in your current on-chain delegation:';
+            } else if (err.code === 'METHOD_NOT_ALLOWED') {
+              manualMsg.textContent = 'This selector is not in the allowed function list — sign manually:';
+            } else if (err.code === 'DELEGATION_NOT_ON_CHAIN') {
+              manualMsg.textContent = 'Delegation not active on this chain — sign manually:';
+            } else {
+              manualMsg.textContent = err.error || 'Execution failed — sign manually:';
+            }
             container.appendChild(manualMsg);
             // Re-render as manual tx card inline
             const actionsDiv = document.createElement('div');
             actionsDiv.className = 'confirm-actions';
-            const updateBtn = err.code === 'AGENT_NOT_DELEGATED'
-              ? `<button class="btn-agent-exec approve" style="background:var(--accent);" onclick="openDelegationSetup(${tx.chainId});this.closest('.msg').remove()">Update Delegation</button>`
-              : '';
-            actionsDiv.innerHTML = updateBtn +
+            let extraBtn = '';
+            if (err.code === 'AGENT_NOT_DELEGATED') {
+              extraBtn = `<button class="btn-agent-exec approve" style="background:var(--accent);" onclick="openDelegationSetup(${tx.chainId});this.closest('.msg').remove()">Update Delegation</button>`;
+            } else if (err.code === 'SPONSORED_FAILED') {
+              extraBtn = `<button class="btn-agent-exec approve" style="background:var(--accent);" onclick="openSettings();document.getElementById('sponsor-toggle').checked=false;toggleSponsoredGas(false);">Disable Sponsored Gas</button>`;
+            }
+            actionsDiv.innerHTML = extraBtn +
               `<button class="btn-agent-exec approve" onclick="signManualTxCard(this)">Sign with Wallet</button>
               <button class="btn-agent-exec reject" onclick="this.closest('.msg').remove()">Dismiss</button>`;
             container.appendChild(actionsDiv);

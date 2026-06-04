@@ -385,22 +385,28 @@ delegation.get("/status", async (c) => {
  * Body: { operatorAddress, vaultAddress, chainId, authSignature, authTimestamp, transaction }
  */
 delegation.post("/execute", async (c) => {
-  try {
-    const body = await c.req.json<{
-      operatorAddress: string;
-      vaultAddress: string;
+  // Declare these OUTSIDE the try block so the bundler cannot break catch-block references.
+  // The bundler has a bug where it renames block-scoped try-block variables but misses
+  // references inside catch blocks, causing ReferenceError at runtime → 500.
+  let body: {
+    operatorAddress: string;
+    vaultAddress: string;
+    chainId: number;
+    authSignature: string;
+    authTimestamp: number;
+    transaction: {
+      to: string;
+      data: string;
+      value: string;
       chainId: number;
-      authSignature: string;
-      authTimestamp: number;
-      transaction: {
-        to: string;
-        data: string;
-        value: string;
-        chainId: number;
-        gas?: string;
-        description?: string;
-      };
-    }>();
+      gas?: string;
+      description?: string;
+    };
+  } | undefined;
+  let tx: UnsignedTransaction | undefined;
+
+  try {
+    body = await c.req.json<typeof body>();
 
     if (!body.transaction?.to || !body.transaction?.data) {
       return c.json({ error: "transaction.to and transaction.data are required" }, 400);
@@ -428,7 +434,7 @@ delegation.post("/execute", async (c) => {
       }, 400);
     }
 
-    const tx: UnsignedTransaction = {
+    tx = {
       to: body.transaction.to as Address,
       data: body.transaction.data as Hex,
       value: body.transaction.value || "0x0",
@@ -447,12 +453,6 @@ delegation.post("/execute", async (c) => {
     }
     if (err instanceof ExecutionError) {
       console.error(`[delegation/execute] ExecutionError: code=${err.code} msg=${err.message}`);
-      // Map error codes to appropriate HTTP status codes:
-      // - 400: malformed request or setup issue (delegation not configured, needs re-setup)
-      // - 403: forbidden (selector/target not allowed)
-      // - 422: trade-level failure (simulation reverted, NAV shield blocked, insufficient balance)
-      // - 502: upstream service failure (RPC unreachable, gas estimation failed, bundler error)
-      // - 500: internal misconfiguration (agent wallet missing/mismatched)
       const statusMap: Record<string, number> = {
         DELEGATION_NOT_CONFIGURED: 400,
         DELEGATION_NOT_ON_CHAIN: 400,
@@ -464,30 +464,34 @@ delegation.post("/execute", async (c) => {
         INSUFFICIENT_BALANCE: 422,
         AGENT_WALLET_NOT_FOUND: 500,
         AGENT_WALLET_MISMATCH: 500,
+        AGENT_WALLET_ERROR: 502,
         GAS_ESTIMATION_FAILED: 502,
         SPONSORED_FAILED: 502,
+        EXECUTION_FAILED: 502,
         RPC_UNAVAILABLE: 502,
       };
       const status = statusMap[err.code] || 500;
-      // Signal fallback to manual wallet signing for delegation/selector issues
-      // or when sponsored execution fails and the agent wallet has no gas.
       const fallbackCodes = ["DELEGATION_NOT_ON_CHAIN", "METHOD_NOT_ALLOWED", "AGENT_NOT_DELEGATED"];
       if (fallbackCodes.includes(err.code) || err.fallbackToManual) {
         return c.json({
           error: sanitizeError(err.message),
           code: err.code,
           fallbackToManual: true,
-          transaction: body.transaction,
+          transaction: body?.transaction,
         }, status as 400 | 403 | 422 | 502);
       }
       return c.json({ error: sanitizeError(err.message), code: err.code }, status as any);
     }
-    // Log the FULL error for debugging — the sanitized version hides crucial details
     const errMsg = err instanceof Error ? err.message : String(err);
     const errStack = err instanceof Error ? err.stack : undefined;
     console.error(`[delegation/execute] UNHANDLED ERROR: ${errMsg}`);
     if (errStack) console.error(`[delegation/execute] Stack: ${errStack}`);
-    return c.json({ error: sanitizeError(errMsg) }, 500);
+    return c.json({
+      error: `Execution error: ${sanitizeError(errMsg)}. Please sign this transaction directly from your wallet.`,
+      code: "UNEXPECTED_ERROR",
+      fallbackToManual: true,
+      transaction: body?.transaction,
+    }, 502);
   }
 });
 

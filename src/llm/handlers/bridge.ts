@@ -79,6 +79,14 @@ export async function handle_crosschain_transfer(
     chainId: srcChainId,
     gas,
     description: result.description,
+    swapMeta: {
+      sellAmount: result.quote.inputAmount,
+      sellToken: result.quote.inputToken.symbol,
+      buyAmount: parseFloat(result.quote.outputAmount).toFixed(6),
+      buyToken: result.quote.outputToken.symbol,
+      price: `Bridge ${result.quote.feePct} fee`,
+      dex: "Across Protocol",
+    },
   };
 
   const message = [

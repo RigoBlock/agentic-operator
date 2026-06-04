@@ -106,15 +106,11 @@ export async function executeSponsoredCalls(
 ): Promise<SponsoredCallsResult> {
   try {
     // ── Step 1: Create signer (per SDK quickstart) ──
-    console.log(`[SmartWallet] Step 1: Creating LocalAccountSigner for ${agentAccount.address}`);
     const signer = new LocalAccountSigner(agentAccount);
     const signerAddress = await signer.getAddress();
-    console.log(`[SmartWallet] Step 1 OK: signerAddress=${signerAddress}`);
 
     // ── Step 2: Create smart wallet client (per SDK quickstart) ──
-    console.log(`[SmartWallet] Step 2: Creating SmartWalletClient for chain ${chainId}`);
     const alchemyChain = getAlchemyChain(chainId);
-    console.log(`[SmartWallet] Step 2a: Got Alchemy chain: ${alchemyChain.name} (id=${alchemyChain.id})`);
     const transport = alchemy({
       apiKey: alchemyKey,
       fetchOptions: {
@@ -123,21 +119,14 @@ export async function executeSponsoredCalls(
         },
       },
     });
-    console.log(`[SmartWallet] Step 2b: Created alchemy transport (with Origin header)`);
 
     const client = createSmartWalletClient({
       transport,
       chain: alchemyChain,
       signer,
     });
-    console.log(`[SmartWallet] Step 2 OK: Client created`);
 
     // ── Step 3: Prepare calls ──
-    console.log(
-      `[SmartWallet] Step 3: prepareCalls: ${calls.length} call(s), ` +
-      `from=${signerAddress}, policyId=${policyId}` +
-      (callGasLimit ? `, callGasLimit=${callGasLimit}` : ""),
-    );
     const capabilities: Record<string, unknown> = {
       paymasterService: {
         policyId,
@@ -165,31 +154,22 @@ export async function executeSponsoredCalls(
       from: signerAddress,
       capabilities,
     });
-    console.log(`[SmartWallet] Step 3 OK: Calls prepared`);
 
     // ── Step 4: Sign the prepared calls ──
-    console.log(`[SmartWallet] Step 4: signPreparedCalls...`);
     const signedCalls = await client.signPreparedCalls(preparedCalls);
-    console.log(`[SmartWallet] Step 4 OK: Calls signed`);
 
     // ── Step 5: Send the prepared calls ──
-    console.log(`[SmartWallet] Step 5: sendPreparedCalls...`);
     const result = await client.sendPreparedCalls(signedCalls);
 
     const callId = result.id;
     if (!callId) {
       throw new Error("sendPreparedCalls did not return a call ID");
     }
-    console.log(`[SmartWallet] Step 5 OK: callId=${callId}`);
 
     // ── Step 6: Wait for confirmation ──
-    console.log(`[SmartWallet] Step 6: waitForCallsStatus...`);
     const statusResult = await client.waitForCallsStatus({ id: callId });
 
-    console.log(
-      `[SmartWallet] Step 6 OK: status=${statusResult.status} ` +
-      `(receipts: ${statusResult.receipts?.length ?? 0})`,
-    );
+
 
     return {
       callId,
@@ -202,10 +182,6 @@ export async function executeSponsoredCalls(
     // Log full error details for debugging bundler/paymaster failures
     const errDetails = (err as any)?.details || (err as any)?.cause?.message || "";
     const errCode = (err as any)?.code || (err as any)?.cause?.code || "";
-    console.error(`[SmartWallet] FAILED: ${errMsg}`);
-    if (errDetails) console.error(`[SmartWallet] Details: ${errDetails}`);
-    if (errCode) console.error(`[SmartWallet] Code: ${errCode}`);
-    if (errStack) console.error(`[SmartWallet] Stack: ${errStack}`);
     // Re-throw with the original error for the caller to handle
     throw err;
   }

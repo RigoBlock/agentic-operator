@@ -230,6 +230,10 @@ app.get("/", async (c) => {
       '</sitemap.xml>; rel="sitemap"',
     ].join(", "),
   );
+  // Prevent stale HTML after deploy — the frontend must always match the worker API.
+  headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
   return new Response(response.body, { status: response.status, headers });
 });
 

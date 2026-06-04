@@ -243,8 +243,8 @@ export const TOOL_DEFINITIONS = [
       name: "gmx_increase_position",
       description:
         "Increase the size of an existing GMX v2 perpetual position or add collateral to it. " +
-        "Use this when the user already has an open position and wants to add to it (e.g. 'increase my LIT long by $1500'). " +
-        "Parameters are the same as gmx_open_position: either notionalUsd + leverage, or collateralAmount + leverage.",
+        "Use this when the user already has an open position and wants to add to it. " +
+        "Three modes: (1) notionalUsd + leverage to increase size, (2) collateralAmount + leverage to add collateral AND size, (3) collateralAmount with sizeDeltaUsd='0' to add collateral ONLY without changing size.",
       parameters: {
         type: "object",
         properties: {
@@ -266,7 +266,7 @@ export const TOOL_DEFINITIONS = [
           },
           sizeDeltaUsd: {
             type: "string",
-            description: "Additional position size in USD (alternative to notionalUsd)",
+            description: "Additional position size in USD. Set to '0' when the user wants to add collateral ONLY without increasing position size (e.g., 'add 0.5 WETH collateral to reduce liquidation risk').",
           },
           isLong: {
             type: "boolean",
@@ -274,7 +274,7 @@ export const TOOL_DEFINITIONS = [
           },
           leverage: {
             type: "string",
-            description: "Desired leverage multiplier (e.g., '10' for 10x). If omitted, existing position leverage is maintained.",
+            description: "Desired leverage multiplier (e.g., '10' for 10x). If omitted, defaults to 2x for size-increasing orders. Ignored when sizeDeltaUsd='0'.",
           },
         },
         required: ["market", "isLong"],

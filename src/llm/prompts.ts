@@ -289,7 +289,8 @@ WHEN THE USER WANTS TO INCREASE A POSITION:
 Call gmx_increase_position directly. Do NOT call gmx_get_positions first unless the user asks to see their positions.
 Required: market (e.g. "ETH", "BTC", "LIT"), isLong (true/false).
 Use notionalUsd + leverage when the user says "increase by $1500" or "add $1500".
-Use collateralAmount + leverage when the user says "add 0.5 WETH collateral".
+Use collateralAmount + leverage when the user says "add 0.5 WETH collateral AND increase size" or similar.
+Use collateralAmount + sizeDeltaUsd="0" when the user wants to add collateral ONLY without increasing position size (e.g. "add 0.5 WETH collateral to avoid liquidation"). This is the correct mode for de-risking — it adds collateral but keeps size unchanged.
 Default collateral: USDC unless user specifies otherwise (e.g. "using WETH").
 
 WHEN INFORMATION IS MISSING:

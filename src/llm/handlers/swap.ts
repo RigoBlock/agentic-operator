@@ -173,6 +173,14 @@ export async function handle_build_vault_swap(
           chainId: ctx.chainId,
           gas,
           description: `${isWrap ? "Wrap" : "Unwrap"} ${intent.amountIn} ${fromSym} → ${toSym}`,
+          swapMeta: {
+            sellAmount: intent.amountIn,
+            sellToken: fromSym,
+            buyAmount: intent.amountIn,
+            buyToken: toSym,
+            price: "1:1 (no slippage)",
+            dex: "Vault Adapter",
+          },
         };
 
         let message = [

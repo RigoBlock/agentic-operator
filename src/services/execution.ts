@@ -101,55 +101,13 @@ const NATIVE_TOKEN: Record<number, string> = {
  * Parse Alchemy bundler/paymaster errors to detect rate-limit or spending-cap issues.
  * Returns a user-friendly message if the error matches, otherwise null.
  */
-function parseSponsoredError(raw: string, chainId: number, agentAddress: string): string | null {
-  const lower = raw.toLowerCase();
-  const token = NATIVE_TOKEN[chainId] || "ETH";
-
-  // Invalid RPC parameters — usually a bundler/EIP-7702 configuration issue
-  if (lower.includes("invalid parameters") || lower.includes("invalid params") ||
-      lower.includes("invalid method params") || lower.includes("invalid request")) {
-    return (
-      `Gas-sponsored execution failed due to an RPC parameter error. ` +
-      `This is usually a temporary bundler issue — please try again in a moment. ` +
-      `If the problem persists, the gas sponsorship policy may need to be reconfigured for chain ${chainId}.`
-    );
-  }
-
-  // Per-user transaction count limit or per-UO spend limit
-  if (lower.includes("max number of user ops") || lower.includes("policy limit") ||
-      lower.includes("exceeded the maximum") || lower.includes("rate limit") ||
-      lower.includes("spending limit") || lower.includes("spend limit") ||
-      lower.includes("quota")) {
-    return (
-      `Gas sponsorship limit reached for this wallet. ` +
-      `The agent wallet has exhausted its sponsored transaction allowance. ` +
-      `To continue trading, send a small amount of ${token} to the agent wallet ` +
-      `(${agentAddress}) on chain ${chainId} to cover gas fees, ` +
-      `or wait for the sponsorship limit to reset.`
-    );
-  }
-
-  // Policy expired / disabled
-  if (lower.includes("policy not found") || lower.includes("policy is disabled") ||
-      lower.includes("policy has expired") || lower.includes("invalid policy")) {
-    return (
-      `Gas sponsorship policy is no longer active. ` +
-      `Send a small amount of ${token} to the agent wallet ` +
-      `(${agentAddress}) on chain ${chainId} to cover gas fees directly.`
-    );
-  }
-
-  // Global spending cap or paymaster deposit depleted
-  if (lower.includes("max spend") || lower.includes("global limit") ||
-      lower.includes("budget exceeded") || lower.includes("insufficient funds") ||
-      lower.includes("paymaster deposit too low")) {
-    return (
-      `Gas sponsorship budget has been exhausted. ` +
-      `To continue, send a small amount of ${token} to the agent wallet ` +
-      `(${agentAddress}) on chain ${chainId} to pay gas fees directly.`
-    );
-  }
-
+/**
+ * No friendly interpretations — the raw Alchemy error (in details/cause) is
+ * already descriptive. Adding our own text risks being wrong (e.g. saying
+ * "bundler rejected fee parameters" when the actual error is a paymaster
+ * spending limit). Returns null so the caller shows only facts.
+ */
+function parseSponsoredError(_raw: string, _chainId: number, _agentAddress: string, _details?: string): string | null {
   return null;
 }
 
@@ -168,8 +126,9 @@ function parseSponsoredError(raw: string, chainId: number, agentAddress: string)
 const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }> = {
   // L1 Ethereum — maxFee is NOT a fixed fee; it is a safety cap on the
   // 2×-buffered base fee from the latest block (see estimateFees).
-  // Priority is hardcoded to 0.01 gwei (negligible vs base fee).
-  1:     { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.01") },
+  // Priority fee cap raised to 0.1 gwei: the Alchemy bundler rejects below
+  // ~0.0625 gwei, so 0.01 gwei caused every sponsored tx to fail on mainnet.
+  1:     { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.1") },
   // L2s — much cheaper, priority is negligible
   10:    { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
   // BSC — use RPC estimateMaxPriorityFeePerGas, cap at 0.1 gwei
@@ -179,12 +138,12 @@ const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }>
   8453:  { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
   42161: { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
   // Testnets
-  11155111: { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.01") },
+  11155111: { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.1") },
   84532:   { maxFeePerGas: parseGwei("1"),    maxPriorityFee: parseGwei("0.01") },
 };
 
 /** Default caps for chains not explicitly listed */
-const DEFAULT_GAS_CAP = { maxFeePerGas: parseGwei("10"), maxPriorityFee: parseGwei("0.01") };
+const DEFAULT_GAS_CAP = { maxFeePerGas: parseGwei("10"), maxPriorityFee: parseGwei("0.1") };
 
 /**
  * Multiplier for base fee estimation.
@@ -264,11 +223,15 @@ async function estimateFees(
   const bufferedBaseFee = (baseFee * BASE_FEE_MULTIPLIER) / 100n;
 
   // ── Priority fee ──
-  // Mainnet: hardcode 0.01 gwei. It is orders of magnitude smaller than
-  // base fee, so it barely affects total cost, yet is enough for inclusion.
-  // Other chains: use RPC estimateMaxPriorityFeePerGas (with cap).
+  // Use RPC estimateMaxPriorityFeePerGas when available. L2s work fine with
+  // whatever the RPC returns. On mainnet the cap (GAS_CAPS[1].maxPriorityFee)
+  // keeps the value bounded so we don't overpay on sponsored transactions.
+  // If the RPC call fails we fall back to baseFee/10.
   let priorityFee: bigint;
   if (chainId === 1 || chainId === 11155111) {
+    // Mainnet: hardcode 0.01 gwei. Keeps sponsored tx cost minimal to stay
+    // under paymaster policy limits. The Alchemy bundler may demand more;
+    // the retry logic in trySponsoredCalls bumps to the bundler's minimum.
     priorityFee = parseGwei("0.01");
   } else {
     try {
@@ -283,13 +246,7 @@ async function estimateFees(
   const maxFee = bufferedBaseFee + cappedPriorityFee;
   const cappedMaxFee = maxFee < caps.maxFeePerGas ? maxFee : caps.maxFeePerGas;
 
-  console.log(
-    `[Gas] Chain ${chainId}: baseFee=${formatGwei(baseFee)} gwei, ` +
-    `buffered=${formatGwei(bufferedBaseFee)} gwei, ` +
-    `priority=${formatGwei(cappedPriorityFee)} gwei, ` +
-    `maxFee=${formatGwei(cappedMaxFee)} gwei ` +
-    `(cap: ${formatGwei(caps.maxFeePerGas)} gwei)`,
-  );
+
 
   return {
     maxFeePerGas: cappedMaxFee,
@@ -379,15 +336,24 @@ export async function executeViaDelegation(
   }
 
   // 5. Load the agent wallet
-  const agentAccount = await loadAgentWalletAccount(
-    env.KV,
-    vaultAddress,
-    env,
-  );
-  if (!agentAccount) {
+  let agentAccount: LocalAccount;
+  try {
+    const loaded = await loadAgentWalletAccount(env.KV, vaultAddress, env);
+    if (!loaded) {
+      throw new ExecutionError(
+        "Agent wallet not found for this vault",
+        "AGENT_WALLET_NOT_FOUND",
+      );
+    }
+    agentAccount = loaded;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (err instanceof ExecutionError) throw err;
     throw new ExecutionError(
-      "Agent wallet not found for this vault",
-      "AGENT_WALLET_NOT_FOUND",
+      `Agent wallet unavailable: ${sanitizeError(msg)}. ` +
+      `The CDP service may be temporarily unreachable. Sign this transaction directly from your wallet.`,
+      "AGENT_WALLET_ERROR",
+      true,
     );
   }
 
@@ -445,9 +411,7 @@ export async function executeViaDelegation(
     const errorCode = navResult.code === 'TRADE_REVERTS'
       ? "SIMULATION_FAILED"   // The swap itself would revert — not a NAV issue
       : "NAV_SHIELD_BLOCKED"; // NAV would drop too much, or pre-NAV read failed
-    console.warn(
-      `[executeViaDelegation] ${errorCode}: ${navResult.reason}`,
-    );
+
     throw new ExecutionError(
       navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
       errorCode,
@@ -456,23 +420,15 @@ export async function executeViaDelegation(
 
   // Log NAV verification status
   if (!navResult.verified) {
-    console.warn(
-      `[executeViaDelegation] NAV shield UNVERIFIED on chain ${tx.chainId}: ${navResult.reason}. ` +
-      `Proceeding — trade simulation passed but NAV impact was not measured.`,
-    );
+
   } else if (navResult.dropPct !== "0" && navResult.dropPct !== "0.00") {
-    console.log(
-      `[executeViaDelegation] NAV shield OK: drop=${navResult.dropPct}% ` +
-      `(pre=${navResult.preNavUnitaryValue} post=${navResult.postNavUnitaryValue})`,
-    );
+
   }
 
   // 7. Execute the transaction
   // Choose execution path: sponsored (ERC-4337 bundler) or direct broadcast
   const useSponsored = config.sponsoredGas && !!env.ALCHEMY_GAS_POLICY_ID;
-  console.log(`[executeViaDelegation] Path: ${useSponsored ? 'SPONSORED' : 'DIRECT'}, ` +
-    `sponsoredGas=${config.sponsoredGas}, policyId=${env.ALCHEMY_GAS_POLICY_ID ? 'SET' : 'MISSING'}, ` +
-    `agent=${agentAccount.address}, chain=${tx.chainId}`);
+  // Path chosen: sponsored if config says so AND policy ID exists, otherwise direct
 
   // Track whether the NAV shield ran as operator and confirmed the transaction is valid.
   // We use this to distinguish "trade is bad" (SIMULATION_FAILED from NAV shield) from
@@ -490,7 +446,6 @@ export async function executeViaDelegation(
       // ── Sponsored path: submit as UserOperation via Alchemy bundler ──
       // The paymaster sponsors gas, so the agent wallet doesn't need ETH.
       // The agent EOA must have EIP-7702 authorization (auto-set on first use).
-      console.log(`[executeViaDelegation] Calling sponsoredAgentTransaction...`);
       try {
         result = await sponsoredAgentTransaction(
           agentAccount,
@@ -501,14 +456,12 @@ export async function executeViaDelegation(
           env.KV,
         );
       } catch (sponsoredErr) {
-        // If simulation failed, don't retry via direct — let outer catch handle it
+        // Simulation failure is a trade-level issue — don't mask it with sponsorship errors
         if (sponsoredErr instanceof ExecutionError && sponsoredErr.code === "SIMULATION_FAILED") {
           throw sponsoredErr;
         }
-        // For bundler/paymaster errors (e.g. policy expired, chain not covered),
-        // fall back to direct broadcast so the agent wallet pays gas instead.
+
         const sponsoredMsg = sponsoredErr instanceof Error ? sponsoredErr.message : String(sponsoredErr);
-        // Extract nested error details from Alchemy SDK (often has .details or .cause)
         const sponsoredDetails = (sponsoredErr as any)?.details
           || (sponsoredErr as any)?.cause?.message
           || (sponsoredErr as any)?.cause?.details
@@ -516,12 +469,9 @@ export async function executeViaDelegation(
         const sponsoredCode = (sponsoredErr as any)?.code
           || (sponsoredErr as any)?.cause?.code
           || "";
-        console.warn(
-          `[executeViaDelegation] Sponsored execution failed, falling back to direct broadcast. ` +
-          `Error: ${sponsoredMsg}` +
-          (sponsoredDetails ? ` | Details: ${sponsoredDetails}` : "") +
-          (sponsoredCode ? ` | Code: ${sponsoredCode}` : ""),
-        );
+        const gasInfo = (sponsoredErr as any)?._gasInfo;
+
+        // Try direct broadcast (agent wallet pays gas)
         try {
           result = await broadcastAgentTransaction(
             agentAccount,
@@ -530,26 +480,50 @@ export async function executeViaDelegation(
             env.ALCHEMY_API_KEY,
           );
         } catch (directErr) {
-          // If direct broadcast also fails due to no balance, the real problem is the
-          // sponsored path. Surface a user-friendly message about what went wrong.
-          // Include the actual bundler error so the operator can diagnose the root cause.
+          // Both sponsored and direct failed. Build a user-facing message that explains
+          // exactly what happened and gives the user three clear choices:
+          // 1. Fund the agent wallet so direct broadcast works next time
+          // 2. Disable sponsorship on this chain so direct broadcast is the default
+          // 3. Sign this transaction manually right now
+          const token = NATIVE_TOKEN[tx.chainId] || "ETH";
+          const detailSuffix = sponsoredDetails
+            ? ` (${sanitizeError(String(sponsoredDetails))})`
+            : "";
+          const codeSuffix = sponsoredCode ? ` [${sponsoredCode}]` : "";
+
+          // Show only facts: raw error, gas params, options. No interpretation.
+          let gasBreakdown = "";
+          if (gasInfo) {
+            const parts: string[] = [];
+            if (gasInfo.callGasLimit) parts.push(`gas limit: ${gasInfo.callGasLimit}`);
+            if (gasInfo.ourMaxFeePerGasGwei) parts.push(`our maxFeePerGas: ${gasInfo.ourMaxFeePerGasGwei} gwei`);
+            if (gasInfo.ourMaxPriorityFeePerGasGwei) parts.push(`our maxPriorityFeePerGas: ${gasInfo.ourMaxPriorityFeePerGasGwei} gwei`);
+            if (gasInfo.alchemyMaxFeePerGasGwei) parts.push(`Alchemy maxFeePerGas: ${gasInfo.alchemyMaxFeePerGasGwei} gwei`);
+            if (gasInfo.alchemyMaxPriorityFeePerGasGwei) parts.push(`Alchemy maxPriorityFeePerGas: ${gasInfo.alchemyMaxPriorityFeePerGasGwei} gwei`);
+            if (gasInfo.maxCostEth) parts.push(`max cost: ${gasInfo.maxCostEth} ${token}`);
+            if (parts.length) gasBreakdown = `\n[${parts.join(" · ")}]`;
+          }
+
+          let userMsg: string;
           if (directErr instanceof ExecutionError && directErr.code === "INSUFFICIENT_BALANCE") {
-            const friendly = parseSponsoredError(sponsoredMsg, tx.chainId, agentAccount.address);
-            const sanitizedMsg = sanitizeError(sponsoredMsg);
-            const detailSuffix = sponsoredDetails
-              ? ` Bundler details: ${sanitizeError(String(sponsoredDetails))}.`
-              : "";
-            const codeSuffix = sponsoredCode ? ` Code: ${sponsoredCode}.` : "";
-            const baseMsg = friendly
-              ? `${friendly}${detailSuffix}${codeSuffix} Raw: ${sanitizedMsg}`
-              : `Gas-sponsored execution failed: ${sanitizedMsg}.${detailSuffix}${codeSuffix}`;
-            throw new ExecutionError(
-              `${baseMsg}\nAlternatively, sign this transaction directly from your wallet.`,
-              "SPONSORED_FAILED",
-              true, // fallbackToManual — user can sign with their own wallet
+            userMsg = (
+              `Sponsored execution failed${detailSuffix}${codeSuffix}.${gasBreakdown}\n` +
+              `Direct broadcast also failed: agent wallet has no ${token} for gas.\n` +
+              `Options: (1) fund agent wallet ${agentAccount.address}, ` +
+              `(2) disable sponsored gas, or ` +
+              `(3) sign this transaction directly from your wallet.`
+            );
+          } else {
+            const directMsg = directErr instanceof Error ? directErr.message : String(directErr);
+            userMsg = (
+              `Sponsored execution failed${detailSuffix}${codeSuffix}.${gasBreakdown}\n` +
+              `Direct broadcast also failed: ${sanitizeError(directMsg)}.\n` +
+              `Options: (1) fund agent wallet ${agentAccount.address}, ` +
+              `(2) disable sponsored gas, or ` +
+              `(3) sign this transaction directly from your wallet.`
             );
           }
-          throw directErr;
+          throw new ExecutionError(userMsg, "SPONSORED_FAILED", true);
         }
       }
     } else {
@@ -571,10 +545,7 @@ export async function executeViaDelegation(
     // In this case, the operator can still execute the transaction by signing it
     // directly from their wallet — signal fallbackToManual to the caller.
     if (execErr instanceof ExecutionError && execErr.code === "SIMULATION_FAILED") {
-      console.warn(
-        `[executeViaDelegation] Agent simulation failed but operator validation passed — ` +
-        `selector ${selector} is likely not delegated on-chain. Signalling AGENT_NOT_DELEGATED.`,
-      );
+
       throw new ExecutionError(
         `The agent wallet is not delegated for function selector ${selector} on-chain. ` +
         `Update your delegation to add this function, or sign this transaction directly from your wallet.`,
@@ -609,6 +580,7 @@ async function broadcastAgentTransaction(
   chainId: number,
   alchemyKey?: string,
 ): Promise<ExecutionResult> {
+  try {
   const chain = getChain(chainId);
   const rpcUrl = getRpcUrl(chainId, alchemyKey);
 
@@ -625,10 +597,8 @@ async function broadcastAgentTransaction(
       data: tx.data as Hex,
       value: txValue,
     });
-    console.log(`[Execution] Simulation passed for ${tx.to} selector=${tx.data.slice(0, 10)} on chain ${chainId}`);
   } catch (simError) {
     const msg = simError instanceof Error ? simError.message : String(simError);
-    console.error(`[Execution] Simulation FAILED for ${tx.to} on chain ${chainId}:`, msg);
     const friendly = parseSimulationRevert(msg);
     throw new ExecutionError(
       friendly ||
@@ -662,10 +632,8 @@ async function broadcastAgentTransaction(
       data: tx.data as Hex,
       value: txValue,
     });
-    console.log(`[Execution] On-chain gas estimate: ${estimatedGas}`);
   } catch (estError) {
     const msg = estError instanceof Error ? estError.message : String(estError);
-    console.error(`[Execution] Gas estimation failed: ${msg}`);
     throw new ExecutionError(
       `Gas estimation failed — the transaction may revert or the RPC is unreachable. Details: ${msg}`,
       "GAS_ESTIMATION_FAILED",
@@ -707,9 +675,6 @@ async function broadcastAgentTransaction(
 
   const nonce = await publicClient.getTransactionCount({ address: agentAccount.address });
 
-  console.log(`[Execution] Broadcasting tx on chain ${chainId}`);
-  console.log(`[Execution] Agent: ${agentAccount.address} → Vault: ${tx.to}`);
-  console.log(`[Execution] Gas: ${gasLimit}, maxFee: ${formatGwei(fees.maxFeePerGas)} gwei, priority: ${formatGwei(fees.maxPriorityFeePerGas)} gwei`);
 
   let txHash = await walletClient.sendTransaction({
     to: tx.to as Address,
@@ -721,7 +686,6 @@ async function broadcastAgentTransaction(
     nonce,
   });
 
-  console.log(`[Execution] Tx sent: ${txHash}`);
 
   // ── Step 6: Wait for confirmation with resubmission ──
   let receipt: TransactionReceipt | null = null;
@@ -743,7 +707,6 @@ async function broadcastAgentTransaction(
 
       attempt++;
       if (attempt > MAX_RESUBMIT_ATTEMPTS) {
-        console.warn(`[Execution] Max resubmission attempts reached for ${txHash}`);
         break;
       }
 
@@ -760,11 +723,7 @@ async function broadcastAgentTransaction(
 
       // Bump fees and resubmit with same nonce
       fees = bumpFees(fees, chainId);
-      console.log(
-        `[Execution] Resubmitting (attempt ${attempt}/${MAX_RESUBMIT_ATTEMPTS}) ` +
-        `with bumped fees: maxFee=${formatGwei(fees.maxFeePerGas)} gwei, ` +
-        `priority=${formatGwei(fees.maxPriorityFeePerGas)} gwei`,
-      );
+
 
       try {
         txHash = await walletClient.sendTransaction({
@@ -776,9 +735,7 @@ async function broadcastAgentTransaction(
           maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
           nonce,
         });
-        console.log(`[Execution] Replacement tx sent: ${txHash}`);
       } catch (resubmitErr) {
-        console.warn(`[Execution] Resubmission failed: ${resubmitErr}`);
         break;
       }
     }
@@ -798,10 +755,7 @@ async function broadcastAgentTransaction(
     const cost = receipt.gasUsed * receipt.effectiveGasPrice;
     gasCostEth = formatEther(cost);
     const status = receipt.status === "success" ? "Confirmed" : "REVERTED";
-    console.log(
-      `[Execution] ${status}: block=${receipt.blockNumber} gasUsed=${gasUsed} ` +
-      `effectivePrice=${formatGwei(receipt.effectiveGasPrice)} gwei cost=${gasCostEth} ETH`,
-    );
+
   }
 
   return {
@@ -817,6 +771,14 @@ async function broadcastAgentTransaction(
     sponsored: false,
     resubmitAttempts: attempt,
   };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (err instanceof ExecutionError) throw err;
+    throw new ExecutionError(
+      `Broadcast failed: ${sanitizeError(msg)}`,
+      "EXECUTION_FAILED",
+    );
+  }
 }
 
 // ── Sponsored Execution via Alchemy Smart Wallet SDK ─────────────────
@@ -858,10 +820,8 @@ async function sponsoredAgentTransaction(
       data: tx.data as Hex,
       value: txValue,
     });
-    console.log(`[Sponsored] Simulation passed for ${tx.to} selector=${tx.data.slice(0, 10)} on chain ${chainId}`);
   } catch (simError) {
     const msg = simError instanceof Error ? simError.message : String(simError);
-    console.error(`[Sponsored] Simulation FAILED on chain ${chainId}:`, msg);
     const friendly = parseSimulationRevert(msg);
     throw new ExecutionError(
       friendly ||
@@ -885,41 +845,34 @@ async function sponsoredAgentTransaction(
     });
     // 30% buffer over estimate: vault proxy + EIP-7702 overhead
     callGasLimit = estimatedGas + (estimatedGas * 30n) / 100n;
-    console.log(`[Sponsored] Gas estimate: ${estimatedGas}, callGasLimit (with 30% buffer): ${callGasLimit}`);
   } catch (estError) {
     // If gas estimation fails but simulation passed, proceed without override.
     // The bundler will use its own estimate (potentially too low, but better
     // than blocking a transaction that simulated successfully).
     const msg = estError instanceof Error ? estError.message : String(estError);
-    console.warn(`[Sponsored] Gas estimation failed (proceeding without override): ${msg}`);
   }
 
   // ── Step 1c: Fee estimate + sponsorship viability check ──
   // We override the bundler's fee estimation with our own values (base fee from
-  // the latest block × 2, hardcoded 0.01 gwei priority on mainnet). This gives
-  // us 100% control over the cost Alchemy sees in the UserOperation.
-  const fees = await estimateFees(publicClient, chainId);
-
-  // On Ethereum mainnet, gas costs are high enough that most vault transactions
-  // exceed Alchemy's typical per-UO sponsorship limit ($1.00). Skip sponsorship
-  // early to avoid an ugly paymaster rejection and fall back to direct broadcast
-  // (or manual signing if the agent wallet has no ETH).
-  if (chainId === 1 && callGasLimit) {
-    const estimatedCostEth = Number(callGasLimit * fees.maxFeePerGas) / 1e18;
-    // Conservative threshold: ~$0.80 worth of ETH at $3000/ETH = 0.000267 ETH
-    const SPONSOR_COST_THRESHOLD_ETH = 0.00025;
-    if (estimatedCostEth > SPONSOR_COST_THRESHOLD_ETH) {
-      const token = NATIVE_TOKEN[chainId] || "ETH";
-      throw new ExecutionError(
-        `Estimated gas cost (${estimatedCostEth.toFixed(6)} ETH) exceeds sponsorship limit on Ethereum mainnet. ` +
-        `You can either:\n` +
-        `1. Fund your agent wallet (${agentAccount.address}) with ${token} so it can pay gas directly, or\n` +
-        `2. Sign this transaction directly from your wallet.`,
-        "SPONSORED_FAILED",
-        true, // fallbackToManual
-      );
-    }
+  // the latest block × 2, priority fee from RPC with a 0.05 gwei floor). This
+  // gives us control over the cost Alchemy sees in the UserOperation while
+  // respecting bundler minimums.
+  let fees: FeeEstimate;
+  try {
+    fees = await estimateFees(publicClient, chainId);
+  } catch (feeErr) {
+    const msg = feeErr instanceof Error ? feeErr.message : String(feeErr);
+    throw new ExecutionError(
+      `Fee estimation failed — RPC may be unreachable on chain ${chainId}. Details: ${sanitizeError(msg)}`,
+      "GAS_ESTIMATION_FAILED",
+    );
   }
+
+  // NOTE: We no longer skip sponsorship pre-emptively on mainnet. Alchemy's
+  // paymaster will either accept or reject the UserOperation. If rejected,
+  // the real error (spending limit, policy expired, etc.) is decoded below
+  // and presented to the user so they can decide: fund agent wallet,
+  // disable sponsorship, or sign manually.
 
   // ── Step 2: Execute via Alchemy Smart Wallet SDK ──
   const calls: WalletCall[] = [{
@@ -928,22 +881,88 @@ async function sponsoredAgentTransaction(
     data: tx.data as Hex,
   }];
 
-  console.log(
-    `[Sponsored] Calling executeSponsoredCalls: to=${calls[0].to} ` +
-    `value=${calls[0].value} data=${calls[0].data?.slice(0,10)} ` +
-    `fees=[maxFee=${formatGwei(fees.maxFeePerGas)} gwei, priority=${formatGwei(fees.maxPriorityFeePerGas)} gwei]`,
-  );
+  // Capture gas params so the caller can verify Alchemy's rejection reason.
+  // Also captures Alchemy's returned fee values from -32602 data fields so
+  // the user can compare "what we sent" vs "what Alchemy expects".
+  const buildGasInfo = (overrideFees?: FeeEstimate, alchemyFees?: { maxFee?: bigint; maxPriorityFee?: bigint }) => ({
+    callGasLimit: callGasLimit ? callGasLimit.toString() : undefined,
+    ourMaxFeePerGasGwei: formatGwei(overrideFees ? overrideFees.maxFeePerGas : fees.maxFeePerGas),
+    ourMaxPriorityFeePerGasGwei: formatGwei(overrideFees ? overrideFees.maxPriorityFeePerGas : fees.maxPriorityFeePerGas),
+    alchemyMaxFeePerGasGwei: alchemyFees?.maxFee ? formatGwei(alchemyFees.maxFee) : undefined,
+    alchemyMaxPriorityFeePerGasGwei: alchemyFees?.maxPriorityFee ? formatGwei(alchemyFees.maxPriorityFee) : undefined,
+    maxCostEth: callGasLimit
+      ? (Number(callGasLimit * (overrideFees ? overrideFees.maxFeePerGas : fees.maxFeePerGas)) / 1e18).toFixed(6)
+      : undefined,
+  });
 
-  const result = await executeSponsoredCalls(
-    agentAccount,
-    chainId,
-    alchemyKey,
-    gasPolicyId,
-    calls,
-    callGasLimit,
-    fees.maxFeePerGas,
-    fees.maxPriorityFeePerGas,
-  );
+  async function trySponsoredCalls(attemptFees: FeeEstimate, isRetry: boolean): Promise<ReturnType<typeof executeSponsoredCalls>> {
+    try {
+      return await executeSponsoredCalls(
+        agentAccount,
+        chainId,
+        alchemyKey,
+        gasPolicyId,
+        calls,
+        callGasLimit,
+        attemptFees.maxFeePerGas,
+        attemptFees.maxPriorityFeePerGas,
+      );
+    } catch (err) {
+      // If the bundler rejected because our fees are too low, parse the
+      // required minimum from the error and retry once. Alchemy returns:
+      //   -32602 data fields: current_max_priority_fee, current_max_fee
+      //   -32000 message: "...must be at least 62500000"
+      if (isRetry) {
+        (err as any)._gasInfo = buildGasInfo(attemptFees);
+        throw err;
+      }
+
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const errData = (err as any)?.data || (err as any)?.cause?.data;
+      const errCode = (err as any)?.code || (err as any)?.cause?.code || "";
+
+      // Parse "must be at least N" from the error message (wei units)
+      const mustBeAtLeastMatch = errMsg.match(/must be at least\s+(\d+)/i);
+      const requiredMinWei = mustBeAtLeastMatch ? BigInt(mustBeAtLeastMatch[1]) : undefined;
+
+      // Parse Alchemy -32602 data fields
+      const dataPriorityFee = errData?.current_max_priority_fee ? BigInt(errData.current_max_priority_fee) : undefined;
+      const dataMaxFee = errData?.current_max_fee ? BigInt(errData.current_max_fee) : undefined;
+
+      // Only retry when the error is explicitly fee-related (message text or
+      // Alchemy data fields). DO NOT retry on generic -32602 — Alchemy uses
+      // that code for paymaster rejections (spending limit) too.
+      const isFeeError =
+        errMsg.toLowerCase().includes("maxpriorityfeepergas") ||
+        errMsg.toLowerCase().includes("maxfeepergas") ||
+        errMsg.toLowerCase().includes("precheck failed");
+
+      if (isFeeError && (requiredMinWei || dataPriorityFee || dataMaxFee)) {
+        // Recompute fees using the bundler's minimums
+        const newPriorityFee = dataPriorityFee
+          || (requiredMinWei && requiredMinWei > attemptFees.maxPriorityFeePerGas ? requiredMinWei : undefined)
+          || attemptFees.maxPriorityFeePerGas;
+        const newMaxFee = dataMaxFee
+          || (newPriorityFee > attemptFees.maxFeePerGas ? newPriorityFee + (newPriorityFee * 10n) / 100n : attemptFees.maxFeePerGas);
+
+        const retryFees: FeeEstimate = {
+          maxPriorityFeePerGas: newPriorityFee,
+          maxFeePerGas: newMaxFee,
+        };
+
+        return trySponsoredCalls(retryFees, true);
+      }
+
+      // Attach Alchemy's returned fee values so the user can compare
+      const alchemyFees = (dataMaxFee || dataPriorityFee)
+        ? { maxFee: dataMaxFee, maxPriorityFee: dataPriorityFee }
+        : undefined;
+      (err as any)._gasInfo = buildGasInfo(attemptFees, alchemyFees);
+      throw err;
+    }
+  }
+
+  const result = await trySponsoredCalls(fees, false);
 
   // ── Step 3: Map result to ExecutionResult ──
   const explorerBase = EXPLORER_TX_URL[chainId];
@@ -958,9 +977,7 @@ async function sponsoredAgentTransaction(
     const isSuccess = receipt.status === "success";
     const statusLabel = isSuccess ? "Confirmed (sponsored)" : "REVERTED";
 
-    console.log(
-      `[Sponsored] ${statusLabel}: gasUsed=${gasUsed} (sponsored — operator pays $0)`,
-    );
+
 
     return {
       txHash: receipt.transactionHash,
@@ -990,7 +1007,6 @@ async function sponsoredAgentTransaction(
   }
 
   // Timeout / pending — submission was accepted but not yet mined
-  console.warn(`[Sponsored] Call ${result.callId} not confirmed yet`);
   return {
     txHash: receiptTxHash,
     chainId,
@@ -1046,7 +1062,6 @@ export async function revoke7702Authorization(
   const kvKey = `7702-auth:${agentAccount.address.toLowerCase()}:${chainId}`;
   await kv.delete(kvKey);
 
-  console.log(`[7702] Revoked authorization for ${agentAccount.address} on chain ${chainId}: ${txHash}`);
   return txHash;
 }
 
