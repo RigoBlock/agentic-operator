@@ -101,6 +101,8 @@ export async function executeSponsoredCalls(
   policyId: string,
   calls: WalletCall[],
   callGasLimit?: bigint,
+  maxFeePerGas?: bigint,
+  maxPriorityFeePerGas?: bigint,
 ): Promise<SponsoredCallsResult> {
   try {
     // ── Step 1: Create signer (per SDK quickstart) ──
@@ -141,10 +143,18 @@ export async function executeSponsoredCalls(
         policyId,
       },
     };
+    const gasOverrides: Record<string, string> = {};
     if (callGasLimit) {
-      capabilities.gasParamsOverride = {
-        callGasLimit: `0x${callGasLimit.toString(16)}`,
-      };
+      gasOverrides.callGasLimit = `0x${callGasLimit.toString(16)}`;
+    }
+    if (maxFeePerGas) {
+      gasOverrides.maxFeePerGas = `0x${maxFeePerGas.toString(16)}`;
+    }
+    if (maxPriorityFeePerGas) {
+      gasOverrides.maxPriorityFeePerGas = `0x${maxPriorityFeePerGas.toString(16)}`;
+    }
+    if (Object.keys(gasOverrides).length > 0) {
+      capabilities.gasParamsOverride = gasOverrides;
     }
     const preparedCalls = await client.prepareCalls({
       calls: calls.map(c => ({

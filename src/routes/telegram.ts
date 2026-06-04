@@ -1094,7 +1094,7 @@ async function handleCallbackQuery(
 /** Format TxExecOutcome[] as Telegram HTML lines */
 function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
   const lines: string[] = [];
-  for (const { tx, result, error } of outcomes) {
+  for (const { tx, result, error, fallbackToManual } of outcomes) {
     const meta = tx.swapMeta;
     const desc = meta
       ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
@@ -1121,6 +1121,13 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
           || TESTNET_CHAINS.find(ch => error.includes(String(ch.id)))?.name
           || "this chain";
         lines.push(`⚠️ ${escapeHtml(desc)} — delegation not set up on ${chainName}. Visit <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to activate.`);
+      } else if (fallbackToManual || /sponsorship|sponsor|paymaster/i.test(error)) {
+        lines.push(
+          `⚠️ ${escapeHtml(desc)}\n\n${escapeHtml(error.slice(0, 400))}\n\n` +
+          `This transaction cannot be executed from Telegram. ` +
+          `Open <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to sign it from your wallet, ` +
+          `or fund your agent wallet with native currency so future trades execute automatically.`,
+        );
       } else {
         lines.push(`⚠️ ${escapeHtml(desc)} — ${escapeHtml(error.slice(0, 150))}`);
       }

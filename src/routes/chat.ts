@@ -180,15 +180,17 @@ chat.post("/", async (c) => {
                   ? await executeTxList(c.env, executableTxs, body.vaultAddress)
                   : [];
                 const results = outcomes.filter(o => o.result).map(o => o.result!);
+                const hasFallback = outcomes.some(o => o.fallbackToManual);
                 if (results.length === 1) {
                   response.executionResult = results[0];
-                  if (!results[0].reverted) {
+                  if (!hasFallback && !results[0].reverted) {
                     response.transaction = undefined;
                     response.transactions = undefined;
                   }
                 } else if (results.length > 1) {
                   response.executionResults = results;
-                  if (results.every(r => r.confirmed && !r.reverted)) {
+                  const allSuccess = results.every(r => r.confirmed && !r.reverted);
+                  if (!hasFallback && allSuccess) {
                     response.transaction = undefined;
                     response.transactions = undefined;
                   }
@@ -240,17 +242,18 @@ chat.post("/", async (c) => {
           ? await executeTxList(c.env, executableTxs, body.vaultAddress)
           : [];
         const results = outcomes.filter(o => o.result).map(o => o.result!);
+        const hasFallback = outcomes.some(o => o.fallbackToManual);
 
         if (results.length === 1) {
           response.executionResult = results[0];
-          if (!results[0].reverted) {
+          if (!hasFallback && !results[0].reverted) {
             response.transaction = undefined;
             response.transactions = undefined;
           }
         } else if (results.length > 1) {
           response.executionResults = results;
           const allSuccess = results.every(r => r.confirmed && !r.reverted);
-          if (allSuccess) {
+          if (!hasFallback && allSuccess) {
             response.transaction = undefined;
             response.transactions = undefined;
           }

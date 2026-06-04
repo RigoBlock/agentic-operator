@@ -115,10 +115,11 @@ function parseSponsoredError(raw: string, chainId: number, agentAddress: string)
     );
   }
 
-  // Per-user transaction count limit
+  // Per-user transaction count limit or per-UO spend limit
   if (lower.includes("max number of user ops") || lower.includes("policy limit") ||
       lower.includes("exceeded the maximum") || lower.includes("rate limit") ||
-      lower.includes("spending limit") || lower.includes("quota")) {
+      lower.includes("spending limit") || lower.includes("spend limit") ||
+      lower.includes("quota")) {
     return (
       `Gas sponsorship limit reached for this wallet. ` +
       `The agent wallet has exhausted its sponsored transaction allowance. ` +
@@ -138,7 +139,7 @@ function parseSponsoredError(raw: string, chainId: number, agentAddress: string)
     );
   }
 
-  // Global spending cap
+  // Global spending cap or paymaster deposit depleted
   if (lower.includes("max spend") || lower.includes("global limit") ||
       lower.includes("budget exceeded") || lower.includes("insufficient funds") ||
       lower.includes("paymaster deposit too low")) {
@@ -165,23 +166,25 @@ function parseSponsoredError(raw: string, chainId: number, agentAddress: string)
  * even if the RPC returns an absurd priority fee estimate.
  */
 const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }> = {
-  // L1 Ethereum — 0.1 gwei priority cap to avoid wallet drain from rogue RPC values
-  1:     { maxFeePerGas: parseGwei("50"),  maxPriorityFee: parseGwei("0.1") },
+  // L1 Ethereum — maxFee is NOT a fixed fee; it is a safety cap on the
+  // 2×-buffered base fee from the latest block (see estimateFees).
+  // Priority is hardcoded to 0.01 gwei (negligible vs base fee).
+  1:     { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.01") },
   // L2s — much cheaper, priority is negligible
   10:    { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
-  // BSC — same conservative priority as L1
+  // BSC — use RPC estimateMaxPriorityFeePerGas, cap at 0.1 gwei
   56:    { maxFeePerGas: parseGwei("5"),   maxPriorityFee: parseGwei("0.1") },
   // Polygon — high base fees (market ~290 gwei priority), cap at 500 to cover spikes
   137:   { maxFeePerGas: parseGwei("500"), maxPriorityFee: parseGwei("500") },
   8453:  { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
   42161: { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
   // Testnets
-  11155111: { maxFeePerGas: parseGwei("50"),  maxPriorityFee: parseGwei("0.1") },
+  11155111: { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.01") },
   84532:   { maxFeePerGas: parseGwei("1"),    maxPriorityFee: parseGwei("0.01") },
 };
 
 /** Default caps for chains not explicitly listed */
-const DEFAULT_GAS_CAP = { maxFeePerGas: parseGwei("30"), maxPriorityFee: parseGwei("0.1") };
+const DEFAULT_GAS_CAP = { maxFeePerGas: parseGwei("10"), maxPriorityFee: parseGwei("0.01") };
 
 /**
  * Multiplier for base fee estimation.
@@ -253,17 +256,27 @@ async function estimateFees(
 ): Promise<FeeEstimate> {
   const caps = GAS_CAPS[chainId] || DEFAULT_GAS_CAP;
 
+  // ── Base fee from the latest block (gas oracle) ──
+  // We read the actual protocol base fee, then buffer it 2× to cover
+  // ~5 blocks of 12.5% compounded increases (Ethereum max per-block bump).
   const block = await publicClient.getBlock({ blockTag: "latest" });
   const baseFee = block.baseFeePerGas ?? parseGwei("1");
-
   const bufferedBaseFee = (baseFee * BASE_FEE_MULTIPLIER) / 100n;
 
+  // ── Priority fee ──
+  // Mainnet: hardcode 0.01 gwei. It is orders of magnitude smaller than
+  // base fee, so it barely affects total cost, yet is enough for inclusion.
+  // Other chains: use RPC estimateMaxPriorityFeePerGas (with cap).
   let priorityFee: bigint;
-  try {
-    priorityFee = await publicClient.estimateMaxPriorityFeePerGas();
-  } catch {
-    priorityFee = baseFee / 10n;
-    if (priorityFee < parseGwei("0.001")) priorityFee = parseGwei("0.001");
+  if (chainId === 1 || chainId === 11155111) {
+    priorityFee = parseGwei("0.01");
+  } else {
+    try {
+      priorityFee = await publicClient.estimateMaxPriorityFeePerGas();
+    } catch {
+      priorityFee = baseFee / 10n;
+      if (priorityFee < parseGwei("0.001")) priorityFee = parseGwei("0.001");
+    }
   }
 
   const cappedPriorityFee = priorityFee < caps.maxPriorityFee ? priorityFee : caps.maxPriorityFee;
@@ -527,11 +540,13 @@ export async function executeViaDelegation(
               ? ` Bundler details: ${sanitizeError(String(sponsoredDetails))}.`
               : "";
             const codeSuffix = sponsoredCode ? ` Code: ${sponsoredCode}.` : "";
+            const baseMsg = friendly
+              ? `${friendly}${detailSuffix}${codeSuffix} Raw: ${sanitizedMsg}`
+              : `Gas-sponsored execution failed: ${sanitizedMsg}.${detailSuffix}${codeSuffix}`;
             throw new ExecutionError(
-              (friendly
-                ? `${friendly}${detailSuffix}${codeSuffix} Raw: ${sanitizedMsg}`
-                : `Gas-sponsored execution failed: ${sanitizedMsg}.${detailSuffix}${codeSuffix}`),
+              `${baseMsg}\nAlternatively, sign this transaction directly from your wallet.`,
               "SPONSORED_FAILED",
+              true, // fallbackToManual — user can sign with their own wallet
             );
           }
           throw directErr;
@@ -879,6 +894,33 @@ async function sponsoredAgentTransaction(
     console.warn(`[Sponsored] Gas estimation failed (proceeding without override): ${msg}`);
   }
 
+  // ── Step 1c: Fee estimate + sponsorship viability check ──
+  // We override the bundler's fee estimation with our own values (base fee from
+  // the latest block × 2, hardcoded 0.01 gwei priority on mainnet). This gives
+  // us 100% control over the cost Alchemy sees in the UserOperation.
+  const fees = await estimateFees(publicClient, chainId);
+
+  // On Ethereum mainnet, gas costs are high enough that most vault transactions
+  // exceed Alchemy's typical per-UO sponsorship limit ($1.00). Skip sponsorship
+  // early to avoid an ugly paymaster rejection and fall back to direct broadcast
+  // (or manual signing if the agent wallet has no ETH).
+  if (chainId === 1 && callGasLimit) {
+    const estimatedCostEth = Number(callGasLimit * fees.maxFeePerGas) / 1e18;
+    // Conservative threshold: ~$0.80 worth of ETH at $3000/ETH = 0.000267 ETH
+    const SPONSOR_COST_THRESHOLD_ETH = 0.00025;
+    if (estimatedCostEth > SPONSOR_COST_THRESHOLD_ETH) {
+      const token = NATIVE_TOKEN[chainId] || "ETH";
+      throw new ExecutionError(
+        `Estimated gas cost (${estimatedCostEth.toFixed(6)} ETH) exceeds sponsorship limit on Ethereum mainnet. ` +
+        `You can either:\n` +
+        `1. Fund your agent wallet (${agentAccount.address}) with ${token} so it can pay gas directly, or\n` +
+        `2. Sign this transaction directly from your wallet.`,
+        "SPONSORED_FAILED",
+        true, // fallbackToManual
+      );
+    }
+  }
+
   // ── Step 2: Execute via Alchemy Smart Wallet SDK ──
   const calls: WalletCall[] = [{
     to: tx.to as Address,
@@ -886,7 +928,11 @@ async function sponsoredAgentTransaction(
     data: tx.data as Hex,
   }];
 
-  console.log(`[Sponsored] Calling executeSponsoredCalls: to=${calls[0].to} value=${calls[0].value} data=${calls[0].data?.slice(0,10)}`);
+  console.log(
+    `[Sponsored] Calling executeSponsoredCalls: to=${calls[0].to} ` +
+    `value=${calls[0].value} data=${calls[0].data?.slice(0,10)} ` +
+    `fees=[maxFee=${formatGwei(fees.maxFeePerGas)} gwei, priority=${formatGwei(fees.maxPriorityFeePerGas)} gwei]`,
+  );
 
   const result = await executeSponsoredCalls(
     agentAccount,
@@ -895,6 +941,8 @@ async function sponsoredAgentTransaction(
     gasPolicyId,
     calls,
     callGasLimit,
+    fees.maxFeePerGas,
+    fees.maxPriorityFeePerGas,
   );
 
   // ── Step 3: Map result to ExecutionResult ──
@@ -1095,10 +1143,13 @@ export async function checkPendingTxStatus(
  */
 export class ExecutionError extends Error {
   code: string;
-  constructor(message: string, code: string) {
+  /** When true, the caller should allow the user to sign the transaction manually. */
+  fallbackToManual?: boolean;
+  constructor(message: string, code: string, fallbackToManual?: boolean) {
     super(message);
     this.name = "ExecutionError";
     this.code = code;
+    this.fallbackToManual = fallbackToManual;
   }
 }
 
@@ -1109,6 +1160,8 @@ export interface TxExecOutcome {
   tx: UnsignedTransaction;
   result?: ExecutionResult;
   error?: string;
+  /** When true, the user can sign this transaction directly from their wallet. */
+  fallbackToManual?: boolean;
 }
 
 /**
@@ -1133,7 +1186,8 @@ export async function executeTxList(
       outcomes.push({ tx, result });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      outcomes.push({ tx, error: sanitizeError(msg) });
+      const fallbackToManual = err instanceof ExecutionError ? err.fallbackToManual : false;
+      outcomes.push({ tx, error: sanitizeError(msg), fallbackToManual });
     }
   }
   return outcomes;
@@ -1145,7 +1199,7 @@ export async function executeTxList(
  */
 export function formatOutcomesMarkdown(outcomes: TxExecOutcome[]): string {
   const parts: string[] = [];
-  for (const { tx, result, error } of outcomes) {
+  for (const { tx, result, error, fallbackToManual } of outcomes) {
     const desc = tx.description || "Transaction";
     if (result?.confirmed) {
       const gasInfo = result.gasCostEth ? ` Gas: ${result.gasCostEth} ETH.` : "";
@@ -1158,7 +1212,10 @@ export function formatOutcomesMarkdown(outcomes: TxExecOutcome[]): string {
     } else if (result) {
       parts.push(`⏳ Transaction submitted: ${result.txHash}. Waiting for confirmation…`);
     } else if (error) {
-      parts.push(`❌ ${desc} failed: ${error}`);
+      const fallbackHint = fallbackToManual
+        ? " You can sign this transaction directly from your wallet."
+        : "";
+      parts.push(`❌ ${desc} failed: ${error}.${fallbackHint}`);
     }
   }
   if (outcomes.some(o => o.result?.reverted)) {

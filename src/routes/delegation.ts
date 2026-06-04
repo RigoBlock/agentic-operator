@@ -470,13 +470,15 @@ delegation.post("/execute", async (c) => {
       };
       const status = statusMap[err.code] || 500;
       // Signal fallback to manual wallet signing for delegation/selector issues
+      // or when sponsored execution fails and the agent wallet has no gas.
       const fallbackCodes = ["DELEGATION_NOT_ON_CHAIN", "METHOD_NOT_ALLOWED", "AGENT_NOT_DELEGATED"];
-      if (fallbackCodes.includes(err.code)) {
+      if (fallbackCodes.includes(err.code) || err.fallbackToManual) {
         return c.json({
           error: sanitizeError(err.message),
           code: err.code,
           fallbackToManual: true,
-        }, status as 400 | 403);
+          transaction: body.transaction,
+        }, status as 400 | 403 | 422 | 502);
       }
       return c.json({ error: sanitizeError(err.message), code: err.code }, status as any);
     }
