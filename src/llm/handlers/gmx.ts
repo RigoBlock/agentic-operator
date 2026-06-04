@@ -12,7 +12,7 @@ import { getVaultTokenBalance } from "../../services/vault.js";
 import { parseUnits, formatUnits, type Address, type Hex } from "viem";
 import {
   findGmxMarket, getGmxMarkets, getGmxTickers, getGmxTokenPrice,
-  resolveGmxCollateral, getGmxTokenDecimals,
+  resolveGmxCollateral, getGmxTokenDecimals, warmTokenDecimalsCache, warmDecimalsForAddresses,
   buildCreateIncreaseOrderCalldata, buildCreateDecreaseOrderCalldata,
   buildUpdateOrderCalldata, buildCancelOrderCalldata, buildClaimFundingFeesCalldata,
 } from "../../services/gmxTrading.js";
@@ -45,6 +45,8 @@ export async function handle_gmx_increase_position(
   const market = await findGmxMarket(marketSymbol);
   const collateralAddr = await resolveGmxCollateral(collateralSymbol);
   const collateralDecimals = getGmxTokenDecimals(collateralAddr);
+  // One multicall for both tokens before price lookup — no per-token RPC calls inside getGmxTokenPrice
+  await warmDecimalsForAddresses([collateralAddr, market.indexToken], env.ALCHEMY_API_KEY);
   const [collateralPrice, indexTokenPrice] = await Promise.all([
     getGmxTokenPrice(collateralAddr),
     getGmxTokenPrice(market.indexToken),
@@ -555,6 +557,10 @@ export async function handle_gmx_get_markets(
     getGmxMarkets(),
     getGmxTickers(),
   ]);
+
+  // Warm decimals cache for all ticker tokens before building the price map.
+  // This fetches ERC20 decimals on-chain for unknown tokens (e.g. synthetic BTC = 8 dec, not 18).
+  await warmTokenDecimalsCache(tickers, env.ALCHEMY_API_KEY);
 
   const tickerMap = new Map<string, { symbol: string; price: number }>();
   for (const t of tickers) {

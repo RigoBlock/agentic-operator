@@ -31,7 +31,11 @@ import {
   GmxDecreasePositionSwapType,
   ARBITRUM_CHAIN_ID,
 } from "../abi/gmx.js";
+import { getClient } from "./vault.js";
 import type { Env } from "../types.js";
+
+/** Module-level decimals cache — populated on first get_markets call, used everywhere. */
+const tokenDecimalsCache = new Map<string, number>();
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -208,6 +212,36 @@ export async function findGmxMarket(
  *
  * GMX API prices are per-smallest-unit (wei, micro-USDC) scaled by 10^30.
  * Formula: pricePerToken = rawPrice / 10^(30 - tokenDecimals)
+ */
+/**
+ * Ensure decimals are cached for a specific set of token addresses.
+ * Uses a single multicall — call this before getGmxTokenPrice when trading
+ * to avoid per-token RPC calls inside the price function.
+ */
+export async function warmDecimalsForAddresses(
+  addresses: string[],
+  alchemyKey: string,
+): Promise<void> {
+  const ERC20_DECIMALS_ABI = [{ name: "decimals", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] }] as const;
+  const unknown = addresses
+    .map(a => a.toLowerCase())
+    .filter(a => STATIC_DECIMALS[a] === undefined && !tokenDecimalsCache.has(a));
+  if (unknown.length === 0) return;
+
+  const client = getClient(ARBITRUM_CHAIN_ID, alchemyKey);
+  const results = await client.multicall({
+    contracts: unknown.map(addr => ({ address: addr as Address, abi: ERC20_DECIMALS_ABI, functionName: "decimals" as const })),
+    allowFailure: true,
+  });
+  for (let i = 0; i < unknown.length; i++) {
+    const r = results[i];
+    tokenDecimalsCache.set(unknown[i], r.status === "success" ? Number(r.result) : 18);
+  }
+}
+
+/**
+ * Get token price from GMX tickers. Decimals must already be in cache —
+ * call warmDecimalsForAddresses() first when trading non-static tokens.
  */
 export async function getGmxTokenPrice(
   tokenAddress: string,
@@ -532,34 +566,47 @@ export function computeLeverage(
   return sizeDeltaUsd / collateralValue;
 }
 
+/** Static decimals for well-known tokens. Populated into the cache on first use. */
+const STATIC_DECIMALS: Record<string, number> = {
+  "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": 18, // WETH
+  "0xaf88d065e77c8cc2239327c5edb3a432268e5831": 6,  // USDC
+  "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8": 6,  // USDC.e
+  "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": 6,  // USDT
+  "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": 18, // DAI
+  "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f": 8,  // WBTC
+  "0x912ce59144191c1204e64559fe8253a0e49e6548": 18, // ARB
+  "0xf97f4df75e6c8e0ce7fec36ad7c4e12f3a1c33d8": 18, // LINK
+  "0xfa7f8980b0f1e64a2062791cc3b0871572f1f7f0": 18, // UNI
+  "0x2bcc6d6cdbbdc0a4071e48bb3b969b06b3330c07": 9,  // SOL (Wormhole)
+  "0x47904963fc8b2340414262125af798b9655e58cd": 8,  // BTC (GMX synthetic)
+};
+
 /**
- * Get the decimals for a known GMX collateral token on Arbitrum.
+ * Get decimals for a token — checks static map then module cache.
+ * Returns 18 as fallback (safe for 18-decimal tokens; wrong ones get fixed by warmTokenDecimalsCache).
  */
 export function getGmxTokenDecimals(tokenAddress: string): number {
   const addr = tokenAddress.toLowerCase();
-  const DECIMALS: Record<string, number> = {
-    // WETH
-    "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": 18,
-    // USDC
-    "0xaf88d065e77c8cc2239327c5edb3a432268e5831": 6,
-    // USDC.e
-    "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8": 6,
-    // USDT
-    "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": 6,
-    // DAI
-    "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": 18,
-    // WBTC
-    "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f": 8,
-    // ARB
-    "0x912ce59144191c1204e64559fe8253a0e49e6548": 18,
-    // LINK
-    "0xf97f4df75e6c8e0ce7fec36ad7c4e12f3a1c33d8": 18,
-    // UNI
-    "0xfa7f8980b0f1e64a2062791cc3b0871572f1f7f0": 18,
-    // SOL
-    "0x2bcc6d6cdbbdc0a4071e48bb3b969b06b3330c07": 9,
-  };
-  return DECIMALS[addr] ?? 18;
+  if (STATIC_DECIMALS[addr] !== undefined) return STATIC_DECIMALS[addr];
+  return tokenDecimalsCache.get(addr) ?? 18;
+}
+
+/**
+ * Fetch ERC20 decimals on-chain for any ticker address not in the static map.
+ * Call once before displaying prices to ensure correct decimal normalization.
+ * Results are stored in tokenDecimalsCache and reused by getGmxTokenDecimals.
+ */
+/** Warm decimals for all tickers (used by get_markets display). One multicall for all. */
+export async function warmTokenDecimalsCache(
+  tickers: GmxTickerPrice[],
+  alchemyKey: string | undefined,
+): Promise<void> {
+  if (!alchemyKey) return;
+  await warmDecimalsForAddresses(tickers.map(t => t.tokenAddress), alchemyKey);
+}
+
+function unique<T>(arr: T[]): T[] {
+  return [...new Set(arr)];
 }
 
 /**

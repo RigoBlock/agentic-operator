@@ -142,6 +142,16 @@ export function friendlyError(raw: string): string {
   if (raw.includes('\n') && (raw.startsWith('❌') || raw.startsWith('⚠️') || raw.includes('Proposed action:'))) {
     return raw;
   }
+  // Uniswap Trading API capacity error — usually triggered when GMX handler
+  // tries to swap stablecoins to ETH to cover the GMX keeper execution fee.
+  if (/3040|capacity.*exceeded/i.test(raw) && /uniswap/i.test(raw)) {
+    return "Uniswap Trading API is temporarily at capacity (error 3040). " +
+      "If this happened during a GMX trade, it means the vault doesn't have enough native ETH for the GMX keeper fee and the fallback ETH swap also failed. " +
+      "Fix: send a small amount of ETH (≥0.005) directly to the vault, then retry.";
+  }
+  if (/3040|capacity.*exceeded/i.test(raw)) {
+    return "A pricing API is temporarily at capacity (error 3040). Please retry in a few seconds.";
+  }
   // Gas-sponsored execution failures
   if (/Invalid parameters.*RPC method/i.test(raw)) {
     return "Gas-sponsored execution failed due to an RPC configuration issue. Try again or contact support.";
@@ -276,7 +286,6 @@ async function callWorkersAI(
     const decoder = new TextDecoder();
     let fullText = '';
     let lineBuffer = '';
-    let inThink = false;
     let reasoning = '';
     // Throttle reasoning events: emit at most every 150ms to avoid flooding the SSE pipe
     let lastEmitTime = 0;
@@ -804,6 +813,7 @@ ${executionModeNote}${contextDocsBlock}`;
     (hasVault ? tryFastPathStrategyQueries(effectiveMsg) : null) ||
     (hasVault ? tryFastPathTwapCreate(effectiveMsg) : null) ||
     (hasVault ? tryFastPathBridge(effectiveMsg) : null) ||
+    (hasVault ? tryFastPathGmxIncrease(effectiveMsg) : null) ||
     (hasVault ? tryFastPathSwap(effectiveMsg) : null);
   if (immediateFastPath) {
     console.log(`[LLM] Immediate fast-path (no LLM): ${immediateFastPath.name}(${JSON.stringify(immediateFastPath.args)})`);
@@ -2302,13 +2312,85 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
 // Regex-matches well-structured GMX commands to bypass the LLM entirely.
 
 /**
- * Attempt to parse a GMX command directly from the user message.
- * Returns tool name + args if matched, null otherwise.
+ * Detect "increase position" commands that should route directly to gmx_increase_position
+ * without any intermediate get_markets / get_positions calls.
  *
- * Supported patterns:
- *   "long 100 XAUTUSD 5x"        → gmx_open_position, notionalUsd=100, leverage=5
- *   "short 500 ethusdc 10x"       → gmx_open_position, notionalUsd=500, leverage=10
- *   "close my ETH long"           → gmx_close_position
- *   "show positions" / "my perps" → gmx_get_positions
- *   "gmx markets"                 → gmx_get_markets
+ * Patterns:
+ *   "increase [by] 1500 usd [LIT] [10x] position"
+ *   "increase [by] 1500 usd [LIT/USD] [10x] position [on gmx] [using WETH]"
+ *   "add 1500 usd to [LIT] [long] position"
+ *   "add to [LIT] position [1500 usd] [10x]"
  */
+function tryFastPathGmxIncrease(msg: string): FastPathResult | null {
+  const m = msg.trim();
+
+  // "increase [by] N usd [MARKET] [Nx] position [using COLLATERAL]"
+  const incMatch = m.match(
+    /^(?:increase|add)(?:\s+by)?\s+([\d.,]+)\s+(?:usd|usdc|usdt)?\s*([A-Z]{2,8})?(?:\/USD)?\s*(\d+(?:\.\d+)?x)?\s*(?:long|short)?\s*position(?:\s+.*)?$/i,
+  );
+  if (incMatch) {
+    const args: Record<string, unknown> = {
+      notionalUsd: incMatch[1].replace(/,/g, ""),
+    };
+    if (incMatch[2]) args.market = incMatch[2].toUpperCase().replace(/USD[CT]?$/i, "");
+    if (incMatch[3]) args.leverage = incMatch[3].replace(/x$/i, "");
+
+    // Extract collateral from "using WETH/ETH/USDC" suffix
+    const collateralMatch = m.match(/using\s+(\w+)/i);
+    if (collateralMatch) args.collateral = collateralMatch[1].toUpperCase();
+
+    // isLong defaults to true (increase is on existing position — keep same direction)
+    args.isLong = true;
+    const shortMatch = m.match(/\bshort\b/i);
+    if (shortMatch) args.isLong = false;
+
+    return { name: "gmx_increase_position", args };
+  }
+
+  // "long N MARKET Nx" / "short N MARKET Nx" — open/increase
+  const longShortMatch = m.match(
+    /^(long|short)\s+([\d.,]+)\s+([A-Z]{2,8}(?:\/USD[CT]?)?)\s*(\d+(?:\.\d+)?x)?/i,
+  );
+  if (longShortMatch) {
+    const isLong = longShortMatch[1].toLowerCase() === "long";
+    const market = longShortMatch[3].toUpperCase().replace(/\/USD[CT]?$/i, "");
+    const args: Record<string, unknown> = {
+      market,
+      isLong,
+      notionalUsd: longShortMatch[2].replace(/,/g, ""),
+    };
+    if (longShortMatch[4]) args.leverage = longShortMatch[4].replace(/x$/i, "");
+    const collateralMatch = m.match(/using\s+(\w+)/i);
+    if (collateralMatch) args.collateral = collateralMatch[1].toUpperCase();
+    return { name: "gmx_open_position", args };
+  }
+
+  // "close [my] MARKET [long|short] [position]"
+  const closeMatch = m.match(
+    /^close(?:\s+my)?\s+([A-Z]{2,8})(?:\/USD)?\s*(long|short)?\s*(?:position)?$/i,
+  );
+  if (closeMatch) {
+    return {
+      name: "gmx_close_position",
+      args: {
+        market: closeMatch[1].toUpperCase(),
+        isLong: closeMatch[2]?.toLowerCase() !== "short",
+        sizeDeltaUsd: "0", // full close
+      },
+    };
+  }
+
+  // "show [my] [gmx] positions" / "my perps"
+  if (/^(?:show|list|get|check)(?:\s+my)?\s+(?:gmx\s+)?positions?$/i.test(m) ||
+      /^my\s+perps?$/i.test(m) ||
+      /^(?:gmx\s+)?positions?$/i.test(m)) {
+    return { name: "gmx_get_positions", args: {} };
+  }
+
+  // "gmx markets" / "show gmx markets"
+  if (/^(?:show\s+)?gmx\s+markets?$/i.test(m) || /^(?:list\s+)?gmx\s+markets?$/i.test(m)) {
+    return { name: "gmx_get_markets", args: {} };
+  }
+
+  return null;
+}
