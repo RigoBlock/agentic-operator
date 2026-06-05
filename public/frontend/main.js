@@ -27,6 +27,8 @@ import {
 
 import {
   parseDirectToolCall, invokeDirectTool,
+  enhanceGmxPositions, closeGmxPosition, modifyGmxSize,
+  modifyGmxCollateral, refreshGmxPositions,
 } from './chat-ui.js';
 
 import {
@@ -155,6 +157,10 @@ window.deploySmartPool = deploySmartPool;
 // Direct tools
 window.parseDirectToolCall = parseDirectToolCall;
 window.invokeDirectTool = invokeDirectTool;
+window.closeGmxPosition = closeGmxPosition;
+window.modifyGmxSize = modifyGmxSize;
+window.modifyGmxCollateral = modifyGmxCollateral;
+window.refreshGmxPositions = refreshGmxPositions;
 
 // ── Event Listeners ───────────────────────────────────────────────────
 

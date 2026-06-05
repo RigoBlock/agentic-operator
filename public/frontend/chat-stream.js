@@ -428,7 +428,11 @@ async function handleChatResponse(data) {
   }
 
   if (data.reply) {
-    appendMessage('assistant', data.reply, withModelTrace({ suggestions: data.suggestions }));
+    const extras = withModelTrace({ suggestions: data.suggestions });
+    if (data.metadata?.gmxPositions) {
+      extras.gmxPositions = data.metadata.gmxPositions;
+    }
+    appendMessage('assistant', data.reply, extras);
     // Store tool results inline so the LLM has full context.
     // IMPORTANT: Do NOT use any bracket/prefix format that looks like a tool call —
     // gpt-4.1-nano reproduced such patterns as text instead of calling actual tools.

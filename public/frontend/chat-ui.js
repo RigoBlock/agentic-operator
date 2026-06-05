@@ -86,6 +86,12 @@ function appendMessage(role, content, extras, isRestore) {
   }
   chatEl.appendChild(div);
   chatEl.scrollTop = chatEl.scrollHeight;
+
+  // Post-process GMX positions message to add inline action buttons
+  if (!isRestore && extras?.gmxPositions?.length > 0) {
+    enhanceGmxPositions(div, extras.gmxPositions);
+  }
+
   return div;
 }
 
@@ -294,7 +300,196 @@ async function invokeDirectTool(toolInfo) {
 }
 
 
+/**
+ * Enhance a GMX positions message with inline action buttons.
+ * Replaces the plain markdown table with an interactive version:
+ * - Refresh PnL button at the top
+ * - Close button per position
+ * - Size / Collateral / PnL cells are interactive (hover on desktop, click on mobile)
+ */
+function enhanceGmxPositions(msgDiv, positions) {
+  const contentDiv = msgDiv.querySelector('.msg-content');
+  if (!contentDiv) return;
+
+  // Find the positions table (first table after the summary line)
+  const tables = contentDiv.querySelectorAll('table');
+  if (tables.length === 0) return;
+
+  const posTable = tables[0];
+  const rows = posTable.querySelectorAll('tr');
+  if (rows.length < 2) return; // header + at least one data row
+
+  // Skip header row
+  const dataRows = Array.from(rows).slice(1);
+  if (dataRows.length !== positions.length) return;
+
+  // Add refresh button above the table
+  const refreshBtn = document.createElement('button');
+  refreshBtn.className = 'gmx-refresh-btn';
+  refreshBtn.textContent = '🔄 Refresh PnL';
+  refreshBtn.title = 'Update positions, PnL, size, collateral, leverage and mark price';
+  refreshBtn.onclick = () => refreshGmxPositions();
+  posTable.parentElement.insertBefore(refreshBtn, posTable);
+
+  // Enhance each data row
+  dataRows.forEach((row, idx) => {
+    const pos = positions[idx];
+    if (!pos) return;
+    const cells = row.querySelectorAll('td');
+    if (cells.length < 8) return;
+
+    const market = pos.indexTokenSymbol;
+    const isLong = pos.isLong;
+
+    // Add Close button as last cell
+    const closeCell = document.createElement('td');
+    closeCell.innerHTML = `<button class="gmx-action-btn close" title="Close position">✕</button>`;
+    closeCell.querySelector('button').onclick = () => closeGmxPosition(market, isLong);
+    row.appendChild(closeCell);
+
+    // Make Size cell interactive
+    const sizeCell = cells[2];
+    makeInteractiveCell(sizeCell, [
+      { label: '▲ Increase', action: () => modifyGmxSize(market, isLong, 'increase') },
+      { label: '▼ Decrease', action: () => modifyGmxSize(market, isLong, 'decrease') },
+    ]);
+
+    // Make Collateral cell interactive
+    const colCell = cells[3];
+    makeInteractiveCell(colCell, [
+      { label: '+ Add', action: () => modifyGmxCollateral(market, isLong, 'add') },
+      { label: '− Withdraw', action: () => modifyGmxCollateral(market, isLong, 'withdraw') },
+    ]);
+
+    // Make PnL cell interactive (withdraw positive PnL — placeholder)
+    const pnlCell = cells[7];
+    const pnlValue = parseFloat(pos.unrealizedPnl.replace(/[^0-9.-]/g, '')) || 0;
+    if (pnlValue > 0) {
+      makeInteractiveCell(pnlCell, [
+        { label: '💰 Withdraw PnL', action: () => withdrawGmxPnl(market, isLong), disabled: true, title: 'Withdraw positive PnL (coming soon)' },
+      ]);
+    }
+  });
+
+  // Add Actions header cell
+  const headerRow = rows[0];
+  const th = document.createElement('th');
+  th.textContent = 'Actions';
+  headerRow.appendChild(th);
+}
+
+/** Wrap a table cell with an interactive tooltip menu */
+function makeInteractiveCell(cell, actions) {
+  cell.classList.add('gmx-interactive-cell');
+  cell.style.cursor = 'pointer';
+
+  const menu = document.createElement('div');
+  menu.className = 'gmx-cell-menu';
+  for (const act of actions) {
+    const btn = document.createElement('button');
+    btn.className = 'gmx-menu-item' + (act.disabled ? ' disabled' : '');
+    btn.textContent = act.label;
+    btn.title = act.title || '';
+    if (!act.disabled) {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        menu.style.display = 'none';
+        act.action();
+      };
+    }
+    menu.appendChild(btn);
+  }
+  cell.appendChild(menu);
+
+  // Toggle menu on click (works for both desktop and mobile)
+  cell.addEventListener('click', (e) => {
+    // Close any other open menus
+    document.querySelectorAll('.gmx-cell-menu').forEach(m => {
+      if (m !== menu) m.style.display = 'none';
+    });
+    const isOpen = menu.style.display === 'block';
+    menu.style.display = isOpen ? 'none' : 'block';
+  });
+
+  // Close menu when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!cell.contains(e.target)) {
+      menu.style.display = 'none';
+    }
+  });
+}
+
+function closeGmxPosition(market, isLong) {
+  invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong } });
+}
+
+function modifyGmxSize(market, isLong, mode) {
+  if (mode === 'increase') {
+    invokeDirectTool({ toolName: 'gmx_increase_position', args: { market, isLong } });
+  } else {
+    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong } });
+  }
+}
+
+function modifyGmxCollateral(market, isLong, mode) {
+  if (mode === 'add') {
+    invokeDirectTool({ toolName: 'gmx_increase_position', args: { market, isLong, sizeDeltaUsd: '0' } });
+  } else {
+    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, sizeDeltaUsd: '0' } });
+  }
+}
+
+function withdrawGmxPnl(market, isLong) {
+  // Placeholder — GMX PnL withdrawal not yet implemented
+  window.appendMessage('system', '💰 PnL withdrawal is coming soon. Use Close or Decrease to realize profits.');
+}
+
+async function refreshGmxPositions() {
+  const vault = vaultInput.value.trim();
+  if (!vault || vault.length !== 42) {
+    window.appendMessage('system', 'Please enter a vault address first.');
+    return;
+  }
+  try {
+    window.appendMessage('system', '🔄 Refreshing GMX positions…');
+    const body = {
+      arguments: {},
+      chainId: 42161,
+      vaultAddress: vault,
+    };
+    if (connectedAddress && authSignature) {
+      body.operatorAddress = connectedAddress;
+      body.authSignature = authSignature;
+      body.authTimestamp = authTimestamp;
+    }
+    const res = await fetch('/api/tools?toolName=gmx_get_positions', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      window.appendMessage('system', `❌ Failed to refresh: ${data.error || data.message || 'Unknown error'}`);
+      return;
+    }
+    // The response will be a new assistant message with updated positions
+    const msg = data.message || data.reply || JSON.stringify(data);
+    const extras = {};
+    if (data.metadata?.gmxPositions) {
+      extras.gmxPositions = data.metadata.gmxPositions;
+    }
+    if (data.suggestions) {
+      extras.suggestions = data.suggestions;
+    }
+    appendMessage('assistant', msg, extras);
+  } catch (err) {
+    window.appendMessage('system', `❌ Refresh failed: ${err.message}`);
+  }
+}
+
 export {
   appendMessage, renderRichContent, makeReasoningBlock,
   parseDirectToolCall, invokeDirectTool,
+  enhanceGmxPositions, closeGmxPosition, modifyGmxSize,
+  modifyGmxCollateral, refreshGmxPositions,
 };

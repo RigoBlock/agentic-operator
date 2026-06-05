@@ -192,6 +192,8 @@ export interface ChatResponse {
   modelsUsed?: string[];
   /** Model that authored the final natural-language output (or 'tooling' when output is tool-native) */
   finalModel?: string;
+  /** Protocol-specific structured metadata (e.g. GMX positions) for frontend rendering */
+  metadata?: Record<string, unknown>;
 }
 
 // ── SSE Stream Events ─────────────────────────────────────────────────

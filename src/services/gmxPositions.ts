@@ -388,7 +388,7 @@ function formatPositionsReport(
 
   if (vaultAddress) {
     const portfolioUrl = `https://app.gmx.io/#/accounts/${vaultAddress}?network=arbitrum&v=2`;
-    lines.push(`🔗 ${portfolioUrl}`);
+    lines.push(`View positions on GMX → ${portfolioUrl}`);
   }
 
   return lines.join("\n");

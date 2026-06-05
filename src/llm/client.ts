@@ -907,6 +907,7 @@ ${executionModeNote}${contextDocsBlock}`;
   let pendingChainSwitch: number | undefined;
   let detectedDex: string | undefined;
   let pendingSuggestions: string[] | undefined;
+  let pendingMetadata: Record<string, unknown> | undefined;
   let pendingSelfContained = false;
 
   // Autonomous orchestration loop: continue tool execution across multiple rounds
@@ -940,6 +941,7 @@ ${executionModeNote}${contextDocsBlock}`;
           transactions: toolResult.transaction ? [toolResult.transaction] : undefined,
           chainSwitch: toolResult.chainSwitch,
           suggestions: toolResult.suggestions,
+          metadata: toolResult.metadata,
           reasoning: orchestrationReasoning,
           modelsUsed,
           finalModel: "tooling",
@@ -1031,6 +1033,10 @@ ${executionModeNote}${contextDocsBlock}`;
 
           if (toolResult.suggestions?.length) {
             pendingSuggestions = toolResult.suggestions;
+          }
+
+          if (toolResult.metadata) {
+            pendingMetadata = { ...pendingMetadata, ...toolResult.metadata };
           }
 
           if (toolResult.selfContained) {
@@ -1200,6 +1206,7 @@ ${executionModeNote}${contextDocsBlock}`;
           chainSwitch: pendingChainSwitch,
           dexProvider: detectedDex,
           suggestions: pendingSuggestions,
+          metadata: pendingMetadata,
           reasoning: orchestrationReasoning,
           modelsUsed,
           finalModel: "tooling",
@@ -1219,6 +1226,7 @@ ${executionModeNote}${contextDocsBlock}`;
           toolCalls: [],
           chainSwitch: pendingChainSwitch,
           suggestions: pendingSuggestions,
+          metadata: pendingMetadata,
           reasoning: orchestrationReasoning,
           modelsUsed,
           finalModel: "tooling",
@@ -1404,6 +1412,8 @@ export interface ToolResult {
   suggestions?: string[];
   /** When true, the message is a complete report — skip the follow-up LLM call */
   selfContained?: boolean;
+  /** Protocol-specific structured metadata for frontend rendering */
+  metadata?: Record<string, unknown>;
 }
 
 /**

@@ -1140,9 +1140,9 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
 
 async function sendHelpMessage(token: string, chatId: number): Promise<void> {
   const text = [
-    "<b>🤖 Rigoblock Vault Operator</b>",
+    "<b>🤖 Rigoblock Trader</b>",
     "",
-    "Control your smart pool from Telegram — no wallet app needed.",
+    "Control your smart pool directly from Telegram.",
     "",
     "<b>Setup:</b>",
     "1. Open <a href=\"https://trader.rigoblock.com\">trader.rigoblock.com</a> and click the Telegram icon (⬡)",

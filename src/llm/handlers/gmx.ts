@@ -540,21 +540,9 @@ export async function handle_gmx_get_positions(
     env.ALCHEMY_API_KEY,
   );
 
-  // Build context-aware suggestions — one per open position so the user
-  // knows exactly which position each action targets.
+  // Generic suggestions only — per-position actions are rendered inline by the frontend.
   const suggestions: string[] = [];
   if (summary.positions.length > 0) {
-    for (const pos of summary.positions) {
-      const side = pos.isLong ? "long" : "short";
-      const sym = pos.indexTokenSymbol;
-      suggestions.push(
-        `Close ${sym} ${side}`,
-        `Increase ${sym} ${side}`,
-        `Decrease ${sym} ${side}`,
-        `Add collateral to ${sym} ${side}`,
-        `Withdraw collateral from ${sym} ${side}`,
-      );
-    }
     suggestions.push("Open new position", "Show GMX markets");
   } else {
     suggestions.push("Open a long", "Open a short", "Show GMX markets");
@@ -563,7 +551,12 @@ export async function handle_gmx_get_positions(
     suggestions.push("Cancel order");
   }
 
-  return { message: summary.formattedReport, chainSwitch: chainSwitched, suggestions };
+  return {
+    message: summary.formattedReport,
+    chainSwitch: chainSwitched,
+    suggestions,
+    metadata: { gmxPositions: summary.positions },
+  };
 }
 
 export async function handle_gmx_cancel_order(
