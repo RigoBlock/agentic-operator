@@ -1,0 +1,118 @@
+    /* ── Chat ───────────────────────────────────────────── */
+    #chat {
+      flex: 1; overflow-y: auto; overflow-x: hidden; padding: 20px 24px;
+      display: flex; flex-direction: column; gap: 14px;
+    }
+    .msg {
+      max-width: 1200px; padding: 12px 18px; border-radius: 10px;
+      line-height: 1.5; font-size: 15px; white-space: pre-wrap; word-break: break-word;
+      box-sizing: border-box;
+    }
+    .msg.user { align-self: flex-end; background: var(--accent-dim); border-bottom-right-radius: 4px; }
+    .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; max-width: 100%; }
+    .msg.compact { width: fit-content; min-width: 240px; max-width: 480px; white-space: normal; box-sizing: border-box; }
+    .msg.system { align-self: center; color: var(--muted); font-size: 13px; background: none; padding: 2px 0; white-space: normal; }
+    .msg .tool-call {
+      margin-top: 8px; padding: 8px 14px; background: rgba(0,0,0,0.3); border-radius: 6px;
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; color: var(--warn);
+    }
+    .msg .tool-result {
+      margin-top: 8px; padding: 8px 14px; background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.3);
+      border-radius: 6px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; color: var(--success);
+    }
+    .msg .error-result { background: rgba(248,81,73,0.1); border-color: rgba(248,81,73,0.3); color: var(--error); }
+    .typing .msg-content { color: var(--muted); font-style: italic; }
+    .typing .msg-content::after { content: ' ▋'; animation: blink 1s step-end infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* ── Rich message content (tables, links) ───────────── */
+    .msg.assistant .msg-content a {
+      color: var(--accent); text-decoration: none; word-break: break-all;
+    }
+    .msg.assistant .msg-content a:hover { text-decoration: underline; }
+    .msg.assistant .msg-content {
+      overflow-x: auto;
+      max-width: 100%;
+    }
+    .msg.assistant .msg-content table {
+      border-collapse: collapse; margin: 8px 0; font-size: 14px;
+      white-space: nowrap;
+    }
+    .msg.assistant .msg-content th,
+    .msg.assistant .msg-content td {
+      padding: 4px 12px; border: 1px solid var(--border); text-align: left;
+    }
+    .msg.assistant .msg-content th {
+      background: var(--bg); font-weight: 600; font-size: 13px; color: var(--muted);
+    }
+    .msg.assistant .msg-content td { font-size: 13px; }
+    .msg.assistant .msg-content pre {
+      overflow-x: auto;
+    }
+
+    /* ── Suggestion chips ───────────────────────────────── */
+    .suggestions {
+      display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding-top: 8px;
+      border-top: 1px solid var(--border);
+    }
+    .suggestion-chip {
+      font-size: 13px; padding: 6px 14px; border-radius: 14px;
+      border: 1px solid var(--accent-dim); background: rgba(31, 111, 235, 0.08);
+      color: var(--accent); cursor: pointer; font-weight: 500;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .suggestion-chip:hover {
+      background: rgba(31, 111, 235, 0.18); border-color: var(--accent);
+    }
+
+    /* ── Reasoning trace (collapsible) ─────────────────── */
+    .reasoning-block {
+      margin-bottom: 8px; border: 1px solid rgba(210, 153, 34, 0.25);
+      border-radius: 8px; overflow: hidden; background: rgba(210, 153, 34, 0.04);
+    }
+    .reasoning-toggle {
+      display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+      cursor: pointer; font-size: 13px; color: var(--warn); user-select: none;
+      background: none; border: none; width: 100%; text-align: left;
+      font-family: inherit;
+    }
+    .reasoning-toggle:hover { background: rgba(210, 153, 34, 0.08); }
+    .reasoning-toggle .arrow { transition: transform 0.2s; display: inline-block; }
+    .reasoning-toggle .arrow.open { transform: rotate(90deg); }
+    .reasoning-content {
+      padding: 0 12px 10px; font-size: 13px; line-height: 1.6;
+      color: var(--muted); white-space: pre-wrap; word-break: break-word;
+      max-height: 300px; overflow-y: auto; overflow-x: hidden; display: none;
+    }
+    .reasoning-content.open { display: block; }
+    .model-trace {
+      margin-top: 6px;
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--muted);
+      opacity: 0.85;
+      letter-spacing: 0.01em;
+    }
+
+    /* ── Input ──────────────────────────────────────────── */
+    #input-area { padding: 12px 24px 20px; }
+    #input-wrapper { position: relative; }
+    #input-area textarea {
+      width: 100%; box-sizing: border-box;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--text); padding: 12px 50px 12px 16px; font-size: 15px; font-family: inherit;
+      resize: none; outline: none; min-height: 100px; max-height: 200px;
+    }
+    #input-area textarea:focus { border-color: var(--accent); }
+    #send {
+      position: absolute; bottom: 12px; right: 12px;
+      width: 40px; height: 40px; border-radius: 50%;
+      background: var(--accent); border: none; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s;
+    }
+    #send:hover { background: #1a7aff; }
+    #send:disabled { opacity: 0.4; cursor: not-allowed; }
+    #send.stopping { background: #dc2626; }
+    #send.stopping:hover { background: #b91c1c; }
+

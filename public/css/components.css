@@ -1,0 +1,291 @@
+
+    /* ── Delegation panel (inside settings modal) ──── */
+    #delegation-panel {
+      gap: 10px; align-items: center; flex-wrap: wrap;
+      font-size: 14px;
+    }
+    .delegation-status {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 13px; border-radius: 6px; font-size: 14px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .delegation-status.active {
+      background: rgba(63,185,80,0.1); color: var(--success);
+      border: 1px solid rgba(63,185,80,0.2);
+    }
+    .delegation-status.stale {
+      background: rgba(210,153,34,0.1); color: var(--warn);
+      border: 1px solid rgba(210,153,34,0.25);
+    }
+    .delegation-status.inactive {
+      background: rgba(139,148,158,0.1); color: var(--muted);
+      border: 1px solid rgba(139,148,158,0.2);
+    }
+    /* Per-chain chain chips — compact grid under the badge row */
+    .delegation-chain-chips {
+      display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; width: 100%;
+    }
+    .chain-chip {
+      font-size: 11px; padding: 2px 7px; border-radius: 999px;
+      display: inline-flex; align-items: center; gap: 4px;
+      background: rgba(255,255,255,0.04); color: var(--muted);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .chain-chip.active {
+      background: rgba(35,134,54,0.1); color: var(--success);
+      border-color: rgba(35,134,54,0.2);
+    }
+    .chain-chip .cc-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+    /* Chain checkbox grid in delegation modal */
+    .chain-checkbox-grid {
+      display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px;
+    }
+    .chain-check-item {
+      display: flex; align-items: center; gap: 5px; padding: 4px 10px;
+      border-radius: 6px; background: rgba(255,255,255,0.04);
+      cursor: pointer; user-select: none; font-size: 13px;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .chain-check-item.already-active {
+      opacity: 0.55; cursor: default;
+    }
+    .chain-check-item input[type=checkbox] { cursor: pointer; }
+    /* Multi-chain setup progress */
+    .chain-progress-list {
+      display: flex; flex-direction: column; gap: 6px; margin: 10px 0; font-size: 13px;
+    }
+    .chain-progress-row {
+      display: flex; align-items: center; gap: 8px; padding: 4px 0;
+    }
+    .chain-progress-row .cpr-icon { width: 16px; text-align: center; flex-shrink: 0; }
+    .chain-progress-row .cpr-name { min-width: 80px; }
+    .chain-progress-row .cpr-status { color: var(--muted); font-size: 12px; }
+    .chain-progress-row.cpr-done .cpr-icon { color: var(--success); }
+    .chain-progress-row.cpr-done .cpr-name { color: var(--success); }
+    .chain-progress-row.cpr-active .cpr-icon { color: var(--accent); }
+    .chain-progress-row.cpr-error .cpr-icon { color: var(--error); }
+    .chain-progress-row.cpr-error .cpr-name { color: var(--error); }
+    .chain-progress-row.cpr-pending .cpr-name { color: var(--muted); }
+    .delegation-status .dot {
+      width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+    }
+    .delegation-status.active .dot { background: var(--success); }
+    .delegation-status.stale .dot { background: var(--warn); }
+    .delegation-status.inactive .dot { background: var(--muted); }
+    .btn-delegation {
+      font-size: 14px; padding: 6px 15px; border-radius: 6px;
+      border: 1px solid var(--accent-dim); background: rgba(31,111,235,0.08);
+      color: var(--accent); cursor: pointer; font-weight: 500;
+      transition: background 0.15s;
+    }
+    .btn-delegation:hover { background: rgba(31,111,235,0.18); }
+
+    /* ── Delegation hint bar ───────────────────────────────── */
+    #delegation-hint {
+      display: none;
+      align-items: center; gap: 10px;
+      padding: 7px 12px; margin-bottom: 6px;
+      background: rgba(245,158,11,0.10); border: 1px solid rgba(245,158,11,0.30);
+      border-radius: 8px; font-size: 12px; color: #d97706;
+    }
+    #delegation-hint .hint-icon { font-size: 14px; flex-shrink: 0; }
+    #delegation-hint .hint-text { flex: 1; line-height: 1.4; }
+    #delegation-hint .hint-text strong { color: #b45309; }
+    #delegation-hint .hint-cta {
+      flex-shrink: 0; padding: 3px 10px; border-radius: 5px; border: 1px solid #d97706;
+      background: rgba(217,119,6,0.15); color: #b45309; font-size: 11px; font-weight: 600;
+      cursor: pointer; white-space: nowrap; transition: background 0.15s;
+    }
+    #delegation-hint .hint-cta:hover { background: rgba(217,119,6,0.28); }
+    #delegation-hint.active-other-chain { background: rgba(99,102,241,0.08); border-color: rgba(99,102,241,0.28); color: #6366f1; }
+    #delegation-hint.active-other-chain .hint-text strong { color: #4f46e5; }
+    #delegation-hint.active-other-chain .hint-cta { border-color: #6366f1; background: rgba(99,102,241,0.12); color: #4f46e5; }
+    #delegation-hint.active-other-chain .hint-cta:hover { background: rgba(99,102,241,0.22); }
+
+    .btn-delegation.danger {
+      border-color: var(--error); background: rgba(248,81,73,0.08); color: var(--error);
+    }
+    .btn-delegation.danger:hover { background: rgba(248,81,73,0.18); }
+    .btn-delegation.telegram {
+      border-color: #229ED9; background: rgba(34,158,217,0.08); color: #229ED9;
+    }
+    .btn-delegation.telegram:hover { background: rgba(34,158,217,0.18); }
+    .btn-delegation.danger {
+      border-color: #e74c3c; background: rgba(231,76,60,0.08); color: #e74c3c;
+    }
+    .btn-delegation.danger:hover { background: rgba(231,76,60,0.18); }
+    .sponsor-toggle {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 14px; color: var(--muted); cursor: pointer;
+      margin: 0 5px;
+    }
+    .sponsor-toggle input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+    .agent-balance {
+      font-size: 14px; color: var(--muted);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .agent-balance.low { color: var(--warn); }
+
+    /* ── Tx receipt card (in-chat) ──────────────────────── */
+    .tx-receipt-card {
+      padding: 16px 19px; border-radius: 10px; font-size: 19px;
+      white-space: normal;
+    }
+    .tx-receipt-card.success {
+      background: rgba(63,185,80,0.06); border: 1px solid rgba(63,185,80,0.2);
+    }
+    .tx-receipt-card.pending {
+      background: rgba(31,111,235,0.06); border: 1px solid rgba(31,111,235,0.15);
+    }
+    .tx-receipt-card.failed {
+      background: rgba(248,81,73,0.06); border: 1px solid rgba(248,81,73,0.2);
+    }
+    .tx-receipt-card .receipt-header {
+      display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 21px;
+    }
+    .tx-receipt-card .receipt-status { font-size: 22px; }
+    .tx-receipt-card .receipt-trade { color: var(--text); }
+    .tx-receipt-card .receipt-price { font-size: 18px; color: var(--muted); margin: 3px 0 0 0; }
+    .tx-receipt-card .receipt-details {
+      font-size: 18px; color: var(--muted); margin-top: 3px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .tx-receipt-card .receipt-details a {
+      color: var(--accent); text-decoration: none;
+    }
+    .tx-receipt-card .receipt-details a:hover { text-decoration: underline; }
+    /* ── Delegation setup modal ─────────────────────────── */
+    .delegation-step { margin-bottom: 22px; }
+    .delegation-step h4 {
+      font-size: 21px; color: var(--accent); margin-bottom: 8px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .delegation-step .step-num {
+      width: 29px; height: 29px; border-radius: 50%;
+      background: var(--accent-dim); color: #fff; font-size: 18px;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .delegation-step p { font-size: 19px; color: var(--muted); line-height: 1.5; }
+    .delegation-info {
+      padding: 14px; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; font-size: 18px; font-family: 'SF Mono', 'Fira Code', monospace;
+      margin: 11px 0; word-break: break-all;
+    }
+    .delegation-info .row { display: flex; justify-content: space-between; padding: 5px 0; }
+    .delegation-info .label { color: var(--muted); }
+    .delegation-info .value { color: var(--text); }
+    .copyable-addr { cursor: pointer; user-select: all; font-family: monospace; font-size: 18px; word-break: break-all; }
+    .copyable-addr:hover { color: var(--accent); }
+    .copyable-addr::after { content: ' 📋'; font-size: 16px; opacity: 0.5; }
+    .copy-toast { position: fixed; bottom: 13px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #000; padding: 10px 22px; border-radius: 8px; font-size: 19px; z-index: 10000; pointer-events: none; animation: fadeOut 1.5s ease forwards; }
+    @keyframes fadeOut { 0%,60% { opacity: 1; } 100% { opacity: 0; } }
+    .caveat-list { list-style: none; margin: 8px 0; }
+    .caveat-list li {
+      padding: 6px 13px; font-size: 18px; color: var(--success);
+      border-left: 2px solid var(--success); margin-bottom: 6px;
+    }
+
+    /* ── Delegated execution confirmation (in-chat) ────── */
+    .delegated-confirm {
+      padding: 12px 14px; background: rgba(31,111,235,0.06);
+      border: 1px solid rgba(31,111,235,0.15); border-radius: 8px;
+      white-space: normal; word-break: break-word; box-sizing: border-box;
+    }
+    .delegated-confirm .trade-pair {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      font-size: 14px; font-weight: 600;
+    }
+    .delegated-confirm .trade-arrow { color: var(--muted); font-size: 13px; }
+    .delegated-confirm .trade-amount.sell { color: var(--text); }
+    .delegated-confirm .trade-amount.buy { color: var(--success); }
+    .delegated-confirm .trade-meta {
+      font-size: 12px; color: var(--muted); margin: 4px 0 10px;
+    }
+    .delegated-confirm .confirm-actions { display: flex; gap: 8px; }
+    .delegated-confirm .btn-agent-exec {
+      font-size: 13px; padding: 6px 14px; border-radius: 6px;
+      border: none; cursor: pointer; font-weight: 500;
+    }
+    .delegated-confirm .btn-agent-exec.approve {
+      background: var(--success); color: #000;
+    }
+    .delegated-confirm .btn-agent-exec.reject {
+      background: transparent; color: var(--muted); border: 1px solid var(--border);
+    }
+    .delegated-confirm .exec-status {
+      font-size: 13px; margin-top: 6px; white-space: normal;
+      word-break: break-word; overflow-wrap: anywhere;
+    }
+    .delegated-confirm .multi-tx-header {
+      font-size: 13px; color: var(--muted); margin-bottom: 6px; font-weight: 600;
+    }
+    .multi-trade-row {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      font-size: 14px; font-weight: 600; padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .multi-trade-row:last-of-type { border-bottom: none; margin-bottom: 13px; }
+    .multi-trade-row .trade-chain {
+      font-size: 16px; color: var(--accent); background: rgba(31,111,235,0.12);
+      padding: 2px 10px; border-radius: 5px; font-weight: 500;
+    }
+    .multi-trade-row .multi-tx-status {
+      margin-left: auto; font-size: 19px;
+    }
+
+    /* ── Pool onboarding ─────────────────────────────── */
+    .onboarding-card {
+      background: rgba(31,111,235,0.06);
+      border: 1px solid rgba(31,111,235,0.2);
+      border-radius: 11px;
+      padding: 22px;
+      margin: 16px 0;
+      text-align: center;
+    }
+    .onboarding-card h3 {
+      font-size: 24px; color: var(--accent); margin: 0 0 11px 0;
+    }
+    .onboarding-card p {
+      font-size: 19px; color: var(--muted); margin: 0 0 16px 0; line-height: 1.5;
+    }
+    .onboarding-actions {
+      display: flex; gap: 13px; justify-content: center; flex-wrap: wrap;
+    }
+    .onboarding-actions button {
+      font-size: 19px; padding: 13px 26px; border-radius: 10px;
+      border: 1px solid rgba(31,111,235,0.3); cursor: pointer;
+      background: transparent; color: var(--accent); font-weight: 500;
+      transition: background 0.15s;
+    }
+    .onboarding-actions button:hover {
+      background: rgba(31,111,235,0.12);
+    }
+    .onboarding-actions button.primary {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+    }
+    .onboarding-actions button.primary:hover {
+      background: #1a6fd8;
+    }
+    /* ── Deploy pool modal ───────────────────────────── */
+    .deploy-field { margin-bottom: 16px; }
+    .deploy-field label {
+      display: block; font-size: 18px; color: var(--muted);
+      margin-bottom: 6px; font-weight: 500;
+    }
+    .deploy-field input, .deploy-field select {
+      width: 100%; padding: 13px 16px; border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.12); background: var(--surface);
+      color: var(--text); font-size: 21px; box-sizing: border-box;
+    }
+    .deploy-field select { color-scheme: dark; }
+    .deploy-field select option {
+      background: var(--surface); color: var(--text);
+    }
+    .deploy-field input:focus, .deploy-field select:focus {
+      border-color: var(--accent); outline: none;
+    }
+    .deploy-field .hint {
+      font-size: 16px; color: var(--muted); margin-top: 5px;
+    }
+
+    .wallet-divider {
