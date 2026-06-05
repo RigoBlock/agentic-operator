@@ -9,6 +9,10 @@ import {
   escapeHtml, copyToClipboard, apiHeaders,
 } from "./state.js";
 
+import { openWalletPicker, signAuthMessage } from "./wallet.js";
+
+import { showTransactionModal } from "./tx-modal.js";
+
 function makeReasoningBlock(text, startOpen = true) {
   const block = document.createElement('div');
   block.className = 'reasoning-block';
@@ -63,6 +67,26 @@ function appendMessage(role, content, extras, isRestore) {
     tr.textContent = extras.toolResult;
     div.appendChild(tr);
   }
+  if (extras?.transaction && !isRestore) {
+    const tx = extras.transaction;
+    const actionDiv = document.createElement('div');
+    actionDiv.className = 'tx-actions';
+    actionDiv.style.marginTop = '12px';
+    const execBtn = document.createElement('button');
+    execBtn.className = 'btn-confirm';
+    execBtn.textContent = tx.description?.toLowerCase().includes('gmx') ? 'Execute Position Change'
+      : tx.description?.toLowerCase().includes('deploy') ? 'Deploy'
+      : tx.description?.toLowerCase().includes('liquidity') ? 'Add Liquidity'
+      : 'Execute';
+    execBtn.onclick = () => showTransactionModal(tx);
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'btn-cancel';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.onclick = () => actionDiv.remove();
+    actionDiv.appendChild(execBtn);
+    actionDiv.appendChild(dismissBtn);
+    div.appendChild(actionDiv);
+  }
   // model trace intentionally not shown to users
   if (extras?.suggestions?.length) {
     const chips = document.createElement('div');
@@ -77,7 +101,7 @@ function appendMessage(role, content, extras, isRestore) {
           invokeDirectTool(direct);
         } else {
           inputEl.value = label;
-          sendMessage();
+          window.sendMessage();
         }
       };
       chips.appendChild(chip);
@@ -131,15 +155,24 @@ function renderRichContent(text) {
 
     // Close table if we were in one
     if (inTable) {
-      html += '</table></div>';
+      html += '</table>';
       inTable = false;
     }
 
-    // Regular line: escape then linkify URLs
-    html += linkifyUrls(escapeHtml(line)) + '\n';
+    // Regular line: convert markdown links, escape, then linkify raw URLs
+    const placeholders = [];
+    let processed = line.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (match, text, url) => {
+      const key = `__MDLINK_${placeholders.length}__`;
+      placeholders.push(`<a href="${url}" target="_blank" rel="noopener">${escapeHtml(text)}</a>`);
+      return key;
+    });
+    processed = escapeHtml(processed);
+    processed = linkifyUrls(processed);
+    processed = processed.replace(/__MDLINK_(\d+)__/g, (match, idx) => placeholders[idx]);
+    html += processed + '\n';
   }
 
-  if (inTable) html += '</table></div>';
+  if (inTable) html += '</table>';
   return html;
 }
 
@@ -157,6 +190,12 @@ function linkifyUrls(str) {
  * Returns null for normal chat-flow chips.
  */
 function parseDirectToolCall(label) {
+  // Exact-match chips that bypass the LLM entirely
+  const lower = label.toLowerCase().trim();
+  if (lower === 'refresh positions') {
+    return { toolName: 'gmx_get_positions', args: {} };
+  }
+
   // GMX position action chips: "<Action> <SYMBOL> <long|short>"
   const gmxMatch = label.match(/^(Close|Increase|Decrease|Add collateral to|Withdraw collateral from)\s+(\S+)\s+(long|short)$/i);
   if (gmxMatch) {
@@ -185,6 +224,34 @@ function parseDirectToolCall(label) {
 /**
  * Directly invoke a tool via /api/tools with prompt-based param collection.
  */
+function formatDirectToolLabel(toolName, args) {
+  if (toolName === 'gmx_close_position') {
+    const side = args.isLong ? 'long' : 'short';
+    return `Close ${args.market} ${side}`;
+  }
+  if (toolName === 'gmx_increase_position') {
+    const side = args.isLong ? 'long' : 'short';
+    if (args.sizeDeltaUsd === '0') return `Add collateral to ${args.market} ${side}`;
+    return `Increase ${args.market} ${side}`;
+  }
+  if (toolName === 'build_vault_swap') {
+    return `Swap ${args.amountIn} ${args.tokenIn} → ${args.tokenOut}`;
+  }
+  if (toolName === 'gmx_get_positions') return 'Refresh GMX positions';
+  if (toolName === 'gmx_claim_funding_fees') return 'Claim GMX funding fees';
+  if (toolName === 'crosschain_transfer') return `Bridge ${args.amount} ${args.token} to ${args.destinationChain}`;
+  if (toolName === 'deploy_smart_pool') return `Deploy pool: ${args.name}`;
+  if (toolName === 'fund_pool') return `Fund pool with ${args.amount} ${args.token}`;
+  if (toolName === 'setup_delegation') return 'Set up delegation';
+  if (toolName === 'revoke_delegation') return 'Revoke delegation';
+  if (toolName === 'add_liquidity') return `Add liquidity: ${args.tokenA}/${args.tokenB}`;
+  if (toolName === 'remove_liquidity') return `Remove liquidity: ${args.tokenA}/${args.tokenB}`;
+  if (toolName === 'grg_stake') return `Stake ${args.amount} GRG`;
+  if (toolName === 'grg_unstake') return `Unstake ${args.amount} GRG`;
+  if (toolName === 'grg_claim_rewards') return 'Claim GRG rewards';
+  return toolName.replace(/_/g, ' ');
+}
+
 async function invokeDirectTool(toolInfo) {
   if (!connectedAddress) {
     appendMessage('system', '👛 Please connect your wallet first.');
@@ -212,9 +279,8 @@ async function invokeDirectTool(toolInfo) {
   // Prompt for missing params based on tool
   if (toolInfo.toolName === 'gmx_close_position') {
     if (!args.sizeDeltaUsd) {
-      const size = prompt(`Size to close in USD (e.g., 5000). Leave empty or type "all" to close fully:`);
-      if (size === null) return; // cancelled
-      args.sizeDeltaUsd = size.trim() || 'all';
+      // Default to full close — user can type a partial close in chat if needed
+      args.sizeDeltaUsd = 'all';
     }
     if (args.sizeDeltaUsd === '0') {
       const col = prompt('Amount of collateral to withdraw:');
@@ -265,7 +331,7 @@ async function invokeDirectTool(toolInfo) {
     body.authTimestamp = authTimestamp;
   }
 
-  appendMessage('user', `🔧 Direct: ${toolInfo.toolName}(${JSON.stringify(args)})`);
+  appendMessage('user', `🔧 ${formatDirectToolLabel(toolInfo.toolName, args)}`);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 60000);
@@ -286,13 +352,15 @@ async function invokeDirectTool(toolInfo) {
     const msg = data.message || data.reply || JSON.stringify(data);
     const extras = {};
     if (data.transaction) {
-      extras.toolResult = msg;
-      appendMessage('assistant', msg, extras);
-      // Open tx modal for signing
-      showTransactionModal(data.transaction);
-    } else {
-      appendMessage('assistant', msg, extras);
+      extras.transaction = data.transaction;
     }
+    if (data.metadata?.gmxPositions) {
+      extras.gmxPositions = data.metadata.gmxPositions;
+    }
+    if (data.suggestions) {
+      extras.suggestions = data.suggestions;
+    }
+    appendMessage('assistant', msg, extras);
   } catch (err) {
     clearTimeout(timeoutId);
     appendMessage('system', `Direct tool call failed: ${err.message}`);
@@ -326,8 +394,8 @@ function enhanceGmxPositions(msgDiv, positions) {
   // Add refresh button above the table
   const refreshBtn = document.createElement('button');
   refreshBtn.className = 'gmx-refresh-btn';
-  refreshBtn.textContent = '🔄 Refresh PnL';
-  refreshBtn.title = 'Update positions, PnL, size, collateral, leverage and mark price';
+  refreshBtn.textContent = '🔄 Refresh Positions';
+  refreshBtn.title = 'Update positions, PnL, size, collateral, leverage and mark price (no LLM cost)';
   refreshBtn.onclick = () => refreshGmxPositions();
   posTable.parentElement.insertBefore(refreshBtn, posTable);
 
@@ -361,20 +429,21 @@ function enhanceGmxPositions(msgDiv, positions) {
       { label: '− Withdraw', action: () => modifyGmxCollateral(market, isLong, 'withdraw') },
     ]);
 
-    // Make PnL cell interactive (withdraw positive PnL — placeholder)
+    // PnL cell — info tooltip only (GMX v2 has no separate "withdraw unrealized PnL" operation)
     const pnlCell = cells[7];
     const pnlValue = parseFloat(pos.unrealizedPnl.replace(/[^0-9.-]/g, '')) || 0;
-    if (pnlValue > 0) {
-      makeInteractiveCell(pnlCell, [
-        { label: '💰 Withdraw PnL', action: () => withdrawGmxPnl(market, isLong), disabled: true, title: 'Withdraw positive PnL (coming soon)' },
-      ]);
+    if (pnlValue !== 0) {
+      pnlCell.title = pnlValue > 0
+        ? 'Positive PnL is realized when you close or decrease the position. Use Collateral → Withdraw to reduce collateral without changing size.'
+        : 'Negative PnL is realized when you close or decrease the position.';
+      pnlCell.style.cursor = 'help';
     }
   });
 
-  // Add Actions header cell
+  // Add Close header cell
   const headerRow = rows[0];
   const th = document.createElement('th');
-  th.textContent = 'Actions';
+  th.textContent = 'Close';
   headerRow.appendChild(th);
 }
 
@@ -427,7 +496,15 @@ function modifyGmxSize(market, isLong, mode) {
   if (mode === 'increase') {
     invokeDirectTool({ toolName: 'gmx_increase_position', args: { market, isLong } });
   } else {
-    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong } });
+    // Decrease — ask user for the USD amount to reduce
+    const amount = prompt('Size to decrease in USD (e.g., 500):');
+    if (amount === null) return;
+    const trimmed = amount.trim();
+    if (!trimmed || isNaN(parseFloat(trimmed)) || parseFloat(trimmed) <= 0) {
+      window.appendMessage('system', 'Invalid decrease amount. Please enter a positive number.');
+      return;
+    }
+    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, sizeDeltaUsd: trimmed } });
   }
 }
 
@@ -435,13 +512,23 @@ function modifyGmxCollateral(market, isLong, mode) {
   if (mode === 'add') {
     invokeDirectTool({ toolName: 'gmx_increase_position', args: { market, isLong, sizeDeltaUsd: '0' } });
   } else {
-    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, sizeDeltaUsd: '0' } });
+    // Withdraw collateral — ask for amount
+    const amount = prompt('Amount of collateral to withdraw:');
+    if (amount === null) return;
+    const trimmed = amount.trim();
+    if (!trimmed || isNaN(parseFloat(trimmed)) || parseFloat(trimmed) <= 0) {
+      window.appendMessage('system', 'Invalid collateral amount. Please enter a positive number.');
+      return;
+    }
+    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, sizeDeltaUsd: '0', collateralDeltaAmount: trimmed } });
   }
 }
 
-function withdrawGmxPnl(market, isLong) {
-  // Placeholder — GMX PnL withdrawal not yet implemented
-  window.appendMessage('system', '💰 PnL withdrawal is coming soon. Use Close or Decrease to realize profits.');
+function withdrawGmxPnl(market, isLong, collateralSymbol, maxCollateral, pnlUsd) {
+  // DEPRECATED — GMX v2 has no standalone "withdraw unrealized PnL" function.
+  // PnL is realized implicitly on close/decrease. Collateral withdrawal is done
+  // via modifyGmxCollateral with sizeDeltaUsd=0.
+  window.appendMessage('system', '💡 GMX v2: Unrealized PnL is realized when you close or decrease a position. To withdraw collateral without changing position size, use the Collateral cell menu.');
 }
 
 async function refreshGmxPositions() {
@@ -489,7 +576,8 @@ async function refreshGmxPositions() {
 
 export {
   appendMessage, renderRichContent, makeReasoningBlock,
+  linkifyMarkdownInCell, linkifyUrls,
   parseDirectToolCall, invokeDirectTool,
   enhanceGmxPositions, closeGmxPosition, modifyGmxSize,
-  modifyGmxCollateral, refreshGmxPositions,
+  modifyGmxCollateral, withdrawGmxPnl, refreshGmxPositions,
 };

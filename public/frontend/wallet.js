@@ -9,6 +9,8 @@ import {
   setPendingTx, setCurrentChainId,
 } from './state.js';
 
+import { appendMessage } from './chat-ui.js';
+
 /* ================================================================
    EIP-6963 Multi-Wallet Discovery
    ================================================================ */
@@ -317,6 +319,7 @@ export {
   renderWalletList,
   openWalletPicker,
   connectWithProvider,
+  attachProviderListeners,
   disconnectWallet,
   restoreCachedAuth,
   signAuthMessage,

@@ -411,8 +411,19 @@ export async function handle_gmx_close_position(
       throw new Error(`No open ${isLong ? "long" : "short"} ${marketSymbol} position found.`);
     }
     const posSizeNum = parseUsdString(matchedPos.sizeInUsd);
-    const closeSizeNum = parseFloat(sizeDeltaUsd);
-    isFullClose = closeSizeNum >= posSizeNum;
+    // Support percentage strings like "50%"
+    if (sizeDeltaUsd.trim().endsWith("%")) {
+      const pct = parseFloat(sizeDeltaUsd.replace("%", ""));
+      if (Number.isNaN(pct) || pct <= 0) {
+        throw new Error(`Invalid percentage for size decrease: ${sizeDeltaUsd}. Use a positive number like "50%".`);
+      }
+      const computed = (posSizeNum * pct) / 100;
+      sizeDeltaUsd = computed.toFixed(2);
+      isFullClose = computed >= posSizeNum;
+    } else {
+      const closeSizeNum = parseFloat(sizeDeltaUsd);
+      isFullClose = closeSizeNum >= posSizeNum;
+    }
   }
 
   const collateralDelta = (args.collateralDeltaAmount as string) || "0";
@@ -543,7 +554,7 @@ export async function handle_gmx_get_positions(
   // Generic suggestions only — per-position actions are rendered inline by the frontend.
   const suggestions: string[] = [];
   if (summary.positions.length > 0) {
-    suggestions.push("Open new position", "Show GMX markets");
+    suggestions.push("Refresh positions", "Open new position", "Show GMX markets");
   } else {
     suggestions.push("Open a long", "Open a short", "Show GMX markets");
   }

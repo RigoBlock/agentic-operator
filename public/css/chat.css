@@ -96,13 +96,14 @@
 
     /* ── GMX Position Actions ───────────────────────────── */
     .gmx-refresh-btn {
-      font-size: 12px; padding: 4px 12px; border-radius: 6px;
-      border: 1px solid var(--accent-dim); background: rgba(31, 111, 235, 0.08);
-      color: var(--accent); cursor: pointer; font-weight: 500;
-      margin-bottom: 8px; transition: background 0.15s, border-color 0.15s;
+      font-size: 13px; padding: 6px 16px; border-radius: 8px;
+      border: 1px solid var(--accent-dim); background: rgba(31, 111, 235, 0.12);
+      color: var(--accent); cursor: pointer; font-weight: 600;
+      margin-bottom: 10px; transition: background 0.15s, border-color 0.15s;
+      display: inline-flex; align-items: center; gap: 6px;
     }
     .gmx-refresh-btn:hover {
-      background: rgba(31, 111, 235, 0.18); border-color: var(--accent);
+      background: rgba(31, 111, 235, 0.22); border-color: var(--accent);
     }
     .gmx-interactive-cell {
       position: relative;

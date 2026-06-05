@@ -14,6 +14,9 @@ import {
   setExecutionMode, setDelegationState,
   currentChainId,
   connectedAddress,
+  restoreChat,
+  commandHistory, historyIndex, historyDraft,
+  setHistoryIndex, setHistoryDraft,
 } from './state.js';
 
 import {
@@ -28,7 +31,7 @@ import {
 import {
   parseDirectToolCall, invokeDirectTool,
   enhanceGmxPositions, closeGmxPosition, modifyGmxSize,
-  modifyGmxCollateral, refreshGmxPositions,
+  modifyGmxCollateral, withdrawGmxPnl, refreshGmxPositions,
 } from './chat-ui.js';
 
 import {
@@ -66,6 +69,7 @@ import {
   getSavedVaults, saveVault, removeVault, toggleSavedVaults,
   renderSavedVaults, loadVault, startStrategyPoller,
   stopStrategyPoller, validateVault, updateOnboardingVisibility,
+  restoreLastVault,
 } from './vault.js';
 
 import {
@@ -100,10 +104,15 @@ window.handleChatResponse = handleChatResponse;
 window.autoProgressAfterTx = autoProgressAfterTx;
 window.showTransactionModal = showTransactionModal;
 window.showDelegatedConfirmation = showDelegatedConfirmation;
+window.confirmDelegatedExecution = confirmDelegatedExecution;
+window.rejectDelegatedExecution = rejectDelegatedExecution;
 window.showMultiDelegatedConfirmation = showMultiDelegatedConfirmation;
+window.confirmMultiDelegatedExecution = confirmMultiDelegatedExecution;
 window.showTxReceiptCard = showTxReceiptCard;
 window.showManualTxCard = showManualTxCard;
+window.signManualTxCard = signManualTxCard;
 window.pollPendingTx = pollPendingTx;
+window.confirmTransaction = confirmTransaction;
 
 // Wallet
 window.openWalletPicker = openWalletPicker;
@@ -160,6 +169,7 @@ window.invokeDirectTool = invokeDirectTool;
 window.closeGmxPosition = closeGmxPosition;
 window.modifyGmxSize = modifyGmxSize;
 window.modifyGmxCollateral = modifyGmxCollateral;
+window.withdrawGmxPnl = withdrawGmxPnl;
 window.refreshGmxPositions = refreshGmxPositions;
 
 // ── Event Listeners ───────────────────────────────────────────────────
@@ -179,20 +189,17 @@ inputEl.addEventListener('keydown', (e) => {
     return;
   }
   // Command history (up/down arrow)
-  const commandHistory = [];
-  let historyIndex = -1;
-  let historyDraft = '';
   if (e.key === 'ArrowUp' && inputEl.selectionStart === 0 && !e.shiftKey) {
     if (commandHistory.length === 0) return;
     e.preventDefault();
-    if (historyIndex === -1) historyDraft = inputEl.value;
-    historyIndex = Math.min(historyIndex + 1, commandHistory.length - 1);
+    if (historyIndex === -1) setHistoryDraft(inputEl.value);
+    setHistoryIndex(Math.min(historyIndex + 1, commandHistory.length - 1));
     inputEl.value = commandHistory[commandHistory.length - 1 - historyIndex];
   }
   if (e.key === 'ArrowDown' && !e.shiftKey) {
     if (historyIndex === -1) return;
     e.preventDefault();
-    historyIndex -= 1;
+    setHistoryIndex(historyIndex - 1);
     inputEl.value = historyIndex === -1 ? historyDraft : commandHistory[commandHistory.length - 1 - historyIndex];
   }
 });
@@ -223,6 +230,7 @@ document.addEventListener('DOMContentLoaded', () => {
   restoreCachedAuth();
 
   // Vault / onboarding
+  restoreLastVault();
   updateOnboardingVisibility();
 
   // Delegation

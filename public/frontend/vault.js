@@ -6,7 +6,14 @@ import {
   lastEventTimestamp, setLastEventTimestamp,
   strategyPollTimer, setStrategyPollTimer,
   setExecutionMode, setDelegationState,
+  afterValidateVault,
 } from './state.js';
+
+import {
+  applyTestnetState, updateChainDisplay,
+} from './settings.js';
+
+import { appendMessage } from './chat-ui.js';
 
 /* ================================================================
    Saved Vaults (localStorage)
@@ -78,6 +85,29 @@ function loadVault(address) {
 }
 
 /* ================================================================
+   Restore last-used vault on page load
+   ================================================================ */
+function restoreLastVault() {
+  // Restore network mode FIRST
+  const testnetOn = localStorage.getItem('rigoblock_testnet') === 'true';
+  document.getElementById('testnet-toggle').checked = testnetOn;
+  applyTestnetState(testnetOn);
+  if (testnetOn) setCurrentChainId(11155111);
+
+  const vaults = getSavedVaults();
+  if (vaults.length > 0) {
+    vaultInput.value = vaults[0].address;
+    // Don't restore cached chainId -- validateVault() will discover it
+    updateChainDisplay();
+    const status = document.getElementById('vault-status');
+    status.className = 'vault-info-badge';
+    status.textContent = vaults[0].name || 'last used';
+  } else {
+    updateChainDisplay();
+  }
+}
+
+/* ================================================================
    Strategy Event Polling -- shows notifications for cron-triggered actions
    ================================================================ */
 function startStrategyPoller() {
@@ -124,6 +154,8 @@ document.addEventListener('click', (e) => {
    Vault validation
    ================================================================ */
 let validateTimer = null;
+let validateInProgress = false;
+
 vaultInput.addEventListener('input', () => {
   clearTimeout(validateTimer);
   const v = vaultInput.value.trim();
@@ -144,9 +176,15 @@ async function validateVault() {
   const chainId = currentChainId;
   const status = document.getElementById('vault-status');
   if (!addr || addr.length !== 42) { status.textContent = ''; return; }
+  if (validateInProgress) return;
+  validateInProgress = true;
 
   status.className = 'vault-info-badge';
   status.textContent = 'checking\u2026';
+
+  let valid = false;
+  let foundChainId = chainId;
+  let name = '';
 
   try {
     // Backend tries selected chain first, then all others
@@ -154,8 +192,8 @@ async function validateVault() {
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || 'Not a vault');
 
-    const name = data.name || '';
-    const foundChainId = data.chainId || chainId;
+    name = data.name || '';
+    foundChainId = data.chainId || chainId;
 
     // Auto-switch chain within the same network mode (e.g. Ethereum -> Base).
     // NEVER auto-switch between mainnet and testnet -- respect the user's toggle.
@@ -168,6 +206,7 @@ async function validateVault() {
         status.className = 'vault-info-badge';
         status.textContent = `${name || 'valid'} -- on ${CHAIN_NAMES[foundChainId] || 'chain ' + foundChainId} (${modeLabel})`;
         saveVault(addr, foundChainId, name);
+        validateInProgress = false;
         return;
       }
       // Same network mode -- safe to auto-switch chain
@@ -193,13 +232,30 @@ async function validateVault() {
     }
 
     saveVault(addr, foundChainId, name);
-    window.refreshDelegationStatus();
-    startStrategyPoller();
-    window.restoreTradeSettings();
+    valid = true;
   } catch {
     status.className = 'vault-info-badge error';
     status.textContent = 'not a vault on any chain';
   }
+
+  // Post-validation work: delegation refresh, strategy polling, trade settings.
+  // These are best-effort and must NOT overwrite a successful vault status.
+  if (valid) {
+    try {
+      window.refreshDelegationStatus();
+    } catch { /* ignore */ }
+    try {
+      startStrategyPoller();
+    } catch { /* ignore */ }
+    try {
+      window.restoreTradeSettings();
+    } catch { /* ignore */ }
+  }
+
+  if (afterValidateVault) {
+    try { await afterValidateVault(); } catch { /* ignore */ }
+  }
+  validateInProgress = false;
 }
 
 /* ================================================================
@@ -217,13 +273,11 @@ function updateOnboardingVisibility() {
 
 // Listen on vault input changes
 vaultInput.addEventListener('input', updateOnboardingVisibility);
-// Show onboarding on initial load if no vault set
-updateOnboardingVisibility();
 
 export {
   VAULT_STORAGE_KEY,
   getSavedVaults, saveVault, removeVault,
   toggleSavedVaults, renderSavedVaults, loadVault,
   startStrategyPoller, stopStrategyPoller, pollStrategyEvents,
-  validateVault, updateOnboardingVisibility,
+  validateVault, updateOnboardingVisibility, restoreLastVault,
 };

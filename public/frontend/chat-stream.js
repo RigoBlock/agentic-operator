@@ -3,21 +3,43 @@
  */
 
 import {
-  inputEl, sendBtn, vaultInput,
+  chatEl, inputEl, sendBtn, vaultInput,
   activeAbortController, setActiveAbortController,
   currentChainId, setCurrentChainId,
   conversationHistory, setConversationHistory,
   pendingTx, setPendingTx,
-  connectedAddress, authSignature, setAuthSignature, setAuthTimestamp,
+  connectedAddress, authSignature, authTimestamp, setAuthSignature, setAuthTimestamp,
   executionMode, setExecutionMode,
   multiStepActive, setMultiStepActive,
   apiHeaders, escapeHtml, getExplorerUrl,
+  CHAIN_NAMES, TESTNET_CHAINS_LIST,
   enterStoppingMode, exitStoppingMode, persistChat, restoreChat,
+  commandHistory,
+  setHistoryIndex, setHistoryDraft,
 } from "./state.js";
 
 import { sendChatMessage, callTool } from "./api.js";
 
 import { makeReasoningBlock, appendMessage } from "./chat-ui.js";
+
+import {
+  getAiRequestParams, slippageOverrideKey, getSlippageBps,
+  applyTestnetState, updateChainDisplay,
+} from "./settings.js";
+
+import { getSavedVaults } from "./vault.js";
+
+import { refreshDelegationStatus } from "./delegation-status.js";
+
+import { openWalletPicker, signAuthMessage, authKey } from "./wallet.js";
+
+import { showTransactionModal } from "./tx-modal.js";
+
+import {
+  showDelegatedConfirmation, showMultiDelegatedConfirmation,
+} from "./tx-delegated.js";
+
+import { showManualTxCard, showTxReceiptCard } from "./tx-receipt.js";
 
 function autoProgressAfterTx(description) {
   // Only auto-progress when we're in a multi-step flow
@@ -44,13 +66,25 @@ async function sendMessage() {
   if (!commandHistory.length || commandHistory[commandHistory.length - 1] !== text) {
     commandHistory.push(text);
   }
-  historyIndex = -1;
-  historyDraft = '';
+  setHistoryIndex(-1);
+  setHistoryDraft('');
 
   const vault = vaultInput.value.trim();
   // Allow empty vault — zero address means no pool yet (for deploy_smart_pool flow)
   const effectiveVault = (vault && vault.length === 42) ? vault : '0x0000000000000000000000000000000000000000';
   const chainId = currentChainId;
+
+  // Warn if wallet chain doesn't match the vault's saved chain
+  if (vault && vault.length === 42) {
+    const saved = getSavedVaults().find(v => v.address.toLowerCase() === vault.toLowerCase());
+    if (saved && saved.chainId && saved.chainId !== chainId) {
+      const savedName = CHAIN_NAMES[saved.chainId] || 'chain ' + saved.chainId;
+      const currentName = CHAIN_NAMES[chainId] || 'chain ' + chainId;
+      appendMessage('system', `⚠️ Chain mismatch: vault ${vault.slice(0, 6)}…${vault.slice(-4)} was saved on ${savedName}, but your wallet is on ${currentName}. Switch your wallet to ${savedName} or re-enter the vault to auto-switch.`);
+      // Don't block — let the user proceed if they intentionally want a different chain
+    }
+  }
+
   if (!connectedAddress) {
     appendMessage('system', '👛 Please connect your wallet first to use the chat.');
     openWalletPicker();
@@ -519,7 +553,8 @@ async function handleChatResponse(data) {
     for (const r of data.executionResults) {
       showTxReceiptCard(r);
     }
-  } else {
+  } else if (!data.reply && !data.metadata) {
+    // Only warn when there's truly nothing useful in the response
     console.log('[tx-modal] No transaction in response:', Object.keys(data));
   }
 }

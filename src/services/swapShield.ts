@@ -4,6 +4,7 @@ import {
   hasPriceFeedForPair,
   normalizeTokenAddress,
 } from "./oraclePrice.js";
+import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "../config.js";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -30,6 +31,11 @@ function formatBpsAsPct(bps: bigint): string {
   const wholePct = absBps / 100n;
   const fractionalPct = (absBps % 100n).toString().padStart(2, "0");
   return `${sign}${wholePct.toString()}.${fractionalPct}`;
+}
+
+function getChainName(chainId: number): string {
+  const all = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS];
+  return all.find((c) => c.id === chainId)?.name || `Chain ${chainId}`;
 }
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -280,7 +286,9 @@ export async function checkSwapPrice(
   const maxDivergenceBps = BigInt(Math.round(normalizedMaxDivergencePct * 100));
 
   console.log(
-    `[SwapShield] Comparison: oracle=${oracleAmountRaw} dexExpected=${dexExpectedOutRaw} ` +
+    `[SwapShield] Comparison on ${getChainName(chainId)}: ` +
+    `oracle=${oracleAmountRaw} dexExpected=${dexExpectedOutRaw} ` +
+    `tokenIn=${normalizedIn} tokenOut=${normalizedOut} ` +
     `divergence=${divergencePctDisplay}% ` +
     `(tolerance=±${normalizedMaxDivergencePct}%)`,
   );
@@ -307,8 +315,9 @@ export async function checkSwapPrice(
       code: "BLOCKED",
       reason:
         `⚠️ Swap Shield blocked: the DEX quote diverges ${divergencePctDisplay}% from the oracle spot price ` +
-        `(max allowed: ${normalizedMaxDivergencePct}%). ` +
+        `(max allowed: ${normalizedMaxDivergencePct}%) on ${getChainName(chainId)}. ` +
         `This likely indicates significant price impact, a bad route, or stale liquidity.\n\n` +
+        `Oracle expected: ${oracleAmountRaw} | DEX quoted: ${dexExpectedOutRaw} (base units)\n\n` +
         `To proceed anyway, you can temporarily raise the tolerance (up to 50% for 10 min): "set swap shield tolerance to 30%"\n` +
         `Or split the trade into smaller amounts using a TWAP order to reduce price impact.`,
     };
@@ -337,8 +346,9 @@ export async function checkSwapPrice(
         code: "BLOCKED",
         reason:
           `⚠️ Swap Shield blocked: the DEX quote is ${favorablePctDisplay}% better than the oracle spot price, ` +
-          `exceeding the ${normalizedMaxDivergencePct}% tolerance. ` +
+          `exceeding the ${normalizedMaxDivergencePct}% tolerance on ${getChainName(chainId)}. ` +
           `This may indicate a stale oracle or manipulated route.\n\n` +
+          `Oracle expected: ${oracleAmountRaw} | DEX quoted: ${dexExpectedOutRaw} (base units)\n\n` +
           `To proceed anyway, temporarily raise the tolerance (up to 50% for 10 min): "set swap shield tolerance to 30%"`,
       };
     }

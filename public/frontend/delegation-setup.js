@@ -6,11 +6,17 @@ import {
   connectedAddress, authSignature, authTimestamp,
   executionMode, setExecutionMode,
   delegationState, setDelegationState,
-  vaultInput, CHAIN_NAMES, escapeHtml, apiHeaders,
+  vaultInput, CHAIN_NAMES, MAINNET_CHAINS_LIST, escapeHtml, apiHeaders, copyToClipboard,
   currentChainId, activeProvider,
 } from "./state.js";
 
 import { fetchDelegationStatus, fetchAgentBalance } from "./api.js";
+
+import { appendMessage } from "./chat-ui.js";
+
+import { closeModal, openWalletPicker } from "./wallet.js";
+
+import { fetchAllDelegationStatuses, refreshDelegationStatus } from "./delegation-status.js";
 
 async function openDelegationSetup(targetChainId) {
   if (!connectedAddress) {

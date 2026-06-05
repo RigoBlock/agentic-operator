@@ -6,11 +6,18 @@ import {
   connectedAddress, authSignature, authTimestamp,
   executionMode, setExecutionMode,
   delegationState, setDelegationState,
-  vaultInput, CHAIN_NAMES, escapeHtml, apiHeaders,
+  vaultInput, CHAIN_NAMES, MAINNET_CHAINS_LIST, escapeHtml, apiHeaders,
   currentChainId, activeProvider,
+  setAfterValidateVault,
 } from "./state.js";
 
 import { fetchDelegationStatus } from "./api.js";
+
+import { appendMessage } from "./chat-ui.js";
+
+import { closeModal, signAuthMessage } from "./wallet.js";
+
+import { refreshDelegationStatus, updateDelegationUI } from "./delegation-status.js";
 
 function openRevokeModal() {
   if (!delegationState || !delegationState.agentAddress) return;
@@ -322,9 +329,7 @@ async function revokeDelegation() {
 }
 
 // Refresh delegation when vault changes
-const origValidateVault = validateVault;
-validateVault = async function() {
-  await origValidateVault();
+setAfterValidateVault(async () => {
   // Only load delegation data when the connected wallet IS the vault owner.
   // Otherwise clear the panel so stale agent info doesn't persist.
   const statusEl = document.getElementById('vault-status');
@@ -336,11 +341,11 @@ validateVault = async function() {
   } else {
     refreshDelegationStatus();
   }
-};
+});
 
 // Auto-refresh delegation on load
 (function initDelegation() {
-  setTimeout(() => refreshDelegationStatus(), 600);
+  setTimeout(() => window.refreshDelegationStatus?.() || refreshDelegationStatus(), 600);
 })();
 
 // One-time cleanup: remove old per-vault swap-shield keys from earlier versions
@@ -356,9 +361,6 @@ validateVault = async function() {
   }
   localStorage.setItem('rigoblock_shield_cleanup_v3', '1');
 })();
-
-// Restore trading settings from localStorage
-restoreTradeSettings();
 
 /* ================================================================
    Pool Onboarding — show/hide based on vault input

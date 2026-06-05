@@ -4,8 +4,17 @@
 
 import {
   activeProvider, connectedAddress,
-  CHAIN_NAMES, escapeHtml,
+  delegationState, executionMode,
+  authSignature, authTimestamp,
+  currentChainId, vaultInput, chatEl,
+  CHAIN_NAMES, escapeHtml, apiHeaders,
 } from "./state.js";
+
+import { appendMessage } from "./chat-ui.js";
+
+import { fetchAgentBalance } from "./api.js";
+
+import { showTxReceiptCard, showManualTxCard, pollPendingTx } from "./tx-receipt.js";
 
 function showDelegatedConfirmation(tx) {
   const meta = tx.swapMeta;
@@ -183,7 +192,7 @@ async function confirmDelegatedExecution(btn) {
         const desc = tx.swapMeta
           ? `${tx.swapMeta.sellAmount} ${tx.swapMeta.sellToken} → ${tx.swapMeta.buyAmount} ${tx.swapMeta.buyToken}`
           : null;
-        setTimeout(() => autoProgressAfterTx(desc), 2000);
+        setTimeout(() => window.autoProgressAfterTx(desc), 2000);
       }
 
       // Refresh agent balance

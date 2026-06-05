@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https:; font-src 'self';" />
   <link rel="icon" type="image/png" href="/favicon.png" />
   <title>Rigoblock Trader</title>
   <link rel="stylesheet" href="/css/base.css" />
@@ -291,7 +292,7 @@
       <h3>🏊 Get Started</h3>
       <p>You don't have a vault address set. Paste an existing pool address above, or deploy a new smart pool.</p>
       <div class="onboarding-actions">
-        <button onclick="vaultInput.focus()">Paste Address</button>
+        <button onclick="document.getElementById('vault-input').focus()">Paste Address</button>
         <button class="primary" onclick="openDeployPoolModal()">Deploy New Pool</button>
       </div>
     </div>

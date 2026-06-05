@@ -28,6 +28,17 @@ export let multiStepActive = false; // true when agent response indicates a mult
 export let executionMode = 'manual'; // 'manual' | 'delegated'
 export let delegationState = null;   // cached delegation status from backend
 
+// Command history for up/down arrow navigation in chat input
+export const commandHistory = [];
+export let historyIndex = -1;
+export let historyDraft = '';
+export function setHistoryIndex(v) { historyIndex = v; }
+export function setHistoryDraft(v) { historyDraft = v; }
+
+// Hook for delegation modules to run after vault validation
+export let afterValidateVault = null;
+export function setAfterValidateVault(fn) { afterValidateVault = fn; }
+
 // Setters for mutable state (modules must use these to update shared state)
 export function setActiveAbortController(v) { activeAbortController = v; }
 export function setCurrentChainId(v) { currentChainId = v; }

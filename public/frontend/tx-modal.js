@@ -4,9 +4,13 @@
 
 import {
   pendingTx, setPendingTx,
-  activeProvider, connectedAddress,
+  activeProvider, connectedAddress, currentChainId,
   CHAIN_NAMES, escapeHtml, getExplorerUrl,
 } from "./state.js";
+
+import { appendMessage } from "./chat-ui.js";
+
+import { closeModal } from "./wallet.js";
 
 function showTransactionModal(tx) {
   if (!tx || !tx.to || !tx.data) {
@@ -15,7 +19,7 @@ function showTransactionModal(tx) {
     return;
   }
   setPendingTx(tx);
-  document.getElementById('tx-description').textContent = tx.description || 'Vault swap transaction';
+  document.getElementById('tx-description').textContent = tx.description || 'Vault transaction';
   const gasDisplay = tx.gas ? parseInt(tx.gas, 16).toLocaleString() : 'auto';
   const dataLength = tx.data ? (tx.data.length - 2) / 2 : 0;
   const valueHex = tx.value || '0x0';
@@ -53,7 +57,8 @@ function showTransactionModal(tx) {
     : desc.includes('bridge') || desc.includes('transfer') ? 'Transfer'
     : desc.includes('stake') || desc.includes('unstake') ? 'Confirm'
     : desc.includes('delegation') || desc.includes('delegate') ? 'Delegate'
-    : 'Confirm Swap';
+    : desc.includes('gmx') || desc.includes('close') || desc.includes('decrease') ? 'Confirm'
+    : 'Confirm';
   confirmBtn.style.display = '';
   document.getElementById('tx-modal').classList.add('visible');
 }
@@ -149,12 +154,12 @@ async function pollTransactionReceipt(txHash, tx, statusEl) {
             : `✅ Transaction confirmed`;
           appendMessage('system', chatMsg);
           // Refresh delegation status (handles chat-based delegation setup)
-          refreshDelegationStatus();
+          window.refreshDelegationStatus();
           // Auto-progress to next strategy step if agent is leading a multi-step flow
           // Note: we do NOT repeat the buy/sell amounts here (those came from the swap
           // result — already in conversation history). Including them as a new user
           // message causes the LLM to echo them as "new balance", which is wrong.
-          setTimeout(() => autoProgressAfterTx(null), 4500);
+          setTimeout(() => window.autoProgressAfterTx(null), 4500);
         } else {
           statusEl.style.color = 'var(--error)';
           statusEl.textContent = '✗ Transaction reverted';

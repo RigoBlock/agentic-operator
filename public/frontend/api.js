@@ -94,7 +94,7 @@ export async function fetchDelegationStatus(vault, allChains = false) {
  * Fetch agent wallet ETH balance.
  */
 export async function fetchAgentBalance(vault) {
-  const res = await fetch(`/api/agent/balance?vaultAddress=${vault}`, { headers: apiHeaders() });
+  const res = await fetch(`/api/delegation/balance?vaultAddress=${vault}`, { headers: apiHeaders() });
   if (!res.ok) return null;
   return res.json();
 }
@@ -114,14 +114,4 @@ export async function pollStrategyEvents(vault) {
   return events || [];
 }
 
-/**
- * Toggle sponsored gas for a vault.
- */
-export async function setSponsoredGas(vault, enabled) {
-  const res = await fetch('/api/agent/sponsored-gas', {
-    method: 'POST',
-    headers: apiHeaders(),
-    body: JSON.stringify({ vaultAddress: vault, enabled }),
-  });
-  return res.ok;
-}
+

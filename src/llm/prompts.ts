@@ -309,6 +309,10 @@ GMX INTENT PARSING:
 - "long 1000 ETHUSDC 5x" → gmx_open_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5"
 - "short BTC 10x with 5000 USDC" → gmx_open_position: market="BTC", isLong=false, collateralAmount="5000", leverage="10"
 - "close my ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all"
+- "decrease my ETH long by $500" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="500"
+- "reduce my BTC short size by half" → gmx_close_position: market="BTC", isLong=false, sizeDeltaUsd="50%" (the backend resolves percentages against the open position)
+- "withdraw 100 USDC collateral from my ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="0", collateralDeltaAmount="100"
+- "withdraw my PnL from ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="0", collateralDeltaAmount="<unrealized PnL converted to collateral token units>" — if you don't know the exact amount, call gmx_get_positions first to read it
 - "set stop loss on ETH long at $3000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all", orderType="stop_loss", triggerPrice="3000"`,
 
   lp: `UNISWAP V4 LP WORKFLOW:

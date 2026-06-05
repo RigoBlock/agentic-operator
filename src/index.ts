@@ -40,6 +40,15 @@ const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 // ── Middleware ─────────────────────────────────────────────────────────
 app.use("*", cors());
 
+// Set a permissive CSP so the browser enforces it alongside any report-only policy.
+app.use("*", async (c, next) => {
+  await next();
+  c.header(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https:; font-src 'self';"
+  );
+});
+
 // Initialise token resolver KV on every request
 app.use("*", async (c, next) => {
   if (c.env.KV) initTokenResolver(c.env.KV);
@@ -233,6 +242,10 @@ app.get("/", async (c) => {
   // Prevent stale HTML after deploy — the frontend must always match the worker API.
   headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
   headers.set("Pragma", "no-cache");
+  headers.set(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https:; font-src 'self';"
+  );
   headers.set("Expires", "0");
   return new Response(response.body, { status: response.status, headers });
 });
@@ -540,6 +553,18 @@ app.get("/.well-known/openid-configuration", (c) =>
     },
   }),
 );
+
+// Catch-all: serve static assets via the ASSETS binding with CSP headers.
+// This ensures every response (HTML, JS, CSS, images) gets a proper CSP.
+app.get("*", async (c) => {
+  const response = await c.env.ASSETS.fetch(c.req.raw);
+  const headers = new Headers(response.headers);
+  headers.set(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https:; font-src 'self';"
+  );
+  return new Response(response.body, { status: response.status, headers });
+});
 
 export { app };
 

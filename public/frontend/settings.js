@@ -7,6 +7,8 @@ import {
   apiHeaders,
 } from './state.js';
 
+import { appendMessage } from './chat-ui.js';
+
 // AI model configuration (persisted in localStorage)
 const AI_SETTINGS_KEY = 'rigoblock_ai_settings';
 let aiSettings = loadAiSettings();

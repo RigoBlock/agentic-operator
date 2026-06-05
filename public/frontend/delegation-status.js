@@ -10,7 +10,7 @@ import {
   currentChainId, MAINNET_CHAINS_LIST, copyToClipboard,
 } from "./state.js";
 
-import { fetchDelegationStatus, fetchAgentBalance, setSponsoredGas } from "./api.js";
+import { fetchDelegationStatus, fetchAgentBalance } from "./api.js";
 
 /* ================================================================
    Execution Mode — auto-detected from delegation status

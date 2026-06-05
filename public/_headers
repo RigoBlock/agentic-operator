@@ -1,2 +1,3 @@
-/
+/*
   Link: </openapi.json>; rel="service-desc", </.well-known/ai-plugin.json>; rel="describedby", </.well-known/api-catalog>; rel="api-catalog", </sitemap.xml>; rel="sitemap"
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https:; font-src 'self';

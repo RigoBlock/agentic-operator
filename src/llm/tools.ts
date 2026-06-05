@@ -215,7 +215,7 @@ export const TOOL_DEFINITIONS = [
           },
           sizeDeltaUsd: {
             type: "string",
-            description: "Amount to decrease in USD (e.g., '5000'). Use 'all' to close entirely. Set '0' to withdraw collateral only without changing position size.",
+            description: "Amount to decrease in USD (e.g., '5000'), or a percentage like '50%'. Use 'all' to close entirely. Set '0' to withdraw collateral only without changing position size.",
           },
           collateral: {
             type: "string",

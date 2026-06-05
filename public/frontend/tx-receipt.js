@@ -3,9 +3,13 @@
  */
 
 import {
-  activeProvider, connectedAddress,
+  activeProvider, connectedAddress, chatEl, vaultInput,
   CHAIN_NAMES, escapeHtml, getExplorerUrl,
 } from "./state.js";
+
+import { appendMessage } from "./chat-ui.js";
+
+import { fetchAgentBalance } from "./api.js";
 
 function showManualTxCard(tx) {
   if (!tx || !tx.to || !tx.data) return;
@@ -114,7 +118,7 @@ async function pollManualTxReceipt(txHash, tx, statusEl) {
         }
         if (success) {
           // Refresh delegation status (handles chat-based delegation setup)
-          refreshDelegationStatus();
+          window.refreshDelegationStatus();
           // Auto-progress to next strategy step.
           // NOTE: for non-swap txs (bridges, delegation, etc.), pass null rather than
           // tx.description — bridge descriptions contain receive amounts (e.g.
@@ -122,7 +126,7 @@ async function pollManualTxReceipt(txHash, tx, statusEl) {
           const desc = meta
             ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
             : null;
-          setTimeout(() => autoProgressAfterTx(desc), 2000);
+          setTimeout(() => window.autoProgressAfterTx(desc), 2000);
         }
         return;
       }
@@ -210,7 +214,7 @@ async function pollPendingTx(r, swapMeta) {
           const desc = swapMeta
             ? `${swapMeta.sellAmount} ${swapMeta.sellToken} → ${swapMeta.buyAmount} ${swapMeta.buyToken}`
             : 'transaction';
-          setTimeout(() => autoProgressAfterTx(desc), 2000);
+          setTimeout(() => window.autoProgressAfterTx(desc), 2000);
         } else {
           showTxReceiptCard({ ...r, ...data, reverted: true }, swapMeta);
         }
@@ -219,19 +223,6 @@ async function pollPendingTx(r, swapMeta) {
     } catch { /* silent retry */ }
   }, intervalMs);
 }
-
-/* ================================================================
-   EIP-6963 Multi-Wallet Discovery
-   ================================================================ */
-window.addEventListener('eip6963:announceProvider', (event) => {
-  const { info, provider } = event.detail;
-  if (!discoveredProviders.some(p => p.info.rdns === info.rdns)) {
-    discoveredProviders.push({ info, provider });
-  }
-  renderWalletList();
-});
-window.dispatchEvent(new Event('eip6963:requestProvider'));
-
 
 export {
   showTxReceiptCard, pollPendingTx,
