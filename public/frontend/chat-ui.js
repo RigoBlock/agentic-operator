@@ -7,6 +7,7 @@ import {
   conversationHistory, setConversationHistory,
   currentChainId, connectedAddress, authSignature, authTimestamp,
   escapeHtml, copyToClipboard, apiHeaders,
+  setLastGmxPositions, executionMode, delegationState,
 } from "./state.js";
 
 import { openWalletPicker, signAuthMessage } from "./wallet.js";
@@ -45,10 +46,14 @@ function appendMessage(role, content, extras, isRestore) {
     div.textContent = content;
   }
 
-  // Skip interactive elements (tool calls, tx cards, suggestions) on restore
+  // On restore, skip dynamic one-shot elements (tx actions, suggestion chips)
+  // but still enhance GMX tables if we have cached position data.
   if (isRestore) {
     chatEl.appendChild(div);
     chatEl.scrollTop = chatEl.scrollHeight;
+    if (extras?.gmxPositions?.length > 0) {
+      enhanceGmxPositions(div, extras.gmxPositions);
+    }
     return;
   }
 
@@ -112,7 +117,8 @@ function appendMessage(role, content, extras, isRestore) {
   chatEl.scrollTop = chatEl.scrollHeight;
 
   // Post-process GMX positions message to add inline action buttons
-  if (!isRestore && extras?.gmxPositions?.length > 0) {
+  if (extras?.gmxPositions?.length > 0) {
+    setLastGmxPositions(extras.gmxPositions);
     enhanceGmxPositions(div, extras.gmxPositions);
   }
 
@@ -227,6 +233,9 @@ function parseDirectToolCall(label) {
 function formatDirectToolLabel(toolName, args) {
   if (toolName === 'gmx_close_position') {
     const side = args.isLong ? 'long' : 'short';
+    if (args.sizeDeltaUsd === '0' && args.collateralDeltaAmount) {
+      return `Withdraw collateral from ${args.market} ${side}`;
+    }
     return `Close ${args.market} ${side}`;
   }
   if (toolName === 'gmx_increase_position') {
@@ -282,41 +291,25 @@ async function invokeDirectTool(toolInfo) {
       // Default to full close — user can type a partial close in chat if needed
       args.sizeDeltaUsd = 'all';
     }
-    if (args.sizeDeltaUsd === '0') {
+    // Only prompt for collateral withdraw amount if caller didn't already provide it
+    if (args.sizeDeltaUsd === '0' && !args.collateralDeltaAmount) {
       const col = prompt('Amount of collateral to withdraw:');
       if (col === null) return;
       args.collateralDeltaAmount = col.trim();
     }
   }
   if (toolInfo.toolName === 'gmx_increase_position') {
-    if (args.sizeDeltaUsd === '0') {
-      // Pure collateral add
-      const col = prompt('Amount of collateral to add:');
+    // Pure collateral add (sizeDeltaUsd already set to '0' by caller)
+    if (args.sizeDeltaUsd === '0' && !args.collateralAmount) {
+      const col = prompt('Collateral amount to add:');
       if (col === null) return;
       args.collateralAmount = col.trim();
-    } else {
-      const mode = prompt('Increase by: (1) notional USD amount, (2) size delta USD, (3) collateral amount + leverage');
-      if (mode === null) return;
-      const m = mode.trim();
-      if (m === '1') {
-        const notional = prompt('Additional notional size in USD (e.g., 1500):');
-        if (notional === null) return;
-        args.notionalUsd = notional.trim();
-      } else if (m === '2') {
-        const size = prompt('Additional size delta in USD (e.g., 1500):');
-        if (size === null) return;
-        args.sizeDeltaUsd = size.trim();
-      } else if (m === '3') {
-        const col = prompt('Collateral amount to add:');
-        if (col === null) return;
-        args.collateralAmount = col.trim();
-        const lev = prompt('Leverage multiplier (e.g., 5):');
-        if (lev === null) return;
-        args.leverage = lev.trim();
-      } else {
-        appendMessage('system', 'Invalid choice. Please type 1, 2, or 3.');
-        return;
-      }
+    }
+    // Fallback: if caller didn't set notionalUsd or sizeDeltaUsd, prompt once
+    if (!args.notionalUsd && !args.sizeDeltaUsd && !args.collateralAmount) {
+      const notional = prompt('USD amount to increase:');
+      if (notional === null) return;
+      args.notionalUsd = notional.trim();
     }
   }
 
@@ -329,6 +322,11 @@ async function invokeDirectTool(toolInfo) {
     body.operatorAddress = connectedAddress;
     body.authSignature = authSignature;
     body.authTimestamp = authTimestamp;
+    // If delegated mode is active and delegation is confirmed on this chain,
+    // auto-execute without requiring manual signing
+    if (executionMode === 'delegated' && delegationState?.delegated) {
+      body.executionMode = 'delegated';
+    }
   }
 
   appendMessage('user', `🔧 ${formatDirectToolLabel(toolInfo.toolName, args)}`);
@@ -379,6 +377,9 @@ function enhanceGmxPositions(msgDiv, positions) {
   const contentDiv = msgDiv.querySelector('.msg-content');
   if (!contentDiv) return;
 
+  // Idempotent: skip if already enhanced
+  if (contentDiv.dataset.gmxEnhanced === 'true') return;
+
   // Find the positions table (first table after the summary line)
   const tables = contentDiv.querySelectorAll('table');
   if (tables.length === 0) return;
@@ -391,12 +392,12 @@ function enhanceGmxPositions(msgDiv, positions) {
   const dataRows = Array.from(rows).slice(1);
   if (dataRows.length !== positions.length) return;
 
-  // Add refresh button above the table
+  // Add subtle refresh link above the table
   const refreshBtn = document.createElement('button');
   refreshBtn.className = 'gmx-refresh-btn';
-  refreshBtn.textContent = '🔄 Refresh Positions';
-  refreshBtn.title = 'Update positions, PnL, size, collateral, leverage and mark price (no LLM cost)';
-  refreshBtn.onclick = () => refreshGmxPositions();
+  refreshBtn.textContent = '🔄 Refresh';
+  refreshBtn.title = 'Update positions (no LLM cost)';
+  refreshBtn.onclick = () => refreshGmxPositions(msgDiv);
   posTable.parentElement.insertBefore(refreshBtn, posTable);
 
   // Enhance each data row
@@ -408,25 +409,26 @@ function enhanceGmxPositions(msgDiv, positions) {
 
     const market = pos.indexTokenSymbol;
     const isLong = pos.isLong;
+    const collateralSymbol = pos.collateralSymbol;
 
     // Add Close button as last cell
     const closeCell = document.createElement('td');
     closeCell.innerHTML = `<button class="gmx-action-btn close" title="Close position">✕</button>`;
-    closeCell.querySelector('button').onclick = () => closeGmxPosition(market, isLong);
+    closeCell.querySelector('button').onclick = () => closeGmxPosition(market, isLong, collateralSymbol);
     row.appendChild(closeCell);
 
     // Make Size cell interactive
     const sizeCell = cells[2];
     makeInteractiveCell(sizeCell, [
-      { label: '▲ Increase', action: () => modifyGmxSize(market, isLong, 'increase') },
-      { label: '▼ Decrease', action: () => modifyGmxSize(market, isLong, 'decrease') },
+      { label: '▲ Increase', action: () => modifyGmxSize(market, isLong, 'increase', collateralSymbol) },
+      { label: '▼ Decrease', action: () => modifyGmxSize(market, isLong, 'decrease', collateralSymbol) },
     ]);
 
     // Make Collateral cell interactive
     const colCell = cells[3];
     makeInteractiveCell(colCell, [
-      { label: '+ Add', action: () => modifyGmxCollateral(market, isLong, 'add') },
-      { label: '− Withdraw', action: () => modifyGmxCollateral(market, isLong, 'withdraw') },
+      { label: '+ Add', action: () => modifyGmxCollateral(market, isLong, 'add', collateralSymbol) },
+      { label: '− Withdraw', action: () => modifyGmxCollateral(market, isLong, 'withdraw', collateralSymbol) },
     ]);
 
     // PnL cell — info tooltip only (GMX v2 has no separate "withdraw unrealized PnL" operation)
@@ -445,6 +447,8 @@ function enhanceGmxPositions(msgDiv, positions) {
   const th = document.createElement('th');
   th.textContent = 'Close';
   headerRow.appendChild(th);
+
+  contentDiv.dataset.gmxEnhanced = 'true';
 }
 
 /** Wrap a table cell with an interactive tooltip menu */
@@ -488,57 +492,80 @@ function makeInteractiveCell(cell, actions) {
   });
 }
 
-function closeGmxPosition(market, isLong) {
-  invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong } });
+function closeGmxPosition(market, isLong, collateralSymbol) {
+  invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, collateral: collateralSymbol } });
 }
 
-function modifyGmxSize(market, isLong, mode) {
+function modifyGmxSize(market, isLong, mode, collateralSymbol) {
   if (mode === 'increase') {
-    invokeDirectTool({ toolName: 'gmx_increase_position', args: { market, isLong } });
-  } else {
-    // Decrease — ask user for the USD amount to reduce
-    const amount = prompt('Size to decrease in USD (e.g., 500):');
+    const amount = prompt('USD amount to increase:');
     if (amount === null) return;
     const trimmed = amount.trim();
     if (!trimmed || isNaN(parseFloat(trimmed)) || parseFloat(trimmed) <= 0) {
-      window.appendMessage('system', 'Invalid decrease amount. Please enter a positive number.');
+      window.appendMessage('system', 'Invalid amount. Please enter a positive number.');
       return;
     }
-    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, sizeDeltaUsd: trimmed } });
+    invokeDirectTool({ toolName: 'gmx_increase_position', args: { market, isLong, collateral: collateralSymbol, notionalUsd: trimmed } });
+  } else {
+    const amount = prompt('USD amount to decrease:');
+    if (amount === null) return;
+    const trimmed = amount.trim();
+    if (!trimmed || isNaN(parseFloat(trimmed)) || parseFloat(trimmed) <= 0) {
+      window.appendMessage('system', 'Invalid amount. Please enter a positive number.');
+      return;
+    }
+    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, collateral: collateralSymbol, sizeDeltaUsd: trimmed } });
   }
 }
 
-function modifyGmxCollateral(market, isLong, mode) {
+function sanitizeAmountInput(input) {
+  if (!input) return '';
+  const trimmed = input.trim();
+  // Extract leading decimal number, ignoring trailing text like "WETH" or "USDC"
+  const match = trimmed.match(/^(?:\d+\.?\d*|\.\d+)/);
+  return match ? match[0] : trimmed;
+}
+
+function modifyGmxCollateral(market, isLong, mode, collateralSymbol) {
   if (mode === 'add') {
-    invokeDirectTool({ toolName: 'gmx_increase_position', args: { market, isLong, sizeDeltaUsd: '0' } });
-  } else {
-    // Withdraw collateral — ask for amount
-    const amount = prompt('Amount of collateral to withdraw:');
+    const amount = prompt('Collateral amount to add:');
     if (amount === null) return;
-    const trimmed = amount.trim();
+    const trimmed = sanitizeAmountInput(amount);
     if (!trimmed || isNaN(parseFloat(trimmed)) || parseFloat(trimmed) <= 0) {
-      window.appendMessage('system', 'Invalid collateral amount. Please enter a positive number.');
+      window.appendMessage('system', 'Invalid amount. Please enter a positive number.');
       return;
     }
-    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, sizeDeltaUsd: '0', collateralDeltaAmount: trimmed } });
+    invokeDirectTool({ toolName: 'gmx_increase_position', args: { market, isLong, collateral: collateralSymbol, sizeDeltaUsd: '0', collateralAmount: trimmed } });
+  } else {
+    const amount = prompt('Collateral amount to withdraw:');
+    if (amount === null) return;
+    const trimmed = sanitizeAmountInput(amount);
+    if (!trimmed || isNaN(parseFloat(trimmed)) || parseFloat(trimmed) <= 0) {
+      window.appendMessage('system', 'Invalid amount. Please enter a positive number.');
+      return;
+    }
+    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, collateral: collateralSymbol, sizeDeltaUsd: '0', collateralDeltaAmount: trimmed } });
   }
 }
 
-function withdrawGmxPnl(market, isLong, collateralSymbol, maxCollateral, pnlUsd) {
-  // DEPRECATED — GMX v2 has no standalone "withdraw unrealized PnL" function.
-  // PnL is realized implicitly on close/decrease. Collateral withdrawal is done
-  // via modifyGmxCollateral with sizeDeltaUsd=0.
-  window.appendMessage('system', '💡 GMX v2: Unrealized PnL is realized when you close or decrease a position. To withdraw collateral without changing position size, use the Collateral cell menu.');
-}
+// DEPRECATED: GMX v2 has no standalone "withdraw unrealized PnL" function.
+// Removed to prevent confusion. PnL is realized on close/decrease.
 
-async function refreshGmxPositions() {
+async function refreshGmxPositions(msgDiv) {
   const vault = vaultInput.value.trim();
   if (!vault || vault.length !== 42) {
     window.appendMessage('system', 'Please enter a vault address first.');
     return;
   }
+
+  const contentDiv = msgDiv.querySelector('.msg-content');
+  if (!contentDiv) return;
+
+  // Save current content for rollback on error
+  const originalHtml = contentDiv.innerHTML;
+  contentDiv.innerHTML = '<div style="color:var(--muted);font-style:italic;padding:4px 0;">🔄 Refreshing…</div>';
+
   try {
-    window.appendMessage('system', '🔄 Refreshing GMX positions…');
     const body = {
       arguments: {},
       chainId: 42161,
@@ -556,20 +583,41 @@ async function refreshGmxPositions() {
     });
     const data = await res.json();
     if (!res.ok) {
+      contentDiv.innerHTML = originalHtml;
       window.appendMessage('system', `❌ Failed to refresh: ${data.error || data.message || 'Unknown error'}`);
       return;
     }
-    // The response will be a new assistant message with updated positions
+
     const msg = data.message || data.reply || JSON.stringify(data);
-    const extras = {};
-    if (data.metadata?.gmxPositions) {
-      extras.gmxPositions = data.metadata.gmxPositions;
+    contentDiv.innerHTML = renderRichContent(msg);
+    contentDiv.removeAttribute('data-gmx-enhanced');
+
+    if (data.metadata?.gmxPositions?.length > 0) {
+      setLastGmxPositions(data.metadata.gmxPositions);
+      enhanceGmxPositions(msgDiv, data.metadata.gmxPositions);
     }
-    if (data.suggestions) {
-      extras.suggestions = data.suggestions;
+
+    // Update suggestion chips in-place if present
+    const oldChips = msgDiv.querySelector('.suggestions');
+    if (oldChips) oldChips.remove();
+    if (data.suggestions?.length > 0) {
+      const chips = document.createElement('div');
+      chips.className = 'suggestions';
+      for (const label of data.suggestions) {
+        const chip = document.createElement('button');
+        chip.className = 'suggestion-chip';
+        chip.textContent = label;
+        chip.onclick = () => {
+          const direct = parseDirectToolCall(label);
+          if (direct) invokeDirectTool(direct);
+          else { inputEl.value = label; window.sendMessage(); }
+        };
+        chips.appendChild(chip);
+      }
+      msgDiv.appendChild(chips);
     }
-    appendMessage('assistant', msg, extras);
   } catch (err) {
+    contentDiv.innerHTML = originalHtml;
     window.appendMessage('system', `❌ Refresh failed: ${err.message}`);
   }
 }
@@ -579,5 +627,5 @@ export {
   linkifyMarkdownInCell, linkifyUrls,
   parseDirectToolCall, invokeDirectTool,
   enhanceGmxPositions, closeGmxPosition, modifyGmxSize,
-  modifyGmxCollateral, withdrawGmxPnl, refreshGmxPositions,
+  modifyGmxCollateral, refreshGmxPositions,
 };

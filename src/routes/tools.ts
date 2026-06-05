@@ -13,6 +13,7 @@
 import { Hono } from "hono";
 import type { Env, AppVariables, RequestContext, ExecutionMode } from "../types.js";
 import { executeToolCall, TOOL_NAME_ALIASES, OPERATOR_VERIFIED_TOOLS } from "../llm/client.js";
+import { executeTxList, formatOutcomesMarkdown } from "../services/execution.js";
 import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS } from "../llm/tools.js";
 import { getSkillTools } from "../skills/index.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
@@ -109,6 +110,7 @@ tools.post("/", async (c) => {
       authSignature?: string;
       authTimestamp?: number;
       executionMode?: ExecutionMode;
+      confirmExecution?: boolean;
     };
     try {
       const parsedBody: unknown = await c.req.json();
@@ -169,12 +171,36 @@ tools.post("/", async (c) => {
     const canonicalName = TOOL_NAME_ALIASES[toolName] ?? toolName;
     const result = await executeToolCall(c.env, ctx, toolName, body.arguments);
 
+    // ── Delegated execution: auto-execute in delegated mode ──
+    // Unlike /api/chat, direct tool callers explicitly choose the tool and
+    // parameters — no LLM-generated ambiguity to review. So delegated mode
+    // alone is sufficient; confirmExecution is optional (ignored here).
+    if (executionMode === "delegated" && result.transaction) {
+      const txList = result.transaction ? [result.transaction] : [];
+      const executableTxs = txList.filter(tx => !tx.operatorOnly);
+      const outcomes = executableTxs.length > 0
+        ? await executeTxList(c.env, executableTxs, body.vaultAddress)
+        : [];
+      const results = outcomes.filter(o => o.result).map(o => o.result!);
+      const hasFallback = outcomes.some(o => o.fallbackToManual);
+
+      if (results.length === 1) {
+        result.executionResult = results[0];
+        if (!hasFallback && !results[0].reverted) {
+          result.transaction = undefined;
+        }
+      }
+      result.message = formatOutcomesMarkdown(outcomes);
+    }
+
     return c.json({
       tool: canonicalName,
       message: result.message,
       transaction: result.transaction,
       chainSwitch: result.chainSwitch,
       suggestions: result.suggestions,
+      metadata: result.metadata,
+      executionResult: result.executionResult,
     });
   } catch (err) {
     if (err instanceof AuthError) {

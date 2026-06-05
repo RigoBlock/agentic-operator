@@ -20,8 +20,9 @@ import {
   resolveGmxCollateral, getGmxTokenDecimals, warmTokenDecimalsCache, warmDecimalsForAddresses,
   buildCreateIncreaseOrderCalldata, buildCreateDecreaseOrderCalldata,
   buildUpdateOrderCalldata, buildCancelOrderCalldata, buildClaimFundingFeesCalldata,
+  checkVaultEthForGmxKeeper,
 } from "../../services/gmxTrading.js";
-import { getGmxPositionsSummary, getGmxPositions, type GmxPosition } from "../../services/gmxPositions.js";
+import { getGmxPositionsSummary, getGmxPositions, findGmxPosition, type GmxPosition } from "../../services/gmxPositions.js";
 import { ARBITRUM_CHAIN_ID, GmxOrderType } from "../../abi/gmx.js";
 import { estimateGas, executeToolCall, txActionLine } from "../client.js";
 
@@ -30,6 +31,82 @@ function parseUsdString(s: string): number {
   return parseFloat(s.replace(/[+$,]/g, "").replace(/K/, "e3").replace(/M/, "e6")) || 0;
 }
 
+// ── Shared helpers ─────────────────────────────────────────────────────
+
+/**
+ * Check vault has enough native ETH for GMX keeper fee.
+ * Throws a clear error if insufficient. Returns nothing if OK.
+ */
+async function checkKeeperFee(
+  env: Env,
+  ctx: RequestContext,
+): Promise<void> {
+  const feeStatus = await checkVaultEthForGmxKeeper(
+    ctx.vaultAddress as Address,
+    env.ALCHEMY_API_KEY,
+  );
+  if (!feeStatus.sufficient) {
+    throw new Error(
+      `The vault needs ETH to pay the GMX keeper execution fee. ` +
+      `Current balance: ${feeStatus.ethBalance} ETH (need ≥ 0.001 ETH). ` +
+      `Send at least 0.005 ETH to the vault (${ctx.vaultAddress}) and retry.`,
+    );
+  }
+}
+
+/**
+ * Cap collateral to available vault balance. Returns the (possibly capped)
+ * collateralAmount and sizeDeltaUsd, plus an optional warning note.
+ */
+async function capCollateralToBalance(
+  env: Env,
+  ctx: RequestContext,
+  collateralAddr: Address,
+  collateralDecimals: number,
+  collateralSymbol: string,
+  collateralAmount: string,
+  sizeDeltaUsd: string,
+  isPureCollateralAdd: boolean,
+): Promise<{ collateralAmount: string; sizeDeltaUsd: string; cappedNote: string }> {
+  const { balance: colBal } = await getVaultTokenBalance(
+    ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, collateralAddr, env.ALCHEMY_API_KEY,
+  );
+  const requestedRaw = parseUnits(collateralAmount, collateralDecimals);
+  if (requestedRaw <= colBal) {
+    return { collateralAmount, sizeDeltaUsd, cappedNote: "" };
+  }
+
+  const availableNum = parseFloat(formatUnits(colBal, collateralDecimals));
+  if (availableNum < 0.5) {
+    throw new Error(
+      `Insufficient ${collateralSymbol} balance for GMX collateral. ` +
+      `Requested: ${collateralAmount} ${collateralSymbol}, ` +
+      `Available: ${availableNum.toFixed(6)} ${collateralSymbol} on Arbitrum. ` +
+      `Swap more ${collateralSymbol} first.`,
+    );
+  }
+
+  const prevCollateral = parseFloat(collateralAmount);
+  const scaleFactor = availableNum / prevCollateral;
+  const newCollateral = availableNum.toFixed(collateralDecimals <= 8 ? collateralDecimals : 6);
+  let newSize = sizeDeltaUsd;
+  if (!isPureCollateralAdd) {
+    newSize = (parseFloat(sizeDeltaUsd) * scaleFactor).toFixed(2);
+  }
+  const note = `\n⚠️ Collateral capped to available balance: ${newCollateral} ${collateralSymbol}` +
+    (isPureCollateralAdd ? "" : ` (position size scaled proportionally to $${newSize})`);
+
+  return { collateralAmount: newCollateral, sizeDeltaUsd: newSize, cappedNote: note };
+}
+
+// ── Open / Increase (unified) ──────────────────────────────────────────
+
+/**
+ * Unified handler for both opening a NEW position and increasing an EXISTING one.
+ * GMX v2 uses the same `createIncreaseOrder` for both — the only difference is:
+ *   - NEW: collateral MUST be specified, leverage MUST be specified (no defaults)
+ *   - EXISTING: collateral auto-resolved from position, leverage preserved when omitted
+ */
 export async function handle_gmx_increase_position(
   env: Env,
   ctx: RequestContext,
@@ -40,7 +117,6 @@ export async function handle_gmx_increase_position(
     throw new Error("Wallet not connected. Connect your wallet first.");
   }
 
-  // Auto-switch to Arbitrum if needed
   let chainSwitched: number | undefined;
   if (ctx.chainId !== ARBITRUM_CHAIN_ID) {
     ctx.chainId = ARBITRUM_CHAIN_ID;
@@ -48,11 +124,43 @@ export async function handle_gmx_increase_position(
   }
 
   const marketSymbol = (args.market as string).toUpperCase();
-  const isLong = args.isLong as boolean;
-  const collateralSymbol = (args.collateral as string) || "USDC";
-
-  // Find market and get prices
+  const isLong = args.isLong === true || args.isLong === "true";
   const market = await findGmxMarket(marketSymbol);
+
+  // ── Resolve existing position (if any) ──────────────────────────────
+  let existingPos: GmxPosition | undefined;
+  const userCollateral = (args.collateral as string) || "";
+  try {
+    existingPos = await findGmxPosition(
+      ctx.vaultAddress as Address,
+      marketSymbol,
+      isLong,
+      env.ALCHEMY_API_KEY,
+      userCollateral,
+    );
+  } catch {
+    // No existing position — will proceed as OPEN
+    existingPos = undefined;
+  }
+
+  const isOpen = !existingPos;
+
+  // ── Resolve collateral ──────────────────────────────────────────────
+  let collateralSymbol: string;
+  if (isOpen) {
+    if (!userCollateral) {
+      throw new Error(
+        `Opening a new ${marketSymbol} ${isLong ? "long" : "short"} requires specifying a collateral token. ` +
+        `Available collaterals depend on the market. Common choices: USDC, WETH, USDT, WBTC. ` +
+        `Please specify which token to use as collateral (e.g., collateral="WETH").`,
+      );
+    }
+    collateralSymbol = userCollateral;
+  } else {
+    // Increase: use existing position's collateral unless user explicitly overrides
+    collateralSymbol = userCollateral || existingPos.collateralSymbol;
+  }
+
   const collateralAddr = await resolveGmxCollateral(collateralSymbol);
   const collateralDecimals = getGmxTokenDecimals(collateralAddr);
   await warmDecimalsForAddresses([collateralAddr, market.indexToken], env.ALCHEMY_API_KEY);
@@ -61,29 +169,7 @@ export async function handle_gmx_increase_position(
     getGmxTokenPrice(market.indexToken),
   ]);
 
-  // ── Fetch existing position (for leverage continuity) ─────────────
-  let existingPos: GmxPosition | undefined;
-  let existingSizeUsd = 0;
-  let existingCollateralValueUsd = 0;
-  try {
-    const positions = await getGmxPositions(ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
-    existingPos = positions.find(
-      (p) => p.indexTokenSymbol.toUpperCase() === marketSymbol && p.isLong === isLong,
-    );
-    if (existingPos) {
-      existingSizeUsd = parseUsdString(existingPos.sizeInUsd);
-      const collateralNum = parseFloat(existingPos.collateralAmount);
-      // Use current collateral price for accurate USD valuation
-      const colPriceForPos = collateralSymbol === existingPos.collateralSymbol
-        ? collateralPrice.mid
-        : collateralPrice.mid; // same collateral expected; fallback safe
-      existingCollateralValueUsd = collateralNum * colPriceForPos;
-    }
-  } catch {
-    // ignore RPC failures — proceed with defaults
-  }
-
-  // ── Resolve collateralAmount and sizeDeltaUsd ─────────────────────
+  // ── Resolve collateralAmount and sizeDeltaUsd ───────────────────────
   let collateralAmount: string;
   let sizeDeltaUsd: string;
 
@@ -100,36 +186,39 @@ export async function handle_gmx_increase_position(
     collateralAmount = args.collateralAmount as string;
     sizeDeltaUsd = "0";
   } else if (hasNotional && hasLeverage) {
-    // Mode A: notional + leverage
     const notional = parseFloat(args.notionalUsd as string);
     const leverageNum = parseFloat(args.leverage as string);
     sizeDeltaUsd = notional.toFixed(2);
     const collateralValueUsd = notional / leverageNum;
     collateralAmount = (collateralValueUsd / collateralPrice.mid).toFixed(collateralDecimals <= 8 ? collateralDecimals : 6);
   } else if (hasCollateral && hasLeverage) {
-    // Mode B: collateral + leverage
     collateralAmount = args.collateralAmount as string;
     const leverageNum = parseFloat(args.leverage as string);
     const collateralValueUsd = parseFloat(collateralAmount) * collateralPrice.mid;
     sizeDeltaUsd = (collateralValueUsd * leverageNum).toFixed(2);
   } else if (hasCollateral && hasSizeDelta) {
-    // Mode C: explicit collateral + size
     collateralAmount = args.collateralAmount as string;
     sizeDeltaUsd = args.sizeDeltaUsd as string;
   } else if (hasNotional) {
-    // notional without leverage → preserve current leverage, or default 2x for new positions
     const notional = parseFloat(args.notionalUsd as string);
     sizeDeltaUsd = notional.toFixed(2);
-    let targetLeverage = existingPos ? parseFloat(existingPos.leverage) : 2;
-    if (!targetLeverage || targetLeverage <= 0) targetLeverage = 2;
+    let targetLeverage: number;
+    if (existingPos) {
+      targetLeverage = parseFloat(existingPos.leverage);
+      if (!targetLeverage || targetLeverage <= 0) targetLeverage = 2; // fallback only for corrupt data
+    } else {
+      throw new Error(
+        `Opening a new position with notionalUsd requires specifying leverage. ` +
+        `Example: notionalUsd="1000", leverage="5". ` +
+        `Without leverage, the system cannot compute how much collateral to deposit.`,
+      );
+    }
     const collateralValueUsd = notional / targetLeverage;
     collateralAmount = (collateralValueUsd / collateralPrice.mid).toFixed(collateralDecimals <= 8 ? collateralDecimals : 6);
   } else if (hasSizeDelta) {
-    // size without collateral → pure size increase (leverage goes up)
     sizeDeltaUsd = args.sizeDeltaUsd as string;
     collateralAmount = hasCollateral ? (args.collateralAmount as string) : "0";
   } else if (hasCollateral) {
-    // collateral only → pure collateral add
     collateralAmount = args.collateralAmount as string;
     sizeDeltaUsd = "0";
   } else {
@@ -139,110 +228,22 @@ export async function handle_gmx_increase_position(
   const isPureCollateralAdd = sizeDeltaUsd === "0" || parseFloat(sizeDeltaUsd) === 0;
   const isPureSizeIncrease = parseFloat(collateralAmount) === 0 && !isPureCollateralAdd;
 
-  // ── Pre-checks ────────────────────────────────────────────────────
+  // ── Pre-checks ──────────────────────────────────────────────────────
+  await checkKeeperFee(env, ctx);
 
-  // 1. Check vault native ETH balance for GMX keeper fee.
-  const NATIVE_ZERO = "0x0000000000000000000000000000000000000000" as Address;
-  const MIN_KEEPER_ETH = 1_000_000_000_000_000n; // 0.001 ETH
-  const USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address;
-  const USDT_ARBITRUM = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9" as Address;
-  try {
-    const { balance: ethBal } = await getVaultTokenBalance(
-      ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, NATIVE_ZERO, env.ALCHEMY_API_KEY,
-    );
-    if (ethBal < MIN_KEEPER_ETH) {
-      const ethBalFmt = formatUnits(ethBal, 18);
-      const [usdcBal, usdtBal] = await Promise.all([
-        getVaultTokenBalance(ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, USDC_ARBITRUM, env.ALCHEMY_API_KEY)
-          .catch(() => ({ balance: 0n })),
-        getVaultTokenBalance(ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, USDT_ARBITRUM, env.ALCHEMY_API_KEY)
-          .catch(() => ({ balance: 0n })),
-      ]);
-      const stableIn = usdcBal.balance >= usdtBal.balance && usdcBal.balance > 0n
-        ? "USDC"
-        : usdtBal.balance > 0n ? "USDT" : null;
-      if (!stableIn) {
-        throw new Error(
-          `The vault needs ETH to pay the GMX keeper execution fee ` +
-          `(current: ${ethBalFmt} ETH) but has no USDC or USDT to swap for ETH. ` +
-          `Send at least 0.005 ETH to the vault (${ctx.vaultAddress}) and retry.`,
-        );
-      }
-      try {
-        const savedChainId = ctx.chainId;
-        ctx.chainId = ARBITRUM_CHAIN_ID;
-        const ethSwapResult = await executeToolCall(env, ctx, "build_vault_swap", {
-          tokenIn: stableIn,
-          tokenOut: "ETH",
-          amountOut: "0.002",
-          chain: "arbitrum",
-        });
-        ctx.chainId = savedChainId;
-        return {
-          message:
-            `⚠️ **ETH required for GMX keeper fee**\n` +
-            `Vault ETH balance: ${ethBalFmt} ETH (need ≥ 0.001 ETH)\n\n` +
-            `Sign the swap below to get 0.002 ETH, then resubmit your GMX position.\n\n` +
-            ethSwapResult.message,
-          transaction: ethSwapResult.transaction,
-          chainSwitch: ARBITRUM_CHAIN_ID !== savedChainId ? ARBITRUM_CHAIN_ID : undefined,
-        };
-      } catch {
-        throw new Error(
-          `The vault needs ETH to pay the GMX keeper execution fee. ` +
-          `Current balance: ${ethBalFmt} ETH. ` +
-          `Swap ${stableIn} → ETH first: build_vault_swap(tokenIn="${stableIn}", tokenOut="ETH", amountOut="0.002", chain="arbitrum"), ` +
-          `then retry the GMX position.`,
-        );
-      }
-    }
-  } catch (err) {
-    if (err instanceof Error && (
-      err.message.includes("keeper execution fee") ||
-      err.message.includes("ETH required")
-    )) throw err;
-  }
-
-  // 2. Balance pre-check: cap collateral to available vault balance.
   let cappedNote = "";
   if (!isPureSizeIncrease) {
-    try {
-      const { balance: colBal } = await getVaultTokenBalance(
-        ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, collateralAddr, env.ALCHEMY_API_KEY,
-      );
-      const requestedRaw = parseUnits(collateralAmount, collateralDecimals);
-      if (requestedRaw > colBal) {
-        const availableNum = parseFloat(formatUnits(colBal, collateralDecimals));
-        if (availableNum < 0.5) {
-          throw new Error(
-            `Insufficient ${collateralSymbol} balance for GMX collateral. ` +
-            `Requested: ${collateralAmount} ${collateralSymbol}, ` +
-            `Available: ${availableNum.toFixed(6)} ${collateralSymbol} on Arbitrum. ` +
-            `Swap more ${collateralSymbol} first.`,
-          );
-        }
-        const prevCollateral = parseFloat(collateralAmount);
-        const scaleFactor = availableNum / prevCollateral;
-        collateralAmount = availableNum.toFixed(collateralDecimals <= 8 ? collateralDecimals : 6);
-        if (!isPureCollateralAdd) {
-          sizeDeltaUsd = (parseFloat(sizeDeltaUsd) * scaleFactor).toFixed(2);
-        }
-        cappedNote = `\n⚠️ Collateral capped to available balance: ${collateralAmount} ${collateralSymbol}` +
-          (isPureCollateralAdd ? "" : ` (position size scaled proportionally to $${sizeDeltaUsd})`);
-      }
-    } catch (err) {
-      if (err instanceof Error && (
-        err.message.includes("Insufficient") ||
-        err.message.includes("keeper")
-      )) throw err;
-    }
+    const capped = await capCollateralToBalance(
+      env, ctx, collateralAddr, collateralDecimals, collateralSymbol,
+      collateralAmount, sizeDeltaUsd, isPureCollateralAdd,
+    );
+    collateralAmount = capped.collateralAmount;
+    sizeDeltaUsd = capped.sizeDeltaUsd;
+    cappedNote = capped.cappedNote;
   }
 
+  // ── Build transaction ───────────────────────────────────────────────
   const oraclePrice = indexTokenPrice.mid;
-
-  // GMX v2: NO price impact on entry for opens/increases.
-  // Entry price is simply the oracle price (max for longs, min for shorts).
-  // Slippage protection (1%) bounds the keeper execution price.
   const acceptablePriceUsd = isLong
     ? (oraclePrice * 1.01).toFixed(4)
     : (oraclePrice * 0.99).toFixed(4);
@@ -258,22 +259,29 @@ export async function handle_gmx_increase_position(
     acceptablePriceUsd,
   });
 
-  // Compute leverage display
-  const addedCollateralValueUsd = parseFloat(collateralAmount) * collateralPrice.mid;
-  const newSizeUsd = existingSizeUsd + parseFloat(sizeDeltaUsd);
-  const newCollateralValueUsd = existingCollateralValueUsd + addedCollateralValueUsd;
-  const newLeverage = newCollateralValueUsd > 0 ? newSizeUsd / newCollateralValueUsd : 0;
-  const currentLeverage = existingCollateralValueUsd > 0 ? existingSizeUsd / existingCollateralValueUsd : 0;
-
   const gmxGas = await estimateGas(
     ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
     calldata as Hex, "0x0",
     ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
   );
 
+  // ── Compute display values ──────────────────────────────────────────
+  const addedCollateralValueUsd = parseFloat(collateralAmount) * collateralPrice.mid;
+  const existingSizeUsd = existingPos ? parseUsdString(existingPos.sizeInUsd) : 0;
+  const existingCollateralValueUsd = existingPos
+    ? parseFloat(existingPos.collateralAmount) * collateralPrice.mid
+    : 0;
+  const newSizeUsd = existingSizeUsd + parseFloat(sizeDeltaUsd);
+  const newCollateralValueUsd = existingCollateralValueUsd + addedCollateralValueUsd;
+  const newLeverage = newCollateralValueUsd > 0 ? newSizeUsd / newCollateralValueUsd : 0;
+  const currentLeverage = existingCollateralValueUsd > 0 ? existingSizeUsd / existingCollateralValueUsd : 0;
+
   const actionLabel = isPureCollateralAdd
     ? "Add Collateral"
-    : (toolName === "gmx_increase_position" ? "Increase" : "Open");
+    : isOpen
+      ? "Open Position"
+      : "Increase";
+
   const txDescription = isPureCollateralAdd
     ? `[GMX] Add ${collateralAmount} ${collateralSymbol} collateral to ${isLong ? "Long" : "Short"} ${marketSymbol}`
     : `[GMX] ${isLong ? "Long" : "Short"} ${marketSymbol} ${newLeverage.toFixed(1)}x — ${collateralAmount} ${collateralSymbol} collateral (~$${addedCollateralValueUsd.toFixed(2)}), $${sizeDeltaUsd} size`;
@@ -290,7 +298,7 @@ export async function handle_gmx_increase_position(
   const messageLines = [
     `✅ GMX ${actionLabel} ready`,
     `Direction: ${isLong ? "🟢 LONG" : "🔴 SHORT"} ${marketSymbol}/USD`,
-    `Oracle price: $${oraclePrice.toFixed(4)}`,
+    `Price: $${oraclePrice.toFixed(4)}`,
   ];
 
   if (!isPureCollateralAdd) {
@@ -328,6 +336,8 @@ export async function handle_gmx_increase_position(
   return { message: messageLines.join("\n"), transaction, chainSwitch: chainSwitched };
 }
 
+// ── Close / Decrease ───────────────────────────────────────────────────
+
 export async function handle_gmx_close_position(
   env: Env,
   ctx: RequestContext,
@@ -345,71 +355,31 @@ export async function handle_gmx_close_position(
   }
 
   const marketSymbol = (args.market as string).toUpperCase();
-  const isLong = args.isLong as boolean;
+  const isLong = args.isLong === true || args.isLong === "true";
   const market = await findGmxMarket(marketSymbol);
-
-  // Resolve collateral from args or from position
-  let collateralSymbol = (args.collateral as string) || "USDC";
-  const collateralAddr = await resolveGmxCollateral(collateralSymbol);
-  const collateralDecimals = getGmxTokenDecimals(collateralAddr);
-
-  // Get index token price for slippage protection
-  const indexTokenPrice = await getGmxTokenPrice(market.indexToken);
-  const oraclePrice = indexTokenPrice.mid;
 
   // sizeDeltaUsd: "all" means close full position — find position size
   let sizeDeltaUsd = (args.sizeDeltaUsd as string) || "all";
   let matchedPos: GmxPosition | undefined;
   let isFullClose = false;
 
-  // Always fetch positions so we can (a) resolve "all", (b) match collateral, (c) get execution price
-  const positions = await getGmxPositions(ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+  // Use the shared helper so close and increase never disagree about which
+  // position exists. This also handles string/boolean isLong mismatches.
+  const userCollateral = (args.collateral as string) || "";
+  matchedPos = await findGmxPosition(
+    ctx.vaultAddress as Address,
+    marketSymbol,
+    isLong,
+    env.ALCHEMY_API_KEY,
+    userCollateral,
+  );
 
   if (sizeDeltaUsd.toLowerCase() === "all") {
-    // Match by market + direction + collateral (if user specified collateral)
-    const candidates = positions.filter(
-      (p) =>
-        p.indexTokenSymbol.toUpperCase() === marketSymbol &&
-        p.isLong === isLong,
-    );
-    if (candidates.length === 1) {
-      matchedPos = candidates[0];
-    } else if (candidates.length > 1) {
-      // Disambiguate by collateral token if user provided one
-      const byCollateral = candidates.find(
-        (p) => p.collateralSymbol.toUpperCase() === collateralSymbol.toUpperCase(),
-      );
-      if (byCollateral) {
-        matchedPos = byCollateral;
-      } else {
-        const list = candidates.map(
-          (p) => `${p.collateralSymbol} ${p.isLong ? "long" : "short"} ${p.sizeInUsd}`
-        ).join(", ");
-        throw new Error(
-          `Multiple ${isLong ? "long" : "short"} ${marketSymbol} positions found: ${list}. ` +
-          `Specify collateral token (e.g., collateral="WETH") to disambiguate.`,
-        );
-      }
-    }
-    if (matchedPos) {
-      sizeDeltaUsd = matchedPos.sizeInUsd.replace(/[\$,KM]/g, "");
-      if (matchedPos.sizeInUsd.includes("K")) sizeDeltaUsd = (parseFloat(sizeDeltaUsd) * 1000).toString();
-      if (matchedPos.sizeInUsd.includes("M")) sizeDeltaUsd = (parseFloat(sizeDeltaUsd) * 1000000).toString();
-      collateralSymbol = matchedPos.collateralSymbol;
-      isFullClose = true;
-    } else {
-      throw new Error(`No open ${isLong ? "long" : "short"} ${marketSymbol} position found.`);
-    }
+    sizeDeltaUsd = matchedPos.sizeInUsd.replace(/[\$,KM]/g, "");
+    if (matchedPos.sizeInUsd.includes("K")) sizeDeltaUsd = (parseFloat(sizeDeltaUsd) * 1000).toString();
+    if (matchedPos.sizeInUsd.includes("M")) sizeDeltaUsd = (parseFloat(sizeDeltaUsd) * 1000000).toString();
+    isFullClose = true;
   } else {
-    // Partial close — still try to match position for context
-    matchedPos = positions.find(
-      (p) =>
-        p.indexTokenSymbol.toUpperCase() === marketSymbol &&
-        p.isLong === isLong,
-    );
-    if (!matchedPos) {
-      throw new Error(`No open ${isLong ? "long" : "short"} ${marketSymbol} position found.`);
-    }
     const posSizeNum = parseUsdString(matchedPos.sizeInUsd);
     // Support percentage strings like "50%"
     if (sizeDeltaUsd.trim().endsWith("%")) {
@@ -425,6 +395,15 @@ export async function handle_gmx_close_position(
       isFullClose = closeSizeNum >= posSizeNum;
     }
   }
+
+  // Resolve collateral from matched position
+  const collateralSymbol = matchedPos.collateralSymbol;
+  const collateralAddr = await resolveGmxCollateral(collateralSymbol);
+  const collateralDecimals = getGmxTokenDecimals(collateralAddr);
+
+  // Get index token price for slippage protection
+  const indexTokenPrice = await getGmxTokenPrice(market.indexToken);
+  const oraclePrice = indexTokenPrice.mid;
 
   const collateralDelta = (args.collateralDeltaAmount as string) || "0";
   const isPureCollateralWithdraw = parseFloat(sizeDeltaUsd) === 0 && parseFloat(collateralDelta) > 0;
@@ -497,7 +476,7 @@ export async function handle_gmx_close_position(
   const messageLines = [
     `✅ GMX ${orderLabel} ready`,
     `Direction: ${isLong ? "LONG" : "SHORT"} ${marketSymbol}/USD`,
-    `Oracle price: $${oraclePrice.toFixed(4)}`,
+    `Price: $${oraclePrice.toFixed(4)}`,
     `Execution price: $${executionPrice.toFixed(4)} (${priceImpactLabel} $${priceImpactDisplay})`,
     `Acceptable ${acceptableLabel}: $${acceptablePriceUsd} (1% bound)`,
   ];
@@ -534,6 +513,8 @@ export async function handle_gmx_close_position(
   return { message: messageLines.join("\n"), transaction, chainSwitch: chainSwitched };
 }
 
+// ── Get positions ──────────────────────────────────────────────────────
+
 export async function handle_gmx_get_positions(
   env: Env,
   ctx: RequestContext,
@@ -569,6 +550,8 @@ export async function handle_gmx_get_positions(
     metadata: { gmxPositions: summary.positions },
   };
 }
+
+// ── Cancel order ───────────────────────────────────────────────────────
 
 export async function handle_gmx_cancel_order(
   env: Env,
@@ -611,6 +594,8 @@ export async function handle_gmx_cancel_order(
     chainSwitch: chainSwitched,
   };
 }
+
+// ── Update order ───────────────────────────────────────────────────────
 
 export async function handle_gmx_update_order(
   env: Env,
@@ -663,6 +648,8 @@ export async function handle_gmx_update_order(
     chainSwitch: chainSwitched,
   };
 }
+
+// ── Claim funding fees ─────────────────────────────────────────────────
 
 export async function handle_gmx_claim_funding_fees(
   env: Env,
@@ -722,6 +709,8 @@ export async function handle_gmx_claim_funding_fees(
     chainSwitch: chainSwitched,
   };
 }
+
+// ── Get markets ────────────────────────────────────────────────────────
 
 export async function handle_gmx_get_markets(
   env: Env,

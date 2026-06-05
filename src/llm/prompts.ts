@@ -292,7 +292,15 @@ Required: market (e.g. "ETH", "BTC", "LIT"), isLong (true/false).
 Use notionalUsd + leverage when the user says "increase by $1500" or "add $1500".
 Use collateralAmount + leverage when the user says "add 0.5 WETH collateral AND increase size" or similar.
 Use collateralAmount + sizeDeltaUsd="0" when the user wants to add collateral ONLY without increasing position size (e.g. "add 0.5 WETH collateral to avoid liquidation"). This is the correct mode for de-risking — it adds collateral but keeps size unchanged.
-Default collateral: USDC unless user specifies otherwise (e.g. "using WETH").
+
+NEW POSITIONS (gmx_open_position):
+- The user MUST specify collateral token (e.g., "using WETH", "with USDC"). There is no default.
+- The user MUST specify leverage (e.g., "5x", "10x"). There is no default.
+- If collateral or leverage is missing, ASK the user before calling the tool.
+
+EXISTING POSITIONS (gmx_increase_position):
+- Collateral auto-resolves from the existing position.
+- Leverage is preserved when not specified (notionalUsd without leverage uses current leverage).
 
 WHEN INFORMATION IS MISSING:
 - If the user says "increase my LIT position" but does NOT specify long/short → ASK: "Is your LIT position long or short?"

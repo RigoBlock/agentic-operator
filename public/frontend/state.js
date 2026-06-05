@@ -99,6 +99,19 @@ export function exitStoppingMode() {
 
 // ── Chat persistence (sessionStorage — survives refresh, clears on tab close) ──
 const CHAT_STORAGE_KEY = 'rigoblock_chat_history';
+const GMX_CACHE_KEY = 'rigoblock_last_gmx_positions';
+
+export function setLastGmxPositions(positions) {
+  try {
+    sessionStorage.setItem(GMX_CACHE_KEY, JSON.stringify(positions));
+  } catch { /* quota exceeded — ignore */ }
+}
+
+export function getLastGmxPositions() {
+  try {
+    return JSON.parse(sessionStorage.getItem(GMX_CACHE_KEY) || '[]');
+  } catch { return []; }
+}
 
 export function persistChat() {
   try {
@@ -131,11 +144,16 @@ export function restoreChat() {
     chatEl.innerHTML = '';
     if (onboarding) chatEl.appendChild(onboarding);
     const rendered = new Set();
+    const cachedPositions = getLastGmxPositions();
     for (const msg of conversationHistory) {
       const key = `${msg.role}:${msg.content}`;
       if (rendered.has(key)) continue;
       rendered.add(key);
-      window.appendMessage(msg.role, msg.content, null, true);
+      const isGmxPositions = msg.role === 'assistant' && msg.content.includes('📊 GMX Positions');
+      const extras = isGmxPositions && cachedPositions.length > 0
+        ? { gmxPositions: cachedPositions }
+        : null;
+      window.appendMessage(msg.role, msg.content, extras, true);
     }
     return true;
   } catch { return false; }

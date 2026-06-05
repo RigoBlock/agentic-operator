@@ -155,7 +155,8 @@ export const TOOL_DEFINITIONS = [
         "Use this when the user wants to open a position they do not already have. " +
         "Builds an unsigned createIncreaseOrder transaction. " +
         "If not on Arbitrum, auto-switches. The vault must have sufficient collateral. " +
-        "Default collateral is always USDC unless the user explicitly specifies another token.",
+        "REQUIRED for new positions: collateral token (e.g., USDC, WETH) AND leverage. " +
+        "No defaults — the user must explicitly choose collateral and leverage.",
       parameters: {
         type: "object",
         properties: {
@@ -165,7 +166,7 @@ export const TOOL_DEFINITIONS = [
           },
           collateral: {
             type: "string",
-            description: "Collateral token symbol (e.g., 'USDC', 'WETH', 'USDT'). Default: USDC.",
+            description: "Collateral token symbol (e.g., 'USDC', 'WETH', 'USDT'). REQUIRED for new positions. For increases, auto-resolved from existing position.",
           },
           collateralAmount: {
             type: "string",
@@ -185,7 +186,7 @@ export const TOOL_DEFINITIONS = [
           },
           leverage: {
             type: "string",
-            description: "Desired leverage multiplier (e.g., '5' for 5x, '10' for 10x). If omitted, defaults to 2x.",
+            description: "Desired leverage multiplier (e.g., '5' for 5x, '10' for 10x). REQUIRED for new positions. For increases on existing positions, current leverage is preserved when omitted.",
           },
         },
         required: ["market", "isLong"],
@@ -255,7 +256,7 @@ export const TOOL_DEFINITIONS = [
           },
           collateral: {
             type: "string",
-            description: "Collateral token symbol (e.g., 'WETH', 'USDC'). Default: USDC",
+            description: "Collateral token symbol (e.g., 'WETH', 'USDC'). Auto-resolved from existing position when omitted.",
           },
           collateralAmount: {
             type: "string",
@@ -1400,13 +1401,13 @@ NEVER set amountIn when the user says "buy" — "buy" ALWAYS means amountOut.
 Provide exactly ONE of amountIn or amountOut, never both.
 
 GMX INTENT PARSING:
-- "long 1000 ETHUSDC 5x" → gmx_open_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5" (collateral = 1000/5 = 200 USDC)
-- "long 100 UNIUSD 5x" → gmx_open_position: market="UNI", isLong=true, notionalUsd="100", leverage="5" (collateral = 100/5 = 20 USDC)
-- "long 500 BTCUSD 10x" → gmx_open_position: market="BTC", isLong=true, notionalUsd="500", leverage="10" (collateral = 500/10 = 50 USDC)
-- "short 2000 SOLUSD 4x" → gmx_open_position: market="SOL", isLong=false, notionalUsd="2000", leverage="4" (collateral = 2000/4 = 500 USDC)
+- "long 1000 ETHUSDC 5x using USDC" → gmx_open_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5", collateral="USDC" (collateral = 1000/5 = 200 USDC)
+- "long 100 UNIUSD 5x using USDC" → gmx_open_position: market="UNI", isLong=true, notionalUsd="100", leverage="5", collateral="USDC" (collateral = 100/5 = 20 USDC)
+- "long 500 BTCUSD 10x using USDC" → gmx_open_position: market="BTC", isLong=true, notionalUsd="500", leverage="10", collateral="USDC" (collateral = 500/10 = 50 USDC)
+- "short 2000 SOLUSD 4x using USDC" → gmx_open_position: market="SOL", isLong=false, notionalUsd="2000", leverage="4", collateral="USDC" (collateral = 2000/4 = 500 USDC)
 - "long ETH 5x with 0.5 ETH" → gmx_open_position: market="ETH", isLong=true, collateralAmount="0.5", collateral="ETH", leverage="5"
-- "long ETH 5x with 200 USDC" → gmx_open_position: market="ETH", isLong=true, collateralAmount="200", leverage="5"
-- "short BTC with 5000 USDC at 10x" → gmx_open_position: market="BTC", isLong=false, collateralAmount="5000", leverage="10"
+- "long ETH 5x with 200 USDC" → gmx_open_position: market="ETH", isLong=true, collateralAmount="200", collateral="USDC", leverage="5"
+- "short BTC with 5000 USDC at 10x" → gmx_open_position: market="BTC", isLong=false, collateralAmount="5000", collateral="USDC", leverage="10"
 - "open a $10000 long on ETH with 1 ETH" → gmx_open_position: market="ETH", isLong=true, collateralAmount="1", collateral="ETH", sizeDeltaUsd="10000"
 - "close my ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all"
 - "reduce ETH long by $5000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="5000"

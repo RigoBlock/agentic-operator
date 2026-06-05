@@ -231,6 +231,41 @@ export async function getVaultTokenBalance(
 }
 
 /**
+ * Batch-read ERC-20 balances for multiple tokens in a single multicall.
+ * Returns a map of tokenAddress → balance. Native ETH is NOT supported here
+ * (use getVaultTokenBalance for ETH, or include WETH in the token list).
+ *
+ * This uses viem's multicall — a single RPC round-trip for N tokens instead
+ * of N parallel eth_calls.
+ */
+export async function getVaultTokenBalancesBatch(
+  chainId: number,
+  vaultAddress: Address,
+  tokenAddresses: Address[],
+  alchemyKey?: string,
+): Promise<Map<string, bigint>> {
+  const client = getClient(chainId, alchemyKey);
+  const contracts = tokenAddresses.map((address) => ({
+    address,
+    abi: ERC20_ABI,
+    functionName: "balanceOf" as const,
+    args: [vaultAddress] as const,
+  }));
+
+  const results = await client.multicall({ contracts });
+  const map = new Map<string, bigint>();
+  for (let i = 0; i < tokenAddresses.length; i++) {
+    const result = results[i];
+    if (result.status === "success") {
+      map.set(tokenAddresses[i].toLowerCase(), result.result as bigint);
+    } else {
+      map.set(tokenAddresses[i].toLowerCase(), 0n);
+    }
+  }
+  return map;
+}
+
+/**
  * Encode a call to vault.execute(commands, inputs, deadline).
  *
  * This is the Uniswap Universal Router `execute` function that the

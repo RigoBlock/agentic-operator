@@ -32,8 +32,9 @@ import {
   GmxDecreasePositionSwapType,
   ARBITRUM_CHAIN_ID,
 } from "../abi/gmx.js";
-import { getClient } from "./vault.js";
+import { getClient, getVaultTokenBalance } from "./vault.js";
 import type { Env } from "../types.js";
+import { formatUnits } from "viem";
 
 /** Module-level decimals cache — populated on first get_markets call, used everywhere. */
 const tokenDecimalsCache = new Map<string, number>();
@@ -726,4 +727,40 @@ export function formatGmxTokenAmount(raw: bigint, decimals: number): string {
  */
 export function getGmxGasLimit(): bigint {
   return GMX_GAS_LIMIT;
+}
+
+/**
+ * Check if the vault has enough native ETH for GMX keeper execution fees.
+ * GMX v2 requires the vault to send ETH with each order to pay the keeper.
+ * The Rigoblock GMX adapter auto-computes this fee on-chain from the vault's
+ * native ETH balance.
+ *
+ * Simply checks ETH balance against a minimum threshold. If insufficient,
+ * the caller should tell the user to fund ETH — this service does NOT try
+ * to build swap transactions (that's not its job).
+ */
+export interface GmxKeeperFeeStatus {
+  sufficient: boolean;
+  ethBalance: string; // human-readable ETH
+  ethBalanceRaw: bigint;
+  minRequired: bigint;
+}
+
+const NATIVE_ZERO = "0x0000000000000000000000000000000000000000" as Address;
+const MIN_KEEPER_ETH = 1_000_000_000_000_000n; // 0.001 ETH
+
+export async function checkVaultEthForGmxKeeper(
+  vaultAddress: Address,
+  alchemyKey?: string,
+): Promise<GmxKeeperFeeStatus> {
+  const { balance: ethBal } = await getVaultTokenBalance(
+    ARBITRUM_CHAIN_ID, vaultAddress, NATIVE_ZERO, alchemyKey,
+  );
+
+  return {
+    sufficient: ethBal >= MIN_KEEPER_ETH,
+    ethBalance: formatUnits(ethBal, 18),
+    ethBalanceRaw: ethBal,
+    minRequired: MIN_KEEPER_ETH,
+  };
 }

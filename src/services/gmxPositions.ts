@@ -84,6 +84,15 @@ const ORDER_TYPE_LABELS: Record<number, string> = {
   7: "Liquidation",
 };
 
+// ── Helpers ────────────────────────────────────────────────────────────
+
+/** Normalize isLong to boolean, handling both boolean and string inputs from LLMs. */
+function normalizeIsLong(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return value.toLowerCase() === "true";
+  return Boolean(value);
+}
+
 // ── Core functions ─────────────────────────────────────────────────────
 
 /**
@@ -182,7 +191,9 @@ export async function getGmxPositions(
       : 0;
     const collateralValueUsd = collateralNum * collateralPrice;
 
-    const leverage = collateralValueUsd > 0 ? sizeUsdNum / collateralValueUsd : 0;
+    // GMX v2 leverage uses effective collateral (collateral + unrealized PnL)
+    const effectiveCollateral = collateralValueUsd + pnl;
+    const leverage = effectiveCollateral > 0 ? sizeUsdNum / effectiveCollateral : 0;
     const pnlPercent = collateralValueUsd > 0 ? (pnl / collateralValueUsd) * 100 : 0;
 
     // Estimated funding fee (from borrowingFactor — approximate)
@@ -209,6 +220,61 @@ export async function getGmxPositions(
   }
 
   return positions;
+}
+
+/**
+ * Find a specific GMX position by market, direction, and optionally collateral.
+ * Throws clear errors when no match is found or when multiple matches are ambiguous.
+ * This is the single source of truth for position resolution — both read and write
+ * tools use it so they never disagree about which position exists.
+ */
+export async function findGmxPosition(
+  vaultAddress: Address,
+  marketSymbol: string,
+  isLongArg: unknown,
+  alchemyKey?: string,
+  collateralSymbolHint?: string,
+): Promise<GmxPosition> {
+  const positions = await getGmxPositions(vaultAddress, alchemyKey);
+  const isLong = normalizeIsLong(isLongArg);
+  const sym = marketSymbol.toUpperCase();
+
+  const candidates = positions.filter(
+    (p) => p.indexTokenSymbol.toUpperCase() === sym && p.isLong === isLong,
+  );
+
+  if (candidates.length === 0) {
+    // List what we DO have so the error is actionable
+    const available = positions
+      .map((p) => `${p.indexTokenSymbol} ${p.isLong ? "long" : "short"} (${p.collateralSymbol})`)
+      .join(", ") || "none";
+    throw new Error(
+      `No open ${isLong ? "long" : "short"} ${sym} position found for this vault. ` +
+      `Open positions: ${available}.`,
+    );
+  }
+
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+
+  // Multiple positions — disambiguate by collateral hint
+  const hint = (collateralSymbolHint || "").toUpperCase();
+  const byCollateral = hint
+    ? candidates.find((p) => p.collateralSymbol.toUpperCase() === hint)
+    : undefined;
+
+  if (byCollateral) {
+    return byCollateral;
+  }
+
+  const list = candidates.map(
+    (p) => `${p.collateralSymbol} ${p.isLong ? "long" : "short"} ${p.sizeInUsd}`
+  ).join(", ");
+  throw new Error(
+    `Multiple ${isLong ? "long" : "short"} ${sym} positions found: ${list}. ` +
+    `Specify collateral token (e.g., collateral="WETH") to disambiguate.`,
+  );
 }
 
 /**
