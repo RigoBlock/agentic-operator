@@ -197,10 +197,11 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "gmx_close_position",
       description:
-        "Close (fully or partially) an existing GMX v2 perpetual position. " +
+        "Close (fully or partially) an existing GMX v2 perpetual position, or withdraw collateral from it. " +
         "Builds an unsigned createDecreaseOrder transaction. " +
-        "To close fully, set sizeDeltaUsd to the full position size. " +
-        "To partially close, set a smaller sizeDeltaUsd.",
+        "To close fully, set sizeDeltaUsd to the full position size — all remaining collateral is returned automatically. " +
+        "To partially close, set a smaller sizeDeltaUsd. " +
+        "To withdraw collateral WITHOUT changing position size, set sizeDeltaUsd='0' and collateralDeltaAmount to the amount to withdraw.",
       parameters: {
         type: "object",
         properties: {
@@ -214,15 +215,15 @@ export const TOOL_DEFINITIONS = [
           },
           sizeDeltaUsd: {
             type: "string",
-            description: "Amount to decrease in USD (e.g., '5000'). Use 'all' or the full position size to close entirely.",
+            description: "Amount to decrease in USD (e.g., '5000'). Use 'all' to close entirely. Set '0' to withdraw collateral only without changing position size.",
           },
           collateral: {
             type: "string",
-            description: "Collateral token symbol used in the position (e.g., 'WETH', 'USDC')",
+            description: "Collateral token symbol used in the position (e.g., 'WETH', 'USDC'). Helps disambiguate when multiple positions exist for the same market and direction.",
           },
           collateralDeltaAmount: {
             type: "string",
-            description: "Amount of collateral to withdraw (default: '0' — only decrease size)",
+            description: "Amount of collateral to explicitly withdraw (default: '0'). On a full close this is ignored — all collateral is returned automatically. Use this for partial closes or collateral-only withdrawals (sizeDeltaUsd='0').",
           },
           orderType: {
             type: "string",
@@ -244,7 +245,7 @@ export const TOOL_DEFINITIONS = [
       description:
         "Increase the size of an existing GMX v2 perpetual position or add collateral to it. " +
         "Use this when the user already has an open position and wants to add to it. " +
-        "Three modes: (1) notionalUsd + leverage to increase size, (2) collateralAmount + leverage to add collateral AND size, (3) collateralAmount with sizeDeltaUsd='0' to add collateral ONLY without changing size.",
+        "Modes: (1) notionalUsd + leverage → adds size and collateral, (2) notionalUsd without leverage → preserves current leverage ratio, (3) collateralAmount + leverage → adds collateral AND size, (4) collateralAmount with sizeDeltaUsd='0' → adds collateral ONLY, (5) sizeDeltaUsd without collateralAmount (or collateralAmount='0') → increases size WITHOUT adding collateral (leverage goes up).",
       parameters: {
         type: "object",
         properties: {
@@ -258,15 +259,15 @@ export const TOOL_DEFINITIONS = [
           },
           collateralAmount: {
             type: "string",
-            description: "Additional collateral amount in human-readable units (e.g., '200' USDC). If notionalUsd is given instead, collateral is derived automatically.",
+            description: "Additional collateral amount in human-readable units (e.g., '200' USDC). Set to '0' or omit to increase size WITHOUT adding collateral (leverage will rise).",
           },
           notionalUsd: {
             type: "string",
-            description: "Additional notional position size in USD (e.g., '1500'). When used with leverage, collateral = notionalUsd / leverage. Preferred when user says 'increase by $1500'.",
+            description: "Additional notional position size in USD (e.g., '1500'). When used with leverage, collateral = notionalUsd / leverage. Without leverage, current leverage is preserved. Preferred when user says 'increase by $1500'.",
           },
           sizeDeltaUsd: {
             type: "string",
-            description: "Additional position size in USD. Set to '0' when the user wants to add collateral ONLY without increasing position size (e.g., 'add 0.5 WETH collateral to reduce liquidation risk').",
+            description: "Additional position size in USD. Set to '0' to add collateral ONLY without increasing position size. Omit collateralAmount to increase size without adding collateral.",
           },
           isLong: {
             type: "boolean",
@@ -274,7 +275,7 @@ export const TOOL_DEFINITIONS = [
           },
           leverage: {
             type: "string",
-            description: "Desired leverage multiplier (e.g., '10' for 10x). If omitted, defaults to 2x for size-increasing orders. Ignored when sizeDeltaUsd='0'.",
+            description: "Desired leverage multiplier (e.g., '10' for 10x). If omitted when increasing size, current leverage is preserved. Ignored when sizeDeltaUsd='0' or collateralAmount='0'.",
           },
         },
         required: ["market", "isLong"],

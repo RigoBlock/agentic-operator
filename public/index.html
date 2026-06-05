@@ -1790,8 +1790,13 @@
           chip.className = 'suggestion-chip';
           chip.textContent = label;
           chip.onclick = () => {
-            inputEl.value = label;
-            sendMessage();
+            const direct = parseDirectToolCall(label);
+            if (direct) {
+              invokeDirectTool(direct);
+            } else {
+              inputEl.value = label;
+              sendMessage();
+            }
           };
           chips.appendChild(chip);
         }
@@ -1884,6 +1889,154 @@
 
     function linkifyUrls(str) {
       return str.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+    }
+
+    /**
+     * Parse a suggestion chip label to see if it should bypass the LLM and
+     * directly invoke a tool via /api/tools.
+     * Returns null for normal chat-flow chips.
+     */
+    function parseDirectToolCall(label) {
+      // GMX position action chips: "<Action> <SYMBOL> <long|short>"
+      const gmxMatch = label.match(/^(Close|Increase|Decrease|Add collateral to|Withdraw collateral from)\s+(\S+)\s+(long|short)$/i);
+      if (gmxMatch) {
+        const action = gmxMatch[1].toLowerCase();
+        const market = gmxMatch[2].toUpperCase();
+        const isLong = gmxMatch[3].toLowerCase() === 'long';
+        if (action === 'close') {
+          return { toolName: 'gmx_close_position', args: { market, isLong } };
+        }
+        if (action === 'increase') {
+          return { toolName: 'gmx_increase_position', args: { market, isLong } };
+        }
+        if (action === 'decrease') {
+          return { toolName: 'gmx_close_position', args: { market, isLong } };
+        }
+        if (action === 'add collateral to') {
+          return { toolName: 'gmx_increase_position', args: { market, isLong, sizeDeltaUsd: '0' } };
+        }
+        if (action === 'withdraw collateral from') {
+          return { toolName: 'gmx_close_position', args: { market, isLong, sizeDeltaUsd: '0' } };
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Directly invoke a tool via /api/tools with prompt-based param collection.
+     */
+    async function invokeDirectTool(toolInfo) {
+      if (!connectedAddress) {
+        appendMessage('system', '👛 Please connect your wallet first.');
+        openWalletPicker();
+        return;
+      }
+      const vault = vaultInput.value.trim();
+      const effectiveVault = (vault && vault.length === 42) ? vault : '0x0000000000000000000000000000000000000000';
+
+      // Ensure auth for vault owners
+      const statusEl = document.getElementById('vault-status');
+      const isOwner = !!(vault && vault.length === 42)
+        && !!(statusEl && statusEl.textContent.includes('(owned)') && !statusEl.className.includes('error'));
+      if (isOwner && !authSignature) {
+        appendMessage('system', 'Signing authentication…');
+        await signAuthMessage();
+        if (!authSignature) {
+          appendMessage('system', 'Sign cancelled. Please try again.');
+          return;
+        }
+      }
+
+      const args = { ...toolInfo.args };
+
+      // Prompt for missing params based on tool
+      if (toolInfo.toolName === 'gmx_close_position') {
+        if (!args.sizeDeltaUsd) {
+          const size = prompt(`Size to close in USD (e.g., 5000). Leave empty or type "all" to close fully:`);
+          if (size === null) return; // cancelled
+          args.sizeDeltaUsd = size.trim() || 'all';
+        }
+        if (args.sizeDeltaUsd === '0') {
+          const col = prompt('Amount of collateral to withdraw:');
+          if (col === null) return;
+          args.collateralDeltaAmount = col.trim();
+        }
+      }
+      if (toolInfo.toolName === 'gmx_increase_position') {
+        if (args.sizeDeltaUsd === '0') {
+          // Pure collateral add
+          const col = prompt('Amount of collateral to add:');
+          if (col === null) return;
+          args.collateralAmount = col.trim();
+        } else {
+          const mode = prompt('Increase by: (1) notional USD amount, (2) size delta USD, (3) collateral amount + leverage');
+          if (mode === null) return;
+          const m = mode.trim();
+          if (m === '1') {
+            const notional = prompt('Additional notional size in USD (e.g., 1500):');
+            if (notional === null) return;
+            args.notionalUsd = notional.trim();
+          } else if (m === '2') {
+            const size = prompt('Additional size delta in USD (e.g., 1500):');
+            if (size === null) return;
+            args.sizeDeltaUsd = size.trim();
+          } else if (m === '3') {
+            const col = prompt('Collateral amount to add:');
+            if (col === null) return;
+            args.collateralAmount = col.trim();
+            const lev = prompt('Leverage multiplier (e.g., 5):');
+            if (lev === null) return;
+            args.leverage = lev.trim();
+          } else {
+            appendMessage('system', 'Invalid choice. Please type 1, 2, or 3.');
+            return;
+          }
+        }
+      }
+
+      const body = {
+        arguments: args,
+        chainId: 42161, // GMX is Arbitrum-only
+        vaultAddress: effectiveVault,
+      };
+      if (isOwner && authSignature) {
+        body.operatorAddress = connectedAddress;
+        body.authSignature = authSignature;
+        body.authTimestamp = authTimestamp;
+      }
+
+      appendMessage('user', `🔧 Direct: ${toolInfo.toolName}(${JSON.stringify(args)})`);
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      try {
+        const res = await fetch(`/api/tools?toolName=${toolInfo.toolName}`, {
+          method: 'POST',
+          headers: apiHeaders(),
+          signal: controller.signal,
+          body: JSON.stringify(body),
+        });
+        clearTimeout(timeoutId);
+        const data = await res.json();
+        if (!res.ok) {
+          appendMessage('assistant', `❌ Error: ${data.error || data.message || 'Unknown error'}`, { toolError: true });
+          return;
+        }
+        // Show the tool result message
+        const msg = data.message || data.reply || JSON.stringify(data);
+        const extras = {};
+        if (data.transaction) {
+          extras.toolResult = msg;
+          appendMessage('assistant', msg, extras);
+          // Open tx modal for signing
+          showTransactionModal(data.transaction);
+        } else {
+          appendMessage('assistant', msg, extras);
+        }
+      } catch (err) {
+        clearTimeout(timeoutId);
+        appendMessage('system', `Direct tool call failed: ${err.message}`);
+      }
     }
 
     async function sendMessage() {
