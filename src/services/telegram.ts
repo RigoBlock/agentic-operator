@@ -238,11 +238,40 @@ export function escapeHtml(text: string): string {
 
 /**
  * Convert LLM response text to Telegram-friendly HTML.
- * Strips markdown tables (Telegram doesn't render them) and converts
- * markdown bold/code to HTML tags.
+ * Telegram supports <b>, <i>, <a>, <code>, <pre> but NOT tables.
+ * Markdown tables are converted to <pre> blocks so columns align.
  */
 export function formatForTelegram(text: string): string {
-  let result = escapeHtml(text);
+  // Convert markdown tables to <pre> blocks BEFORE escaping HTML,
+  // so the pipe characters survive and columns align in Telegram.
+  const lines = text.split("\n");
+  const outLines: string[] = [];
+  let tableBuffer: string[] = [];
+
+  function flushTable() {
+    if (tableBuffer.length === 0) return;
+    // Filter out markdown separator rows (|-----|-----|)
+    const contentRows = tableBuffer.filter((line) => !/^\|[-:|\s]+\|$/.test(line.trim()));
+    if (contentRows.length > 0) {
+      const preContent = contentRows
+        .map((line) => escapeHtml(line.trim()))
+        .join("\n");
+      outLines.push(`<pre>${preContent}</pre>`);
+    }
+    tableBuffer = [];
+  }
+
+  for (const line of lines) {
+    if (/^\|/.test(line.trim())) {
+      tableBuffer.push(line);
+      continue;
+    }
+    flushTable();
+    outLines.push(line);
+  }
+  flushTable();
+
+  let result = outLines.join("\n");
   // **bold** → <b>bold</b>
   result = result.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
   // `code` → <code>code</code>

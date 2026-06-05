@@ -129,9 +129,11 @@ window.openSettings = openSettings;
 window.toggleAiSettings = toggleAiSettings;
 window.onAiProviderChange = onAiProviderChange;
 window.toggleTestnet = toggleTestnet;
+window.applyTestnetState = applyTestnetState;
 window.onSlippageChange = onSlippageChange;
 window.onSwapShieldToleranceChange = onSwapShieldToleranceChange;
 window.resetSwapShieldTolerance = resetSwapShieldTolerance;
+window.restoreTradeSettings = restoreTradeSettings;
 window.updateChainDisplay = updateChainDisplay;
 
 // Vault

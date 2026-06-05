@@ -715,19 +715,24 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
     if (operatorAddress && authSignature && authTimestamp) {
       const ts = Number(authTimestamp);
       if (!isNaN(ts)) {
+        let valid = false;
         try {
-          const valid = await verifyOperatorSignatureOnly(operatorAddress, authSignature, ts);
-          if (valid) {
-            // Fail-closed safety: only bypass x402 for explicitly protected routes.
-            const path = new URL(c.req.url).pathname;
-            const method = c.req.method;
-            if (!isProtectedRoute(method, path)) {
-              // Signature is valid but route is not protected — fall through to normal flow
-            } else {
-              // Rate limit check (non-paid requests only)
-              const rateLimit = await checkRateLimit(c.env.KV, operatorAddress);
-              if (!rateLimit.allowed) {
-                setRateLimitHeaders(c, 0, rateLimit.resetAt);
+          valid = await verifyOperatorSignatureOnly(operatorAddress, authSignature, ts);
+        } catch {
+          // signature verification threw — treat as invalid
+        }
+
+        if (valid) {
+          // Fail-closed safety: only bypass x402 for explicitly protected routes.
+          const path = new URL(c.req.url).pathname;
+          const method = c.req.method;
+          if (!isProtectedRoute(method, path)) {
+            // Signature is valid but route is not protected — fall through to normal flow
+          } else {
+            // Rate limit check (non-paid requests only)
+            const rateLimit = await checkRateLimit(c.env.KV, operatorAddress);
+            if (!rateLimit.allowed) {
+              setRateLimitHeaders(c, 0, rateLimit.resetAt);
               const retryAfterSec = Math.ceil((rateLimit.resetAt - Date.now()) / 1000);
               c.header("Retry-After", String(retryAfterSec));
               return c.json(
@@ -738,15 +743,23 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
                 },
                 429,
               );
-              }
-
-              c.set("operatorAuthVerified", true);
-              setRateLimitHeaders(c, rateLimit.remaining, rateLimit.resetAt);
-              return next();
             }
+
+            c.set("operatorAuthVerified", true);
+            setRateLimitHeaders(c, rateLimit.remaining, rateLimit.resetAt);
+            return next();
           }
-        } catch {
-          // Invalid signature — fall through to x402 payment
+        } else {
+          // Auth headers were sent but signature is invalid or expired.
+          // Return 401 so the frontend knows to re-authenticate instead of
+          // confusing the user with a 402 "Payment Required".
+          return c.json(
+            {
+              error: "Authentication expired",
+              detail: "Your session signature is invalid or expired. Please re-authenticate.",
+            },
+            401,
+          );
         }
       }
     }

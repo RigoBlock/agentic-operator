@@ -84,7 +84,7 @@ describe("operator signature bypass", () => {
     expect(json.auth).toBe(true);
   });
 
-  it("does NOT bypass for invalid signature", async () => {
+  it("returns 401 for invalid signature instead of 402", async () => {
     mockVerifySig.mockResolvedValue(false);
     const { app, env } = createApp();
     const res = await app.request(
@@ -99,9 +99,12 @@ describe("operator signature bypass", () => {
       },
       env,
     );
-    // x402 server init fails in tests → falls through; route sees no auth
+    // Auth headers were sent but signature is invalid — should return 401
+    // so the frontend knows to re-authenticate instead of confusing the user
+    // with a 402 "Payment Required".
+    expect(res.status).toBe(401);
     const json = await res.json();
-    expect(json.auth).toBe(false);
+    expect(json.error).toContain("Authentication expired");
   });
 
   it("does NOT bypass when headers are missing", async () => {

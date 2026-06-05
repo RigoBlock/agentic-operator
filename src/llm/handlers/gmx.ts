@@ -22,7 +22,7 @@ import {
   buildUpdateOrderCalldata, buildCancelOrderCalldata, buildClaimFundingFeesCalldata,
   checkVaultEthForGmxKeeper,
 } from "../../services/gmxTrading.js";
-import { getGmxPositionsSummary, getGmxPositions, findGmxPosition, type GmxPosition } from "../../services/gmxPositions.js";
+import { getGmxPositionsSummary, getGmxPositions, findGmxPosition, computeGmxLeverage, computeEffectiveCollateral, type GmxPosition } from "../../services/gmxPositions.js";
 import { ARBITRUM_CHAIN_ID, GmxOrderType } from "../../abi/gmx.js";
 import { estimateGas, executeToolCall, txActionLine } from "../client.js";
 
@@ -266,15 +266,19 @@ export async function handle_gmx_increase_position(
   );
 
   // ── Compute display values ──────────────────────────────────────────
+  // Leverage must use EFFECTIVE collateral (raw collateral + unrealized PnL),
+  // matching GMX v2's on-chain formula. We derive effective collateral from
+  // Leverage uses effective collateral (raw collateral + unrealized PnL).
+  // Current leverage comes directly from the on-chain position data.
+  // Post-tx leverage is projected using the same shared formula.
   const addedCollateralValueUsd = parseFloat(collateralAmount) * collateralPrice.mid;
   const existingSizeUsd = existingPos ? parseUsdString(existingPos.sizeInUsd) : 0;
-  const existingCollateralValueUsd = existingPos
-    ? parseFloat(existingPos.collateralAmount) * collateralPrice.mid
-    : 0;
+  const currentLeverage = existingPos ? parseFloat(existingPos.leverage) : 0;
+  const existingEffectiveCollateral = computeEffectiveCollateral(existingSizeUsd, currentLeverage);
+
   const newSizeUsd = existingSizeUsd + parseFloat(sizeDeltaUsd);
-  const newCollateralValueUsd = existingCollateralValueUsd + addedCollateralValueUsd;
-  const newLeverage = newCollateralValueUsd > 0 ? newSizeUsd / newCollateralValueUsd : 0;
-  const currentLeverage = existingCollateralValueUsd > 0 ? existingSizeUsd / existingCollateralValueUsd : 0;
+  const newEffectiveCollateral = existingEffectiveCollateral + addedCollateralValueUsd;
+  const newLeverage = computeGmxLeverage(newSizeUsd, newEffectiveCollateral);
 
   const actionLabel = isPureCollateralAdd
     ? "Add Collateral"

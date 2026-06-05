@@ -93,6 +93,23 @@ function normalizeIsLong(value: unknown): boolean {
   return Boolean(value);
 }
 
+/**
+ * GMX v2 leverage formula — single source of truth.
+ * leverage = sizeUsd / effectiveCollateralUsd
+ * where effectiveCollateral = collateralValue + unrealizedPnl
+ */
+export function computeGmxLeverage(sizeUsd: number, effectiveCollateralUsd: number): number {
+  return effectiveCollateralUsd > 0 ? sizeUsd / effectiveCollateralUsd : 0;
+}
+
+/**
+ * Derive effective collateral from size and leverage.
+ * Inverse of computeGmxLeverage.
+ */
+export function computeEffectiveCollateral(sizeUsd: number, leverage: number): number {
+  return leverage > 0 ? sizeUsd / leverage : 0;
+}
+
 // ── Core functions ─────────────────────────────────────────────────────
 
 /**
@@ -193,7 +210,7 @@ export async function getGmxPositions(
 
     // GMX v2 leverage uses effective collateral (collateral + unrealized PnL)
     const effectiveCollateral = collateralValueUsd + pnl;
-    const leverage = effectiveCollateral > 0 ? sizeUsdNum / effectiveCollateral : 0;
+    const leverage = computeGmxLeverage(sizeUsdNum, effectiveCollateral);
     const pnlPercent = collateralValueUsd > 0 ? (pnl / collateralValueUsd) * 100 : 0;
 
     // Estimated funding fee (from borrowingFactor — approximate)
@@ -206,8 +223,8 @@ export async function getGmxPositions(
       sizeInUsd: formatUsd(sizeUsdNum),
       sizeInTokens: formatTokenValue(Number(sizeInTokens) / 10 ** indexDecimals),
       collateralAmount: formatTokenValue(collateralNum),
-      entryPrice: `$${entryPrice.toFixed(2)}`,
-      markPrice: `$${indexPrice.toFixed(2)}`,
+      entryPrice: `$${entryPrice.toFixed(3)}`,
+      markPrice: `$${indexPrice.toFixed(3)}`,
       leverage: `${leverage.toFixed(1)}x`,
       unrealizedPnl: `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`,
       unrealizedPnlPercent: `${pnl >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}%`,
@@ -423,15 +440,13 @@ function formatPositionsReport(
     lines.push("");
 
     // Table header
-    lines.push("| Market | Side | Size | Collateral | Leverage | Entry | Mark | PnL |");
-    lines.push("|--------|------|------|------------|----------|-------|------|-----|");
+    lines.push("| Market | Side | Size | Collateral | Leverage | PnL | Entry | Mark |");
+    lines.push("|--------|------|------|------------|----------|-----|-------|------|");
 
     for (const pos of positions) {
       const side = pos.isLong ? "🟢 LONG" : "🔴 SHORT";
-      const pnlValue = parseUsdString(pos.unrealizedPnl);
-      const pnlIcon = pnlValue >= 0 ? "✅" : "❌";
       lines.push(
-        `| ${pos.marketSymbol} | ${side} | ${pos.sizeInUsd} (${pos.sizeInTokens} ${pos.indexTokenSymbol}) | ${pos.collateralAmount} ${pos.collateralSymbol} | ${pos.leverage} | ${pos.entryPrice} | ${pos.markPrice} | ${pnlIcon} ${pos.unrealizedPnl} (${pos.unrealizedPnlPercent}) |`,
+        `| ${pos.marketSymbol} | ${side} | ${pos.sizeInUsd} (${pos.sizeInTokens} ${pos.indexTokenSymbol}) | ${pos.collateralAmount} ${pos.collateralSymbol} | ${pos.leverage} | ${pos.unrealizedPnl} (${pos.unrealizedPnlPercent}) | ${pos.entryPrice} | ${pos.markPrice} |`,
       );
     }
     lines.push("");

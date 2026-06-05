@@ -8,9 +8,10 @@ import {
   currentChainId, connectedAddress, authSignature, authTimestamp,
   escapeHtml, copyToClipboard, apiHeaders,
   setLastGmxPositions, executionMode, delegationState,
+  setAuthSignature, setAuthTimestamp,
 } from "./state.js";
 
-import { openWalletPicker, signAuthMessage } from "./wallet.js";
+import { openWalletPicker, signAuthMessage, authKey } from "./wallet.js";
 
 import { showTransactionModal } from "./tx-modal.js";
 
@@ -343,6 +344,20 @@ async function invokeDirectTool(toolInfo) {
     clearTimeout(timeoutId);
     const data = await res.json();
     if (!res.ok) {
+      // Auth expired — clear cached signature and prompt user to re-sign
+      if (res.status === 401 && authSignature) {
+        setAuthSignature(null);
+        setAuthTimestamp(null);
+        localStorage.removeItem(authKey(connectedAddress));
+        appendMessage('system', '🔐 Session expired. Please sign the authentication message to continue.');
+        await signAuthMessage();
+        if (authSignature) {
+          // Retry the same tool call with fresh auth
+          return invokeDirectTool(toolInfo);
+        }
+        appendMessage('system', 'Sign cancelled. Please try again.');
+        return;
+      }
       appendMessage('assistant', `❌ Error: ${data.error || data.message || 'Unknown error'}`, { toolError: true });
       return;
     }
@@ -431,9 +446,11 @@ function enhanceGmxPositions(msgDiv, positions) {
       { label: '− Withdraw', action: () => modifyGmxCollateral(market, isLong, 'withdraw', collateralSymbol) },
     ]);
 
-    // PnL cell — info tooltip only (GMX v2 has no separate "withdraw unrealized PnL" operation)
-    const pnlCell = cells[7];
+    // PnL cell — color by gain/loss + info tooltip
+    const pnlCell = cells[5];
     const pnlValue = parseFloat(pos.unrealizedPnl.replace(/[^0-9.-]/g, '')) || 0;
+    pnlCell.style.color = pnlValue >= 0 ? 'var(--success)' : 'var(--danger)';
+    pnlCell.style.fontWeight = '600';
     if (pnlValue !== 0) {
       pnlCell.title = pnlValue > 0
         ? 'Positive PnL is realized when you close or decrease the position. Use Collateral → Withdraw to reduce collateral without changing size.'
