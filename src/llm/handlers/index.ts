@@ -16,7 +16,7 @@ import { handle_set_swap_shield_tolerance } from "./settings.js";
 import { handle_enable_swap_shield } from "./settings.js";
 import { handle_refresh_oracle_feed } from "./oracle.js";
 import { handle_gmx_increase_position } from "./gmx.js";
-import { handle_gmx_close_position } from "./gmx.js";
+import { handle_gmx_decrease_position } from "./gmx.js";
 import { handle_gmx_get_positions } from "./gmx.js";
 import { handle_gmx_cancel_order } from "./gmx.js";
 import { handle_gmx_update_order } from "./gmx.js";
@@ -59,9 +59,8 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "set_swap_shield_tolerance": handle_set_swap_shield_tolerance,
   "enable_swap_shield": handle_enable_swap_shield,
   "refresh_oracle_feed": handle_refresh_oracle_feed,
-  "gmx_open_position": handle_gmx_increase_position,
   "gmx_increase_position": handle_gmx_increase_position,
-  "gmx_close_position": handle_gmx_close_position,
+  "gmx_decrease_position": handle_gmx_decrease_position,
   "gmx_get_positions": handle_gmx_get_positions,
   "gmx_cancel_order": handle_gmx_cancel_order,
   "gmx_update_order": handle_gmx_update_order,

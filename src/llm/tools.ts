@@ -149,54 +149,7 @@ export const TOOL_DEFINITIONS = [
   {
     type: "function" as const,
     function: {
-      name: "gmx_open_position",
-      description:
-        "Open a NEW leveraged perpetual position on GMX v2 (Arbitrum only). " +
-        "Use this when the user wants to open a position they do not already have. " +
-        "Builds an unsigned createIncreaseOrder transaction. " +
-        "If not on Arbitrum, auto-switches. The vault must have sufficient collateral. " +
-        "REQUIRED for new positions: collateral token (e.g., USDC, WETH) AND leverage. " +
-        "No defaults — the user must explicitly choose collateral and leverage.",
-      parameters: {
-        type: "object",
-        properties: {
-          market: {
-            type: "string",
-            description: "Market to trade — index token symbol (e.g., 'ETH', 'BTC', 'LIT', 'SOL', 'LINK'). Strip any 'USD'/'USDC'/'USDT' suffix (e.g. 'ETHUSDC' → 'ETH').",
-          },
-          collateral: {
-            type: "string",
-            description: "Collateral token symbol (e.g., 'USDC', 'WETH', 'USDT'). REQUIRED for new positions. For increases, auto-resolved from existing position.",
-          },
-          collateralAmount: {
-            type: "string",
-            description: "Amount of collateral in human-readable units (e.g., '200' USDC). Alternative to notionalUsd.",
-          },
-          notionalUsd: {
-            type: "string",
-            description: "Notional position size in USD (e.g., '1500'). When used with leverage, collateral = notionalUsd / leverage. Preferred when user says 'long 1000 ETH 5x' or 'increase by $1500'.",
-          },
-          sizeDeltaUsd: {
-            type: "string",
-            description: "Position size in USD. Alternative to notionalUsd.",
-          },
-          isLong: {
-            type: "boolean",
-            description: "true for long (profit when price rises), false for short (profit when price falls). REQUIRED — if the user does not specify, ask them.",
-          },
-          leverage: {
-            type: "string",
-            description: "Desired leverage multiplier (e.g., '5' for 5x, '10' for 10x). REQUIRED for new positions. For increases on existing positions, current leverage is preserved when omitted.",
-          },
-        },
-        required: ["market", "isLong"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "gmx_close_position",
+      name: "gmx_decrease_position",
       description:
         "Close (fully or partially) an existing GMX v2 perpetual position, or withdraw collateral from it. " +
         "Builds an unsigned createDecreaseOrder transaction. " +
@@ -216,7 +169,7 @@ export const TOOL_DEFINITIONS = [
           },
           sizeDeltaUsd: {
             type: "string",
-            description: "Amount to decrease in USD (e.g., '5000'), or a percentage like '50%'. Use 'all' to close entirely. Set '0' to withdraw collateral only without changing position size.",
+            description: "Absolute USD amount to decrease from the position (e.g. '5000' for $5,000), or a percentage like '50%'. Must be the DOLLAR VALUE to close, not a token amount, not a raw number, and not a literal percentage without the '%' sign. Use 'all' to close entirely. Set '0' to withdraw collateral only without changing position size.",
           },
           collateral: {
             type: "string",
@@ -1311,8 +1264,8 @@ Agent execution is optional and ancillary to the core function: protecting vault
 
 PERPETUAL vs SWAP DISAMBIGUATION — TOP PRIORITY:
 When the user says "long" or "short", this is ALWAYS a GMX perpetual position, NEVER a spot swap.
-- "long 100 UNIUSD 5x" → GMX perp: gmx_open_position(market="UNI", isLong=true, notionalUsd="100", leverage="5")
-- "short 500 ETHUSDC 3x" → GMX perp: gmx_open_position(market="ETH", isLong=false, notionalUsd="500", leverage="3")
+- "long 100 UNIUSD 5x" → GMX perp: gmx_increase_position(market="UNI", isLong=true, notionalUsd="100", leverage="5")
+- "short 500 ETHUSDC 3x" → GMX perp: gmx_increase_position(market="ETH", isLong=false, notionalUsd="500", leverage="3")
 - "long ETH" → GMX perp (ask for size/leverage if missing)
 Keywords that ALWAYS mean GMX perpetuals: long, short, perp, leverage, Nx (5x, 10x, etc.), position, margin.
 Keywords that mean spot swap: buy, sell, swap, exchange, convert, trade ... for/to/into.
@@ -1357,12 +1310,12 @@ When the user corrects or changes a previous request (e.g., "no, do it on base a
 
 GMX PERPETUALS:
 - GMX is ONLY available on Arbitrum. If on another chain, auto-switch to Arbitrum.
-- To open a position: use gmx_open_position. Requires market (e.g. "ETH") and isLong.
-- To close: use gmx_close_position. sizeDeltaUsd="all" closes the full position.
+- To open a position: use gmx_increase_position. Requires market (e.g. "ETH") and isLong.
+- To decrease/close: use gmx_decrease_position. sizeDeltaUsd="all" closes the full position. Any smaller amount partially decreases the position.
 - To increase: use gmx_increase_position (same flow as open).
 - To view positions: use gmx_get_positions. Shows a dashboard with PnL, leverage, entry/mark prices.
 - To cancel pending order: use gmx_cancel_order with the orderKey from gmx_get_positions.
-- To set stop-loss or take-profit: use gmx_close_position with orderType="stop_loss" or "limit" and a triggerPrice.
+- To set stop-loss or take-profit: use gmx_decrease_position with orderType="stop_loss" or "limit" and a triggerPrice.
 - Default collateral: ALWAYS USDC (for both longs and shorts), unless user explicitly specifies otherwise.
 - Market symbols may include USD/USDC suffix (ETHUSDC, ETHUSD, ETH all mean the ETH/USD market).
 - NOTIONAL (USD) SYNTAX: "long 1000 ETHUSDC 5x" means notionalUsd=1000, leverage=5, so collateral = 1000/5 = 200 USDC.
@@ -1401,17 +1354,17 @@ NEVER set amountIn when the user says "buy" — "buy" ALWAYS means amountOut.
 Provide exactly ONE of amountIn or amountOut, never both.
 
 GMX INTENT PARSING:
-- "long 1000 ETHUSDC 5x using USDC" → gmx_open_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5", collateral="USDC" (collateral = 1000/5 = 200 USDC)
-- "long 100 UNIUSD 5x using USDC" → gmx_open_position: market="UNI", isLong=true, notionalUsd="100", leverage="5", collateral="USDC" (collateral = 100/5 = 20 USDC)
-- "long 500 BTCUSD 10x using USDC" → gmx_open_position: market="BTC", isLong=true, notionalUsd="500", leverage="10", collateral="USDC" (collateral = 500/10 = 50 USDC)
-- "short 2000 SOLUSD 4x using USDC" → gmx_open_position: market="SOL", isLong=false, notionalUsd="2000", leverage="4", collateral="USDC" (collateral = 2000/4 = 500 USDC)
-- "long ETH 5x with 0.5 ETH" → gmx_open_position: market="ETH", isLong=true, collateralAmount="0.5", collateral="ETH", leverage="5"
-- "long ETH 5x with 200 USDC" → gmx_open_position: market="ETH", isLong=true, collateralAmount="200", collateral="USDC", leverage="5"
-- "short BTC with 5000 USDC at 10x" → gmx_open_position: market="BTC", isLong=false, collateralAmount="5000", collateral="USDC", leverage="10"
-- "open a $10000 long on ETH with 1 ETH" → gmx_open_position: market="ETH", isLong=true, collateralAmount="1", collateral="ETH", sizeDeltaUsd="10000"
-- "close my ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all"
-- "reduce ETH long by $5000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="5000"
-- "set stop loss on ETH long at $3000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all", orderType="stop_loss", triggerPrice="3000"
+- "long 1000 ETHUSDC 5x using USDC" → gmx_increase_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5", collateral="USDC" (collateral = 1000/5 = 200 USDC)
+- "long 100 UNIUSD 5x using USDC" → gmx_increase_position: market="UNI", isLong=true, notionalUsd="100", leverage="5", collateral="USDC" (collateral = 100/5 = 20 USDC)
+- "long 500 BTCUSD 10x using USDC" → gmx_increase_position: market="BTC", isLong=true, notionalUsd="500", leverage="10", collateral="USDC" (collateral = 500/10 = 50 USDC)
+- "short 2000 SOLUSD 4x using USDC" → gmx_increase_position: market="SOL", isLong=false, notionalUsd="2000", leverage="4", collateral="USDC" (collateral = 2000/4 = 500 USDC)
+- "long ETH 5x with 0.5 ETH" → gmx_increase_position: market="ETH", isLong=true, collateralAmount="0.5", collateral="ETH", leverage="5"
+- "long ETH 5x with 200 USDC" → gmx_increase_position: market="ETH", isLong=true, collateralAmount="200", collateral="USDC", leverage="5"
+- "short BTC with 5000 USDC at 10x" → gmx_increase_position: market="BTC", isLong=false, collateralAmount="5000", collateral="USDC", leverage="10"
+- "open a $10000 long on ETH with 1 ETH" → gmx_increase_position: market="ETH", isLong=true, collateralAmount="1", collateral="ETH", sizeDeltaUsd="10000"
+- "close my ETH long" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="all"
+- "reduce ETH long by $5000" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="5000"
+- "set stop loss on ETH long at $3000" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="all", orderType="stop_loss", triggerPrice="3000"
 - "show my perps" / "show positions" / "gmx positions" → gmx_get_positions
 - "what markets are available on gmx" → gmx_get_markets
 
@@ -1500,14 +1453,15 @@ GMX V2 MARKETS (Arbitrum only):
 - XAUT market uses WBTC (long collateral) and USDC (short collateral)
 
 RULES:
-- AUTONOMOUS ORCHESTRATION DEFAULT: When the user asks for an outcome (e.g. rebalance, open/close positions, run strategy, get positions, deploy+fund+trade), you must decompose it into concrete steps and execute tools sequentially in the same turn until you reach a concrete outcome: (a) execution result, (b) unsigned transaction ready to sign, or (c) a verified read-only report from tools.
+- AUTONOMOUS ORCHESTRATION DEFAULT: When the user asks for an outcome that requires action (e.g. rebalance, open/close a position, run strategy, deploy+fund+trade), you must decompose it into concrete steps and execute tools sequentially in the same turn until you reach a concrete outcome: (a) execution result, (b) unsigned transaction ready to sign, or (c) a verified read-only report from tools.
+- PURE READS ARE SINGLE-STEP: When the user asks to VIEW data (positions, balances, markets, prices, NAV, pool info, trade history), call the appropriate read tool ONCE and return the result immediately. Do NOT plan follow-up actions, do NOT suggest modifications, do NOT decompose into multiple steps. "Show my positions" → one gmx_get_positions call → done. "What is my balance" → one get_token_balance call → done.
 - MINIMIZE USER FRICTION: Do NOT ask the user to manually paste docs, select steps, or orchestrate the workflow. The user gives intent; you own planning + tool execution.
 - RETRY/ADAPT ON FAILURE: If a step fails, do not hallucinate success. Use the error, adapt parameters/chain/tool choice when appropriate, and continue toward the requested outcome when safe.
 - INTENT LOCK: For "what are my uniswap liquidity positions" (or equivalent LP position requests), call get_lp_positions immediately. Do NOT switch topics to GMX/perps unless the user explicitly asks for GMX.
 - STRICT DOMAIN SEPARATION: Uniswap LP intents (positions, remove, collect, burn, closed positions) MUST use Uniswap LP tools only (get_lp_positions, remove_liquidity, collect_lp_fees, burn_position). GMX tools are for perps only. Never answer LP requests with GMX guidance.
 - CLOSED LP POSITIONS: Closed Uniswap positions are still visible via get_lp_positions with Status = Closed until burned. If user asks about closed positions, call get_lp_positions and explain that closed NFTs persist until burn_position is executed.
 - ALWAYS use actual tool calls, never write tool names or JSON as text. If you want to call a tool, USE THE TOOL. Do NOT write {"name": "...", "parameters": {...}} in your text response — that will be shown as garbage to the user. NEVER output raw JSON tool call syntax in your text.
-- YOUR TOOLS ARE NAMED EXACTLY: get_swap_quote, build_vault_swap, get_vault_info, get_token_balance, switch_chain, set_default_slippage, set_swap_shield_tolerance, enable_swap_shield, refresh_oracle_feed, setup_delegation, revoke_delegation, check_delegation_status, deploy_smart_pool, fund_pool, crosschain_transfer, crosschain_sync, get_crosschain_quote, get_aggregated_nav, get_rebalance_plan, verify_bridge_arrival, get_pool_info, add_liquidity, remove_liquidity, get_lp_positions, collect_lp_fees, burn_position, gmx_open_position, gmx_close_position, gmx_increase_position, gmx_get_positions, gmx_cancel_order, gmx_update_order, gmx_claim_funding_fees, gmx_get_markets, grg_stake, grg_undelegate_stake, grg_unstake, grg_end_epoch, grg_claim_rewards, list_strategies, create_twap_order, cancel_twap_order, list_twap_orders, revoke_selectors. There is NO tool called "add_liquidity_v4", "remove_liquidity_v4", "deploy_pool", or any other variant. Use ONLY exact tool names from this list.
+- YOUR TOOLS ARE NAMED EXACTLY: get_swap_quote, build_vault_swap, get_vault_info, get_token_balance, switch_chain, set_default_slippage, set_swap_shield_tolerance, enable_swap_shield, refresh_oracle_feed, setup_delegation, revoke_delegation, check_delegation_status, deploy_smart_pool, fund_pool, crosschain_transfer, crosschain_sync, get_crosschain_quote, get_aggregated_nav, get_rebalance_plan, verify_bridge_arrival, get_pool_info, add_liquidity, remove_liquidity, get_lp_positions, collect_lp_fees, burn_position, gmx_decrease_position, gmx_increase_position, gmx_get_positions, gmx_cancel_order, gmx_update_order, gmx_claim_funding_fees, gmx_get_markets, grg_stake, grg_undelegate_stake, grg_unstake, grg_end_epoch, grg_claim_rewards, list_strategies, create_twap_order, cancel_twap_order, list_twap_orders, revoke_selectors. There is NO tool called "add_liquidity_v4", "remove_liquidity_v4", "deploy_pool", or any other variant. Use ONLY exact tool names from this list.
 - NEVER fabricate, invent, or hallucinate tool results. If you need to create a wallet, switch chains, check balances, or perform ANY action — call the actual tool. Do NOT describe the result as if you called it. Every address, balance, hash, or status MUST come from a real tool call.
 - NEVER reply with generic custody disclaimers like "I don't have access to your account" for vault operations. In this system you CAN access vault data through tools. For requests like "what are my GMX positions", "my balances", or "vault status", call the relevant tool immediately (gmx_get_positions, get_token_balance, get_vault_info, get_aggregated_nav) and return the real result.
 - CRITICAL: If a tool returns an error, STOP that step and report the exact error to the user. Do NOT generate a fake success result and continue to the next step. "LP Token ID: 1234567890" or fake tx hashes are hallucinations — never generate them.
@@ -1515,7 +1469,7 @@ RULES:
 - CRITICAL: When auto-progress fires (you receive a bare "Transaction confirmed. Continue to the next step." message), do NOT output any balance or amount statement. Immediately call the next tool in the plan. The conversation history already contains all amounts — do not re-state or re-calculate them.
 - AFTER setup_delegation: The delegation was prepared but needs the operator's signature. Do NOT claim "delegation is complete" or list vault balances — you have not checked them. Say "Sign this transaction to delegate" and STOP. Do not fabricate balances.
 - STOP AFTER ERRORS: If a step in a multi-step plan fails (error result from a tool call), STOP. Do NOT proceed to the next step. Explain the error to the user and ask how they want to proceed. NEVER continue building transactions after a failure.
-- CRITICAL EXECUTION RULE: When moving to the next step in a multi-step plan (after "confirmed", "done", "next", "Continue to the next step", etc.), you MUST call the appropriate tool to BUILD the transaction. NEVER describe a swap, LP addition, or GMX position as text without calling the tool. For swaps → call build_vault_swap. For LP → call add_liquidity. For GMX → call gmx_open_position. For bridges → call crosschain_transfer. Your response MUST contain a tool call, not a text description of what you would do.
+- CRITICAL EXECUTION RULE: When moving to the next step in a multi-step plan (after "confirmed", "done", "next", "Continue to the next step", etc.), you MUST call the appropriate tool to BUILD the transaction. NEVER describe a swap, LP addition, or GMX position as text without calling the tool. For swaps → call build_vault_swap. For LP → call add_liquidity. For GMX → call gmx_increase_position. For bridges → call crosschain_transfer. Your response MUST contain a tool call, not a text description of what you would do.
 - ANTI-HALLUCINATION: When the user says "confirmed" or "done", this means they want you to proceed to the NEXT step by calling a tool. It does NOT mean a previous transaction was confirmed — that confirmation comes from the system automatically. NEVER claim a transaction was confirmed, executed, sent on-chain, or broadcasted ("Transaction confirmed", "Swap executed", "Received X tokens", "Transaction sent") unless you received a tool result containing an on-chain hash or receipt. If no tool was called that produced a hash, NO transaction was sent. You only BUILD unsigned transactions that the user reviews and signs. The correct phrasing is: "Transaction ready — review and sign to execute." NOT "Transaction confirmed" or "Executed: swapped X for Y".
 - Execute ONE tool call per step. After each step, explain the result and proceed.
 - STRICT SEQUENTIAL EXECUTION: Each step in a multi-step plan MUST depend on the previous step's SUCCESS.

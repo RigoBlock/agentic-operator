@@ -80,6 +80,23 @@ function parseSimulationRevert(raw: string): string | null {
     return "The swap would result in too much slippage. Try again with a fresh quote or smaller amount.";
   }
 
+  // GMX v2 acceptable price / execution price (includes "acceptable price", "execution price",
+  // "empty primary price", "invalid primary price", and keeper-revert variants)
+  if (
+    lower.includes("acceptable price") ||
+    lower.includes("execution price") ||
+    lower.includes("empty primary price") ||
+    lower.includes("invalid primary price") ||
+    lower.includes("primary price") ||
+    lower.includes("end of oracle")
+  ) {
+    return (
+      "The GMX order could not be executed at the required price. " +
+      "The oracle price moved beyond the 1% slippage bound before the keeper picked up the order. " +
+      "Retry the order, or wait for less volatility."
+    );
+  }
+
   // Agent wallet has no ETH to cover gas (viem local pre-check before eth_call)
   if (lower.includes("total cost") && lower.includes("exceeds the balance")) {
     return (
@@ -541,20 +558,38 @@ export async function executeViaDelegation(
       );
     }
   } catch (execErr) {
-    // Detect the "agent not delegated on-chain" pattern:
     // The NAV shield already validated the transaction as the OPERATOR (vault owner),
-    // which means the transaction is structurally valid. If the agent's own simulation
-    // now fails, it means the vault has rejected the call because this function selector
-    // is not in the agent's on-chain delegation mapping.
-    //
-    // In this case, the operator can still execute the transaction by signing it
-    // directly from their wallet — signal fallbackToManual to the caller.
+    // so the transaction was structurally valid at that moment. If the agent's own
+    // simulation now fails, it is MOST COMMONLY a market-level revert (e.g., GMX
+    // acceptable price moved) rather than a delegation issue. Only treat it as
+    // "agent not delegated" when the revert reason explicitly says so.
     if (execErr instanceof ExecutionError && execErr.code === "SIMULATION_FAILED") {
+      const msg = execErr.message.toLowerCase();
+      const isDelegationIssue =
+        msg.includes("not delegated") ||
+        msg.includes("caller is not delegated") ||
+        msg.includes("unauthorized") ||
+        msg.includes("no permission") ||
+        msg.includes("only owner") ||
+        msg.includes("onlyowner") ||
+        (msg.includes("selector") && msg.includes("not delegated"));
 
+      if (isDelegationIssue) {
+        throw new ExecutionError(
+          `The agent wallet is not delegated for function selector ${selector} on-chain. ` +
+          `Update your delegation to add this function, or sign this transaction directly from your wallet.`,
+          "AGENT_NOT_DELEGATED",
+          true,
+        );
+      }
+
+      // Market-level simulation failure: preserve the real revert reason and let
+      // the user sign manually if they want to retry with updated prices.
       throw new ExecutionError(
-        `The agent wallet is not delegated for function selector ${selector} on-chain. ` +
-        `Update your delegation to add this function, or sign this transaction directly from your wallet.`,
-        "AGENT_NOT_DELEGATED",
+        `Delegated execution simulation failed: ${execErr.message} ` +
+        `You can sign this transaction directly from your wallet to retry, or wait and try again.`,
+        "SIMULATION_FAILED",
+        true,
       );
     }
     throw execErr;

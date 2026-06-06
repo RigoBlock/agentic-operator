@@ -125,7 +125,7 @@ export async function handle_gmx_increase_position(
 
   const marketSymbol = (args.market as string).toUpperCase();
   const isLong = args.isLong === true || args.isLong === "true";
-  const market = await findGmxMarket(marketSymbol);
+  let market = await findGmxMarket(marketSymbol);
 
   // ── Resolve existing position (if any) ──────────────────────────────
   let existingPos: GmxPosition | undefined;
@@ -141,6 +141,19 @@ export async function handle_gmx_increase_position(
   } catch {
     // No existing position — will proceed as OPEN
     existingPos = undefined;
+  }
+
+  // If increasing an existing position, we MUST use the position's actual market.
+  // findGmxMarket prefers WETH/USDC markets and may return a different market than
+  // the one the position was opened in.
+  if (existingPos) {
+    const allMarkets = await getGmxMarkets();
+    const actualMarket = allMarkets.find(
+      (m) => m.marketToken.toLowerCase() === existingPos!.market.toLowerCase(),
+    );
+    if (actualMarket) {
+      market = actualMarket;
+    }
   }
 
   const isOpen = !existingPos;
@@ -243,19 +256,34 @@ export async function handle_gmx_increase_position(
   }
 
   // ── Build transaction ───────────────────────────────────────────────
-  const oraclePrice = indexTokenPrice.mid;
-  const acceptablePriceUsd = isLong
-    ? (oraclePrice * 1.01).toFixed(4)
-    : (oraclePrice * 0.99).toFixed(4);
+  // For increases, GMX executes at the oracle bound that is WORSE for the trader:
+  //   - Longs (buying index token): execution uses MAX oracle price
+  //   - Shorts (selling index token): execution uses MIN oracle price
+  // Using mid price makes the acceptablePrice bound too loose, so we use the
+  // actual bound to ensure the order is fulfillable.
+  const oraclePriceMid = indexTokenPrice.mid;
+  const oraclePriceBound = isLong ? indexTokenPrice.max : indexTokenPrice.min;
+
+  // Acceptable price uses GMX index-token price precision: 30 - tokenDecimals
+  // (e.g. 12 for ETH, 24 for USDC). Using 30 decimals here produces values
+  // 10^18 too large and causes OrderNotFulfillableAtAcceptablePrice reverts.
+  const indexDecimalsInc = getGmxTokenDecimals(market.indexToken);
+  const priceDecimalsInc = 30 - indexDecimalsInc;
+  const oraclePriceRawInc = parseUnits(oraclePriceBound.toString(), priceDecimalsInc);
+  const acceptablePriceRawInc = isLong
+    ? oraclePriceRawInc + (oraclePriceRawInc * 100n) / 10000n
+    : oraclePriceRawInc - (oraclePriceRawInc * 100n) / 10000n;
+  const acceptablePriceUsd = formatUnits(acceptablePriceRawInc, priceDecimalsInc);
 
   const calldata = buildCreateIncreaseOrderCalldata({
     market: market.marketToken as Address,
+    indexToken: market.indexToken,
     collateralToken: collateralAddr,
     collateralAmount,
     collateralDecimals,
     sizeDeltaUsd,
     isLong,
-    indexTokenPriceUsd: oraclePrice.toString(),
+    indexTokenPriceUsd: oraclePriceBound.toString(),
     acceptablePriceUsd,
   });
 
@@ -302,7 +330,7 @@ export async function handle_gmx_increase_position(
   const messageLines = [
     `✅ GMX ${actionLabel} ready`,
     `Direction: ${isLong ? "🟢 LONG" : "🔴 SHORT"} ${marketSymbol}/USD`,
-    `Price: $${oraclePrice.toFixed(4)}`,
+    `Price: $${oraclePriceMid.toFixed(4)}`,
   ];
 
   if (!isPureCollateralAdd) {
@@ -342,7 +370,7 @@ export async function handle_gmx_increase_position(
 
 // ── Close / Decrease ───────────────────────────────────────────────────
 
-export async function handle_gmx_close_position(
+export async function handle_gmx_decrease_position(
   env: Env,
   ctx: RequestContext,
   args: Record<string, unknown>,
@@ -360,28 +388,40 @@ export async function handle_gmx_close_position(
 
   const marketSymbol = (args.market as string).toUpperCase();
   const isLong = args.isLong === true || args.isLong === "true";
-  const market = await findGmxMarket(marketSymbol);
 
   // sizeDeltaUsd: "all" means close full position — find position size
   let sizeDeltaUsd = (args.sizeDeltaUsd as string) || "all";
-  let matchedPos: GmxPosition | undefined;
   let isFullClose = false;
 
-  // Use the shared helper so close and increase never disagree about which
-  // position exists. This also handles string/boolean isLong mismatches.
+  // Resolve the actual open position first. The position already contains
+  // its market address, index token, collateral, etc. — no need for
+  // findGmxMarket which may return a different market than the one the
+  // position was opened in.
   const userCollateral = (args.collateral as string) || "";
-  matchedPos = await findGmxPosition(
+  const matchedPos = await findGmxPosition(
     ctx.vaultAddress as Address,
     marketSymbol,
     isLong,
     env.ALCHEMY_API_KEY,
     userCollateral,
   );
+  if (!matchedPos) {
+    throw new Error(`No ${isLong ? "long" : "short"} ${marketSymbol} position found for this vault.`);
+  }
+
+  // Build market info directly from the position — avoids extra API calls
+  // and guarantees we use the exact market the position belongs to.
+  const market: GmxMarketInfo = {
+    marketToken: matchedPos.market,
+    indexToken: matchedPos.indexToken,
+    longToken: matchedPos.longToken,
+    shortToken: matchedPos.shortToken,
+  };
 
   if (sizeDeltaUsd.toLowerCase() === "all") {
-    sizeDeltaUsd = matchedPos.sizeInUsd.replace(/[\$,KM]/g, "");
-    if (matchedPos.sizeInUsd.includes("K")) sizeDeltaUsd = (parseFloat(sizeDeltaUsd) * 1000).toString();
-    if (matchedPos.sizeInUsd.includes("M")) sizeDeltaUsd = (parseFloat(sizeDeltaUsd) * 1000000).toString();
+    // Use the exact raw on-chain size to avoid rounding errors that can leave
+    // a dust position below GMX's minimum size threshold.
+    sizeDeltaUsd = formatUnits(BigInt(matchedPos.sizeInUsdRaw), 30);
     isFullClose = true;
   } else {
     const posSizeNum = parseUsdString(matchedPos.sizeInUsd);
@@ -404,12 +444,34 @@ export async function handle_gmx_close_position(
   const collateralSymbol = matchedPos.collateralSymbol;
   const collateralAddr = await resolveGmxCollateral(collateralSymbol);
   const collateralDecimals = getGmxTokenDecimals(collateralAddr);
+  await warmDecimalsForAddresses([collateralAddr, market.indexToken], env.ALCHEMY_API_KEY);
 
-  // Get index token price for slippage protection
+  // Get index token price. For decreases:
+  //   - Longs close at the MIN oracle price (selling the index token)
+  //   - Shorts close at the MAX oracle price (buying back the index token)
+  // Using mid price for the acceptablePrice bound makes it too tight and
+  // causes spurious OrderNotFulfillableAtAcceptablePrice reverts.
   const indexTokenPrice = await getGmxTokenPrice(market.indexToken);
-  const oraclePrice = indexTokenPrice.mid;
+  const oraclePrice = isLong ? indexTokenPrice.min : indexTokenPrice.max;
 
-  const collateralDelta = (args.collateralDeltaAmount as string) || "0";
+  const hasExplicitCollateral = args.collateralDeltaAmount !== undefined && args.collateralDeltaAmount !== null && String(args.collateralDeltaAmount).trim().length > 0;
+  let collateralDelta = hasExplicitCollateral ? String(args.collateralDeltaAmount) : "";
+
+  // Default behavior for partial decreases: withdraw collateral proportionally
+  // to maintain approximately the same leverage ratio. Only keep all collateral
+  // in the position if the user explicitly requests it (collateralDeltaAmount="0").
+  if (!hasExplicitCollateral && !isFullClose) {
+    const sizeDeltaRaw = parseUnits(sizeDeltaUsd, 30);
+    const posSizeRaw = BigInt(matchedPos.sizeInUsdRaw);
+    const posCollateralRaw = BigInt(matchedPos.collateralAmountRaw);
+    if (posSizeRaw > 0n) {
+      const proportionalCollateralRaw = (posCollateralRaw * sizeDeltaRaw) / posSizeRaw;
+      collateralDelta = formatUnits(proportionalCollateralRaw, collateralDecimals);
+    } else {
+      collateralDelta = "0";
+    }
+  }
+
   const isPureCollateralWithdraw = parseFloat(sizeDeltaUsd) === 0 && parseFloat(collateralDelta) > 0;
 
   // Resolve order type
@@ -418,27 +480,53 @@ export async function handle_gmx_close_position(
   if (orderTypeStr === "limit") orderType = GmxOrderType.LimitDecrease;
   else if (orderTypeStr === "stop_loss" || orderTypeStr === "stoploss") orderType = GmxOrderType.StopLossDecrease;
 
+  // GMX index-token prices use 30 - tokenDecimals precision (e.g. 12 for ETH).
+  const indexDecimalsDec = getGmxTokenDecimals(market.indexToken);
+  const priceDecimalsDec = 30 - indexDecimalsDec;
+
   // Get execution price + price impact for CLOSE/DECREASE.
-  // Price impact is ONLY applied on close in GMX v2.
+  // Pass NEGATIVE sizeDeltaUsd so the Reader simulates a decrease, not an increase.
+  // Pass the raw position size in tokens so GMX computes the real execution price.
   let executionPrice = oraclePrice;
   let priceImpactUsd = 0;
+  let priceImpactWarning = "";
   try {
-    const execResult = await getGmxExecutionPrice(market, sizeDeltaUsd, isLong, env.ALCHEMY_API_KEY);
+    const execResult = await getGmxExecutionPrice(
+      market,
+      `-${sizeDeltaUsd}`, // negative = decrease
+      isLong,
+      env.ALCHEMY_API_KEY,
+      formatUnits(BigInt(matchedPos.sizeInUsdRaw), 30),
+      BigInt(matchedPos.sizeInTokensRaw),
+    );
     executionPrice = execResult.executionPrice;
     priceImpactUsd = execResult.priceImpactUsd;
-  } catch {
-    // Fallback to oracle price if RPC fails
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (errMsg.includes("PriceImpactLargerThanOrderSize") || errMsg.includes("0xf0641c92")) {
+      throw new Error(
+        `The requested decrease size ($${sizeDeltaUsd}) is too small for GMX to execute ` +
+        `given current open-interest imbalance — price impact would exceed the order value. ` +
+        `Try closing a larger portion (e.g. "50%" or "all") or wait for market conditions to change.`,
+      );
+    }
+    // Propagate all other execution-preview errors so the user knows the
+    // price cannot be verified before the order is built.
+    throw new Error(`GMX execution preview failed: ${errMsg}`);
   }
 
   // Acceptable price for decreases:
-  // Longs closing (selling): accept down to price * 0.99
-  // Shorts closing (buying back): accept up to price * 1.01
-  const acceptablePriceUsd = isLong
-    ? (oraclePrice * 0.99).toFixed(4)
-    : (oraclePrice * 1.01).toFixed(4);
+  // Longs closing (selling): accept down to oracleMin * 0.99
+  // Shorts closing (buying back): accept up to oracleMax * 1.01
+  const currentPriceRaw = parseUnits(oraclePrice.toString(), priceDecimalsDec);
+  const acceptablePriceRaw = isLong
+    ? currentPriceRaw - (currentPriceRaw * 100n) / 10000n
+    : currentPriceRaw + (currentPriceRaw * 100n) / 10000n;
+  const acceptablePriceUsd = formatUnits(acceptablePriceRaw, priceDecimalsDec);
 
   const calldata = buildCreateDecreaseOrderCalldata({
     market: market.marketToken as Address,
+    indexToken: market.indexToken,
     collateralToken: collateralAddr,
     collateralDeltaAmount: collateralDelta,
     collateralDecimals,
@@ -447,7 +535,7 @@ export async function handle_gmx_close_position(
     orderType,
     triggerPriceUsd: args.triggerPrice as string | undefined,
     indexTokenPriceUsd: oraclePrice.toString(),
-    acceptablePriceUsd: args.acceptablePrice as string | undefined,
+    acceptablePriceUsd: args.acceptablePrice as string | undefined ?? acceptablePriceUsd,
   });
 
   const orderLabel = orderTypeStr === "limit"
@@ -456,7 +544,9 @@ export async function handle_gmx_close_position(
       ? "Stop-Loss"
       : isPureCollateralWithdraw
         ? "Collateral Withdraw"
-        : "Market Close";
+        : isFullClose
+          ? "Market Close"
+          : "Market Decrease";
 
   const gmxDecGas = await estimateGas(
     ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
@@ -485,6 +575,10 @@ export async function handle_gmx_close_position(
     `Acceptable ${acceptableLabel}: $${acceptablePriceUsd} (1% bound)`,
   ];
 
+  if (priceImpactWarning) {
+    messageLines.push(priceImpactWarning);
+  }
+
   if (isPureCollateralWithdraw) {
     messageLines.push(
       `Collateral to withdraw: ${collateralDelta} ${collateralSymbol}`,
@@ -493,9 +587,15 @@ export async function handle_gmx_close_position(
   } else {
     messageLines.push(`Size to ${isFullClose ? "close" : "decrease"}: $${parseFloat(sizeDeltaUsd).toLocaleString()}`);
     if (isFullClose) {
-      messageLines.push(`Collateral return: ALL remaining collateral (~${matchedPos?.collateralAmount} ${collateralSymbol}) will be freed automatically`);
+      messageLines.push(`Collateral return: ALL remaining collateral (~${matchedPos.collateralAmount} ${collateralSymbol}) will be freed automatically`);
+    } else if (parseFloat(collateralDelta) > 0) {
+      if (hasExplicitCollateral) {
+        messageLines.push(`Collateral withdraw: ${collateralDelta} ${collateralSymbol}`);
+      } else {
+        messageLines.push(`Collateral withdraw: ~${collateralDelta} ${collateralSymbol} (proportional — leverage stays approximately the same)`);
+      }
     } else {
-      messageLines.push(`Collateral withdraw: ${collateralDelta} ${collateralSymbol}`);
+      messageLines.push(`Remaining collateral stays in position (leverage will change)`);
     }
   }
 
@@ -508,7 +608,7 @@ export async function handle_gmx_close_position(
     `Chain: Arbitrum`,
     ``,
     `💡 GMX price impact is applied on close/decrease and affects collateral received. ` +
-    `The mark price remains $${oraclePrice.toFixed(4)}; the impact adjusts your payout.`,
+    `The mark price remains $${indexTokenPrice.mid.toFixed(4)}; the impact adjusts your payout.`,
   );
 
   const actionLine = txActionLine(ctx);

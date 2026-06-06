@@ -35,8 +35,11 @@ export interface GmxPosition {
   collateralToken: string;
   isLong: boolean;
   sizeInUsd: string;     // human-readable USD
+  sizeInUsdRaw: string;  // exact 10^30 raw value for calldata building
   sizeInTokens: string;  // human-readable tokens
+  sizeInTokensRaw: string; // exact raw token amount for calldata
   collateralAmount: string; // human-readable
+  collateralAmountRaw: string; // exact raw token amount for calldata
   entryPrice: string;    // human-readable USD
   markPrice: string;     // human-readable USD
   leverage: string;      // e.g. "5.2x"
@@ -47,6 +50,9 @@ export interface GmxPosition {
   marketSymbol: string;  // e.g. "ETH/USD"
   collateralSymbol: string;
   indexTokenSymbol: string;
+  indexToken: string;    // index token address (for price lookup)
+  longToken: string;     // long token address
+  shortToken: string;    // short token address
 }
 
 export interface GmxPendingOrder {
@@ -221,8 +227,11 @@ export async function getGmxPositions(
       collateralToken: pos.addresses.collateralToken,
       isLong,
       sizeInUsd: formatUsd(sizeUsdNum),
+      sizeInUsdRaw: sizeInUsd.toString(),
       sizeInTokens: formatTokenValue(Number(sizeInTokens) / 10 ** indexDecimals),
+      sizeInTokensRaw: sizeInTokens.toString(),
       collateralAmount: formatTokenValue(collateralNum),
+      collateralAmountRaw: collateralAmount.toString(),
       entryPrice: `$${entryPrice.toFixed(3)}`,
       markPrice: `$${indexPrice.toFixed(3)}`,
       leverage: `${leverage.toFixed(1)}x`,
@@ -233,6 +242,9 @@ export async function getGmxPositions(
       marketSymbol: `${indexSymbol}/USD`,
       collateralSymbol,
       indexTokenSymbol: indexSymbol,
+      indexToken: marketInfo?.indexToken || "",
+      longToken: marketInfo?.longToken || "",
+      shortToken: marketInfo?.shortToken || "",
     });
   }
 

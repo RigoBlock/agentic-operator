@@ -37,11 +37,11 @@ function appendMessage(role, content, extras, isRestore) {
   const div = document.createElement('div');
   div.className = `msg ${role}`;
 
-  if (role === 'assistant' && content) {
+  if (role === 'assistant' && (content || extras?.gmxPositions?.length > 0)) {
     // Rich rendering: markdown tables + clickable links
     const contentDiv = document.createElement('div');
     contentDiv.className = 'msg-content';
-    contentDiv.innerHTML = renderRichContent(content);
+    contentDiv.innerHTML = renderRichContent(content || '');
     div.appendChild(contentDiv);
   } else if (content) {
     div.textContent = content;
@@ -210,19 +210,19 @@ function parseDirectToolCall(label) {
     const market = gmxMatch[2].toUpperCase();
     const isLong = gmxMatch[3].toLowerCase() === 'long';
     if (action === 'close') {
-      return { toolName: 'gmx_close_position', args: { market, isLong } };
+      return { toolName: 'gmx_decrease_position', args: { market, isLong } };
     }
     if (action === 'increase') {
       return { toolName: 'gmx_increase_position', args: { market, isLong } };
     }
     if (action === 'decrease') {
-      return { toolName: 'gmx_close_position', args: { market, isLong } };
+      return { toolName: 'gmx_decrease_position', args: { market, isLong } };
     }
     if (action === 'add collateral to') {
       return { toolName: 'gmx_increase_position', args: { market, isLong, sizeDeltaUsd: '0' } };
     }
     if (action === 'withdraw collateral from') {
-      return { toolName: 'gmx_close_position', args: { market, isLong, sizeDeltaUsd: '0' } };
+      return { toolName: 'gmx_decrease_position', args: { market, isLong, sizeDeltaUsd: '0' } };
     }
   }
   return null;
@@ -232,7 +232,7 @@ function parseDirectToolCall(label) {
  * Directly invoke a tool via /api/tools with prompt-based param collection.
  */
 function formatDirectToolLabel(toolName, args) {
-  if (toolName === 'gmx_close_position') {
+  if (toolName === 'gmx_decrease_position') {
     const side = args.isLong ? 'long' : 'short';
     if (args.sizeDeltaUsd === '0' && args.collateralDeltaAmount) {
       return `Withdraw collateral from ${args.market} ${side}`;
@@ -287,7 +287,7 @@ async function invokeDirectTool(toolInfo) {
   const args = { ...toolInfo.args };
 
   // Prompt for missing params based on tool
-  if (toolInfo.toolName === 'gmx_close_position') {
+  if (toolInfo.toolName === 'gmx_decrease_position') {
     if (!args.sizeDeltaUsd) {
       // Default to full close — user can type a partial close in chat if needed
       args.sizeDeltaUsd = 'all';
@@ -324,8 +324,11 @@ async function invokeDirectTool(toolInfo) {
     body.authSignature = authSignature;
     body.authTimestamp = authTimestamp;
     // If delegated mode is active and delegation is confirmed on this chain,
-    // auto-execute without requiring manual signing
-    if (executionMode === 'delegated' && delegationState?.delegated) {
+    // auto-execute ONLY when in autonomous mode. In confirm-trades mode, the
+    // user must review and approve each action before execution.
+    const isDelegated = delegationState && (delegationState.enabled || delegationState.isActiveOnChain);
+    const isAutonomous = localStorage.getItem(`exec-mode:${vault.toLowerCase()}`) === 'autonomous';
+    if (executionMode === 'delegated' && isDelegated && isAutonomous) {
       body.executionMode = 'delegated';
     }
   }
@@ -364,9 +367,6 @@ async function invokeDirectTool(toolInfo) {
     // Show the tool result message
     const msg = data.message || data.reply || JSON.stringify(data);
     const extras = {};
-    if (data.transaction) {
-      extras.transaction = data.transaction;
-    }
     if (data.metadata?.gmxPositions) {
       extras.gmxPositions = data.metadata.gmxPositions;
     }
@@ -374,6 +374,14 @@ async function invokeDirectTool(toolInfo) {
       extras.suggestions = data.suggestions;
     }
     appendMessage('assistant', msg, extras);
+    // In delegated confirm-trades mode, show the delegated confirmation card
+    // instead of manual wallet-sign buttons.
+    if (data.transaction && executionMode === 'delegated' && !data.transaction.operatorOnly) {
+      window.showDelegatedConfirmation(data.transaction);
+    } else if (data.transaction) {
+      // Manual mode or operator-only: show standard wallet modal
+      showTransactionModal(data.transaction);
+    }
   } catch (err) {
     clearTimeout(timeoutId);
     appendMessage('system', `Direct tool call failed: ${err.message}`);
@@ -449,7 +457,7 @@ function enhanceGmxPositions(msgDiv, positions) {
     // PnL cell — color by gain/loss + info tooltip
     const pnlCell = cells[5];
     const pnlValue = parseFloat(pos.unrealizedPnl.replace(/[^0-9.-]/g, '')) || 0;
-    pnlCell.style.color = pnlValue >= 0 ? 'var(--success)' : 'var(--danger)';
+    pnlCell.style.color = pnlValue >= 0 ? 'var(--success)' : 'var(--error)';
     pnlCell.style.fontWeight = '600';
     if (pnlValue !== 0) {
       pnlCell.title = pnlValue > 0
@@ -510,7 +518,7 @@ function makeInteractiveCell(cell, actions) {
 }
 
 function closeGmxPosition(market, isLong, collateralSymbol) {
-  invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, collateral: collateralSymbol } });
+  invokeDirectTool({ toolName: 'gmx_decrease_position', args: { market, isLong, collateral: collateralSymbol } });
 }
 
 function modifyGmxSize(market, isLong, mode, collateralSymbol) {
@@ -531,7 +539,7 @@ function modifyGmxSize(market, isLong, mode, collateralSymbol) {
       window.appendMessage('system', 'Invalid amount. Please enter a positive number.');
       return;
     }
-    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, collateral: collateralSymbol, sizeDeltaUsd: trimmed } });
+    invokeDirectTool({ toolName: 'gmx_decrease_position', args: { market, isLong, collateral: collateralSymbol, sizeDeltaUsd: trimmed } });
   }
 }
 
@@ -561,7 +569,7 @@ function modifyGmxCollateral(market, isLong, mode, collateralSymbol) {
       window.appendMessage('system', 'Invalid amount. Please enter a positive number.');
       return;
     }
-    invokeDirectTool({ toolName: 'gmx_close_position', args: { market, isLong, collateral: collateralSymbol, sizeDeltaUsd: '0', collateralDeltaAmount: trimmed } });
+    invokeDirectTool({ toolName: 'gmx_decrease_position', args: { market, isLong, collateral: collateralSymbol, sizeDeltaUsd: '0', collateralDeltaAmount: trimmed } });
   }
 }
 

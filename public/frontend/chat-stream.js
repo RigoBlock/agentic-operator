@@ -488,12 +488,17 @@ async function handleChatResponse(data) {
     const stepPattern = /step\s+\d+\s*(of|\/)\s*\d+|next\s+(step|i['']ll|we['']ll)|after\s+this|then\s+(i['']ll|we['']ll)|following\s+step|first,?\s+.*then/i;
     setMultiStepActive(stepPattern.test(data.reply));
   } else if (data.toolCalls?.length > 0) {
-    // Reply is empty (e.g., transaction ready) — still push tool results to history
+    // Reply is empty — still show tool results in the UI and push to history
     const resultsText = data.toolCalls
       .filter(tc => !tc.error && tc.result)
       .map(tc => tc.result)
       .join('\n');
     if (resultsText) {
+      const extras = withModelTrace({ suggestions: data.suggestions });
+      if (data.metadata?.gmxPositions) {
+        extras.gmxPositions = data.metadata.gmxPositions;
+      }
+      appendMessage('assistant', resultsText, extras);
       conversationHistory.push({ role: 'assistant', content: resultsText });
       persistChat();
     }

@@ -100,7 +100,7 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
 export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
   swap: ["get_swap_quote", "build_vault_swap", "set_default_slippage", "set_swap_shield_tolerance", "enable_swap_shield", "refresh_oracle_feed"],
   gmx: [
-    "gmx_open_position", "gmx_close_position", "gmx_increase_position",
+    "gmx_decrease_position", "gmx_increase_position",
     "gmx_get_positions", "gmx_cancel_order", "gmx_update_order",
     "gmx_claim_funding_fees", "gmx_get_markets",
   ],
@@ -276,10 +276,11 @@ INTENT PARSING — CRITICAL:
 - When the user mentions "gmx", "perp", "perpetual", "long", "short", "leverage", or "position", ALWAYS use a GMX tool. NEVER use swap tools for these requests.
 
 TOOL SELECTION — CRITICAL:
-- OPEN a new position → gmx_open_position
+- OPEN a new position → gmx_increase_position
 - INCREASE an existing position size or add collateral → gmx_increase_position
-- CLOSE a position fully or partially → gmx_close_position
+- DECREASE/CLOSE a position fully or partially → gmx_decrease_position
 - VIEW open positions and pending orders → gmx_get_positions
+  CRITICAL: When the user ONLY asks to view/check/show positions (e.g. "what are my positions", "show my perps", "gmx positions"), call gmx_get_positions AND STOP. Do NOT suggest closing, reducing, or modifying positions unless the user explicitly asks for an action.
 - CANCEL a pending order → gmx_cancel_order
 - UPDATE a limit/stop order → gmx_update_order
 - CLAIM funding fees → gmx_claim_funding_fees
@@ -293,7 +294,7 @@ Use notionalUsd + leverage when the user says "increase by $1500" or "add $1500"
 Use collateralAmount + leverage when the user says "add 0.5 WETH collateral AND increase size" or similar.
 Use collateralAmount + sizeDeltaUsd="0" when the user wants to add collateral ONLY without increasing position size (e.g. "add 0.5 WETH collateral to avoid liquidation"). This is the correct mode for de-risking — it adds collateral but keeps size unchanged.
 
-NEW POSITIONS (gmx_open_position):
+NEW POSITIONS (gmx_increase_position):
 - The user MUST specify collateral token (e.g., "using WETH", "with USDC"). There is no default.
 - The user MUST specify leverage (e.g., "5x", "10x"). There is no default.
 - If collateral or leverage is missing, ASK the user before calling the tool.
@@ -314,14 +315,14 @@ COLLATERAL SYNTAX: "long ETH 5x with 0.5 ETH" means collateral 0.5 ETH, leverage
 GMX INTENT PARSING:
 - "add 0.2 WETH collateral to my open LIT long" → gmx_increase_position: market="LIT", isLong=true, collateralAmount="0.2", collateral="WETH", sizeDeltaUsd="0" — DIRECT call, NO gmx_get_positions first
 - "increase my LIT long by 1500 usd 10x using weth" → gmx_increase_position: market="LIT", isLong=true, notionalUsd="1500", leverage="10", collateral="WETH"
-- "long 1000 ETHUSDC 5x" → gmx_open_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5"
-- "short BTC 10x with 5000 USDC" → gmx_open_position: market="BTC", isLong=false, collateralAmount="5000", leverage="10"
-- "close my ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all"
-- "decrease my ETH long by $500" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="500"
-- "reduce my BTC short size by half" → gmx_close_position: market="BTC", isLong=false, sizeDeltaUsd="50%" (the backend resolves percentages against the open position)
-- "withdraw 100 USDC collateral from my ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="0", collateralDeltaAmount="100"
-- "withdraw my PnL from ETH long" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="0", collateralDeltaAmount="<unrealized PnL converted to collateral token units>" — if you don't know the exact amount, call gmx_get_positions first to read it
-- "set stop loss on ETH long at $3000" → gmx_close_position: market="ETH", isLong=true, sizeDeltaUsd="all", orderType="stop_loss", triggerPrice="3000"`,
+- "long 1000 ETHUSDC 5x" → gmx_increase_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5"
+- "short BTC 10x with 5000 USDC" → gmx_increase_position: market="BTC", isLong=false, collateralAmount="5000", leverage="10"
+- "close my ETH long" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="all"
+- "decrease my ETH long by $500" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="500"
+- "reduce my BTC short size by half" → gmx_decrease_position: market="BTC", isLong=false, sizeDeltaUsd="50%" (the backend resolves percentages against the open position)
+- "withdraw 100 USDC collateral from my ETH long" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="0", collateralDeltaAmount="100"
+- "withdraw my PnL from ETH long" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="0", collateralDeltaAmount="<unrealized PnL converted to collateral token units>" — if you don't know the exact amount, call gmx_get_positions first to read it
+- "set stop loss on ETH long at $3000" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="all", orderType="stop_loss", triggerPrice="3000"`,
 
   lp: `UNISWAP V4 LP WORKFLOW:
 Ask the user for pool details or a pool ID, then call get_pool_info to discover the exact pool key.

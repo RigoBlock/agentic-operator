@@ -272,9 +272,11 @@ export async function getGmxTokenPrice(
  * imbalance: `(initialDiff^exponent * factor) - (nextDiff^exponent * factor)`.
  *
  * @param market - GMX market info (marketToken, indexToken, longToken, shortToken)
- * @param sizeDeltaUsd - Position size delta in USD (human-readable, e.g. "5000")
+ * @param sizeDeltaUsd - Position size delta in USD (human-readable, e.g. "5000" or "-5000" for decreases)
  * @param isLong - true for long, false for short
  * @param alchemyKey - Alchemy API key for RPC
+ * @param positionSizeInUsd - Existing position size in USD (human-readable, 30 decimals)
+ * @param positionSizeInTokens - Existing position size in raw index tokens (bigint, e.g. from Reader)
  * @returns executionPrice (human-readable USD), priceImpactUsd (human-readable USD), and raw result fields
  */
 export async function getGmxExecutionPrice(
@@ -282,6 +284,8 @@ export async function getGmxExecutionPrice(
   sizeDeltaUsd: string,
   isLong: boolean,
   alchemyKey: string,
+  positionSizeInUsd?: string,
+  positionSizeInTokens?: bigint,
 ): Promise<{
   executionPrice: number;
   priceImpactUsd: number;
@@ -307,7 +311,14 @@ export async function getGmxExecutionPrice(
   const longRaw = getRaw(market.longToken);
   const shortRaw = getRaw(market.shortToken);
 
-  const sizeRaw = parseUnits(sizeDeltaUsd, USD_DECIMALS);
+  // Support negative sizeDeltaUsd for decreases (GMX Reader takes signed int256)
+  const sizeTrimmed = sizeDeltaUsd.trim();
+  const sizeIsNegative = sizeTrimmed.startsWith("-");
+  const sizeAbsRaw = parseUnits(sizeIsNegative ? sizeTrimmed.slice(1) : sizeTrimmed, USD_DECIMALS);
+  const sizeRaw = sizeIsNegative ? -sizeAbsRaw : sizeAbsRaw;
+
+  const posSizeUsdRaw = positionSizeInUsd ? parseUnits(positionSizeInUsd, USD_DECIMALS) : 0n;
+  const posSizeTokensRaw = positionSizeInTokens ?? 0n;
 
   const client = getClient(ARBITRUM_CHAIN_ID, alchemyKey);
 
@@ -323,9 +334,9 @@ export async function getGmxExecutionPrice(
         longTokenPrice: { min: longRaw.min, max: longRaw.max },
         shortTokenPrice: { min: shortRaw.min, max: shortRaw.max },
       },
-      0n,           // positionSizeInUsd — 0 for new position
-      0n,           // positionSizeInTokens — 0 for new position
-      sizeRaw,      // sizeDeltaUsd (positive = increase)
+      posSizeUsdRaw,
+      posSizeTokensRaw,
+      sizeRaw,      // sizeDeltaUsd (positive = increase, negative = decrease)
       0n,           // pendingImpactAmount — 0 for new position
       isLong,
     ],
@@ -407,11 +418,13 @@ export async function resolveGmxCollateral(
  * @param collateralDecimals - Decimals of collateral token
  * @param sizeDeltaUsd - Position size in USD (human-readable, e.g. "5000")
  * @param isLong - true for long, false for short
+ * @param indexToken - Index token address for the market (used to determine price precision)
  * @param indexTokenPriceUsd - Current index token price in USD (human-readable, e.g. "3000.50")
  * @param acceptablePriceUsd - Override: max acceptable execution price for longs, min for shorts (human-readable USD)
  */
 export function buildCreateIncreaseOrderCalldata(params: {
   market: Address;
+  indexToken: string;
   collateralToken: Address;
   collateralAmount: string;
   collateralDecimals: number;
@@ -423,15 +436,20 @@ export function buildCreateIncreaseOrderCalldata(params: {
   const collateralRaw = parseUnits(params.collateralAmount, params.collateralDecimals);
   const sizeRaw = parseUnits(params.sizeDeltaUsd, USD_DECIMALS);
 
+  // GMX index-token prices use 30 - tokenDecimals precision (e.g. 12 for ETH, 24 for USDC).
+  // acceptablePrice must be on that same scale, NOT on USD_DECIMALS (30).
+  const indexDecimals = getGmxTokenDecimals(params.indexToken);
+  const priceDecimals = USD_DECIMALS - indexDecimals;
+
   // Acceptable price from current oracle price ± slippage.
   // For longs (buying): willing to pay up to price * (1 + slippage) — max price
   // For shorts (selling): willing to sell at price * (1 - slippage) — min price
   // This protects against oracle price movement between order creation and keeper execution.
   let acceptablePrice: bigint;
   if (params.acceptablePriceUsd) {
-    acceptablePrice = parseUnits(params.acceptablePriceUsd, USD_DECIMALS);
+    acceptablePrice = parseUnits(params.acceptablePriceUsd, priceDecimals);
   } else {
-    const currentPrice = parseUnits(params.indexTokenPriceUsd, USD_DECIMALS);
+    const currentPrice = parseUnits(params.indexTokenPriceUsd, priceDecimals);
     acceptablePrice = params.isLong
       ? currentPrice + (currentPrice * GMX_SLIPPAGE_BPS) / 10_000n  // price + 1%
       : currentPrice - (currentPrice * GMX_SLIPPAGE_BPS) / 10_000n; // price - 1%
@@ -483,12 +501,14 @@ export function buildCreateIncreaseOrderCalldata(params: {
  * @param sizeDeltaUsd - Position size to decrease in USD (human-readable)
  * @param isLong - true for long, false for short (must match existing position)
  * @param orderType - MarketDecrease, LimitDecrease, or StopLossDecrease
+ * @param indexToken - Index token address for the market (used to determine price precision)
  * @param triggerPriceUsd - Trigger price for limit/stop-loss orders (human-readable USD)
  * @param indexTokenPriceUsd - Current index token price in USD (human-readable) for slippage bound
  * @param acceptablePriceUsd - Override: acceptable execution price (human-readable USD)
  */
 export function buildCreateDecreaseOrderCalldata(params: {
   market: Address;
+  indexToken: string;
   collateralToken: Address;
   collateralDeltaAmount: string;
   collateralDecimals: number;
@@ -501,6 +521,11 @@ export function buildCreateDecreaseOrderCalldata(params: {
 }): Hex {
   const collateralRaw = parseUnits(params.collateralDeltaAmount, params.collateralDecimals);
   const sizeRaw = parseUnits(params.sizeDeltaUsd, USD_DECIMALS);
+
+  // GMX index-token prices use 30 - tokenDecimals precision (e.g. 12 for ETH, 24 for USDC).
+  // acceptablePrice must be on that same scale, NOT on USD_DECIMALS (30).
+  const indexDecimals = getGmxTokenDecimals(params.indexToken);
+  const priceDecimals = USD_DECIMALS - indexDecimals;
 
   const orderType = params.orderType ?? GmxOrderType.MarketDecrease;
 
@@ -522,9 +547,9 @@ export function buildCreateDecreaseOrderCalldata(params: {
   // Shorts closing (buying back): accept price up to price * (1 + slippage)
   let acceptablePrice: bigint;
   if (params.acceptablePriceUsd) {
-    acceptablePrice = parseUnits(params.acceptablePriceUsd, USD_DECIMALS);
+    acceptablePrice = parseUnits(params.acceptablePriceUsd, priceDecimals);
   } else {
-    const currentPrice = parseUnits(params.indexTokenPriceUsd, USD_DECIMALS);
+    const currentPrice = parseUnits(params.indexTokenPriceUsd, priceDecimals);
     acceptablePrice = params.isLong
       ? currentPrice - (currentPrice * GMX_SLIPPAGE_BPS) / 10_000n  // price - 1%
       : currentPrice + (currentPrice * GMX_SLIPPAGE_BPS) / 10_000n; // price + 1%

@@ -115,8 +115,7 @@ export const VAULT_TX_TOOLS = new Set<string>([
   "fund_pool",
   "crosschain_transfer",
   "crosschain_sync",
-  "gmx_open_position",
-  "gmx_close_position",
+  "gmx_decrease_position",
   "gmx_increase_position",
   "gmx_cancel_order",
   "gmx_update_order",
@@ -834,6 +833,7 @@ ${executionModeNote}${contextDocsBlock}`;
         transactions: toolResult.transaction ? [toolResult.transaction] : undefined,
         chainSwitch: toolResult.chainSwitch,
         suggestions: toolResult.suggestions,
+        metadata: toolResult.metadata,
         reasoning: fastPathReasoning,
         modelsUsed: [],
         finalModel: "tooling",
@@ -2379,7 +2379,7 @@ function tryFastPathGmxIncrease(msg: string): FastPathResult | null {
     if (longShortMatch[4]) args.leverage = longShortMatch[4].replace(/x$/i, "");
     const collateralMatch = m.match(/using\s+(\w+)/i);
     if (collateralMatch) args.collateral = collateralMatch[1].toUpperCase();
-    return { name: "gmx_open_position", args };
+    return { name: "gmx_increase_position", args };
   }
 
   // "close [my] MARKET [long|short] [position]"
@@ -2388,7 +2388,7 @@ function tryFastPathGmxIncrease(msg: string): FastPathResult | null {
   );
   if (closeMatch) {
     return {
-      name: "gmx_close_position",
+      name: "gmx_decrease_position",
       args: {
         market: closeMatch[1].toUpperCase(),
         isLong: closeMatch[2]?.toLowerCase() !== "short",
@@ -2398,14 +2398,14 @@ function tryFastPathGmxIncrease(msg: string): FastPathResult | null {
   }
 
   // "show [my] [gmx] positions" / "my perps"
-  if (/^(?:show|list|get|check)(?:\s+my)?\s+(?:gmx\s+)?positions?$/i.test(m) ||
-      /^my\s+perps?$/i.test(m) ||
-      /^(?:gmx\s+)?positions?$/i.test(m)) {
+  if (/^(?:show|list|get|check|what\s+are)(?:\s+my)?\s+(?:gmx\s+)?positions?[\s?.!]*$/i.test(m) ||
+      /^my\s+(?:gmx\s+)?(?:positions?|perps?)[\s?.!]*$/i.test(m) ||
+      /^(?:gmx\s+)?positions?[\s?.!]*$/i.test(m)) {
     return { name: "gmx_get_positions", args: {} };
   }
 
   // "gmx markets" / "show gmx markets"
-  if (/^(?:show\s+)?gmx\s+markets?$/i.test(m) || /^(?:list\s+)?gmx\s+markets?$/i.test(m)) {
+  if (/^(?:show\s+)?gmx\s+markets?[\s?.!]*$/i.test(m) || /^(?:list\s+)?gmx\s+markets?[\s?.!]*$/i.test(m)) {
     return { name: "gmx_get_markets", args: {} };
   }
 

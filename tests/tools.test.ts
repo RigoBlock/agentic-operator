@@ -16,8 +16,7 @@ const REQUIRED_TOOLS = [
   "check_delegation_status",
   "revoke_selectors",
   // GMX perpetuals
-  "gmx_open_position",
-  "gmx_close_position",
+  "gmx_decrease_position",
   "gmx_get_positions",
   "gmx_cancel_order",
   "gmx_update_order",
