@@ -612,7 +612,13 @@ function buildHttpServer(env: Env): x402HTTPResourceServer {
 async function getHttpServer(env: Env): Promise<x402HTTPResourceServer> {
   if (!httpServer) {
     httpServer = buildHttpServer(env);
-    initPromise = httpServer.initialize();
+    initPromise = httpServer.initialize().catch((err) => {
+      // Clear the singleton so the next request can retry initialization.
+      // Without this, every subsequent request would re-throw the same stale error.
+      httpServer = null;
+      initPromise = null;
+      throw err;
+    });
   }
   await initPromise;
   return httpServer;
@@ -764,6 +770,21 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
       }
     }
 
+    // Fast path: discovery/health routes and public API routes don't need x402 at all.
+    const reqPath = new URL(c.req.url).pathname;
+    const reqMethod = c.req.method;
+    if (reqPath.startsWith("/.well-known/") || isPublicApiRoute(reqMethod, reqPath)) {
+      return next();
+    }
+
+    // Skip x402 when CDP credentials are missing or clearly invalid (test/dev envs).
+    const hasCdpCreds =
+      typeof c.env.CDP_API_KEY_ID === "string" && c.env.CDP_API_KEY_ID.length > 0 &&
+      typeof c.env.CDP_API_KEY_SECRET === "string" && c.env.CDP_API_KEY_SECRET.length > 0;
+    if (!hasCdpCreds) {
+      return next();
+    }
+
     let server: x402HTTPResourceServer;
     try {
       server = await getHttpServer(c.env);
@@ -771,7 +792,11 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
       // x402 server init failed (facilitator unreachable, bad credentials, etc.)
       // For non-protected routes, let the request through — don't block vault reads
       // because the payment facilitator is down.
-      console.error("[x402] Server initialization failed:", err);
+      // Suppress noisy logs in test environments (Vitest).
+      const isTest = typeof process !== "undefined" && (process.env?.VITEST || process.env?.NODE_ENV === "test");
+      if (!isTest) {
+        console.error("[x402] Server initialization failed:", err);
+      }
       return next();
     }
 

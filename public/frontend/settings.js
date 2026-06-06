@@ -121,9 +121,13 @@ const SLIPPAGE_STORAGE_KEY = 'rigoblock_slippage_bps';
 const SLIPPAGE_OVERRIDE_STORAGE_KEY = 'rigoblock_slippage_override_explicit';
 const SHIELD_STORAGE_KEY = 'rigoblock_swap_shield';
 const SHIELD_TOLERANCE_KEY = 'rigoblock_swap_shield_tolerance';
+const NAV_SHIELD_STORAGE_KEY = 'rigoblock_nav_shield_pct';
 const DEFAULT_SLIPPAGE_BPS = 100;
 const MIN_SLIPPAGE_BPS = 10;
 const MAX_SLIPPAGE_BPS = 500;
+const DEFAULT_NAV_SHIELD_PCT = 10;
+const MIN_NAV_SHIELD_PCT = 1;
+const MAX_NAV_SHIELD_PCT = 100;
 
 // Key helpers -- namespaced per connected address so switching wallets
 // never shows a stale override that belongs to a different operator.
@@ -131,6 +135,7 @@ function slippageKey() { return SLIPPAGE_STORAGE_KEY + '_' + (connectedAddress |
 function slippageOverrideKey() { return SLIPPAGE_OVERRIDE_STORAGE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
 function shieldKey() { return SHIELD_STORAGE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
 function shieldToleranceKey() { return SHIELD_TOLERANCE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
+function navShieldKey() { return NAV_SHIELD_STORAGE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
 
 function getSlippageBps() {
   const stored = localStorage.getItem(slippageKey());
@@ -317,6 +322,98 @@ function startShieldTimer(expiry) {
 }
 let shieldTimerInterval = null;
 
+function getNavShieldPct() {
+  const stored = localStorage.getItem(navShieldKey());
+  if (!stored) return DEFAULT_NAV_SHIELD_PCT;
+  const parsed = parseInt(stored, 10);
+  if (!Number.isFinite(parsed) || parsed < MIN_NAV_SHIELD_PCT || parsed > MAX_NAV_SHIELD_PCT) {
+    return DEFAULT_NAV_SHIELD_PCT;
+  }
+  return parsed;
+}
+
+async function onNavShieldThresholdChange() {
+  const input = document.getElementById('nav-shield-threshold');
+  const pct = parseInt(input.value, 10);
+  if (isNaN(pct) || pct < MIN_NAV_SHIELD_PCT || pct > MAX_NAV_SHIELD_PCT) {
+    alert(`NAV Shield threshold must be between ${MIN_NAV_SHIELD_PCT}% and ${MAX_NAV_SHIELD_PCT}%.`);
+    input.value = String(getNavShieldPct());
+    return;
+  }
+
+  if (!connectedAddress || !vaultInput.value.trim()) {
+    appendMessage('system', 'Connect a wallet and enter a vault address before changing NAV Shield threshold.');
+    input.value = String(getNavShieldPct());
+    return;
+  }
+
+  input.disabled = true;
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: `set NAV shield threshold to ${pct}%` }],
+        vaultAddress: vaultInput.value.trim(),
+        chainId: currentChainId,
+        operatorAddress: connectedAddress,
+        authSignature, authTimestamp,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    localStorage.setItem(navShieldKey(), String(pct));
+    document.getElementById('nav-shield-reset').style.display = 'inline-block';
+    appendMessage('system', `NAV Shield threshold set to ${pct}%.`);
+  } catch (err) {
+    appendMessage('system', `Failed to set NAV shield threshold: ${err instanceof Error ? err.message : String(err)}`);
+    input.value = String(getNavShieldPct());
+  } finally {
+    input.disabled = false;
+  }
+}
+
+async function resetNavShieldThreshold() {
+  if (!connectedAddress || !vaultInput.value.trim()) {
+    appendMessage('system', 'Connect a wallet and enter a vault address before resetting NAV Shield threshold.');
+    return;
+  }
+
+  const input = document.getElementById('nav-shield-threshold');
+  input.disabled = true;
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'reset NAV shield to default' }],
+        vaultAddress: vaultInput.value.trim(),
+        chainId: currentChainId,
+        operatorAddress: connectedAddress,
+        authSignature, authTimestamp,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    input.value = String(DEFAULT_NAV_SHIELD_PCT);
+    localStorage.removeItem(navShieldKey());
+    document.getElementById('nav-shield-reset').style.display = 'none';
+    appendMessage('system', 'NAV Shield threshold reset to default (10%).');
+  } catch (err) {
+    appendMessage('system', `Failed to reset NAV shield threshold: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    input.disabled = false;
+  }
+}
+
 function restoreTradeSettings() {
   // Restore slippage
   const bps = getSlippageBps();
@@ -345,6 +442,11 @@ function restoreTradeSettings() {
     toleranceInput.value = '5';
     document.getElementById('swap-shield-reset').style.display = 'none';
   }
+
+  // Restore NAV shield threshold
+  const navPct = getNavShieldPct();
+  document.getElementById('nav-shield-threshold').value = String(navPct);
+  document.getElementById('nav-shield-reset').style.display = navPct !== DEFAULT_NAV_SHIELD_PCT ? 'inline-block' : 'none';
 }
 
 function toggleTestnet() {
@@ -373,10 +475,13 @@ export {
   AI_SETTINGS_KEY, AI_MODELS, AI_BASE_URLS,
   SLIPPAGE_STORAGE_KEY, SLIPPAGE_OVERRIDE_STORAGE_KEY,
   SHIELD_STORAGE_KEY, SHIELD_TOLERANCE_KEY,
+  NAV_SHIELD_STORAGE_KEY,
   DEFAULT_SLIPPAGE_BPS, MIN_SLIPPAGE_BPS, MAX_SLIPPAGE_BPS,
-  slippageKey, slippageOverrideKey, shieldKey, shieldToleranceKey,
+  DEFAULT_NAV_SHIELD_PCT, MIN_NAV_SHIELD_PCT, MAX_NAV_SHIELD_PCT,
+  slippageKey, slippageOverrideKey, shieldKey, shieldToleranceKey, navShieldKey,
   getSlippageBps, onSlippageChange,
   onSwapShieldToleranceChange, resetSwapShieldTolerance,
+  getNavShieldPct, onNavShieldThresholdChange, resetNavShieldThreshold,
   startShieldTimer, restoreTradeSettings,
   toggleTestnet, applyTestnetState, updateChainDisplay,
   loadAiSettings, saveAiSettings, openSettings, toggleAiSettings,

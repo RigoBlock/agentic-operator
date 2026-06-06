@@ -148,6 +148,9 @@ export function updateDelegationUI(state) {
   const revokeBtn = document.getElementById('delegation-revoke-btn');
   const telegramBtn = document.getElementById('telegram-pair-btn');
   const telegramResetBtn = document.getElementById('telegram-reset-btn');
+  const telegramSection = document.getElementById('telegram-section');
+  const telegramBadge = document.getElementById('telegram-status-badge');
+  const telegramStatusText = document.getElementById('telegram-status-text');
   const agentAddr = document.getElementById('agent-addr');
   const balanceEl = document.getElementById('agent-balance-display');
   const sponsorLabel = document.getElementById('sponsor-toggle-label');
@@ -164,6 +167,7 @@ export function updateDelegationUI(state) {
     setupBtn.title = '';
     setupBtn.onclick = () => window.openDelegationSetup();
     revokeBtn.style.display = 'none';
+    if (telegramSection) telegramSection.style.display = 'none';
     if (telegramBtn) telegramBtn.style.display = 'none';
     if (telegramResetBtn) telegramResetBtn.style.display = 'none';
     const chatModeInactive = document.getElementById('chat-mode-bar');
@@ -231,8 +235,25 @@ export function updateDelegationUI(state) {
     revokeBtn.style.display = anyDelegated ? '' : 'none';
     revokeBtn.textContent = 'Revoke';
     revokeBtn.onclick = () => window.openRevokeModal();
-    if (telegramBtn) telegramBtn.style.display = isOnChain ? '' : 'none';
-    if (telegramResetBtn) telegramResetBtn.style.display = isOnChain ? '' : 'none';
+    // Telegram section: only visible when delegation is active on this chain
+    if (telegramSection) {
+      telegramSection.style.display = isOnChain ? '' : 'none';
+    }
+    if (telegramBadge && telegramStatusText) {
+      if (state.telegramPaired) {
+        telegramBadge.className = 'delegation-status active';
+        telegramStatusText.textContent = 'Linked';
+      } else {
+        telegramBadge.className = 'delegation-status inactive';
+        telegramStatusText.textContent = 'Not linked';
+      }
+    }
+    if (telegramBtn) {
+      telegramBtn.style.display = (isOnChain && !state.telegramPaired) ? '' : 'none';
+    }
+    if (telegramResetBtn) {
+      telegramResetBtn.style.display = (isOnChain && state.telegramPaired) ? '' : 'none';
+    }
 
     // Execution mode toggle — visible in chat input when delegation is active
     const chatModeBar = document.getElementById('chat-mode-bar');

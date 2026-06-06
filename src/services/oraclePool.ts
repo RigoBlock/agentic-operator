@@ -60,7 +60,7 @@ export const BACKGEO_ORACLE: Record<number, Address> = {
 // ── Uniswap V4 Universal Router addresses per chain ──────────────────────
 // Source: https://github.com/RigoBlock/v3-contracts/blob/development/src/utils/constants.ts
 // (These are the standard Uniswap V2 Universal Router deployments.)
-const UNIVERSAL_ROUTER: Record<number, Address> = {
+export const UNIVERSAL_ROUTER: Record<number, Address> = {
   1:     "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af", // Ethereum
   10:    "0x851116D9223fabED8E56C0E6b8Ad0c31d98B3507", // Optimism
   56:    "0x1906c1d672b88cD1B9aC7593301cA990F94Eae07", // BNB Chain
@@ -171,6 +171,10 @@ export interface OraclePoolSwapResult {
     poolId: Hex;
     cardinality: number;
   };
+  /** Parsed input amount in wei — useful for pre-flight checks in callers. */
+  amountInWei: bigint;
+  /** Token decimals (for sell direction) or 18 (for buy direction). */
+  tokenDecimals: number;
   message: string;
 }
 
@@ -298,11 +302,13 @@ export async function buildOraclePoolSwapTx(
   // Parse input amount (native token for buy, ERC-20 token for sell)
   const isBuy = direction === "buy";
   let amountInWei: bigint;
+  let tokenDecimals: number;
   try {
     if (isBuy) {
+      tokenDecimals = 18;
       amountInWei = parseUnits(amountIn, 18);
     } else {
-      const tokenDecimals = await getTokenDecimals(chainId, tokenAddr, alchemyKey);
+      tokenDecimals = await getTokenDecimals(chainId, tokenAddr, alchemyKey);
       amountInWei = parseUnits(amountIn, tokenDecimals);
     }
   } catch {
@@ -428,6 +434,8 @@ export async function buildOraclePoolSwapTx(
         poolId,
         cardinality,
       },
+      amountInWei,
+      tokenDecimals,
       message,
     };
   }
@@ -463,6 +471,8 @@ export async function buildOraclePoolSwapTx(
       poolId,
       cardinality,
     },
+    amountInWei,
+    tokenDecimals,
     message,
   };
 }

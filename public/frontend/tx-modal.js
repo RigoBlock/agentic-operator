@@ -10,6 +10,8 @@ import {
 
 import { appendMessage } from "./chat-ui.js";
 
+import { formatTxMetrics } from "./tx-receipt.js";
+
 import { closeModal } from "./wallet.js";
 
 function showTransactionModal(tx) {
@@ -40,12 +42,14 @@ function showTransactionModal(tx) {
     : isOperatorOnly ? '0' : '0 (vault uses own balance)';
   const toLabel = isOperatorOnly ? 'To' : 'To (vault)';
 
+  const metricsHtml = formatTxMetrics(tx);
   document.getElementById('tx-details').innerHTML = `
     <div class="row"><span class="label">${toLabel}</span><span class="value">${escapeHtml(tx.to)}</span></div>
     <div class="row"><span class="label">Chain</span><span class="value">${CHAIN_NAMES[tx.chainId] || tx.chainId}</span></div>
     <div class="row"><span class="label">Value</span><span class="value">${valueDisplay}</span></div>
     <div class="row"><span class="label">Gas limit</span><span class="value">${gasDisplay}</span></div>
     <div class="row"><span class="label">Data</span><span class="value">${tx.data.slice(0, 10)}… (${dataLength} bytes)</span></div>
+    ${metricsHtml ? `<div class="row" style="margin-top:8px;">${metricsHtml}</div>` : ''}
   `;
   document.getElementById('tx-status').textContent = '';
   const confirmBtn = document.getElementById('tx-confirm-btn');

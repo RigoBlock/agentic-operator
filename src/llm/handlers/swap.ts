@@ -191,10 +191,14 @@ export async function handle_build_vault_swap(
           ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
         ].join("\n");
 
-        const navWarn = await preCheckNavImpact(env, ctx, transaction);
-        if (navWarn) message += '\n' + navWarn;
+        const navCheckWrap = await preCheckNavImpact(env, ctx, transaction);
+        if (navCheckWrap.warning) message += '\n' + navCheckWrap.warning;
 
-        return { message, transaction, chainSwitch: chainSwitched };
+        const metaWrap: Record<string, unknown> = {};
+        if (navCheckWrap.metrics) metaWrap.navShield = navCheckWrap.metrics;
+        if (Object.keys(metaWrap).length) transaction.metrics = metaWrap;
+
+        return { message, transaction, chainSwitch: chainSwitched, metadata: Object.keys(metaWrap).length ? metaWrap : undefined };
       }
     }
   }
@@ -219,7 +223,7 @@ export async function handle_build_vault_swap(
     );
 
     // ── Swap Shield — oracle price check ──
-    const shieldWarning0x = await runSwapShield(
+    const shield0x = await runSwapShield(
       env, ctx, intent,
       zxQuote.sellAmount, zxQuote.decimalsIn,
       zxQuote.buyAmount,
@@ -227,6 +231,7 @@ export async function handle_build_vault_swap(
       zxQuote.buyToken as Address,
       oracleEnrichment0x,
     );
+    const shieldWarning0x = shield0x.warning;
 
     // The 0x API returns a complete transaction targeting AllowanceHolder.
     // For the vault, we send the 0x calldata TO the vault address.
@@ -298,11 +303,16 @@ export async function handle_build_vault_swap(
       ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
     ].join("\n");
 
-    // NAV shield pre-check — warn if simulation fails, block if NAV drops > 10%.
-    let navWarn0x = await preCheckNavImpact(env, ctx, transaction);
-    if (navWarn0x) message += '\n' + navWarn0x;
+    // NAV shield pre-check — warn if simulation fails, block if NAV drops > threshold.
+    const navCheck0x = await preCheckNavImpact(env, ctx, transaction);
+    if (navCheck0x.warning) message += '\n' + navCheck0x.warning;
 
-    return { message, transaction, chainSwitch: chainSwitched };
+    const metadata: Record<string, unknown> = {};
+    if (shield0x.metrics) metadata.swapShield = shield0x.metrics;
+    if (navCheck0x.metrics) metadata.navShield = navCheck0x.metrics;
+    if (Object.keys(metadata).length) transaction.metrics = metadata;
+
+    return { message, transaction, chainSwitch: chainSwitched, metadata: Object.keys(metadata).length ? metadata : undefined };
   }
 
   // ── Uniswap flow (default) ──
@@ -330,7 +340,7 @@ export async function handle_build_vault_swap(
   );
 
   // ── Swap Shield — oracle price check ──
-  const shieldWarningUni = await runSwapShield(
+  const shieldUni = await runSwapShield(
     env, ctx, intent,
     quote.quote.input.amount, quote.decimalsIn,
     quote.quote.output.amount,
@@ -338,6 +348,7 @@ export async function handle_build_vault_swap(
     quote.quote.output.token as Address,
     oracleEnrichmentUni,
   );
+  const shieldWarningUni = shieldUni.warning;
 
   // ── Balance pre-check for exact-output swaps ──
   // For exact-output, we only know required input after the quote. Check here
@@ -470,11 +481,16 @@ export async function handle_build_vault_swap(
     ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
   ].join("\n");
 
-  // NAV shield pre-check — warn if simulation fails, block if NAV drops > 10%.
-  let navWarnUni = await preCheckNavImpact(env, ctx, transaction);
-  if (navWarnUni) message += '\n' + navWarnUni;
+  // NAV shield pre-check — warn if simulation fails, block if NAV drops > threshold.
+  const navCheckUni = await preCheckNavImpact(env, ctx, transaction);
+  if (navCheckUni.warning) message += '\n' + navCheckUni.warning;
 
-  return { message, transaction, chainSwitch: chainSwitched };
+  const metadataUni: Record<string, unknown> = {};
+  if (shieldUni.metrics) metadataUni.swapShield = shieldUni.metrics;
+  if (navCheckUni.metrics) metadataUni.navShield = navCheckUni.metrics;
+  if (Object.keys(metadataUni).length) transaction.metrics = metadataUni;
+
+  return { message, transaction, chainSwitch: chainSwitched, metadata: Object.keys(metadataUni).length ? metadataUni : undefined };
 
 }
 

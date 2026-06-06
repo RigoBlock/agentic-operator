@@ -27,8 +27,10 @@ function mockEnv(): Record<string, string> {
     UNISWAP_API_KEY: "test",
     ZEROX_API_KEY: "test",
     ALCHEMY_API_KEY: "test",
-    CDP_API_KEY_ID: "test",
-    CDP_API_KEY_SECRET: "test",
+    // Empty CDP creds so x402 middleware skips initialization in tests
+    // (avoids noisy facilitator error logs).
+    CDP_API_KEY_ID: "",
+    CDP_API_KEY_SECRET: "",
   };
 }
 

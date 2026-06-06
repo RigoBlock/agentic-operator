@@ -11,6 +11,23 @@ import {
   MIN_SLIPPAGE_BPS,
   MAX_SLIPPAGE_BPS,
 } from "../../services/swapShield.js";
+import {
+  setNavShieldThreshold,
+  clearNavShieldThreshold,
+  DEFAULT_MAX_NAV_DROP_PCT,
+  MIN_NAV_DROP_PCT,
+  MAX_NAV_DROP_PCT,
+} from "../../services/navGuard.js";
+
+/** Settings tools may only be invoked by browser-based operators — not x402 agents. */
+function ensureBrowserOnly(ctx: RequestContext, toolName: string): void {
+  if (!ctx.isBrowserRequest) {
+    throw new Error(
+      `The '${toolName}' tool can only be used via the web UI. ` +
+      `External agents cannot modify operator safety settings.`,
+    );
+  }
+}
 
 export async function handle_set_default_slippage(
   env: Env,
@@ -18,6 +35,8 @@ export async function handle_set_default_slippage(
   args: Record<string, unknown>,
   toolName: string,
 ): Promise<ToolResult> {
+  ensureBrowserOnly(ctx, toolName);
+
   const raw = String(args.slippage ?? "").trim();
   let bps: number;
   const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
@@ -70,6 +89,8 @@ export async function handle_set_swap_shield_tolerance(
   args: Record<string, unknown>,
   toolName: string,
 ): Promise<ToolResult> {
+  ensureBrowserOnly(ctx, toolName);
+
   const raw = String(args.tolerance ?? "").trim();
   let pct: number;
   const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
@@ -99,7 +120,7 @@ export async function handle_set_swap_shield_tolerance(
       `⚠️ Swap Shield tolerance temporarily set to ${pct}% for 10 minutes. ` +
       `Swaps will be allowed if the DEX quote diverges up to ${pct}% from the oracle price. ` +
       `The shield will reset to the default 5% automatically.\n\n` +
-      `The NAV shield (10% max loss) still protects against catastrophic trades.`,
+      `The NAV shield still protects against catastrophic trades.`,
   };
 
 }
@@ -110,6 +131,8 @@ export async function handle_enable_swap_shield(
   args: Record<string, unknown>,
   toolName: string,
 ): Promise<ToolResult> {
+  ensureBrowserOnly(ctx, toolName);
+
   await clearSwapShieldTolerance(
     env.KV,
     ctx.operatorAddress!,
@@ -118,4 +141,56 @@ export async function handle_enable_swap_shield(
     message: "✅ Swap Shield tolerance reset to default (5%). All swaps will be checked against oracle prices.",
   };
 
+}
+
+export async function handle_set_nav_shield_threshold(
+  env: Env,
+  ctx: RequestContext,
+  args: Record<string, unknown>,
+  toolName: string,
+): Promise<ToolResult> {
+  ensureBrowserOnly(ctx, toolName);
+
+  const raw = String(args.threshold ?? "").trim();
+  let pct: bigint;
+  const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
+  const plainMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)$/);
+  if (percentMatch) {
+    const num = parseFloat(percentMatch[1]);
+    if (isNaN(num) || num <= 0) {
+      throw new Error("Invalid threshold value. Provide a positive number (e.g., '15%' or '15').");
+    }
+    pct = BigInt(Math.round(num));
+  } else if (plainMatch) {
+    const num = parseFloat(plainMatch[1]);
+    if (isNaN(num) || num <= 0) {
+      throw new Error("Invalid threshold value. Provide a positive number (e.g., '15%' or '15').");
+    }
+    pct = BigInt(Math.round(num));
+  } else {
+    throw new Error("Invalid threshold format. Use a number like '15%' or '15'.");
+  }
+
+  await setNavShieldThreshold(env.KV, ctx.operatorAddress!, pct);
+  return {
+    message: (
+      `🛡️ NAV Shield threshold set to ${Number(pct)}%. ` +
+      `Trades that would reduce the vault's unit price by more than ${Number(pct)}% will be blocked.\n\n` +
+      `Use 'reset NAV shield to default' to restore the ${Number(MIN_NAV_DROP_PCT)}%–${Number(MAX_NAV_DROP_PCT)}% default.`
+    ),
+  };
+}
+
+export async function handle_enable_nav_shield(
+  env: Env,
+  ctx: RequestContext,
+  args: Record<string, unknown>,
+  toolName: string,
+): Promise<ToolResult> {
+  ensureBrowserOnly(ctx, toolName);
+
+  await clearNavShieldThreshold(env.KV, ctx.operatorAddress!);
+  return {
+    message: `✅ NAV Shield reset to default (${Number(DEFAULT_MAX_NAV_DROP_PCT)}%). Trades that would reduce the vault's unit price by more than ${Number(DEFAULT_MAX_NAV_DROP_PCT)}% will be blocked.`,
+  };
 }

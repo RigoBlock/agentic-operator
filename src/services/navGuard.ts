@@ -65,7 +65,61 @@ import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { getClient } from "./vault.js";
 
 /** Default maximum allowed NAV drop per transaction (10%) — used for swaps */
-const DEFAULT_MAX_NAV_DROP_PCT = 10n;
+export const DEFAULT_MAX_NAV_DROP_PCT = 10n;
+
+/** Minimum configurable NAV drop threshold (1%) */
+export const MIN_NAV_DROP_PCT = 1n;
+
+/** Maximum configurable NAV drop threshold (100%) */
+export const MAX_NAV_DROP_PCT = 100n;
+
+/** KV key prefix for per-operator NAV shield threshold override */
+const NAV_SHIELD_PREFIX = "nav-shield-pct:";
+
+/**
+ * Get the operator's stored NAV shield threshold from KV.
+ * Returns null if not set (caller should use DEFAULT_MAX_NAV_DROP_PCT).
+ */
+export async function getNavShieldThreshold(
+  kv: KVNamespace,
+  operatorAddress: string,
+): Promise<bigint | null> {
+  const raw = await kv.get(`${NAV_SHIELD_PREFIX}${operatorAddress.toLowerCase()}`);
+  if (!raw) return null;
+  if (!/^\d+$/.test(raw)) return null;
+  const val = BigInt(raw);
+  if (val < MIN_NAV_DROP_PCT || val > MAX_NAV_DROP_PCT) return null;
+  return val;
+}
+
+/**
+ * Store the operator's NAV shield threshold in KV (persistent).
+ */
+export async function setNavShieldThreshold(
+  kv: KVNamespace,
+  operatorAddress: string,
+  pct: bigint,
+): Promise<void> {
+  if (pct < MIN_NAV_DROP_PCT || pct > MAX_NAV_DROP_PCT) {
+    throw new Error(
+      `NAV shield threshold must be between ${Number(MIN_NAV_DROP_PCT)}% and ${Number(MAX_NAV_DROP_PCT)}%. ` +
+      `Received: ${Number(pct)}%`,
+    );
+  }
+  await kv.put(`${NAV_SHIELD_PREFIX}${operatorAddress.toLowerCase()}`, String(pct));
+  console.log(`[NavShield] Threshold set to ${Number(pct)}% for ${operatorAddress}`);
+}
+
+/**
+ * Clear the operator's NAV shield threshold override (reset to default).
+ */
+export async function clearNavShieldThreshold(
+  kv: KVNamespace,
+  operatorAddress: string,
+): Promise<void> {
+  await kv.delete(`${NAV_SHIELD_PREFIX}${operatorAddress.toLowerCase()}`);
+  console.log(`[NavShield] Threshold reset to default for ${operatorAddress}`);
+}
 
 /** Known on-chain custom error selectors for clear error reporting */
 const KNOWN_ERRORS: Record<string, string> = {
@@ -397,7 +451,7 @@ export async function checkNavImpact(
   if (dropFromRefPct > maxDrop) {
     const isBelowBaseline = baselineUnitaryValue && baselineUnitaryValue > preNav.unitaryValue;
     const tradeImprovesNav = postNav.unitaryValue > preNav.unitaryValue;
-    const baselineDropPct = isBelowBaseline
+    const baselineDropPct = isBelowBaseline && baselineUnitaryValue
       ? Number(((baselineUnitaryValue - preNav.unitaryValue) * 10000n) / baselineUnitaryValue) / 100
       : 0;
 

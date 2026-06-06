@@ -103,6 +103,75 @@
       transform: translateX(20px); background: #000;
     }
 
+    /* ── Trading params grid ─────────────────────────────── */
+    .trading-params-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    @media (max-width: 520px) {
+      .trading-params-grid { grid-template-columns: 1fr; }
+    }
+    .trading-param label {
+      font-size: 13px;
+      color: var(--muted);
+      display: block;
+      margin-bottom: 6px;
+    }
+    .param-input-wrap {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .param-input-wrap input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 8px 10px;
+      font-size: 15px;
+      outline: none;
+      min-width: 0;
+    }
+    .param-input-wrap input:focus { border-color: var(--accent); }
+    .param-input-wrap span { color: var(--muted); font-size: 15px; }
+
+    /* ── Tooltip ─────────────────────────────────────────── */
+    .tooltip {
+      position: relative;
+      cursor: help;
+      color: var(--muted);
+      font-size: 13px;
+      margin-left: 2px;
+    }
+    .tooltip::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      bottom: 130%;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--text);
+      white-space: normal;
+      max-width: 260px;
+      overflow-wrap: break-word;
+      display: block;
+      text-align: left;
+      z-index: 200;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .tooltip:hover::after {
+      opacity: 1;
+    }
+
     /* ── Mobile responsiveness ───────────────────────────── */
     @media (max-width: 640px) {
       header { padding: 8px 12px; gap: 6px; }

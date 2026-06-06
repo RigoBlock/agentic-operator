@@ -33,9 +33,18 @@
 
   <!-- Settings modal (vault, network, AI, delegation) -->
   <div id="settings-modal" class="modal-overlay" onclick="if(event.target===this)closeModal('settings-modal')">
-    <div class="modal-content" style="max-width: 480px;">
-      <button class="modal-close" onclick="closeModal('settings-modal')">&times;</button>
-      <h3>Settings</h3>
+    <div class="modal-content" style="max-width: 520px;">
+      <div class="settings-header">
+        <h3 style="margin: 0;">Settings</h3>
+        <div class="settings-header-actions">
+          <label class="testnet-toggle" title="Switch between mainnet and testnet chains">
+            <input type="checkbox" id="testnet-toggle" onchange="toggleTestnet()" />
+            <span class="toggle-track"></span>
+            <span id="network-mode-label">Mainnet</span>
+          </label>
+          <button class="modal-close" onclick="closeModal('settings-modal')">&times;</button>
+        </div>
+      </div>
 
       <!-- Vault section -->
       <div class="settings-section">
@@ -46,18 +55,6 @@
             <div id="saved-vaults-dropdown"></div>
           </div>
           <button class="saved-vaults-btn" onclick="toggleSavedVaults()">Saved ▾</button>
-        </div>
-      </div>
-
-      <!-- Network section -->
-      <div class="settings-section">
-        <h4>Network</h4>
-        <div class="settings-row">
-          <label class="testnet-toggle" title="Switch between mainnet and testnet chains">
-            <input type="checkbox" id="testnet-toggle" onchange="toggleTestnet()" />
-            <span class="toggle-track"></span>
-            <span id="network-mode-label">Mainnet</span>
-          </label>
         </div>
       </div>
 
@@ -90,28 +87,33 @@
       <!-- Trading section -->
       <div class="settings-section">
         <h4>Trading</h4>
-        <div style="display: flex; flex-direction: column; gap: 14px;">
-          <div>
-            <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Default Slippage</label>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <input id="slippage-input" type="number" min="0.1" max="5" step="0.1" value="1" style="flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;" onchange="onSlippageChange()" />
-              <span style="color: var(--muted); font-size: 15px;">%</span>
+        <div class="trading-params-grid">
+          <!-- Slippage -->
+          <div class="trading-param">
+            <label>Slippage <span class="tooltip" data-tooltip="Maximum price movement accepted between quote and execution. Range: 0.1% – 5%.">ⓘ</span></label>
+            <div class="param-input-wrap">
+              <input id="slippage-input" type="number" min="0.1" max="5" step="0.1" value="1" onchange="onSlippageChange()" />
+              <span>%</span>
             </div>
-            <span style="font-size: 12px; color: var(--muted); margin-top: 4px; display: block;">
-              Maximum price movement accepted between quote and execution. Range: 0.1% – 5%.
-            </span>
           </div>
-          <div>
-            <label style="font-size: 14px; color: var(--muted); display: block; margin-bottom: 6px;">Swap Shield Tolerance</label>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <input id="swap-shield-tolerance" type="number" min="0.5" max="50" step="0.5" value="5" style="flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 15px; outline: none;" onchange="onSwapShieldToleranceChange()" />
-              <span style="color: var(--muted); font-size: 15px;">%</span>
+          <!-- Swap Shield -->
+          <div class="trading-param">
+            <label>Swap Shield <span class="tooltip" data-tooltip="Maximum divergence from the on-chain oracle price in either direction. Default 5%, up to 50%. Resets after 10 min.">ⓘ</span></label>
+            <div class="param-input-wrap">
+              <input id="swap-shield-tolerance" type="number" min="0.5" max="50" step="0.5" value="5" onchange="onSwapShieldToleranceChange()" />
+              <span>%</span>
               <button id="swap-shield-reset" class="saved-vaults-btn" onclick="resetSwapShieldTolerance()" style="display: none;">Reset</button>
             </div>
-            <span style="font-size: 12px; color: var(--muted); margin-top: 4px; display: block;">
-              Maximum divergence from the on-chain oracle price in either direction. Default 5%, up to 50%.
-              <span id="swap-shield-timer" style="display: none; margin-left: 4px;"></span>
-            </span>
+            <span id="swap-shield-timer" style="display: none; font-size: 11px; color: var(--warn);"></span>
+          </div>
+          <!-- NAV Shield -->
+          <div class="trading-param">
+            <label>NAV Shield <span class="tooltip" data-tooltip="Maximum allowed vault unit-price drop per trade. Default 10%, configurable 1% – 100%. Persistent setting.">ⓘ</span></label>
+            <div class="param-input-wrap">
+              <input id="nav-shield-threshold" type="number" min="1" max="100" step="1" value="10" onchange="onNavShieldThresholdChange()" />
+              <span>%</span>
+              <button id="nav-shield-reset" class="saved-vaults-btn" onclick="resetNavShieldThreshold()" style="display: none;">Reset</button>
+            </div>
           </div>
         </div>
       </div>
@@ -119,23 +121,35 @@
       <!-- Delegation section -->
       <div class="settings-section">
         <h4>Delegation</h4>
-        <div id="delegation-panel" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+        <div id="delegation-panel">
           <span id="delegation-status-badge" class="delegation-status inactive">
             <span class="dot"></span>
             <span id="delegation-status-text">Not set up</span>
           </span>
           <span id="agent-addr" class="addr copyable-addr" style="display:none;" title="Click to copy full address"></span>
           <span id="agent-balance-display" class="agent-balance" style="display:none;"></span>
+          <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
+          <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
           <label id="sponsor-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, gas fees are sponsored (no agent funding needed). When disabled, the agent pays gas from its own ETH balance.">
             <input type="checkbox" id="sponsor-toggle" onchange="toggleSponsoredGas(this.checked)" />
             <span id="sponsor-toggle-text">Sponsored gas</span>
           </label>
-          <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
-          <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
-          <button id="telegram-pair-btn" class="btn-delegation telegram" onclick="openTelegramPairing()" style="display:none;" title="Control this pool from Telegram">⬡ Telegram</button>
-          <button id="telegram-reset-btn" class="btn-delegation danger" onclick="resetTelegramPairing()" style="display:none;" title="Reset Telegram pairing and conversation state">↻ Reset</button>
           <!-- Per-chain active status pills — shown once any chain is set up -->
           <div id="delegation-chain-chips" class="delegation-chain-chips" style="display:none;"></div>
+        </div>
+      </div>
+
+      <!-- Telegram section -->
+      <div class="settings-section" id="telegram-section" style="display:none;">
+        <h4>Telegram</h4>
+        <div id="telegram-panel">
+          <span id="telegram-status-badge" class="delegation-status inactive">
+            <span class="dot"></span>
+            <span id="telegram-status-text">Not linked</span>
+          </span>
+          <span style="font-size: 14px; color: var(--muted);">Control this pool from <a href="https://t.me/RigoVibeBot" target="_blank" rel="noopener" style="color: var(--accent);">@RigoVibeBot</a></span>
+          <button id="telegram-pair-btn" class="btn-delegation telegram" onclick="openTelegramPairing()" style="display:none;" title="Control this pool from Telegram">⬡ Pair</button>
+          <button id="telegram-reset-btn" class="btn-delegation danger" onclick="resetTelegramPairing()" style="display:none;" title="Reset Telegram pairing and conversation state">↻ Reset</button>
         </div>
       </div>
     </div>

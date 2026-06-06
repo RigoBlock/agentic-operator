@@ -142,6 +142,8 @@ export interface ToolCallResult {
   error?: boolean;
   /** Quick-action suggestions shown as clickable chips */
   suggestions?: string[];
+  /** Transaction metrics (NAV impact, oracle divergence) for frontend display */
+  metadata?: Record<string, unknown>;
 }
 
 /** An unsigned transaction returned to the frontend for operator signing */
@@ -167,6 +169,8 @@ export interface UnsignedTransaction {
   };
   /** Internal marker: NAV shield pre-check already ran for this tx build path. */
   navShieldChecked?: boolean;
+  /** Per-transaction metrics (NAV impact, swap-shield divergence) for frontend display. */
+  metrics?: Record<string, unknown>;
 }
 
 export interface ChatResponse {
@@ -202,7 +206,7 @@ export type StreamEvent =
   | { type: "status"; message: string }
   | { type: "reasoning"; content: string }
   | { type: "tool_call"; name: string; arguments: Record<string, unknown> }
-  | { type: "tool_result"; name: string; result: string; error?: boolean }
+  | { type: "tool_result"; name: string; result: string; error?: boolean; metadata?: Record<string, unknown> }
   | { type: "transaction"; transaction: UnsignedTransaction }
   | { type: "chain_switch"; chainId: number }
   | { type: "text"; content: string }

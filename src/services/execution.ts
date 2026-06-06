@@ -39,7 +39,7 @@ import {
   executeSponsoredCalls,
   type WalletCall,
 } from "./bundler.js";
-import { checkNavImpact } from "./navGuard.js";
+import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
 import { getClient, ALCHEMY_ORIGIN } from "./vault.js";
 
 /**
@@ -413,6 +413,11 @@ export async function executeViaDelegation(
   // fix must be in correcting the root cause (e.g. switching from getNavDataView
   // to updateUnitaryValue), not in skipping the shield.
 
+  // Read operator's custom NAV shield threshold (falls back to default 10%)
+  const storedNavThreshold = env.KV
+    ? await getNavShieldThreshold(env.KV, config.operatorAddress)
+    : null;
+
   const navResult = await checkNavImpact(
     tx.to as Address,
     tx.data as Hex,
@@ -421,6 +426,7 @@ export async function executeViaDelegation(
     env.ALCHEMY_API_KEY,
     config.operatorAddress,
     env.KV,
+    storedNavThreshold ?? undefined,
   );
 
   // Route based on what the NAV shield actually found

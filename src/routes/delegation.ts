@@ -36,6 +36,7 @@ import { SUPPORTED_CHAINS } from "../config.js";
 import { checkAgentBalance, checkPendingTxStatus, executeViaDelegation, ExecutionError } from "../services/execution.js";
 import { sanitizeError } from "../config.js";
 import { getTelegramUser, getTelegramUserIdByAddress } from "../services/telegramPairing.js";
+import { getVaultInfo } from "../services/vault.js";
 import type { Address, Hex } from "viem";
 
 const delegation = new Hono<{ Bindings: Env }>();
@@ -350,6 +351,21 @@ delegation.get("/status", async (c) => {
     ? chainDelegation.sponsoredGas
     : (config?.sponsoredGas ?? true);
 
+  // Check Telegram pairing status via operator address (only when verify=true
+  // so we have a synced wallet and can infer the operator address from vault owner)
+  let telegramPaired = false;
+  if (verifyOnChain && walletInfo?.address) {
+    try {
+      const vaultInfo = await getVaultInfo(chainId || 1, vaultAddress as Address, c.env.ALCHEMY_API_KEY);
+      if (vaultInfo?.owner) {
+        const tgUserId = await getTelegramUserIdByAddress(c.env.KV, vaultInfo.owner);
+        telegramPaired = !!tgUserId;
+      }
+    } catch {
+      // ignore — telegram status is best-effort
+    }
+  }
+
   return c.json({
     enabled: config?.enabled || false,
     agentAddress: walletInfo?.address || null,
@@ -373,6 +389,7 @@ delegation.get("/status", async (c) => {
         }
       : null,
     allChainsStatus,
+    telegramPaired,
     // Wallet change fields — non-null only when CDP credential rotation detected
     walletChanged: walletChanged || false,
     previousAgentAddress: previousAgentAddress ?? null,

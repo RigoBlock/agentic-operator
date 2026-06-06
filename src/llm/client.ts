@@ -20,7 +20,7 @@ import { AuthError } from "../services/auth.js";
 import { formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { getClient } from "../services/vault.js";
-import { checkNavImpact } from "../services/navGuard.js";
+import { checkNavImpact, getNavShieldThreshold } from "../services/navGuard.js";
 import {
   getSwapShieldTolerance,
   getStoredSlippage,
@@ -822,13 +822,17 @@ ${executionModeNote}${contextDocsBlock}`;
       // Outer NAV shield for tools that don't self-check (build_vault_swap already sets navShieldChecked)
       let fastPathReply = toolResult.message;
       if (toolResult.transaction && !toolResult.transaction.navShieldChecked && toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress?.toLowerCase()) {
-        const navWarn = await preCheckNavImpact(env, ctx, toolResult.transaction);
+        const navCheck = await preCheckNavImpact(env, ctx, toolResult.transaction);
         toolResult.transaction.navShieldChecked = true;
-        if (navWarn) fastPathReply += '\n' + navWarn;
+        if (navCheck.warning) fastPathReply += '\n' + navCheck.warning;
+        if (navCheck.metrics) {
+          toolResult.metadata = { ...toolResult.metadata, navMetrics: navCheck.metrics };
+          if (toolResult.transaction) toolResult.transaction.metrics = toolResult.metadata;
+        }
       }
       return {
         reply: fastPathReply,
-        toolCalls: [{ name: immediateFastPath.name, arguments: immediateFastPath.args, result: fastPathReply, error: false }],
+        toolCalls: [{ name: immediateFastPath.name, arguments: immediateFastPath.args, result: fastPathReply, error: false, metadata: toolResult.metadata }],
         transaction: toolResult.transaction,
         transactions: toolResult.transaction ? [toolResult.transaction] : undefined,
         chainSwitch: toolResult.chainSwitch,
@@ -930,9 +934,13 @@ ${executionModeNote}${contextDocsBlock}`;
         const toolResult = await executeToolCall(env, ctx, deferredSwap.name, deferredSwap.args);
         let deferredReply = toolResult.message;
         if (toolResult.transaction && !toolResult.transaction.navShieldChecked && toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress?.toLowerCase()) {
-          const navWarn = await preCheckNavImpact(env, ctx, toolResult.transaction);
+          const navCheck = await preCheckNavImpact(env, ctx, toolResult.transaction);
           toolResult.transaction.navShieldChecked = true;
-          if (navWarn) deferredReply += '\n' + navWarn;
+          if (navCheck.warning) deferredReply += '\n' + navCheck.warning;
+          if (navCheck.metrics) {
+            toolResult.metadata = { ...toolResult.metadata, navMetrics: navCheck.metrics };
+            if (toolResult.transaction) toolResult.transaction.metrics = toolResult.metadata;
+          }
         }
         return {
           reply: deferredReply,
@@ -1007,9 +1015,10 @@ ${executionModeNote}${contextDocsBlock}`;
 
         let result: string;
         let isError = false;
+        let toolResult: ToolResult | undefined;
 
         try {
-          const toolResult = await executeToolCall(env, ctx, name, args);
+          toolResult = await executeToolCall(env, ctx, name, args);
           result = toolResult.message;
           console.log(`[LLM] Tool ${name} succeeded, result length: ${result.length}`);
 
@@ -1019,9 +1028,13 @@ ${executionModeNote}${contextDocsBlock}`;
               !toolResult.transaction.navShieldChecked &&
               toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress.toLowerCase()
             ) {
-              const navWarn = await preCheckNavImpact(env, ctx, toolResult.transaction);
+              const navCheck = await preCheckNavImpact(env, ctx, toolResult.transaction);
               toolResult.transaction.navShieldChecked = true;
-              if (navWarn) result += '\n' + navWarn;
+              if (navCheck.warning) result += '\n' + navCheck.warning;
+              if (navCheck.metrics) {
+                toolResult.metadata = { ...toolResult.metadata, navMetrics: navCheck.metrics };
+                if (toolResult.transaction) toolResult.transaction.metrics = toolResult.metadata;
+              }
             }
             pendingTransactions.push(toolResult.transaction);
           }
@@ -1109,15 +1122,17 @@ ${executionModeNote}${contextDocsBlock}`;
           isError = true;
         }
 
+        const callMetadata = !isError && toolResult?.metadata ? toolResult.metadata : undefined;
         toolCallResults.push({
           name,
           arguments: args,
           result,
           error: isError,
+          metadata: callMetadata,
         });
 
         // Emit stream event for tool result
-        onStreamEvent?.({ type: "tool_result", name, result, error: isError || undefined });
+        onStreamEvent?.({ type: "tool_result", name, result, error: isError || undefined, metadata: callMetadata });
 
         if (onToolResult) await onToolResult(name, result, isError).catch(() => {});
 
@@ -1443,13 +1458,22 @@ export interface ToolResult {
  * time (belt-and-suspenders — market conditions could change between building
  * and broadcasting). For manual mode, this is the ONLY NAV shield checkpoint.
  */
+/** Metrics returned by the NAV shield pre-check. */
+export interface NavPreCheckMetrics {
+  navImpactPct: string;
+  navReferenceValue: string;
+  navPostValue: string;
+}
+
 export async function preCheckNavImpact(
   env: Env,
   ctx: RequestContext,
   tx: UnsignedTransaction,
-): Promise<string> {
+): Promise<{ warning: string; metrics?: NavPreCheckMetrics }> {
   const ZERO = "0x0000000000000000000000000000000000000000";
-  if (!ctx.vaultAddress || ctx.vaultAddress === ZERO) return '';
+  if (!ctx.vaultAddress || ctx.vaultAddress === ZERO) {
+    return { warning: '' };
+  }
 
   // Determine who to simulate as — must be the actual vault owner.
   // Verified callers: use their address (already proven to be the owner via signature).
@@ -1468,9 +1492,14 @@ export async function preCheckNavImpact(
       }) as Address;
     } catch {
       // RPC error reading vault owner — skip NAV pre-check; delegated path has a hard stop
-      return '';
+      return { warning: '' };
     }
   }
+
+  // Read operator's custom NAV shield threshold (falls back to default 10%)
+  const storedNavThreshold = env.KV && ctx.operatorAddress
+    ? await getNavShieldThreshold(env.KV, ctx.operatorAddress)
+    : null;
 
   try {
     const result = await checkNavImpact(
@@ -1481,6 +1510,7 @@ export async function preCheckNavImpact(
       env.ALCHEMY_API_KEY,
       simulationSender,
       env.KV,
+      storedNavThreshold ?? undefined,
     );
 
     if (!result.allowed) {
@@ -1491,11 +1521,12 @@ export async function preCheckNavImpact(
         // The delegated-mode broadcast check in execution.ts is the hard stop.
         const warning = `⚠️ Simulation warning: ${result.reason || "transaction may revert on-chain"} — verify token approvals and vault adapter support before signing.`;
         console.warn(`[NavShield pre-check] Non-blocking simulation failure: ${result.reason}`);
-        return warning;
+        return { warning };
       }
       // BLOCKED — NAV would drop more than the threshold. Hard security block.
+      const maxDrop = storedNavThreshold ? Number(storedNavThreshold) : 10;
       const reason = `NAV shield blocked: this trade would reduce vault unit value by ${result.dropPct}% ` +
-        `(max allowed: 10%). ${result.reason || ""}`;
+        `(max allowed: ${maxDrop}%). ${result.reason || ""}`;
       throw new Error(reason.trim());
     }
 
@@ -1503,10 +1534,19 @@ export async function preCheckNavImpact(
       console.log(
         `[NavShield pre-check] ✓ Passed: NAV drop ${result.dropPct}% (chain ${tx.chainId})`,
       );
+      return {
+        warning: '',
+        metrics: {
+          navImpactPct: result.dropPct,
+          navReferenceValue: result.baselineUnitaryValue || result.preNavUnitaryValue,
+          navPostValue: result.postNavUnitaryValue,
+        },
+      };
     } else {
       console.warn(
         `[NavShield pre-check] ⚠ Unverified: NAV impact could not be measured (chain ${tx.chainId})`,
       );
+      return { warning: '' };
     }
   } catch (err) {
     // Re-throw NAV shield blocks — these are security violations
@@ -1520,8 +1560,8 @@ export async function preCheckNavImpact(
         err instanceof Error ? err.message.slice(0, 200) : String(err)
       }`,
     );
+    return { warning: '' };
   }
-  return '';
 }
 
 /**
@@ -1699,6 +1739,13 @@ export async function resolveSlippage(env: Env, ctx: RequestContext): Promise<nu
  * Uses the operator's temporary tolerance override (if set) instead of the
  * default 5% threshold.
  */
+/** Metrics returned by the Swap Shield check. */
+export interface SwapShieldMetrics {
+  oracleDeltaBps: number;
+  divergencePct: string;
+  priceFeedExists: boolean;
+}
+
 export async function runSwapShield(
   env: Env,
   ctx: RequestContext,
@@ -1709,7 +1756,7 @@ export async function runSwapShield(
   resolvedTokenIn?: Address,
   resolvedTokenOut?: Address,
   oracleEnrichment?: { priceFeedExists: boolean; oracleAmount: string },
-): Promise<string | undefined> {
+): Promise<{ warning?: string; metrics?: SwapShieldMetrics }> {
   // Check temporary tolerance override
   let maxDivergencePct: number | undefined;
   if (isVerifiedOperatorContext(ctx) && env.KV) {
@@ -1768,6 +1815,12 @@ export async function runSwapShield(
     oracleEnrichment?.priceFeedExists,
     oracleEnrichment?.oracleAmount ? BigInt(oracleEnrichment.oracleAmount) : undefined,
   );
+
+  const metrics: SwapShieldMetrics = {
+    oracleDeltaBps: result.deltaBps ?? 0,
+    divergencePct: result.divergencePct ?? "0",
+    priceFeedExists: result.priceFeedExists ?? false,
+  };
 
   if (!result.allowed) {
     if (result.code === "INVALID_QUOTE") {
@@ -1834,8 +1887,10 @@ export async function runSwapShield(
       `⚠️ Swap Shield: quote was not oracle-verified (${result.code}). ` +
       (result.reason ?? "Oracle check unavailable — proceeding without oracle protection.");
     console.warn(`[SwapShield] Non-blocking: ${warning}`);
-    return warning;
+    return { warning, metrics };
   }
+
+  return { metrics };
 }
 
 // ── Swap argument sanitizer ──────────────────────────────────────────

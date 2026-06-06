@@ -681,6 +681,12 @@ async function handleMessage(
         ? [response.transaction]
         : [];
 
+    // Defensive: log when txList is empty but tool results suggest a transaction should exist.
+    const hasToolTx = response.toolCalls?.some(tc => tc.result?.includes('ready') || tc.result?.includes('Execute'));
+    if (hasToolTx && txList.length === 0) {
+      console.warn('[telegram] Tool result suggests a transaction but txList is empty. executionMode:', executionMode, 'toolCalls:', response.toolCalls?.map(tc => tc.name));
+    }
+
     // Build the Telegram reply
     let replyParts: string[] = [];
 

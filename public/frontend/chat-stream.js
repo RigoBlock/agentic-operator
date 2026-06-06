@@ -74,16 +74,10 @@ async function sendMessage() {
   const effectiveVault = (vault && vault.length === 42) ? vault : '0x0000000000000000000000000000000000000000';
   const chainId = currentChainId;
 
-  // Warn if wallet chain doesn't match the vault's saved chain
-  if (vault && vault.length === 42) {
-    const saved = getSavedVaults().find(v => v.address.toLowerCase() === vault.toLowerCase());
-    if (saved && saved.chainId && saved.chainId !== chainId) {
-      const savedName = CHAIN_NAMES[saved.chainId] || 'chain ' + saved.chainId;
-      const currentName = CHAIN_NAMES[chainId] || 'chain ' + chainId;
-      appendMessage('system', `⚠️ Chain mismatch: vault ${vault.slice(0, 6)}…${vault.slice(-4)} was saved on ${savedName}, but your wallet is on ${currentName}. Switch your wallet to ${savedName} or re-enter the vault to auto-switch.`);
-      // Don't block — let the user proceed if they intentionally want a different chain
-    }
-  }
+  // Chain mismatch warning removed — it was redundant (the backend already reports
+  // chain switches via data.chainSwitch) and often wrong (delegated mode signs with
+  // the agent wallet, and cross-chain ops auto-switch to the target chain).
+  // Manual-mode users get a chain-switch prompt from their wallet when signing.
 
   if (!connectedAddress) {
     appendMessage('system', '👛 Please connect your wallet first to use the chat.');
@@ -439,13 +433,16 @@ async function handleChatResponse(data) {
     appendMessage('assistant', '', withModelTrace({ reasoning: data.reasoning }));
   }
 
-  // Show tool results but skip the verbose tool call name/args when a transaction is present
-  if (data.toolCalls?.length > 0 && !data._streamShowedErrors) {
+  // Show tool results but skip the verbose tool call name/args when a transaction is present.
+  // When reply is empty (e.g. autonomous execution), the else-if block below renders tool
+  // results as the main message — don't duplicate them here.
+  if (data.toolCalls?.length > 0 && !data._streamShowedErrors && data.reply) {
+    // Normalize whitespace for comparison: collapse multiple spaces/newlines and trim.
+    const normalize = (s) => (s || '').replace(/\s+/g, ' ').trim();
     const suppressEcho = !!(
-      data.reply &&
       data.toolCalls.length === 1 &&
       !data.toolCalls[0].error &&
-      (data.toolCalls[0].result || '').trim() === data.reply.trim()
+      normalize(data.toolCalls[0].result) === normalize(data.reply)
     );
 
     for (const tc of data.toolCalls) {
@@ -524,6 +521,10 @@ async function handleChatResponse(data) {
     // DEX badge removed — dexProvider tracked internally
   }
 
+  // Ensure execution mode is fresh before deciding how to render transactions.
+  // Delegation status may have changed during chain switch or async operations.
+  syncExecutionMode();
+
   // Handle multiple transactions (multi-chain swaps)
   const txList = data.transactions && data.transactions.length > 0
     ? data.transactions
@@ -561,6 +562,13 @@ async function handleChatResponse(data) {
   } else if (!data.reply && !data.metadata) {
     // Only warn when there's truly nothing useful in the response
     console.log('[tx-modal] No transaction in response:', Object.keys(data));
+  }
+
+  // Defensive: if the tool result looks like it should have a transaction but none was found,
+  // log details so we can diagnose why the modal/card didn't appear.
+  const hasToolTx = data.toolCalls?.some(tc => tc.result?.includes('ready') || tc.result?.includes('Execute'));
+  if (hasToolTx && txList.length === 0) {
+    console.warn('[tx-modal] Tool result suggests a transaction but txList is empty. data keys:', Object.keys(data), 'toolCalls:', data.toolCalls?.map(tc => tc.name));
   }
 }
 

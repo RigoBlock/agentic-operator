@@ -14,6 +14,8 @@ import { handle_switch_chain } from "./vault.js";
 import { handle_set_default_slippage } from "./settings.js";
 import { handle_set_swap_shield_tolerance } from "./settings.js";
 import { handle_enable_swap_shield } from "./settings.js";
+import { handle_set_nav_shield_threshold } from "./settings.js";
+import { handle_enable_nav_shield } from "./settings.js";
 import { handle_refresh_oracle_feed } from "./oracle.js";
 import { handle_gmx_increase_position } from "./gmx.js";
 import { handle_gmx_decrease_position } from "./gmx.js";
@@ -58,6 +60,8 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "set_default_slippage": handle_set_default_slippage,
   "set_swap_shield_tolerance": handle_set_swap_shield_tolerance,
   "enable_swap_shield": handle_enable_swap_shield,
+  "set_nav_shield_threshold": handle_set_nav_shield_threshold,
+  "enable_nav_shield": handle_enable_nav_shield,
   "refresh_oracle_feed": handle_refresh_oracle_feed,
   "gmx_increase_position": handle_gmx_increase_position,
   "gmx_decrease_position": handle_gmx_decrease_position,

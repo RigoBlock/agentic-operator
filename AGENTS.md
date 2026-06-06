@@ -265,15 +265,17 @@ are delegated and can revoke at any time.
 6. Agent wallet has sufficient balance for gas
 7. Gas fees within hard caps per chain
 
-### 4. NAV Shield (10% Maximum Loss)
+### 4. NAV Shield (Configurable Maximum Loss)
 Before every transaction broadcast, the system simulates the trade's impact
 on the vault's Net Asset Value per unit:
 
-- Atomically simulates: `multicall([swap, getNavDataView])`
+- Atomically simulates: `multicall([swap, updateUnitaryValue])`
 - Compares post-swap NAV against the **higher of:** pre-swap NAV or 24-hour baseline
-- If NAV drops > 10% → **transaction BLOCKED**, reason returned to caller
+- Default threshold: **10%** NAV drop per trade → **transaction BLOCKED**
+- Operator-configurable range: **1%–100%** (set via the web UI; stored per operator in KV)
 - This check runs outside the agent's control surface — it cannot be disabled,
-  bypassed, or circumvented by any API caller
+  bypassed, or circumvented by any API caller. The agent is bound by whatever
+  threshold the operator has configured.
 
 ### 5. Slippage Protection
 Default slippage tolerance: 1% (100 basis points), configurable by the operator
@@ -294,6 +296,7 @@ against the on-chain BackgeoOracle TWAP price:
 - The operator can temporarily raise the tolerance up to 50% (10-minute TTL) for known high-impact trades instead of fully disabling the shield
 - The tolerance auto-resets to the default 5% after the timeout expires
 - Independent of the NAV shield — both run on every swap
+- **External agents (x402 callers) cannot modify safety settings.** Slippage, swap shield tolerance, and NAV shield threshold can only be changed by the operator via the web UI. Agents are bound by the operator's current settings but cannot alter them.
 
 ---
 
@@ -304,7 +307,7 @@ Even a fully authenticated agent with delegation access CANNOT:
 | Action | Why not |
 |--------|---------|
 | Drain vault assets to external address | `withdraw` and `transferOwnership` selectors are never delegated |
-| Execute trades that lose > 10% NAV | NAV shield blocks pre-broadcast |
+| Execute trades that lose > configured NAV threshold | NAV shield blocks pre-broadcast (default 10%, operator-configurable 1%–100%) |
 | Execute swaps with >5% oracle divergence | Swap Shield compares DEX quote vs TWAP oracle; this block does not apply if the operator has temporarily raised the tolerance above the current divergence |
 | Bypass slippage protection | Slippage is enforced in swap calldata building |
 | Call arbitrary contract functions | Selector whitelist — only approved vault functions |

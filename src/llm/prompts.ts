@@ -21,7 +21,11 @@ export type DomainKey =
   | "vault"
   | "strategy";
 
-/** Pattern-based intent detection. Returns the set of domains relevant to the user's message. */
+/** Pattern-based intent detection. Returns the set of domains relevant to the user's message.
+ *  Only scans USER messages — assistant messages from previous turns contain execution
+ *  outcomes (e.g. "delegation active") that trigger false-positive domains and exclude
+ *  the tools the user actually needs for their current request.
+ */
 export function detectDomains(messages: Array<{ role: string; content: string }>): Set<DomainKey> {
   const domains = new Set<DomainKey>();
 
@@ -32,48 +36,39 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
     .map(m => m.content.toLowerCase())
     .join(" ");
 
-  // Also check assistant messages for ongoing multi-step plans
-  const recentAssistantMsgs = messages
-    .filter(m => m.role === "assistant")
-    .slice(-2)
-    .map(m => m.content.toLowerCase())
-    .join(" ");
-
-  const all = recentUserMsgs + " " + recentAssistantMsgs;
-
-  // Swap
-  if (/\b(swap|buy|sell|exchange|convert|trade|quote|price|slippage|swap.?shield)\b/.test(all) &&
+  // Swap (use \bsell\B to catch "selling", \bbuy\B to catch "buying", etc.)
+  if (/\b(swap|buy\B|sell\B|exchange|convert|trade|quote|price|slippage|swap.?shield|oracle)\b/.test(recentUserMsgs) &&
       !/\b(long|short|perp|leverage|\dx)\b/.test(recentUserMsgs)) {
     domains.add("swap");
   }
 
   // GMX perpetuals
-  if (/\b(long|short|perp|perpetual|leverage|\dx|position|margin|gmx|funding fee|stop.?loss|take.?profit)\b/.test(all)) {
+  if (/\b(long|short|perp|perpetual|leverage|\dx|position|margin|gmx|funding fee|stop.?loss|take.?profit)\b/.test(recentUserMsgs)) {
     domains.add("gmx");
   }
 
   // Uniswap LP
-  if (/\b(lp|liquidity|pool.?info|uniswap|tick|range|burn.?position|collect.?fee|nft|position.*id)\b/.test(all)) {
+  if (/\b(lp|liquidity|pool.?info|uniswap|tick|range|burn.?position|collect.?fee|nft|position.*id)\b/.test(recentUserMsgs)) {
     domains.add("lp");
   }
 
   // Cross-chain bridge
-  if (/\b(bridge|cross.?chain|transfer.*to|move.*to|across|sync.*nav|rebalance|consolidate|aggregated?\s*nav|multichain|multi.chain)\b/.test(all)) {
+  if (/\b(bridge|cross.?chain|transfer.*to|move.*to|across|sync.*nav|rebalance|consolidate|aggregated?\s*nav|multichain|multi.chain)\b/.test(recentUserMsgs)) {
     domains.add("bridge");
   }
 
   // GRG Staking
-  if (/\b(stak|unstake|undelegate|epoch|grg.*reward|claim.*reward|staking)\b/.test(all)) {
+  if (/\b(stak|unstake|undelegate|epoch|grg.*reward|claim.*reward|staking)\b/.test(recentUserMsgs)) {
     domains.add("staking");
   }
 
   // Delegation
-  if (/\b(delegat|revoke|agent.*wallet|auto.?trade|enable.*agent|disable.*agent|selector)\b/.test(all)) {
+  if (/\b(delegat|revoke|agent.*wallet|auto.?trade|enable.*agent|disable.*agent|selector)\b/.test(recentUserMsgs)) {
     domains.add("delegation");
   }
 
   // Vault management
-  if (/\b(vault|pool.*deploy|deploy.*pool|fund.*pool|mint.*pool|deposit.*capital|create.*pool|new.*pool|vault.*info|balance|token.*balance)\b/.test(all)) {
+  if (/\b(vault|pool.*deploy|deploy.*pool|fund.*pool|mint.*pool|deposit.*capital|create.*pool|new.*pool|vault.*info|balance|token.*balance)\b/.test(recentUserMsgs)) {
     domains.add("vault");
   }
 
@@ -81,8 +76,8 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
   // Detect: "every N min", "N at a time", "DCA", "TWAP", "slice", etc.
   // Note: "every.*min" inside \b fails on "every 5 minutes" — check separately.
   if (
-    /\b(strateg|cron|automat|recurring|dca|twap|scheduled|timer|at\s+a\s+time|slice|in\s+parts|incrementally|gradually)\b/.test(all) ||
-    /every\s+\d+\s*(min|hour|hr)/i.test(all)
+    /\b(strateg|cron|automat|recurring|dca|twap|scheduled|timer|at\s+a\s+time|slice|in\s+parts|incrementally|gradually)\b/.test(recentUserMsgs) ||
+    /every\s+\d+\s*(min|hour|hr)/i.test(recentUserMsgs)
   ) {
     domains.add("strategy");
   }
@@ -98,7 +93,7 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
 
 /** Map domains to their tool names — used to filter tool definitions. */
 export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
-  swap: ["get_swap_quote", "build_vault_swap", "set_default_slippage", "set_swap_shield_tolerance", "enable_swap_shield", "refresh_oracle_feed"],
+  swap: ["get_swap_quote", "build_vault_swap", "set_default_slippage", "set_swap_shield_tolerance", "enable_swap_shield", "set_nav_shield_threshold", "enable_nav_shield", "refresh_oracle_feed"],
   gmx: [
     "gmx_decrease_position", "gmx_increase_position",
     "gmx_get_positions", "gmx_cancel_order", "gmx_update_order",
@@ -249,7 +244,9 @@ The check is two-sided with a unified tolerance:
 - The operator can raise tolerance up to 50% for 10 minutes via "set swap shield tolerance to X%"
   (use set_swap_shield_tolerance tool). The shield resets to 5% automatically.
 - Reset early to default with "enable swap shield" (use enable_swap_shield tool)
-- The NAV shield (10% max loss) still runs independently of Swap Shield settings.
+- The NAV shield (default 10% max loss, configurable 1%–100%) still runs independently of Swap Shield settings.
+- The operator can change the NAV shield threshold via "set NAV shield threshold to 15%" (use set_nav_shield_threshold tool).
+- Reset to default with "reset NAV shield to default" (use enable_nav_shield tool).
 
 SLIPPAGE:
 - Default: 1% (100 bps). Configurable by the operator.

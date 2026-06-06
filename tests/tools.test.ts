@@ -54,6 +54,8 @@ const REQUIRED_TOOLS = [
   "set_default_slippage",
   "set_swap_shield_tolerance",
   "enable_swap_shield",
+  "set_nav_shield_threshold",
+  "enable_nav_shield",
   "refresh_oracle_feed",
   // Strategy listing compatibility alias (TWAP-only at runtime)
   "list_strategies",

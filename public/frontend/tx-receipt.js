@@ -11,6 +11,24 @@ import { appendMessage } from "./chat-ui.js";
 
 import { fetchAgentBalance } from "./api.js";
 
+/** Format per-transaction metrics (NAV impact, swap-shield divergence) as HTML. */
+function formatTxMetrics(tx) {
+  if (!tx?.metrics) return '';
+  const m = tx.metrics;
+  const parts = [];
+  if (m.navShield?.navImpactPct != null) {
+    const pct = String(m.navShield.navImpactPct);
+    const cls = pct.startsWith('-') ? 'negative' : 'positive';
+    parts.push(`<span class="metric-item"><span class="metric-label">NAV impact</span><span class="metric-value ${cls}">${escapeHtml(pct)}</span></span>`);
+  }
+  if (m.swapShield?.divergencePct != null) {
+    const pct = String(m.swapShield.divergencePct);
+    const cls = pct.startsWith('-') ? 'negative' : 'positive';
+    parts.push(`<span class="metric-item"><span class="metric-label">Oracle divergence</span><span class="metric-value ${cls}">${escapeHtml(pct)}</span></span>`);
+  }
+  return parts.length ? `<div class="tx-metrics">${parts.join('')}</div>` : '';
+}
+
 function showManualTxCard(tx) {
   if (!tx || !tx.to || !tx.data) return;
   const meta = tx.swapMeta;
@@ -30,11 +48,14 @@ function showManualTxCard(tx) {
     tradeHtml = `<div class="trade-meta">${escapeHtml(tx.description || 'Execute transaction')} · ${escapeHtml(chain)}</div>`;
   }
 
+  const metricsHtml = formatTxMetrics(tx);
+
   const div = document.createElement('div');
   div.className = 'msg assistant compact';
   div.innerHTML = `
     <div class="delegated-confirm">
       ${tradeHtml}
+      ${metricsHtml}
       <div class="confirm-actions">
         <button class="btn-agent-exec approve" onclick="signManualTxCard(this)">Sign with Wallet</button>
         <button class="btn-agent-exec reject" onclick="this.closest('.msg').remove()">Dismiss</button>
@@ -227,4 +248,5 @@ async function pollPendingTx(r, swapMeta) {
 export {
   showTxReceiptCard, pollPendingTx,
   showManualTxCard, signManualTxCard, pollManualTxReceipt,
+  formatTxMetrics,
 };

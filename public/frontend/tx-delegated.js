@@ -14,7 +14,7 @@ import { appendMessage } from "./chat-ui.js";
 
 import { fetchAgentBalance } from "./api.js";
 
-import { showTxReceiptCard, showManualTxCard, pollPendingTx } from "./tx-receipt.js";
+import { showTxReceiptCard, showManualTxCard, pollPendingTx, formatTxMetrics } from "./tx-receipt.js";
 
 function showDelegatedConfirmation(tx) {
   const meta = tx.swapMeta;
@@ -39,11 +39,14 @@ function showDelegatedConfirmation(tx) {
     ? delegationState.chainSponsoredGas
     : (delegationState?.sponsoredGas !== false);
 
+  const metricsHtml = formatTxMetrics(tx);
+
   const div = document.createElement('div');
   div.className = 'msg assistant compact';
   div.innerHTML = `
     <div class="delegated-confirm">
       ${tradeHtml}
+      ${metricsHtml}
       <div class="sponsor-tx-toggle" style="margin:8px 0;font-size:13px;color:var(--muted);">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
           <input type="checkbox" class="sponsor-tx-checkbox" ${defaultSponsored ? 'checked' : ''} />
@@ -225,6 +228,7 @@ function showMultiDelegatedConfirmation(txList) {
     const tx = txList[i];
     const meta = tx.swapMeta;
     const chain = CHAIN_NAMES[tx.chainId] || tx.chainId;
+    const metricsHtml = formatTxMetrics(tx);
     if (meta) {
       tradesHtml += `
         <div class="multi-trade-row" data-tx-idx="${i}">
@@ -233,13 +237,13 @@ function showMultiDelegatedConfirmation(txList) {
           <span class="trade-amount buy">~${escapeHtml(meta.buyAmount)} ${escapeHtml(meta.buyToken)}</span>
           <span class="trade-chain">${escapeHtml(chain)}</span>
           <span class="multi-tx-status"></span>
-        </div>`;
+        </div>${metricsHtml}`;
     } else {
       tradesHtml += `
         <div class="multi-trade-row" data-tx-idx="${i}">
           <span class="trade-meta">${escapeHtml(tx.description || 'Transaction ' + (i + 1))} · ${escapeHtml(chain)}</span>
           <span class="multi-tx-status"></span>
-        </div>`;
+        </div>${metricsHtml}`;
     }
   }
 

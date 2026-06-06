@@ -1,7 +1,32 @@
 
-    /* ── Delegation panel (inside settings modal) ──── */
+    /* ── Settings modal header ─────────────────────────── */
+    .settings-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+      padding-right: 4px;
+    }
+    .settings-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .settings-header-actions .modal-close {
+      position: static;
+      float: none;
+      font-size: 22px;
+      padding: 0 4px;
+      line-height: 1;
+    }
+
+    /* ── Delegation panel (settings modal) ──── */
     #delegation-panel {
-      gap: 10px; align-items: center; flex-wrap: wrap;
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      font-size: 14px;
+    }
+    #telegram-panel {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
       font-size: 14px;
     }
     .delegation-status {
@@ -216,6 +241,17 @@
       font-size: 13px; margin-top: 6px; white-space: normal;
       word-break: break-word; overflow-wrap: anywhere;
     }
+    .tx-metrics {
+      font-size: 12px; color: var(--muted); margin: 4px 0 8px;
+      display: flex; gap: 12px; flex-wrap: wrap;
+    }
+    .tx-metrics .metric-item {
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .tx-metrics .metric-label { opacity: 0.75; }
+    .tx-metrics .metric-value { font-weight: 600; }
+    .tx-metrics .metric-value.positive { color: var(--success); }
+    .tx-metrics .metric-value.negative { color: var(--error); }
     .delegated-confirm .multi-tx-header {
       font-size: 13px; color: var(--muted); margin-bottom: 6px; font-weight: 600;
     }
