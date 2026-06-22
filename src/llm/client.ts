@@ -8,7 +8,7 @@
  */
 
 import OpenAI from "openai";
-import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, RequestContext, StreamEvent } from "../types.js";
+import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, RequestContext, StreamEvent, ExecutionResult } from "../types.js";
 import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS, RUNTIME_CONTEXT_PACK } from "./tools.js";
 import { detectDomains, buildSystemPrompt, filterToolsForDomains } from "./prompts.js";
 import { getSkillTools, getSkillSystemPrompt } from "../skills/index.js";
@@ -1429,6 +1429,8 @@ export interface ToolResult {
   selfContained?: boolean;
   /** Protocol-specific structured metadata for frontend rendering */
   metadata?: Record<string, unknown>;
+  /** In delegated mode: transaction was executed by agent wallet */
+  executionResult?: ExecutionResult;
 }
 
 /**

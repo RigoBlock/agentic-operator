@@ -12,6 +12,7 @@
 
 import type { Env, RequestContext, UnsignedTransaction } from "../../types.js";
 import type { ToolResult } from "../client.js";
+import type { GmxMarketInfo } from "../../services/gmxTrading.js";
 import { getVaultTokenBalance } from "../../services/vault.js";
 import { parseUnits, formatUnits, type Address, type Hex } from "viem";
 import {
@@ -143,24 +144,23 @@ export async function handle_gmx_increase_position(
     existingPos = undefined;
   }
 
-  // If increasing an existing position, we MUST use the position's actual market.
-  // findGmxMarket prefers WETH/USDC markets and may return a different market than
-  // the one the position was opened in.
+  // If increasing an existing position, we MUST use the position's actual market
+  // and collateral token. findGmxMarket prefers WETH/USDC markets and may return a
+  // different market than the one the position was opened in.
+  let collateralSymbol: string;
   if (existingPos) {
+    const existingMarket = existingPos.market.toLowerCase();
     const allMarkets = await getGmxMarkets();
     const actualMarket = allMarkets.find(
-      (m) => m.marketToken.toLowerCase() === existingPos!.market.toLowerCase(),
+      (m) => m.marketToken.toLowerCase() === existingMarket,
     );
     if (actualMarket) {
       market = actualMarket;
     }
-  }
-
-  const isOpen = !existingPos;
-
-  // ── Resolve collateral ──────────────────────────────────────────────
-  let collateralSymbol: string;
-  if (isOpen) {
+    // Increase: use existing position's collateral unless user explicitly overrides
+    collateralSymbol = userCollateral || existingPos.collateralSymbol;
+  } else {
+    // Open: collateral MUST be specified by the user
     if (!userCollateral) {
       throw new Error(
         `Opening a new ${marketSymbol} ${isLong ? "long" : "short"} requires specifying a collateral token. ` +
@@ -169,10 +169,9 @@ export async function handle_gmx_increase_position(
       );
     }
     collateralSymbol = userCollateral;
-  } else {
-    // Increase: use existing position's collateral unless user explicitly overrides
-    collateralSymbol = userCollateral || existingPos.collateralSymbol;
   }
+
+  const isOpen = !existingPos;
 
   const collateralAddr = await resolveGmxCollateral(collateralSymbol);
   const collateralDecimals = getGmxTokenDecimals(collateralAddr);
@@ -240,6 +239,13 @@ export async function handle_gmx_increase_position(
 
   const isPureCollateralAdd = sizeDeltaUsd === "0" || parseFloat(sizeDeltaUsd) === 0;
   const isPureSizeIncrease = parseFloat(collateralAmount) === 0 && !isPureCollateralAdd;
+
+  if (isPureCollateralAdd && !existingPos) {
+    throw new Error(
+      `Cannot add collateral to a non-existent ${marketSymbol} ${isLong ? "long" : "short"} position. ` +
+      `Specify a non-zero sizeDeltaUsd to open a new position first.`,
+    );
+  }
 
   // ── Pre-checks ──────────────────────────────────────────────────────
   await checkKeeperFee(env, ctx);
