@@ -434,7 +434,7 @@ delegation.post("/execute", async (c) => {
   try {
     body = await c.req.json<typeof body>();
 
-    if (!body.transaction?.to || !body.transaction?.data) {
+    if (!body || !body.transaction?.to || !body.transaction?.data) {
       return c.json({ error: "transaction.to and transaction.data are required" }, 400);
     }
 

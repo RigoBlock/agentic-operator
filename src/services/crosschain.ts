@@ -1203,7 +1203,14 @@ export async function buildCrosschainTransfer(params: {
     `Bridge ${bridgeAmount} ${quote.inputToken.symbol} from ${srcName} → ${dstName}` +
     ` (receive ~${quote.outputAmount} ${quote.outputToken.symbol}, fee ${quote.feePct}, ${quote.estimatedTime})`;
 
-  return { quote, calldata, description };
+  return {
+    quote,
+    calldata,
+    description,
+    wasCapped: false,
+    requestedAmount: params.amount,
+    cappedAmount: bridgeAmount,
+  };
 }
 
 /**

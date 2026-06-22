@@ -365,15 +365,15 @@ export async function handle_refresh_oracle_feed(
         // Step 2: Permit2 allowance for the Universal Router
         const universalRouter = UNIVERSAL_ROUTER[ctx.chainId];
         if (universalRouter) {
-          const permit2Allowance = await publicClient.readContract({
+          const [permit2Amount, permit2Expiration] = await publicClient.readContract({
             address: PERMIT2,
             abi: PERMIT2_ABI,
             functionName: "allowance",
             args: [operator, tokenAddr, universalRouter],
-          }) as { amount: bigint; expiration: number; nonce: number };
+          }) as [bigint, number, number];
 
           const now = Math.floor(Date.now() / 1000);
-          const permit2Sufficient = permit2Allowance.amount >= amountInWei && permit2Allowance.expiration > now;
+          const permit2Sufficient = permit2Amount >= amountInWei && permit2Expiration > now;
 
           if (!permit2Sufficient) {
             // Build a Permit2.approve(token, UniversalRouter, amount, expiration) transaction.
