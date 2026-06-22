@@ -225,8 +225,10 @@ interface FeeEstimate {
 
 /**
  * Estimate EIP-1559 gas fees with safety caps.
+ *
+ * Exported for testing the priority-fee floor logic.
  */
-async function estimateFees(
+export async function estimateFees(
   publicClient: PublicClient,
   chainId: number,
 ): Promise<FeeEstimate> {
@@ -246,10 +248,13 @@ async function estimateFees(
   // If the RPC call fails we fall back to baseFee/10.
   let priorityFee: bigint;
   if (chainId === 1 || chainId === 11155111) {
-    // Mainnet: hardcode 0.01 gwei. Keeps sponsored tx cost minimal to stay
-    // under paymaster policy limits. The Alchemy bundler may demand more;
-    // the retry logic in trySponsoredCalls bumps to the bundler's minimum.
-    priorityFee = parseGwei("0.01");
+    // Mainnet: Alchemy's generic api.g.alchemy.com endpoint once rejected
+    // maxPriorityFeePerGas below 0.0625 gwei, but that error appeared alongside
+    // "Unknown network" logs and likely came from misrouted calls. The same
+    // sponsored mainnet tx confirmed with 0.05 gwei, so we use that observed
+    // chain-specific floor. It is the highest value we have proven works and
+    // is not above Alchemy's apparent generic-endpoint minimum.
+    priorityFee = parseGwei("0.05");
   } else {
     try {
       priorityFee = await publicClient.estimateMaxPriorityFeePerGas();
@@ -1052,13 +1057,19 @@ async function sponsoredAgentTransaction(
     );
   }
 
-  // Timeout / pending — submission was accepted but not yet mined
+  // Pending / status timeout — submission was accepted but we could not
+  // confirm the on-chain status in time. Return the callId so the UI can
+  // show "submitted" instead of leaving the user on "Executing trade…".
+  const pendingTxHash = receiptTxHash !== "0x" ? receiptTxHash : (result.callId as Hex);
   return {
-    txHash: receiptTxHash,
+    txHash: pendingTxHash,
     chainId,
     confirmed: false,
+    reverted: false,
     explorerUrl,
     sponsored: true,
+    userOpHash: result.callId as Hex,
+    gasCostEth: receiptTxHash !== "0x" ? "0 (sponsored)" : "0 (sponsored — status check timed out)",
     resubmitAttempts: 0,
   };
 }
@@ -1271,7 +1282,10 @@ export function formatOutcomesMarkdown(outcomes: TxExecOutcome[]): string {
       const link = result.explorerUrl || result.txHash;
       parts.push(`⚠️ ${desc} reverted on-chain${gasWasted}. [View failed tx](${link})`);
     } else if (result) {
-      parts.push(`⏳ Transaction submitted: ${result.txHash}. Waiting for confirmation…`);
+      const pendingNote = result.sponsored && result.gasCostEth?.includes("timed out")
+        ? " The status check timed out; the transaction may still confirm on-chain."
+        : " Waiting for confirmation…";
+      parts.push(`⏳ Transaction submitted: ${result.txHash}.${pendingNote}`);
     } else if (error) {
       const fallbackHint = fallbackToManual
         ? " You can sign this transaction directly from your wallet."

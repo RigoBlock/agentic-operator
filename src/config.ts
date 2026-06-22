@@ -91,7 +91,7 @@ export function resolveChainName(chainId: number): string {
  * Alchemy network slugs for each chain.
  * Chains not listed here use their default public RPC.
  */
-const ALCHEMY_NETWORK: Record<number, string> = {
+export const ALCHEMY_NETWORK: Record<number, string> = {
   1: "eth-mainnet",
   10: "opt-mainnet",
   56: "bnb-mainnet",
@@ -115,6 +115,13 @@ export function getRpcUrl(chainId: number, alchemyKey?: string): string | undefi
     }
   }
   return undefined; // viem will use the chain's default public RPC
+}
+
+/** Get the Alchemy network slug for a chain (e.g. "eth-mainnet", "arb-mainnet"). */
+export function getAlchemyNetworkSlug(chainId: number): string {
+  const network = ALCHEMY_NETWORK[chainId];
+  if (!network) throw new Error(`Unsupported chain ID for Alchemy: ${chainId}`);
+  return network;
 }
 
 /** Native token symbol per chain. Used to derive wrapped-native mappings dynamically. */

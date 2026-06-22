@@ -1114,7 +1114,10 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
       const link = result.explorerUrl ? `<a href="${result.explorerUrl}">↗</a>` : "";
       lines.push(`❌ ${escapeHtml(desc)} — reverted ${link}`);
     } else if (result) {
-      lines.push(`⏳ ${escapeHtml(desc)} — submitted: <code>${result.txHash.slice(0, 14)}…</code>`);
+      const pendingNote = result.sponsored && result.gasCostEth?.includes("timed out")
+        ? "\n(status check timed out; may still confirm)"
+        : "";
+      lines.push(`⏳ ${escapeHtml(desc)} — submitted: <code>${result.txHash.slice(0, 14)}…</code>${pendingNote}`);
     } else if (error) {
       // Provide actionable guidance for delegation errors
       if (error.includes("not in the delegated selectors") || error.includes("selector") && error.includes("not")) {

@@ -6,6 +6,7 @@ import {
   getChain,
   resolveChainId,
   getRpcUrl,
+  getAlchemyNetworkSlug,
   TOKEN_MAP,
   STAKING_PROXY,
   SUPPORTED_CHAINS,
@@ -103,6 +104,29 @@ describe("getRpcUrl", () => {
   it("returns Alchemy URL for BSC", () => {
     const url = getRpcUrl(56, "key");
     expect(url).toContain("bnb-mainnet");
+  });
+});
+
+describe("getAlchemyNetworkSlug", () => {
+  it("returns the correct slug for each supported chain", () => {
+    const expected: Record<number, string> = {
+      1: "eth-mainnet",
+      10: "opt-mainnet",
+      56: "bnb-mainnet",
+      130: "unichain-mainnet",
+      137: "polygon-mainnet",
+      8453: "base-mainnet",
+      42161: "arb-mainnet",
+      11155111: "eth-sepolia",
+      84532: "base-sepolia",
+    };
+    for (const [chainId, slug] of Object.entries(expected)) {
+      expect(getAlchemyNetworkSlug(Number(chainId))).toBe(slug);
+    }
+  });
+
+  it("throws for unsupported chain", () => {
+    expect(() => getAlchemyNetworkSlug(99999)).toThrow("Unsupported chain ID for Alchemy: 99999");
   });
 });
 
