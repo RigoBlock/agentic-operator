@@ -179,7 +179,7 @@ tools.post("/", async (c) => {
       const txList = result.transaction ? [result.transaction] : [];
       const executableTxs = txList.filter(tx => !tx.operatorOnly);
       const outcomes = executableTxs.length > 0
-        ? await executeTxList(c.env, executableTxs, body.vaultAddress)
+        ? await executeTxList(c.env, executableTxs, resolvedVaultAddress)
         : [];
       const results = outcomes.filter(o => o.result).map(o => o.result!);
       const hasFallback = outcomes.some(o => o.fallbackToManual);
