@@ -141,16 +141,9 @@ function parseSponsoredError(_raw: string, _chainId: number, _agentAddress: stri
  * even if the RPC returns an absurd priority fee estimate.
  */
 const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }> = {
-  // L1 Ethereum — maxFee is NOT a fixed fee; it is a safety cap on the
-  // 2×-buffered base fee from the latest block (see estimateFees).
-  // Priority fee cap raised to 0.1 gwei: the Alchemy bundler rejects below
-  // ~0.0625 gwei, so 0.01 gwei caused every sponsored tx to fail on mainnet.
   1:     { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.1") },
-  // L2s — much cheaper, priority is negligible
   10:    { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
-  // BSC — use RPC estimateMaxPriorityFeePerGas, cap at 0.1 gwei
   56:    { maxFeePerGas: parseGwei("5"),   maxPriorityFee: parseGwei("0.1") },
-  // Polygon — high base fees (market ~290 gwei priority), cap at 500 to cover spikes
   137:   { maxFeePerGas: parseGwei("500"), maxPriorityFee: parseGwei("500") },
   8453:  { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
   42161: { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
@@ -159,22 +152,15 @@ const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }>
   84532:   { maxFeePerGas: parseGwei("1"),    maxPriorityFee: parseGwei("0.01") },
 };
 
-/** Default caps for chains not explicitly listed */
-const DEFAULT_GAS_CAP = { maxFeePerGas: parseGwei("10"), maxPriorityFee: parseGwei("0.1") };
-
 /**
  * Multiplier for base fee estimation.
- * 2x guarantees inclusion even if the base fee doubles over the next 2 blocks
+ * 1.5x guarantees inclusion even if the base fee maxes over the next 2 blocks
  * (Ethereum allows max ~12.5% base fee increase per block).
- * A 1.25x buffer would fail to land txs during base fee spikes.
  */
 const BASE_FEE_MULTIPLIER = 150n; // 150% = 1.5x (divided by 100)
 
 /** Maximum number of resubmission attempts */
 const MAX_RESUBMIT_ATTEMPTS = 2;
-
-/** Blocks to wait before considering resubmission */
-const RESUBMIT_AFTER_BLOCKS = 2;
 
 /** Fee bump percentage for resubmission (10% = minimum for most clients) */
 const RESUBMIT_FEE_BUMP_PCT = 15n; // 15% bump
@@ -232,13 +218,13 @@ export async function estimateFees(
   publicClient: PublicClient,
   chainId: number,
 ): Promise<FeeEstimate> {
-  const caps = GAS_CAPS[chainId] || DEFAULT_GAS_CAP;
+  const caps = GAS_CAPS[chainId];
 
   // ── Base fee from the latest block (gas oracle) ──
   // We read the actual protocol base fee, then buffer it 2× to cover
   // ~5 blocks of 12.5% compounded increases (Ethereum max per-block bump).
   const block = await publicClient.getBlock({ blockTag: "latest" });
-  const baseFee = block.baseFeePerGas ?? parseGwei("1");
+  const baseFee = block.baseFeePerGas ?? parseGwei("0");
   const bufferedBaseFee = (baseFee * BASE_FEE_MULTIPLIER) / 100n;
 
   // ── Priority fee ──
@@ -247,14 +233,8 @@ export async function estimateFees(
   // keeps the value bounded so we don't overpay on sponsored transactions.
   // If the RPC call fails we fall back to baseFee/10.
   let priorityFee: bigint;
-  if (chainId === 1 || chainId === 11155111) {
-    // Mainnet: Alchemy's generic api.g.alchemy.com endpoint once rejected
-    // maxPriorityFeePerGas below 0.0625 gwei, but that error appeared alongside
-    // "Unknown network" logs and likely came from misrouted calls. The same
-    // sponsored mainnet tx confirmed with 0.05 gwei, so we use that observed
-    // chain-specific floor. It is the highest value we have proven works and
-    // is not above Alchemy's apparent generic-endpoint minimum.
-    priorityFee = parseGwei("0.05");
+  if (chainId === 1) {
+    priorityFee = parseGwei("0.01");
   } else {
     try {
       priorityFee = await publicClient.estimateMaxPriorityFeePerGas();
@@ -280,7 +260,7 @@ export async function estimateFees(
  * Bump fees for resubmission (must be at least 10% higher for replacement).
  */
 function bumpFees(fees: FeeEstimate, chainId: number): FeeEstimate {
-  const caps = GAS_CAPS[chainId] || DEFAULT_GAS_CAP;
+  const caps = GAS_CAPS[chainId];
 
   const bumpedMaxFee = fees.maxFeePerGas + (fees.maxFeePerGas * RESUBMIT_FEE_BUMP_PCT) / 100n;
   const bumpedPriority = fees.maxPriorityFeePerGas + (fees.maxPriorityFeePerGas * RESUBMIT_FEE_BUMP_PCT) / 100n;

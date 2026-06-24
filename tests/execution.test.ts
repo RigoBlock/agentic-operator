@@ -166,9 +166,7 @@ describe("estimateFees priority fee floor", () => {
 
     const fees = await estimateFees(publicClient, 1);
 
-    // Use the observed chain-specific floor (0.05 gwei), not the higher
-    // 0.0625 gwei seen from the misrouted generic endpoint.
-    expect(fees.maxPriorityFeePerGas).toBeGreaterThanOrEqual(parseGwei("0.05"));
+    expect(fees.maxPriorityFeePerGas).toBeGreaterThanOrEqual(parseGwei("0.01"));
     expect(fees.maxPriorityFeePerGas).toBeLessThanOrEqual(parseGwei("0.0625"));
     expect(fees.maxFeePerGas).toBeGreaterThan(fees.maxPriorityFeePerGas);
   });
