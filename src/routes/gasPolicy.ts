@@ -73,7 +73,7 @@ const gasPolicy = new Hono<{ Bindings: Env }>();
 const AGENT_REVERSE_KEY = "agent-reverse:";
 
 /** KV prefix for per-wallet daily gas sponsorship spend tracking */
-const GAS_SPEND_KEY = "gas-spend:";
+export const GAS_SPEND_KEY = "gas-spend:";
 
 /** Default daily gas sponsorship limit per wallet in USD */
 export const DEFAULT_GAS_SPENDING_LIMIT_USD = 5;
@@ -152,7 +152,15 @@ export async function estimateGasCostUsd(
 
 /**
  * Enforce a per-wallet daily gas sponsorship spending limit.
- * On chains where USD estimation is unavailable the check is skipped (logs a warning).
+ *
+ * This is a read-only check: it looks at already-settled spend (recorded after
+ * a sponsored transaction lands on-chain) and compares it to the estimated cost
+ * of the current request. It does NOT pre-charge the stipend, because many
+ * approved UserOperations never actually get sponsored/broadcast (webhook ok
+ * but bundler rejects, tx reverts, user cancels, etc.). Pre-charging made the
+ * tracker drift by orders of magnitude versus Alchemy's real spend.
+ *
+ * On chains where USD estimation is unavailable the check is skipped.
  */
 export async function checkSpendingLimit(
   kv: KVNamespace,
@@ -178,16 +186,16 @@ export async function checkSpendingLimit(
   const limitUsd = parseFloat(formatUnits(limitUsdRaw, SPENDING_DECIMALS));
 
   if (estimated.rawNormalized === 0n) {
-    return { approved: true, estimatedCost: 0, limit: limitUsd };
+    return { approved: true, currentSpend: 0, estimatedCost: 0, limit: limitUsd };
   }
 
   const dayBucket = getCurrentDayBucket(now);
   const spendKey = `${GAS_SPEND_KEY}${sender.toLowerCase()}:${dayBucket}`;
   const currentSpendRaw = await kv.get(spendKey);
   const currentSpendNormalized = currentSpendRaw ? BigInt(currentSpendRaw) : 0n;
+  const currentSpend = parseFloat(formatUnits(currentSpendNormalized, SPENDING_DECIMALS));
 
   if (currentSpendNormalized + estimated.rawNormalized > limitUsdRaw) {
-    const currentSpend = parseFloat(formatUnits(currentSpendNormalized, SPENDING_DECIMALS));
     return {
       approved: false,
       reason:
@@ -200,14 +208,63 @@ export async function checkSpendingLimit(
     };
   }
 
-  const newSpendNormalized = currentSpendNormalized + estimated.rawNormalized;
-  await kv.put(spendKey, newSpendNormalized.toString());
   return {
     approved: true,
-    currentSpend: parseFloat(formatUnits(newSpendNormalized, SPENDING_DECIMALS)),
+    currentSpend,
     estimatedCost: estimated.usd,
     limit: limitUsd,
   };
+}
+
+/**
+ * Record the actual gas cost of a settled sponsored transaction.
+ * Called by the execution layer after it has an on-chain receipt (or can fetch
+ * one). This keeps the daily stipend tracker aligned with Alchemy's real spend.
+ */
+export async function recordGasSpend(
+  kv: KVNamespace,
+  sender: Address,
+  chainId: number,
+  gasCostWei: bigint,
+  alchemyKey: string,
+  now?: number,
+): Promise<void> {
+  if (gasCostWei <= 0n) return;
+
+  const usdcInfo = getUsdcInfo(chainId);
+  if (!usdcInfo) {
+    console.warn(`[GasPolicy] Cannot record gas spend: no USDC mapping for chain ${chainId}`);
+    return;
+  }
+
+  try {
+    const usdcRaw = await convertTokenAmountViaOracle(
+      chainId,
+      NATIVE_TOKEN_ADDRESS,
+      gasCostWei,
+      usdcInfo.address,
+      alchemyKey,
+    );
+    const normalized = normalizeTo18Decimals(usdcRaw, usdcInfo.decimals);
+    if (normalized <= 0n) return;
+
+    const dayBucket = getCurrentDayBucket(now);
+    const spendKey = `${GAS_SPEND_KEY}${sender.toLowerCase()}:${dayBucket}`;
+    const currentRaw = await kv.get(spendKey);
+    const currentNormalized = currentRaw ? BigInt(currentRaw) : 0n;
+    const nextNormalized = currentNormalized + normalized;
+    await kv.put(spendKey, nextNormalized.toString(), { expirationTtl: 86400 });
+
+    console.log(
+      `[GasPolicy] Recorded gas spend for ${sender.slice(0, 10)}… (chain ${chainId}): ` +
+      `+$${parseFloat(formatUnits(normalized, SPENDING_DECIMALS)).toFixed(4)} ` +
+      `(day ${dayBucket}, total $${parseFloat(formatUnits(nextNormalized, SPENDING_DECIMALS)).toFixed(4)})`,
+    );
+  } catch (err) {
+    console.warn(
+      `[GasPolicy] Failed to record gas spend: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 // ── GET /api/gas-policy — health check ────────────────────────────────
@@ -226,7 +283,7 @@ gasPolicy.post("/", async (c) => {
       body = JSON.parse(rawBody);
     } catch {
       console.error("[GasPolicy] Failed to parse JSON body");
-      return c.json({ approved: false }, 200);
+      return c.json({ approved: false, reason: "Malformed webhook payload from Alchemy" }, 200);
     }
 
     // ── Extract sender from userOperation ─────────────────────────────
@@ -262,16 +319,16 @@ gasPolicy.post("/", async (c) => {
       // ── 2. Verify delegation is active ──
       const config = await getDelegationConfig(c.env.KV, vaultAddress);
       if (!config || !config.enabled) {
-        console.warn(`[GasPolicy] ✗ REJECTED: delegation not active for vault ${vaultAddress}`);
-        return c.json({ approved: false }, 200);
+        const reason = `Delegation not active for vault ${vaultAddress}`;
+        console.warn(`[GasPolicy] ✗ REJECTED: ${reason}`);
+        return c.json({ approved: false, reason }, 200);
       }
 
       // ── 3. Verify the agent address matches delegation config ──
       if (config.agentAddress.toLowerCase() !== sender) {
-        console.warn(
-          `[GasPolicy] ✗ REJECTED: agent mismatch sender=${sender} vs config=${config.agentAddress}`,
-        );
-        return c.json({ approved: false }, 200);
+        const reason = `Agent wallet mismatch: sender ${sender} does not match delegated agent ${config.agentAddress}`;
+        console.warn(`[GasPolicy] ✗ REJECTED: ${reason}`);
+        return c.json({ approved: false, reason }, 200);
       }
 
       // ── 4. Decode callData to verify target is the vault ──
@@ -282,10 +339,9 @@ gasPolicy.post("/", async (c) => {
           const isVault = innerTarget.toLowerCase() === vaultAddress.toLowerCase();
           console.log(`[GasPolicy] Inner target=${innerTarget} isVault=${isVault}`);
           if (!isVault) {
-            console.warn(
-              `[GasPolicy] ✗ REJECTED: inner target ${innerTarget} is not vault ${vaultAddress}`,
-            );
-            return c.json({ approved: false }, 200);
+            const reason = `Inner call target ${innerTarget} is not the delegated vault ${vaultAddress}`;
+            console.warn(`[GasPolicy] ✗ REJECTED: ${reason}`);
+            return c.json({ approved: false, reason }, 200);
           }
         } else {
           console.log("[GasPolicy] Could not decode inner target — approving (on-chain caveats enforce)");
@@ -344,8 +400,9 @@ gasPolicy.post("/", async (c) => {
       }
     }
 
-    console.warn(`[GasPolicy] ✗ REJECTED: sender ${sender} is not an agent wallet and target is not a known vault`);
-    return c.json({ approved: false }, 200);
+    const reason = `Sender ${sender} is not a registered agent wallet and the inner target is not a known vault`;
+    console.warn(`[GasPolicy] ✗ REJECTED: ${reason}`);
+    return c.json({ approved: false, reason }, 200);
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

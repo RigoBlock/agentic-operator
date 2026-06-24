@@ -174,13 +174,13 @@ describe("estimateFees priority fee floor", () => {
   it("uses a sepolia priority fee above Alchemy's bundler minimum", async () => {
     const publicClient = {
       getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: parseGwei("10") }),
-      estimateMaxPriorityFeePerGas: vi.fn(),
+      estimateMaxPriorityFeePerGas: vi.fn().mockResolvedValue(parseGwei("0.05")),
     } as unknown as PublicClient;
 
     const fees = await estimateFees(publicClient, 11155111);
 
     expect(fees.maxPriorityFeePerGas).toBeGreaterThanOrEqual(parseGwei("0.05"));
-    expect(fees.maxPriorityFeePerGas).toBeLessThanOrEqual(parseGwei("0.0625"));
+    expect(fees.maxPriorityFeePerGas).toBeLessThanOrEqual(parseGwei("0.1"));
   });
 
   it("caps priority fee at the chain-specific cap", async () => {

@@ -15,7 +15,9 @@ import {
   getCurrentDayBucket,
   estimateGasCostUsd,
   checkSpendingLimit,
+  recordGasSpend,
   DEFAULT_GAS_SPENDING_LIMIT_USD,
+  GAS_SPEND_KEY,
 } from "../src/routes/gasPolicy.js";
 import { TOKEN_MAP } from "../src/config.js";
 import { CROSSCHAIN_TOKENS } from "../src/services/crosschainConfig.js";
@@ -210,7 +212,7 @@ describe("checkSpendingLimit", () => {
     mockConvertTokenAmountViaOracle.mockReset();
   });
 
-  it("approves when under the daily limit and records spend", async () => {
+  it("approves when under the daily limit (read-only, does not pre-charge)", async () => {
     mockConvertTokenAmountViaOracle.mockResolvedValue(2n * 10n ** 6n); // $2.00
     const kv = makeKV();
 
@@ -218,8 +220,11 @@ describe("checkSpendingLimit", () => {
 
     expect(result.approved).toBe(true);
     expect(result.estimatedCost).toBe(2);
-    expect(result.currentSpend).toBe(2);
+    expect(result.currentSpend).toBe(0);
     expect(result.limit).toBe(5);
+    // Nothing should be written until the transaction actually settles.
+    const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
+    expect(stored).toBeNull();
   });
 
   it("rejects when a single request would exceed the daily limit", async () => {
@@ -238,16 +243,14 @@ describe("checkSpendingLimit", () => {
     mockConvertTokenAmountViaOracle.mockResolvedValue(3n * 10n ** 6n); // $3.00
     const kv = makeKV();
 
-    // First request: $3, under $5 limit
-    const first = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
-    expect(first.approved).toBe(true);
-    expect(first.currentSpend).toBe(3);
+    // Simulate a previous settled transaction that already consumed $3.
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 3n * 10n ** 18n, ALCHEMY_KEY);
 
-    // Second request: $3 more would bring total to $6
-    const second = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
-    expect(second.approved).toBe(false);
-    expect(second.reason).toContain("Daily gas sponsorship limit exceeded");
-    expect(second.currentSpend).toBe(3);
+    // A new $3 request would bring total to $6.
+    const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
+    expect(result.approved).toBe(false);
+    expect(result.reason).toContain("Daily gas sponsorship limit exceeded");
+    expect(result.currentSpend).toBe(3);
   });
 
   it("resets spend tracking at UTC midnight", async () => {
@@ -256,14 +259,13 @@ describe("checkSpendingLimit", () => {
 
     // Spend $4 on 2026-06-22
     const day1 = Date.UTC(2026, 5, 22, 13, 0, 0);
-    const first = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5), day1);
-    expect(first.approved).toBe(true);
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 4n * 10n ** 18n, ALCHEMY_KEY, day1);
 
-    // Next day, same wallet should be under limit again
+    // Next day, same wallet should see $0 spent again
     const day2 = Date.UTC(2026, 5, 23, 13, 0, 0);
-    const second = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5), day2);
-    expect(second.approved).toBe(true);
-    expect(second.currentSpend).toBe(4);
+    const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5), day2);
+    expect(result.approved).toBe(true);
+    expect(result.currentSpend).toBe(0);
   });
 
   it("enforces the limit on Polygon (non-ETH native currency)", async () => {
@@ -296,17 +298,17 @@ describe("checkSpendingLimit", () => {
 
   it("sums cross-chain spend in USD terms, not raw token units", async () => {
     // Base USDC is 6 decimals, BNB USDC is 18 decimals.
-    // Both calls represent $3.00 estimated cost.
+    // Both settled transactions represent $3.00 actual cost.
     mockConvertTokenAmountViaOracle
       .mockResolvedValueOnce(3n * 10n ** 6n)   // Base: $3.00 (6 decimals)
       .mockResolvedValueOnce(3n * 10n ** 18n); // BNB:  $3.00 (18 decimals)
 
     const kv = makeKV();
 
-    const baseResult = await checkSpendingLimit(kv, SENDER, 8453, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
-    expect(baseResult.approved).toBe(true);
-    expect(baseResult.currentSpend).toBe(3);
+    // Record a settled $3 Base transaction
+    await recordGasSpend(kv, SENDER, 8453, 3n * 10n ** 18n, ALCHEMY_KEY);
 
+    // A new $3 BNB request sees $3 already spent and rejects.
     const bnbResult = await checkSpendingLimit(kv, SENDER, 56, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
     expect(bnbResult.approved).toBe(false);
     expect(bnbResult.reason).toContain("Daily gas sponsorship limit exceeded");
@@ -315,21 +317,65 @@ describe("checkSpendingLimit", () => {
   });
 
   it("uses exact bigint math so small amounts do not accumulate rounding error", async () => {
-    // $0.10 per request, 10 times → $1.00 exactly.
+    // $0.10 per transaction, 10 settled transactions → $1.00 exactly.
     // 0.1 USDC (6 decimals) = 100_000 raw units.
     mockConvertTokenAmountViaOracle.mockResolvedValue(100000n);
     const kv = makeKV();
 
     for (let i = 0; i < 10; i++) {
-      const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
-      expect(result.approved).toBe(true);
+      await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 1n * 10n ** 17n, ALCHEMY_KEY); // $0.10
     }
 
-    const stored = await kv.get(`gas-spend:${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
+    const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
     expect(stored).toBe(String(10n ** 18n)); // $1.00 in 18-decimal fixed point
   });
 
   it("uses the default limit when none is provided", async () => {
     expect(DEFAULT_GAS_SPENDING_LIMIT_USD).toBe(5);
+  });
+});
+
+// ── recordGasSpend ─────────────────────────────────────────────────────
+
+describe("recordGasSpend", () => {
+  beforeEach(() => {
+    mockConvertTokenAmountViaOracle.mockReset();
+  });
+
+  it("records a settled transaction's actual gas cost in USD", async () => {
+    mockConvertTokenAmountViaOracle.mockResolvedValue(2n * 10n ** 6n); // $2.00
+    const kv = makeKV();
+
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 2n * 10n ** 18n, ALCHEMY_KEY);
+
+    const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
+    expect(stored).toBe(String(2n * 10n ** 18n)); // $2.00
+  });
+
+  it("accumulates multiple transactions", async () => {
+    mockConvertTokenAmountViaOracle
+      .mockResolvedValueOnce(1n * 10n ** 6n)   // $1.00
+      .mockResolvedValueOnce(15n * 10n ** 5n); // $1.50
+    const kv = makeKV();
+
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 1n * 10n ** 18n, ALCHEMY_KEY);
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 15n * 10n ** 17n, ALCHEMY_KEY);
+
+    const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
+    expect(stored).toBe(String(25n * 10n ** 17n)); // $2.50
+  });
+
+  it("ignores zero or negative gas costs", async () => {
+    const kv = makeKV();
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 0n, ALCHEMY_KEY);
+    const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
+    expect(stored).toBeNull();
+  });
+
+  it("warns and no-ops when the chain has no USDC mapping", async () => {
+    const kv = makeKV();
+    await recordGasSpend(kv, SENDER, 999999, 1n * 10n ** 18n, ALCHEMY_KEY);
+    const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
+    expect(stored).toBeNull();
   });
 });

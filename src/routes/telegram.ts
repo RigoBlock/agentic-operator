@@ -21,7 +21,7 @@
 
 import { Hono, type Context } from "hono";
 import type { Env, ChatMessage, RequestContext, ChatResponse, TelegramConversation, UnsignedTransaction } from "../types.js";
-import type { Address } from "viem";
+import { formatUnits, type Address } from "viem";
 import { processChat } from "../llm/client.js";
 import {
   handle_set_default_slippage,
@@ -31,6 +31,8 @@ import {
   handle_enable_nav_shield,
 } from "../llm/handlers/settings.js";
 import { getDelegationConfig, getActiveChains } from "../services/delegation.js";
+import { getAgentWalletInfo } from "../services/agentWallet.js";
+import { getCurrentDayBucket, DEFAULT_GAS_SPENDING_LIMIT_USD, GAS_SPEND_KEY } from "./gasPolicy.js";
 import { executeTxList, formatOutcomesMarkdown, type TxExecOutcome } from "../services/execution.js";
 import { initTokenResolver } from "../services/tokenResolver.js";
 import {
@@ -422,6 +424,45 @@ async function handleMessage(
             `Unknown mode "<code>${escapeHtml(pick)}</code>".\nUse <code>/mode autonomous</code> or <code>/mode confirm</code>.`,
           );
         }
+        return;
+      }
+
+      case "/stipend": {
+        const stipendUser = await getTelegramUser(env.KV, userId);
+        if (!stipendUser || stipendUser.vaults.length === 0) {
+          await sendMessage(token, chatId, "You haven't paired any vaults yet. Use the web app to pair Telegram first.");
+          return;
+        }
+        const stipendVault = stipendUser.vaults[stipendUser.activeVaultIndex];
+        if (!stipendVault) {
+          await sendMessage(token, chatId, "No active vault. Use <code>/pools</code> to select one.");
+          return;
+        }
+        const agentInfo = await getAgentWalletInfo(env.KV, stipendVault.address);
+        if (!agentInfo) {
+          await sendMessage(token, chatId, "No agent wallet found for this vault. Delegation may not be set up yet.");
+          return;
+        }
+        const agentAddress = agentInfo.address.toLowerCase();
+        const dayBucket = getCurrentDayBucket();
+        const spendKey = `${GAS_SPEND_KEY}${agentAddress}:${dayBucket}`;
+
+        const spentRaw = await env.KV.get(spendKey);
+        const limitUsd = Number(env.GAS_SPENDING_LIMIT_USD || String(DEFAULT_GAS_SPENDING_LIMIT_USD));
+        const spent = spentRaw ? Number(formatUnits(BigInt(spentRaw), 18)) : 0;
+        const remaining = Math.max(0, limitUsd - spent);
+        await sendMessage(
+          token,
+          chatId,
+          `⛽ Gas sponsorship stipend\n\n` +
+          `Vault: <code>${stipendVault.address}</code>\n` +
+          `Agent wallet: <code>${agentInfo.address}</code>\n\n` +
+          `Daily limit: <b>$${limitUsd.toFixed(2)}</b>\n` +
+          `Spent today: <b>$${spent.toFixed(4)}</b>\n` +
+          `Remaining: <b>$${remaining.toFixed(4)}</b>\n\n` +
+          `The stipend is tracked per vault (agent wallet), matching Alchemy's per-sender metering. ` +
+          `Resets at UTC midnight.`,
+        );
         return;
       }
 

@@ -34,6 +34,7 @@ import type { Env, UnsignedTransaction, ExecutionResult } from "../types.js";
 import { getChain, getRpcUrl, sanitizeError } from "../config.js";
 import { loadAgentWalletAccount } from "./agentWallet.js";
 import { getDelegationConfig, getChainDelegation } from "./delegation.js";
+import { recordGasSpend } from "../routes/gasPolicy.js";
 import { ALLOWED_VAULT_SELECTORS } from "../abi/rigoblockVault.js";
 import {
   executeSponsoredCalls,
@@ -482,6 +483,14 @@ export async function executeViaDelegation(
         const sponsoredCode = (sponsoredErr as any)?.code
           || (sponsoredErr as any)?.cause?.code
           || "";
+        // Alchemy may forward the gas-policy webhook's rejection reason inside the
+        // error payload (location varies by SDK version / error shape).
+        const sponsoredReason = (sponsoredErr as any)?.reason
+          || (sponsoredErr as any)?.cause?.reason
+          || (sponsoredErr as any)?.data?.reason
+          || (sponsoredErr as any)?.cause?.data?.reason
+          || (sponsoredErr as any)?.cause?.response?.reason
+          || "";
         const gasInfo = (sponsoredErr as any)?._gasInfo;
 
         // Try direct broadcast (agent wallet pays gas)
@@ -502,6 +511,9 @@ export async function executeViaDelegation(
           const detailSuffix = sponsoredDetails
             ? ` (${sanitizeError(String(sponsoredDetails))})`
             : "";
+          const reasonSuffix = sponsoredReason && !sponsoredDetails.includes(String(sponsoredReason))
+            ? ` — Policy reason: ${sanitizeError(String(sponsoredReason))}`
+            : "";
           const codeSuffix = sponsoredCode ? ` [${sponsoredCode}]` : "";
 
           // Show only facts: raw error, gas params, options. No interpretation.
@@ -520,7 +532,7 @@ export async function executeViaDelegation(
           let userMsg: string;
           if (directErr instanceof ExecutionError && directErr.code === "INSUFFICIENT_BALANCE") {
             userMsg = (
-              `Sponsored execution failed${detailSuffix}${codeSuffix}.${gasBreakdown}\n` +
+              `Sponsored execution failed${detailSuffix}${reasonSuffix}${codeSuffix}.${gasBreakdown}\n` +
               `Direct broadcast also failed: agent wallet has no ${token} for gas.\n` +
               `Options: (1) fund agent wallet ${agentAccount.address}, ` +
               `(2) disable sponsored gas, or ` +
@@ -529,7 +541,7 @@ export async function executeViaDelegation(
           } else {
             const directMsg = directErr instanceof Error ? directErr.message : String(directErr);
             userMsg = (
-              `Sponsored execution failed${detailSuffix}${codeSuffix}.${gasBreakdown}\n` +
+              `Sponsored execution failed${detailSuffix}${reasonSuffix}${codeSuffix}.${gasBreakdown}\n` +
               `Direct broadcast also failed: ${sanitizeError(directMsg)}.\n` +
               `Options: (1) fund agent wallet ${agentAccount.address}, ` +
               `(2) disable sponsored gas, or ` +
@@ -995,9 +1007,35 @@ async function sponsoredAgentTransaction(
 
   const result = await trySponsoredCalls(fees, false);
 
-  // ── Step 3: Map result to ExecutionResult ──
-  const explorerBase = EXPLORER_TX_URL[chainId];
+  // ── Step 3: Record actual gas spend if we have a receipt ──
+  // The paymaster covered the cost, but we still track it against the operator's
+  // daily sponsorship stipend so /stipend stays in sync with Alchemy.
   const receipt = result.receipts?.[0];
+  if (receipt) {
+    const gasUsed = receipt.gasUsed;
+    let effectiveGasPrice = (receipt as any).effectiveGasPrice as bigint | undefined;
+    if (!effectiveGasPrice && receipt.transactionHash) {
+      try {
+        const onChainReceipt = await publicClient.getTransactionReceipt({
+          hash: receipt.transactionHash,
+        });
+        effectiveGasPrice = onChainReceipt.effectiveGasPrice;
+      } catch (fetchErr) {
+        console.warn(
+          `[execution] Could not fetch on-chain receipt for gas spend: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`,
+        );
+      }
+    }
+    if (effectiveGasPrice) {
+      const gasCostWei = gasUsed * effectiveGasPrice;
+      await recordGasSpend(_kv, agentAccount.address, chainId, gasCostWei, alchemyKey).catch((err) =>
+        console.warn(`[execution] Failed to record sponsored gas spend: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    }
+  }
+
+  // ── Step 4: Map result to ExecutionResult ──
+  const explorerBase = EXPLORER_TX_URL[chainId];
   const receiptTxHash = receipt?.transactionHash || ("0x" as Hex);
   const explorerUrl = explorerBase && receiptTxHash !== "0x"
     ? `${explorerBase}${receiptTxHash}`
