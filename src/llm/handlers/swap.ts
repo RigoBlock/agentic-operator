@@ -212,6 +212,31 @@ export async function handle_build_vault_swap(
     // ── 0x AllowanceHolder flow ──
     const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
 
+    // ── Balance pre-check for exact-output swaps ──
+    // For exact-output we only know the required input after the quote. Guard
+    // against a transaction that would revert due to insufficient vault balance.
+    if (intent.amountOut && zxQuote.sellAmount) {
+      try {
+        const sellAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn);
+        const { balance, decimals, symbol } = await getVaultTokenBalance(
+          ctx.chainId, ctx.vaultAddress as Address, sellAddr as Address, env.ALCHEMY_API_KEY,
+        );
+        const requiredIn = BigInt(zxQuote.maxSellAmount || zxQuote.sellAmount);
+        if (requiredIn > balance) {
+          const available = formatUnits(balance, decimals);
+          const needed = formatUnits(requiredIn, decimals);
+          throw new Error(
+            `Insufficient ${symbol} balance. ` +
+            `Need ~${needed} ${symbol} to buy ${intent.amountOut} ${intent.tokenOut}, ` +
+            `but vault only has ${available} ${symbol} on ${chainName}. ` +
+            `Use a smaller amount or bridge more ${symbol} to this chain first.`,
+          );
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("Insufficient")) throw err;
+      }
+    }
+
     // ── Oracle enrichment (deduplicates RPC calls for Swap Shield) ──
     const oracleEnrichment0x = await enrichQuoteWithOracle(
       ctx.chainId,
@@ -239,9 +264,6 @@ export async function handle_build_vault_swap(
     const outputAmount = formatRawAmount(zxQuote.buyAmount, zxQuote.decimalsOut);
     const inputAmount = formatRawAmount(zxQuote.sellAmount, zxQuote.decimalsIn);
     const isExactOutput = !!intent.amountOut;
-    // For 0x, even when user requested exact output, the swap is always exact-input internally.
-    // The sell amount was estimated via the 0x price endpoint.
-    const is0xEstimated = isExactOutput;
 
     // Derive implied price
     const sellNum = parseFloat(inputAmount);
@@ -284,11 +306,11 @@ export async function handle_build_vault_swap(
       navShieldChecked: true,
     };
 
-    const sellLine = is0xEstimated
-      ? `Sell: ~${inputAmount} ${intent.tokenIn} (estimated for ~${intent.amountOut} ${intent.tokenOut})`
+    const sellLine = isExactOutput
+      ? `Sell: ~${inputAmount} ${intent.tokenIn} (estimated)`
       : `Sell: ${intent.amountIn} ${intent.tokenIn}`;
     const buyLine = isExactOutput
-      ? `Buy: ~${outputAmount} ${intent.tokenOut} (target: ${intent.amountOut} ${intent.tokenOut})`
+      ? `Buy: ${intent.amountOut} ${intent.tokenOut}`
       : `Buy: ~${outputAmount} ${intent.tokenOut}`;
 
     let message = [

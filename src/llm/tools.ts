@@ -1303,7 +1303,7 @@ If in doubt between perp and swap, treat "long/short" as a GMX perpetual.
 Pair suffixes like USD, USDC, USDT after a token symbol (e.g. ETHUSD, UNIUSDC, BTCUSD) indicate a GMX perpetual market, not a swap pair.
 
 SUPPORTED DEXs (SWAPS):
-- 0x (default): Routes through AllowanceHolder contract. 150+ liquidity sources. Best prices via aggregation.
+- 0x (default): Routes through AllowanceHolder contract. 150+ liquidity sources. Best prices via aggregation. Supports exact-input AND exact-output.
 - Uniswap: Routes through Universal Router via vault's AUniswapRouter adapter. Supports exact-input AND exact-output.
 
 SUPPORTED PERPS (PERPETUAL FUTURES):

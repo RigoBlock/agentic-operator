@@ -343,4 +343,51 @@ describe("GET /api/quote/0x", () => {
     const json = await res.json();
     expect(json.reason).toBe("Validation Failed");
   });
+
+  it("forwards buyAmount for exact-output quotes and runs oracle enrichment", async () => {
+    const app = createApp();
+    const upstreamResponse = {
+      buyAmount: "2000000000",
+      estimatedNetSellAmount: "1000000000000000000",
+      maxSellAmount: "1010000000000000000",
+      mode: "exact-out",
+    };
+
+    (global.fetch as any).mockResolvedValueOnce(
+      new Response(JSON.stringify(upstreamResponse), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+
+    mockEnrich.mockResolvedValueOnce({ priceFeedExists: true, deltaBps: 2, oracleAmount: "1995000000" });
+
+    const query = "chainId=8453&sellToken=0x0000000000000000000000000000000000000000&buyToken=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&buyAmount=2000000000&taker=0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045&slippageBps=100";
+
+    const res = await app.request(
+      `/api/quote/0x?${query}`,
+      { headers: { "x-test-x402-paid": "true" } },
+      mockEnv(),
+    );
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.buyAmount).toBe("2000000000");
+    expect(json.priceFeedExists).toBe(true);
+    expect(json.deltaBps).toBe(2);
+
+    // Verify query params forwarded verbatim
+    const fetchCalls = (global.fetch as any).mock.calls;
+    expect(fetchCalls.length).toBe(1);
+    const upstreamUrl = fetchCalls[0][0];
+    expect(upstreamUrl).toContain("buyAmount=2000000000");
+    expect(upstreamUrl).not.toContain("sellAmount=");
+
+    // Oracle enrichment should use the response sellAmount as input
+    expect(mockEnrich).toHaveBeenCalledWith(
+      8453,
+      "0x0000000000000000000000000000000000000000",
+      "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "1000000000000000000",
+      "2000000000",
+      "test-alchemy-key",
+    );
+  });
 });

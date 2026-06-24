@@ -266,12 +266,12 @@ async function callWorkersAI(
     content: m.content === null ? "" : m.content,
   }));
 
-  // For Kimi K2.6: use higher max_tokens to allow full reasoning.
+  // For Kimi K2.7 Code: use higher max_tokens to allow full reasoning.
   const isKimi = model.includes('kimi') || model.includes('moonshotai');
 
   // ── Streaming mode (all models when callback provided) ──
   // Streams tokens in real-time so the user sees progress immediately.
-  // Kimi K2.6: emits native delta tool_calls; plain-text replies stream as text tokens.
+  // Kimi K2.7 Code: emits native delta tool_calls; plain-text replies stream as text tokens.
   if (onReasoningToken) {
     const stream = await (ai as any).run(model, {
       messages: sanitizedMessages as any,
@@ -308,7 +308,7 @@ async function callWorkersAI(
         try {
           const json = JSON.parse(trimmed.slice(6));
 
-          // Collect native tool_call deltas (Kimi K2.6 uses OpenAI structured format)
+          // Collect native tool_call deltas (Kimi K2.7 Code uses OpenAI structured format)
           const deltaToolCalls = json.choices?.[0]?.delta?.tool_calls;
           if (Array.isArray(deltaToolCalls)) {
             for (const tc of deltaToolCalls) {
@@ -328,7 +328,7 @@ async function callWorkersAI(
           if (!token) continue;
           fullText += token;
 
-          // Kimi K2.6: emit text tokens until tool-call JSON starts.
+          // Kimi K2.7 Code: emit text tokens until tool-call JSON starts.
           // Kimi typically uses native delta tool_calls (handled above), but falls
           // through here for plain-text responses.
           const jsonStarted = fullText.trimStart().startsWith('{') ||
@@ -367,7 +367,7 @@ async function callWorkersAI(
     }
 
     // Prefer native delta tool_calls over text-embedded extraction.
-    // Kimi K2.6 returns structured tool_calls in the streaming delta —
+    // Kimi K2.7 Code returns structured tool_calls in the streaming delta —
     // these are more reliable than the regex text-extraction fallback.
     if (deltaToolCallMap.size > 0) {
       const assembled = Array.from(deltaToolCallMap.entries())
@@ -473,7 +473,7 @@ async function callWorkersAI(
 
   // Workers AI returns text in different fields depending on model:
   // - Legacy format: result.response (string)
-  // - OpenAI-compat format (Kimi K2.6, newer models): result.choices[0].message.content
+  // - OpenAI-compat format (Kimi K2.7 Code, newer models): result.choices[0].message.content
   const rawToolCalls = result.tool_calls ?? result.choices?.[0]?.message?.tool_calls;
   let hasToolCalls = Array.isArray(rawToolCalls) && rawToolCalls.length > 0;
   let toolCalls = hasToolCalls ? rawToolCalls : undefined;
@@ -633,9 +633,9 @@ export async function processChat(
   // Like MetaMask's default RPC: works out of the box, but users can bring their own key.
   //
   // Workers AI strategy:
-  //   - Kimi K2.6 (1T param MoE, 262k context): primary model — handles reasoning,
+  //   - Kimi K2.7 Code (1T param MoE, 262k context): primary model — handles reasoning,
   //     tool calling, and multi-step planning natively in a single call.
-  const KIMI_MODEL = "@cf/moonshotai/kimi-k2.6";
+  const KIMI_MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
   let openai: OpenAI | null = null;
   let useBinding = false;
@@ -657,7 +657,7 @@ export async function processChat(
     // User-provided key: same model for all calls
   } else if (env.AI) {
     // Workers AI via binding (default — no API key needed, zero-config)
-    // Kimi K2.6 as primary: natively handles reasoning + tool calling in one call.
+    // Kimi K2.7 Code as primary: natively handles reasoning + tool calling in one call.
     useBinding = true;
     llmModel = KIMI_MODEL;
   } else if (env.OPENAI_API_KEY) {
@@ -680,7 +680,7 @@ export async function processChat(
     if (useBinding) {
       // When streamReasoning is true AND we have an onStreamEvent callback,
       // pass it to callWorkersAI so tokens stream in real-time.
-      // Kimi K2.6 → 'text' events (any analysis/plan text before the tool call)
+      // Kimi K2.7 Code → 'text' events (any analysis/plan text before the tool call)
       const isStreamingModel = params.model.includes('kimi') || params.model.includes('moonshotai');
       const reasoningCallback = ((streamReasoning || isStreamingModel) && onStreamEvent)
         ? (accumulated: string) => onStreamEvent({
@@ -872,7 +872,7 @@ ${executionModeNote}${contextDocsBlock}`;
   // First LLM call
   console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
   // User-friendly model label for status messages
-  const modelLabel = llmModel.includes('kimi') || llmModel.includes('moonshotai') ? 'Kimi K2.6'
+  const modelLabel = llmModel.includes('kimi') || llmModel.includes('moonshotai') ? 'Kimi K2.7 Code'
     : llmModel.split('/').pop() || llmModel;
   onStreamEvent?.({ type: "status", message: `Thinking (${modelLabel})…` });
   const response = await callLLM({

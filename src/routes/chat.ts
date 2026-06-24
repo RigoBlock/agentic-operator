@@ -26,7 +26,7 @@ import type { Address } from "viem";
  *
  * Uses a simple token estimate: input chars / 4 ≈ input tokens,
  * output chars / 4 ≈ output tokens. Pricing is $1.50/M input +
- * $5.00/M output (covers Kimi K2.6 cost with ~50% margin).
+ * $5.00/M output (covers Kimi K2.7 Code cost with ~25% margin).
  * Clamped to [$0.003, $0.10] — the min covers overhead and the
  * max must be <= the upto scheme's maxAmountRequired.
  *

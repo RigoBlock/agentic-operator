@@ -61,17 +61,24 @@ quote0x.get("/", async (c) => {
   }
 
   // ── Oracle enrichment ──
-  // Skip for exact-output (buy-amount) quotes: the oracle expects an input amount
-  // to compare against the DEX quote, but exact-output quotes only provide buyAmount.
+  // For exact-input we compare the oracle output for the quoted sellAmount
+  // against the DEX buyAmount. For exact-output (buyAmount) we do the same:
+  // the DEX response tells us the required sellAmount, so we compare the
+  // oracle output for that input against the requested buyAmount.
   const query = c.req.query();
   let enrichment;
-  if (!query.sellAmount || !query.chainId) {
+  const hasChainId = !!query.chainId;
+  const isExactInput = !!query.sellAmount;
+  const isExactOutput = !!query.buyAmount;
+  if (!hasChainId || (!isExactInput && !isExactOutput)) {
     enrichment = { priceFeedExists: false, deltaBps: 0, oracleAmount: "0" };
   } else {
     const chainId = Number(query.chainId);
     const tokenIn = (query.sellToken || "") as Address;
     const tokenOut = (query.buyToken || "") as Address;
-    const amountIn = query.sellAmount;
+    const amountIn = isExactInput
+      ? query.sellAmount
+      : String(data.estimatedNetSellAmount || data.maxSellAmount || data.sellAmount || "0");
     const dexExpectedOut = String(data.buyAmount || "0");
     try {
       enrichment = await enrichQuoteWithOracle(

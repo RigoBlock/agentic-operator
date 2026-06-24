@@ -121,7 +121,7 @@ export interface ChatRequest {
   stream?: boolean;
   /** User-provided AI API key (OpenRouter, Anthropic, or OpenAI) */
   aiApiKey?: string;
-  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/moonshotai/kimi-k2.6") */
+  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/moonshotai/kimi-k2.7-code") */
   aiModel?: string;
   /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
   aiBaseUrl?: string;

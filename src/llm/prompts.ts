@@ -207,7 +207,7 @@ You help operators manage their DeFi vaults. Your API is extensible via x402 end
 
 export const DOMAIN_PROMPTS: Record<DomainKey, string> = {
   swap: `SWAP TRADING:
-- 0x (default): Routes through AllowanceHolder contract. 150+ liquidity sources. Best prices via aggregation.
+- 0x (default): Routes through AllowanceHolder contract. 150+ liquidity sources. Best prices via aggregation. Supports exact-input AND exact-output.
 - Uniswap: Routes through Universal Router via vault's AUniswapRouter adapter. Supports exact-input AND exact-output.
 - Default DEX is 0x. Honor explicit DEX requests.
 - build_vault_swap and get_swap_quote accept a "chain" parameter. Always include it when the user names a chain.

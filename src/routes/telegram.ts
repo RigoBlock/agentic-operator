@@ -370,13 +370,13 @@ async function handleMessage(
         const pick = args[0]?.toLowerCase();
         if (!pick) {
           await sendMessage(token, chatId,
-            "Current model: <b>Kimi K2.6</b>.\n\n" +
+            "Current model: <b>Kimi K2.7 Code</b>.\n\n" +
             "The agent handles reasoning, tool calling, and multi-step planning natively.",
           );
           return;
         }
         await sendMessage(token, chatId,
-          "Model switching is no longer supported. Kimi K2.6 is the fixed model.",
+          "Model switching is no longer supported. Kimi K2.7 Code is the fixed model.",
         );
         return;
       }
@@ -1169,7 +1169,7 @@ async function sendHelpMessage(token: string, chatId: number): Promise<void> {
     "/pools — list paired vaults",
     "/pool &lt;name&gt; — switch active vault",
     "/addpool &lt;0xAddr&gt; — add vault by address",
-    "/model — view current AI model (Kimi K2.6, fixed)",
+    "/model — view current AI model (Kimi K2.7 Code, fixed)",
     "/mode [autonomous|confirm] — toggle auto-execute or confirm",
     "/clear — reset conversation",
     "/unpair &lt;addr&gt; — unlink a vault",
