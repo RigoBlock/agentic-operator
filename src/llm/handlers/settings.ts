@@ -174,9 +174,10 @@ export async function handle_set_nav_shield_threshold(
   await setNavShieldThreshold(env.KV, ctx.operatorAddress!, pct);
   return {
     message: (
-      `🛡️ NAV Shield threshold set to ${Number(pct)}%. ` +
-      `Trades that would reduce the vault's unit price by more than ${Number(pct)}% will be blocked.\n\n` +
-      `Use 'reset NAV shield to default' to restore the ${Number(MIN_NAV_DROP_PCT)}%–${Number(MAX_NAV_DROP_PCT)}% default.`
+      `🛡️ NAV Shield set to ${Number(pct)}%. ` +
+      `Any trade that would drop your pool's unit price by more than ${Number(pct)}% will now be blocked.\n\n` +
+      `This setting applies to all your vaults on every chain. ` +
+      `Say "reset NAV shield to default" to return to ${Number(DEFAULT_MAX_NAV_DROP_PCT)}%.`
     ),
   };
 }
