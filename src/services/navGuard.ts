@@ -16,7 +16,9 @@
  *      selector, so the multicall succeeds.
  * 3. Compare post-swap unitaryValue vs pre-swap unitaryValue
  * 4. If drop > MAX_NAV_DROP_PCT, reject the transaction
- * 5. Store the 24-hour baseline in KV for rolling protection
+ * 5. RECOVERY RULE: trades that improve or hold the current unitaryValue are
+ *    always allowed, even if the vault is still below the 24h baseline.
+ * 6. Store the 24-hour baseline in KV for rolling protection
  *
  * ## Why updateUnitaryValue() instead of getNavDataView()
  *
@@ -199,6 +201,10 @@ function parseKnownError(errMsg: string): string | null {
 /**
  * Check if a transaction would drop the vault's NAV per unit by more
  * than the allowed threshold.
+ *
+ * RECOVERY RULE: trades that improve or hold the current unitaryValue are
+ * always allowed, even when the vault is below the 24h baseline. Only trades
+ * that reduce unitaryValue are subject to the maxDropPct threshold.
  *
  * @param vaultAddress - The vault contract address
  * @param txData - The encoded transaction calldata (for the vault)
@@ -446,11 +452,40 @@ export async function checkNavImpact(
     : 0n;
   const dropFromRefPct = Number(dropFromRefBps) / 100;
 
-  // ── Step 5: Enforce threshold ──
+  // ── Step 5: Recovery rule ──
+  // The NAV shield exists to prevent trades that reduce the vault's unit price.
+  // A trade that improves (or even holds) the current unit price is reducing risk,
+  // not increasing it. Allow it even if the vault is still below the 24h baseline
+  // or the post-trade drop from baseline exceeds the normal threshold.
+  if (postNav.unitaryValue >= preNav.unitaryValue) {
+    const improvementBps = postNav.unitaryValue > preNav.unitaryValue
+      ? ((postNav.unitaryValue - preNav.unitaryValue) * 10000n) / preNav.unitaryValue
+      : 0n;
+    const improvementPct = Number(improvementBps) / 100;
+
+    console.log(
+      `[NavShield] ✓ ALLOWED: trade ${improvementPct > 0 ? "improves" : "holds"} NAV ` +
+      `${improvementPct > 0 ? `by ${improvementPct.toFixed(2)}% ` : ""}` +
+      `(pre=${preNav.unitaryValue} post=${postNav.unitaryValue})`,
+    );
+
+    return {
+      allowed: true,
+      verified: true,
+      preNavUnitaryValue: preNav.unitaryValue.toString(),
+      postNavUnitaryValue: postNav.unitaryValue.toString(),
+      dropPct: "0",
+      baselineUnitaryValue: baselineUnitaryValue?.toString(),
+      reason: improvementPct > 0
+        ? `Trade improves the pool unit price by ${improvementPct.toFixed(2)}%.`
+        : "Trade holds the pool unit price unchanged.",
+    };
+  }
+
+  // ── Step 6: Enforce threshold for trades that actually reduce NAV ──
   const maxDrop = Number(maxDropPct);
   if (dropFromRefPct > maxDrop) {
     const isBelowBaseline = baselineUnitaryValue && baselineUnitaryValue > preNav.unitaryValue;
-    const tradeImprovesNav = postNav.unitaryValue > preNav.unitaryValue;
     const baselineDropPct = isBelowBaseline && baselineUnitaryValue
       ? Number(((baselineUnitaryValue - preNav.unitaryValue) * 10000n) / baselineUnitaryValue) / 100
       : 0;
@@ -460,26 +495,16 @@ export async function checkNavImpact(
       `(max allowed: ${maxDrop}%) reference=${referenceValue} pre=${preNav.unitaryValue} post=${postNav.unitaryValue}`,
     );
 
-    let reason: string;
-    if (isBelowBaseline && tradeImprovesNav) {
-      reason = (
-        `NAV is already ${baselineDropPct.toFixed(2)}% below the 24h baseline. ` +
-        `This trade would improve NAV by ${(Number(((postNav.unitaryValue - preNav.unitaryValue) * 10000n) / preNav.unitaryValue) / 100).toFixed(2)}%, ` +
-        `but the post-trade NAV would still be ${dropFromRefPct.toFixed(2)}% below baseline ` +
-        `(limit: ${maxDrop}%). All trading is paused while NAV is below baseline.`
-      );
-    } else if (isBelowBaseline) {
-      reason = (
+    const reason = isBelowBaseline
+      ? (
         `NAV is already ${baselineDropPct.toFixed(2)}% below the 24h baseline. ` +
         `This trade would worsen it to ${dropFromRefPct.toFixed(2)}% below baseline ` +
         `(limit: ${maxDrop}%). Trading is paused while NAV is below baseline.`
-      );
-    } else {
-      reason = (
+      )
+      : (
         `Trade would reduce pool unit price by ${dropFromRefPct.toFixed(2)}% ` +
         `(limit: ${maxDrop}%). This protects the pool from excessive value impact.`
       );
-    }
 
     return {
       allowed: false,
@@ -493,7 +518,7 @@ export async function checkNavImpact(
     };
   }
 
-  // ── Step 6: Update baseline if needed ──
+  // ── Step 7: Update baseline if needed ──
   if (kv) {
     try {
       // Refresh baseline if older than 24h or doesn't exist

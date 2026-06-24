@@ -38,6 +38,7 @@ export interface Env {
   ZEROX_API_KEY: string;    // 0x Swap API key (dashboard.0x.org)
   ALCHEMY_API_KEY: string;  // Alchemy RPC key (avoids public RPC rate limits)
   ALCHEMY_GAS_POLICY_ID?: string; // Alchemy Gas Manager policy ID (optional, enables sponsored gas)
+  GAS_SPENDING_LIMIT_USD?: string; // Per-wallet daily gas sponsorship limit in USD (default: 5)
   TELEGRAM_BOT_TOKEN?: string;        // Telegram Bot API token (optional, enables Telegram control)
   TELEGRAM_WEBHOOK_SECRET?: string;   // Dedicated webhook secret (recommended). If absent, falls back to deriving from CDP_WALLET_SECRET.
   CDP_API_KEY_ID: string;             // Coinbase Developer Platform API key ID
@@ -120,7 +121,7 @@ export interface ChatRequest {
   stream?: boolean;
   /** User-provided AI API key (OpenRouter, Anthropic, or OpenAI) */
   aiApiKey?: string;
-  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/moonshotai/kimi-k2.6") */
+  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/moonshotai/kimi-k2.7-code") */
   aiModel?: string;
   /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
   aiBaseUrl?: string;
@@ -309,6 +310,8 @@ export interface RequestContext {
    * gate vault-transaction tools: browser callers without auth are blocked (sign in),
    * while x402 agents without auth are allowed in manual mode (Tier 1 AGENTS.md). */
   isBrowserRequest: boolean;
+  /** True when the request comes from the Telegram bot. Used to tailor command guidance in errors. */
+  isTelegram?: boolean;
   /** Execution mode for this request */
   executionMode?: ExecutionMode;
   /** User-provided AI API key (overrides server OPENAI_API_KEY) */

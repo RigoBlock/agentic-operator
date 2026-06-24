@@ -46,8 +46,8 @@ export function getClient(chainId: number, alchemyKey?: string): PublicClient {
   const client = createPublicClient({
     chain,
     transport: http(rpcUrl, rpcUrl?.includes("alchemy.com")
-      ? { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
-      : undefined,
+      ? { timeout: 10_000, fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
+      : { timeout: 10_000 },
     ),
   });
   clientCache.set(cacheKey, client);

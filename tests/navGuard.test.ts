@@ -17,6 +17,11 @@ import {
   handle_set_swap_shield_tolerance,
   handle_enable_swap_shield,
 } from "../src/llm/handlers/settings.js";
+import {
+  tryFastPathSwapShieldToggle,
+  tryFastPathNavShieldThreshold,
+  tryFastPathSlippage,
+} from "../src/llm/client.js";
 import type { RequestContext } from "../src/types.js";
 
 // ── Mock KV namespace ──
@@ -112,6 +117,7 @@ function makeCtx(overrides: Partial<RequestContext> = {}): RequestContext {
     chainId: 8453,
     isBrowserRequest: true,
     operatorAddress: OPERATOR as `0x${string}`,
+    operatorVerified: true,
     ...overrides,
   };
 }
@@ -120,7 +126,7 @@ function makeEnv(kv: KVNamespace): any {
   return { KV: kv, ALCHEMY_API_KEY: "test-key" };
 }
 
-describe("Settings — browser-only restriction", () => {
+describe("Settings — operator-only restriction", () => {
   let kv: KVNamespace;
 
   beforeEach(() => {
@@ -134,12 +140,37 @@ describe("Settings — browser-only restriction", () => {
     expect(result.message).toContain("25%");
   });
 
-  it("rejects NAV shield threshold from non-browser requests", async () => {
+  it("returns a friendly NAV shield confirmation message", async () => {
     const env = makeEnv(kv);
-    const ctx = makeCtx({ isBrowserRequest: false });
+    const ctx = makeCtx({ isBrowserRequest: true });
+    const result = await handle_set_nav_shield_threshold(env, ctx, { threshold: "15%" }, "set_nav_shield_threshold");
+    expect(result.message).toContain("NAV Shield set to 15%");
+    expect(result.message).toContain("all your vaults on every chain");
+    expect(result.message).not.toContain("per-operator");
+    expect(result.message).not.toContain("across all chains");
+  });
+
+  it("sets swap shield tolerance from chat-style input", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ isBrowserRequest: true });
+    const result = await handle_set_swap_shield_tolerance(env, ctx, { tolerance: "30%" }, "set_swap_shield_tolerance");
+    expect(result.message).toContain("30%");
+    expect(result.message).toContain("10 minutes");
+  });
+
+  it("rejects NAV shield threshold from unverified operators (external agents)", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ operatorVerified: false });
     await expect(
       handle_set_nav_shield_threshold(env, ctx, { threshold: "25" }, "set_nav_shield_threshold"),
-    ).rejects.toThrow("can only be used via the web UI");
+    ).rejects.toThrow("can only be used by the vault operator");
+  });
+
+  it("allows NAV shield threshold from Telegram (verified operator)", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ isBrowserRequest: false });
+    const result = await handle_set_nav_shield_threshold(env, ctx, { threshold: "25" }, "set_nav_shield_threshold");
+    expect(result.message).toContain("25%");
   });
 
   it("allows reset NAV shield from browser requests", async () => {
@@ -151,33 +182,96 @@ describe("Settings — browser-only restriction", () => {
     expect(await getNavShieldThreshold(kv, OPERATOR)).toBeNull();
   });
 
-  it("rejects reset NAV shield from non-browser requests", async () => {
+  it("rejects reset NAV shield from unverified operators", async () => {
     const env = makeEnv(kv);
-    const ctx = makeCtx({ isBrowserRequest: false });
-    await expect(handle_enable_nav_shield(env, ctx, {}, "enable_nav_shield")).rejects.toThrow("can only be used via the web UI");
+    const ctx = makeCtx({ operatorVerified: false });
+    await expect(handle_enable_nav_shield(env, ctx, {}, "enable_nav_shield")).rejects.toThrow("can only be used by the vault operator");
   });
 
-  it("rejects slippage change from non-browser requests", async () => {
+  it("allows reset NAV shield from Telegram (verified operator)", async () => {
     const env = makeEnv(kv);
     const ctx = makeCtx({ isBrowserRequest: false });
+    await setNavShieldThreshold(kv, OPERATOR, 50n);
+    const result = await handle_enable_nav_shield(env, ctx, {}, "enable_nav_shield");
+    expect(result.message).toContain("10%");
+    expect(await getNavShieldThreshold(kv, OPERATOR)).toBeNull();
+  });
+
+  it("rejects slippage change from unverified operators", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ operatorVerified: false });
     await expect(
       handle_set_default_slippage(env, ctx, { slippage: "1%" }, "set_default_slippage"),
-    ).rejects.toThrow("can only be used via the web UI");
+    ).rejects.toThrow("can only be used by the vault operator");
   });
 
-  it("rejects swap shield tolerance from non-browser requests", async () => {
+  it("allows swap shield tolerance from Telegram (verified operator)", async () => {
     const env = makeEnv(kv);
     const ctx = makeCtx({ isBrowserRequest: false });
-    await expect(
-      handle_set_swap_shield_tolerance(env, ctx, { tolerance: "30%" }, "set_swap_shield_tolerance"),
-    ).rejects.toThrow("can only be used via the web UI");
+    const result = await handle_set_swap_shield_tolerance(env, ctx, { tolerance: "30%" }, "set_swap_shield_tolerance");
+    expect(result.message).toContain("30%");
   });
 
-  it("rejects enable swap shield from non-browser requests", async () => {
+  it("rejects enable swap shield from unverified operators", async () => {
     const env = makeEnv(kv);
-    const ctx = makeCtx({ isBrowserRequest: false });
+    const ctx = makeCtx({ operatorVerified: false });
     await expect(
       handle_enable_swap_shield(env, ctx, {}, "enable_swap_shield"),
-    ).rejects.toThrow("can only be used via the web UI");
+    ).rejects.toThrow("can only be used by the vault operator");
+  });
+});
+
+
+describe("Settings fast-path parsers", () => {
+  it("parses swap shield tolerance commands", () => {
+    expect(tryFastPathSwapShieldToggle("set swap shield to 10%")).toEqual({
+      name: "set_swap_shield_tolerance",
+      args: { tolerance: "10%" },
+    });
+    expect(tryFastPathSwapShieldToggle("swap shield tolerance 30%")).toEqual({
+      name: "set_swap_shield_tolerance",
+      args: { tolerance: "30%" },
+    });
+    expect(tryFastPathSwapShieldToggle("enable swap shield")).toEqual({
+      name: "enable_swap_shield",
+      args: {},
+    });
+    expect(tryFastPathSwapShieldToggle("disable swap shield")).toEqual({
+      name: "set_swap_shield_tolerance",
+      args: { tolerance: "50%" },
+    });
+    expect(tryFastPathSwapShieldToggle("random message")).toBeNull();
+  });
+
+  it("parses nav shield threshold commands", () => {
+    expect(tryFastPathNavShieldThreshold("set nav shield to 15%")).toEqual({
+      name: "set_nav_shield_threshold",
+      args: { threshold: "15%" },
+    });
+    expect(tryFastPathNavShieldThreshold("nav shield threshold 20%")).toEqual({
+      name: "set_nav_shield_threshold",
+      args: { threshold: "20%" },
+    });
+    expect(tryFastPathNavShieldThreshold("nav shield 7%")).toEqual({
+      name: "set_nav_shield_threshold",
+      args: { threshold: "7%" },
+    });
+    expect(tryFastPathNavShieldThreshold("random message")).toBeNull();
+  });
+
+  it("parses slippage commands", () => {
+    expect(tryFastPathSlippage("set slippage to 0.5%")).toEqual({
+      name: "set_default_slippage",
+      args: { slippage: "0.5%" },
+    });
+    expect(tryFastPathSlippage("slippage 2%")).toEqual({
+      name: "set_default_slippage",
+      args: { slippage: "2%" },
+    });
+    expect(tryFastPathSlippage("set default slippage 1%")).toEqual({
+      name: "set_default_slippage",
+      args: { slippage: "1%" },
+    });
+    expect(tryFastPathSlippage("random message")).toBeNull();
   });
 });

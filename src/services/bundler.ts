@@ -36,6 +36,7 @@ import {
   baseSepolia as alchemyBaseSepolia,
   unichainMainnet as alchemyUnichain,
 } from "@account-kit/infra";
+import { getAlchemyNetworkSlug } from "../config.js";
 
 // ── Alchemy Chain Map ────────────────────────────────────────────────
 
@@ -58,6 +59,29 @@ function getAlchemyChain(chainId: number): Chain {
     `Chain ${chainId} is not supported for sponsored execution — ` +
     `no Alchemy chain definition available.`,
   );
+}
+
+/**
+ * Per-chain timeout for `wallet_getCallsStatus` polling.
+ * Mainnet can take up to ~1 minute during congestion. L2s should land in
+ * seconds, so we fail fast and surface the callId instead of burning most of
+ * the 3-minute Alchemy Policy Expiry waiting for a stuck status response.
+ */
+const WAIT_FOR_CALLS_STATUS_TIMEOUT_MS: Record<number, number> = {
+  1: 60_000,        // Ethereum mainnet
+  11155111: 60_000, // Sepolia
+  // L2s / sidechains — fail fast if status cannot be retrieved
+  10: 20_000,       // Optimism
+  56: 20_000,       // BNB Chain
+  130: 20_000,      // Unichain
+  137: 20_000,      // Polygon
+  8453: 20_000,     // Base
+  42161: 20_000,    // Arbitrum
+  84532: 20_000,    // Base Sepolia
+};
+
+function getWaitForCallsStatusTimeout(chainId: number): number {
+  return WAIT_FOR_CALLS_STATUS_TIMEOUT_MS[chainId] ?? 20_000;
 }
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -111,8 +135,14 @@ export async function executeSponsoredCalls(
 
     // ── Step 2: Create smart wallet client (per SDK quickstart) ──
     const alchemyChain = getAlchemyChain(chainId);
+    // Route chain-agnostic wallet API calls (prepareCalls, sendPreparedCalls,
+    // getCallsStatus) to the chain-specific Alchemy endpoint instead of the
+    // generic api.g.alchemy.com. This fixes "Unknown network" logs and avoids
+    // cross-region routing that caused Arbitrum status polling timeouts.
+    const alchemyNetworkUrl = `https://${getAlchemyNetworkSlug(chainId)}.g.alchemy.com/v2`;
     const transport = alchemy({
       apiKey: alchemyKey,
+      chainAgnosticUrl: alchemyNetworkUrl,
       fetchOptions: {
         headers: {
           Origin: "https://trader.rigoblock.com",
@@ -167,7 +197,34 @@ export async function executeSponsoredCalls(
     }
 
     // ── Step 6: Wait for confirmation ──
-    const statusResult = await client.waitForCallsStatus({ id: callId });
+    // Use a longer timeout (90s) and explicit polling so transient Alchemy
+    // latency does not immediately kill the request. If the status still cannot
+    // be determined, return a pending result with the callId so the caller can
+    // surface "submitted but not yet confirmed" instead of hanging forever.
+    let statusResult;
+    try {
+      statusResult = await client.waitForCallsStatus({
+        id: callId,
+        pollingInterval: 4_000,
+        timeout: getWaitForCallsStatusTimeout(chainId),
+      });
+    } catch (waitErr) {
+      const isTimeout =
+        (waitErr instanceof Error && waitErr.name === "WaitForCallsStatusTimeoutError") ||
+        String(waitErr).includes("Timed out while waiting for call bundle");
+      if (isTimeout) {
+        console.warn(
+          `[bundler] waitForCallsStatus timed out for chain ${chainId}, callId ${callId}. ` +
+            "Returning pending result so the caller can surface the callId to the user.",
+        );
+        return {
+          callId,
+          status: "pending" as const,
+          receipts: undefined,
+        };
+      }
+      throw waitErr;
+    }
 
 
 

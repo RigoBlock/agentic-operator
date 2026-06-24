@@ -4,8 +4,9 @@
  * Tests the ExecutionError class and the execution validation logic WITHOUT
  * real RPC calls.
  */
-import { describe, it, expect } from "vitest";
-import { ExecutionError } from "../src/services/execution.js";
+import { describe, it, expect, vi } from "vitest";
+import { parseGwei, type PublicClient } from "viem";
+import { ExecutionError, estimateFees } from "../src/services/execution.js";
 
 describe("ExecutionError", () => {
   it("has correct name and code", () => {
@@ -153,5 +154,45 @@ describe("Agent wallet gas price buffer", () => {
     const rawGasPrice = 0n;
     const buffered = BigInt(Math.ceil(Number(rawGasPrice) * 1.2));
     expect(buffered).toBe(0n);
+  });
+});
+
+describe("estimateFees priority fee floor", () => {
+  it("uses a mainnet priority fee above Alchemy's 0.0625 gwei bundler minimum", async () => {
+    const publicClient = {
+      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: parseGwei("10") }),
+      estimateMaxPriorityFeePerGas: vi.fn(),
+    } as unknown as PublicClient;
+
+    const fees = await estimateFees(publicClient, 1);
+
+    expect(fees.maxPriorityFeePerGas).toBeGreaterThanOrEqual(parseGwei("0.01"));
+    expect(fees.maxPriorityFeePerGas).toBeLessThanOrEqual(parseGwei("0.0625"));
+    expect(fees.maxFeePerGas).toBeGreaterThan(fees.maxPriorityFeePerGas);
+  });
+
+  it("uses a sepolia priority fee above Alchemy's bundler minimum", async () => {
+    const publicClient = {
+      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: parseGwei("10") }),
+      estimateMaxPriorityFeePerGas: vi.fn().mockResolvedValue(parseGwei("0.05")),
+    } as unknown as PublicClient;
+
+    const fees = await estimateFees(publicClient, 11155111);
+
+    expect(fees.maxPriorityFeePerGas).toBeGreaterThanOrEqual(parseGwei("0.05"));
+    expect(fees.maxPriorityFeePerGas).toBeLessThanOrEqual(parseGwei("0.1"));
+  });
+
+  it("caps priority fee at the chain-specific cap", async () => {
+    const publicClient = {
+      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: parseGwei("1") }),
+      estimateMaxPriorityFeePerGas: vi.fn().mockResolvedValue(parseGwei("1")),
+    } as unknown as PublicClient;
+
+    const fees = await estimateFees(publicClient, 8453);
+
+    expect(fees.maxPriorityFeePerGas).toBe(parseGwei("0.01"));
+    // Base maxFee cap is 1 gwei; buffered base (1.5 gwei) + priority exceeds it.
+    expect(fees.maxFeePerGas).toBe(parseGwei("1"));
   });
 });

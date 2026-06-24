@@ -3,7 +3,8 @@
  * capability boundaries, and system prompt integrity.
  */
 import { describe, it, expect } from "vitest";
-import { TOOL_DEFINITIONS, SYSTEM_PROMPT } from "../src/llm/tools.js";
+import { TOOL_DEFINITIONS } from "../src/llm/tools.js";
+import { CORE_PROMPT, DOMAIN_PROMPTS } from "../src/llm/prompts.js";
 
 // Tool names that MUST exist (security-relevant)
 const REQUIRED_TOOLS = [
@@ -95,16 +96,18 @@ describe("TOOL_DEFINITIONS", () => {
 });
 
 describe("SYSTEM_PROMPT", () => {
+  const systemPrompt = CORE_PROMPT + "\n" + Object.values(DOMAIN_PROMPTS).join("\n");
+
   it("exists and is non-empty", () => {
-    expect(SYSTEM_PROMPT).toBeTypeOf("string");
-    expect(SYSTEM_PROMPT.length).toBeGreaterThan(100);
+    expect(systemPrompt).toBeTypeOf("string");
+    expect(systemPrompt.length).toBeGreaterThan(100);
   });
 
   it("mentions that grg_end_epoch targets the staking proxy (not vault)", () => {
-    expect(SYSTEM_PROMPT).toContain("staking proxy");
+    expect(systemPrompt).toContain("staking proxy");
   });
 
   it("mentions delegation for agent execution", () => {
-    expect(SYSTEM_PROMPT.toLowerCase()).toContain("delegat");
+    expect(systemPrompt.toLowerCase()).toContain("delegation");
   });
 });

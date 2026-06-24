@@ -91,7 +91,7 @@ export function resolveChainName(chainId: number): string {
  * Alchemy network slugs for each chain.
  * Chains not listed here use their default public RPC.
  */
-const ALCHEMY_NETWORK: Record<number, string> = {
+export const ALCHEMY_NETWORK: Record<number, string> = {
   1: "eth-mainnet",
   10: "opt-mainnet",
   56: "bnb-mainnet",
@@ -115,6 +115,13 @@ export function getRpcUrl(chainId: number, alchemyKey?: string): string | undefi
     }
   }
   return undefined; // viem will use the chain's default public RPC
+}
+
+/** Get the Alchemy network slug for a chain (e.g. "eth-mainnet", "arb-mainnet"). */
+export function getAlchemyNetworkSlug(chainId: number): string {
+  const network = ALCHEMY_NETWORK[chainId];
+  if (!network) throw new Error(`Unsupported chain ID for Alchemy: ${chainId}`);
+  return network;
 }
 
 /** Native token symbol per chain. Used to derive wrapped-native mappings dynamically. */
@@ -179,6 +186,7 @@ export const TOKEN_MAP: Record<number, Record<string, `0x${string}`>> = {
     // Unichain
     ETH: "0x0000000000000000000000000000000000000000",
     WETH: "0x4200000000000000000000000000000000000006",
+    USDC: "0x078D782b760474a361dDA0AF3839290b0EF57AD6",
   },
   137: {
     // Polygon
@@ -188,6 +196,7 @@ export const TOKEN_MAP: Record<number, Record<string, `0x${string}`>> = {
     WPOL: "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
     ETH: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
     WETH: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+    USDC: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
   },
   8453: {
     // Base Mainnet

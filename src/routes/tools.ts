@@ -136,7 +136,7 @@ tools.post("/", async (c) => {
     // Auth gate — same model as chat.ts
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
     const isOperatorAuth = c.get("operatorAuthVerified") ?? false;
-    let operatorVerified = false;
+    let operatorVerified = isOperatorAuth;
 
     if (hasAuthCredentials) {
       await verifyOperatorAuth({

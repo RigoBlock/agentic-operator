@@ -22,6 +22,7 @@ import { quote0x } from "./routes/quote0x.js";
 import { delegation } from "./routes/delegation.js";
 import { gasPolicy } from "./routes/gasPolicy.js";
 import { telegram } from "./routes/telegram.js";
+import { settings } from "./routes/settings.js";
 import { tools as toolsRoute } from "./routes/tools.js";
 import { oracle } from "./routes/oracle.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
@@ -70,6 +71,7 @@ app.route("/api/tools", toolsRoute);
 app.route("/api/delegation", delegation);
 app.route("/api/gas-policy", gasPolicy);
 app.route("/api/telegram", telegram);
+app.route("/api/settings", settings);
 
 // ── Vault info (no auth, no LLM — simple on-chain read) ──────────────
 // Tries the requested chain first, then all other supported chains.

@@ -100,12 +100,28 @@ const TICKERS_CACHE_TTL = 10 * 1000; // 10 seconds
 async function fetchWithRetry(
   url: string,
   maxRetries = 2,
+  timeoutMs = 3_000,
 ): Promise<Response> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const res = await fetch(url);
-    if (res.ok) return res;
-    if (attempt === maxRetries) return res;
-    await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      if (res.status !== 429 && res.status < 500) return res;
+      if (attempt === maxRetries - 1) return res;
+    } catch (err) {
+      const isTimeout = err instanceof Error && err.name === "AbortError";
+      if (isTimeout) {
+        console.warn(`[gmx] Request timed out after ${timeoutMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+        throw new Error(`GMX API timed out after ${timeoutMs}ms`);
+      }
+      if (attempt === maxRetries - 1) {
+        throw new Error(
+          `GMX API request failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    const delay = Math.min(300 * Math.pow(2, attempt) + Math.random() * 100, 1_500);
+    console.log(`[gmx] Retry ${attempt + 1}/${maxRetries}, waiting ${Math.round(delay)}ms`);
+    await new Promise((r) => setTimeout(r, delay));
   }
   throw new Error("Unreachable");
 }

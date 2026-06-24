@@ -306,11 +306,21 @@
           {
             "name": "sellAmount",
             "in": "query",
-            "required": true,
-            "description": "Amount to sell in base units",
+            "required": false,
+            "description": "Amount to sell in base units (exact-input). Either sellAmount or buyAmount must be provided.",
             "schema": {
               "type": "string",
               "example": "1000000000000000000"
+            }
+          },
+          {
+            "name": "buyAmount",
+            "in": "query",
+            "required": false,
+            "description": "Amount to buy in base units (exact-output). Either sellAmount or buyAmount must be provided.",
+            "schema": {
+              "type": "string",
+              "example": "2000000000"
             }
           },
           {
@@ -395,7 +405,7 @@
       "post": {
         "operationId": "agentChat",
         "summary": "AI-powered DeFi agent chat",
-        "description": "Natural language DeFi interface. Send a message describing a trading intent and receive unsigned swap calldata, position summaries, bridge transactions, or market analysis. The agent internally uses Kimi K2.6 for reasoning and tool calling.\n\n**Price:** up to $0.10 USDC per request (x402 `upto` scheme, eip155:8453) — billed by actual inference cost, typical $0.003–$0.015\n\n**Supported operations (one per request):**\n- Swap tokens via Uniswap v4 or 0x aggregator\n- Bridge tokens cross-chain via Across Protocol\n- Add/remove Uniswap v4 LP positions\n- Open/close GMX perpetual positions\n- Stake/unstake GRG governance tokens\n- Deploy and fund Rigoblock smart pool vaults\n- Query vault NAV, token balances, active positions\n- Create/manage automated trading strategies\n- Schedule TWAP orders (time-weighted average price execution)\n\n**Execution modes:**\n- manual (default): Returns unsigned calldata — operator signs and broadcasts\n- delegated: Agent wallet executes on-chain directly (requires operator auth + on-chain delegation)\n\n**Safety:** Every transaction passes NAV shield (≤10% loss), Swap Shield (oracle price check), 7-point execution validation, and on-chain selector whitelist.",
+        "description": "Natural language DeFi interface. Send a message describing a trading intent and receive unsigned swap calldata, position summaries, bridge transactions, or market analysis. The agent internally uses Kimi K2.7 Code for reasoning and tool calling.\n\n**Price:** up to $0.10 USDC per request (x402 `upto` scheme, eip155:8453) — billed by actual inference cost, typical $0.003–$0.015\n\n**Supported operations (one per request):**\n- Swap tokens via Uniswap v4 or 0x aggregator\n- Bridge tokens cross-chain via Across Protocol\n- Add/remove Uniswap v4 LP positions\n- Open/close GMX perpetual positions\n- Stake/unstake GRG governance tokens\n- Deploy and fund Rigoblock smart pool vaults\n- Query vault NAV, token balances, active positions\n- Create/manage automated trading strategies\n- Schedule TWAP orders (time-weighted average price execution)\n\n**Execution modes:**\n- manual (default): Returns unsigned calldata — operator signs and broadcasts\n- delegated: Agent wallet executes on-chain directly (requires operator auth + on-chain delegation)\n\n**Safety:** Every transaction passes NAV shield (≤10% loss), Swap Shield (oracle price check), 7-point execution validation, and on-chain selector whitelist.",
         "tags": [
           "Agent"
         ],
@@ -455,6 +465,159 @@
             "x402": []
           }
         ]
+      }
+    },
+    "/api/settings/slippage": {
+      "post": {
+        "operationId": "setSlippage",
+        "summary": "Set default slippage tolerance",
+        "description": "Operator-only endpoint to set the default slippage tolerance (0.1%–5%). Does not involve the chat LLM; the UI settings panel calls this directly.",
+        "tags": ["Operator Settings"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorSettingsRequest"
+              },
+              "example": {
+                "vaultAddress": "0xYourVaultAddress",
+                "chainId": 8453,
+                "operatorAddress": "0xOperatorAddress",
+                "authSignature": "0x...",
+                "authTimestamp": 1741700000000,
+                "slippage": "0.5%"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Slippage updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/settings/swap-shield": {
+      "post": {
+        "operationId": "setSwapShieldTolerance",
+        "summary": "Set or reset Swap Shield tolerance",
+        "description": "Operator-only endpoint to temporarily raise the Swap Shield tolerance (up to 50% for 10 minutes) or reset it to the default 5%. Does not involve the chat LLM.",
+        "tags": ["Operator Settings"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorSettingsRequest"
+              },
+              "example": {
+                "vaultAddress": "0xYourVaultAddress",
+                "chainId": 8453,
+                "operatorAddress": "0xOperatorAddress",
+                "authSignature": "0x...",
+                "authTimestamp": 1741700000000,
+                "tolerance": "30%"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Swap Shield tolerance updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/settings/nav-shield": {
+      "post": {
+        "operationId": "setNavShieldThreshold",
+        "summary": "Set or reset NAV Shield threshold",
+        "description": "Operator-only endpoint to set the NAV Shield maximum loss threshold (1%–100%) or reset it to the default 10%. Does not involve the chat LLM.",
+        "tags": ["Operator Settings"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorSettingsRequest"
+              },
+              "example": {
+                "vaultAddress": "0xYourVaultAddress",
+                "chainId": 8453,
+                "operatorAddress": "0xOperatorAddress",
+                "authSignature": "0x...",
+                "authTimestamp": 1741700000000,
+                "threshold": "15%"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "NAV Shield threshold updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
       }
     },
     "/api/tools": {
@@ -1718,6 +1881,59 @@
           }
         }
       },
+      "OperatorSettingsRequest": {
+        "type": "object",
+        "required": ["vaultAddress", "chainId", "operatorAddress", "authSignature", "authTimestamp"],
+        "properties": {
+          "vaultAddress": {
+            "type": "string",
+            "description": "Vault contract address"
+          },
+          "chainId": {
+            "type": "integer",
+            "description": "Chain ID where the vault exists"
+          },
+          "operatorAddress": {
+            "type": "string",
+            "description": "Vault owner address"
+          },
+          "authSignature": {
+            "type": "string",
+            "description": "EIP-191 signature of the auth message"
+          },
+          "authTimestamp": {
+            "type": "integer",
+            "description": "Timestamp included in the signed auth message"
+          },
+          "slippage": {
+            "type": "string",
+            "description": "Slippage value (e.g. '0.5%', '50bps', or '0.5')"
+          },
+          "tolerance": {
+            "type": "string",
+            "description": "Swap Shield tolerance percentage (e.g. '30%')"
+          },
+          "threshold": {
+            "type": "string",
+            "description": "NAV Shield threshold percentage (e.g. '15%')"
+          },
+          "reset": {
+            "type": "boolean",
+            "description": "When true, reset the setting to its default value"
+          }
+        }
+      },
+      "SettingsResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
       "ErrorResponse": {
         "type": "object",
         "properties": {
@@ -1743,6 +1959,10 @@
     {
       "name": "Tools",
       "description": "Direct tool invocation without LLM overhead — structured input/output"
+    },
+    {
+      "name": "Operator Settings",
+      "description": "Operator-scoped safety settings — requires vault ownership proof, bypasses the LLM"
     }
   ]
 }

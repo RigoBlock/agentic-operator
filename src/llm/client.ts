@@ -9,18 +9,18 @@
 
 import OpenAI from "openai";
 import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, RequestContext, StreamEvent, ExecutionResult } from "../types.js";
-import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS, RUNTIME_CONTEXT_PACK } from "./tools.js";
-import { detectDomains, buildSystemPrompt, filterToolsForDomains } from "./prompts.js";
+import { AGENT_TOOL_DEFINITIONS, RUNTIME_CONTEXT_PACK } from "./tools.js";
+import { detectDomains, buildSystemPrompt, DOMAIN_TOOLS, CORE_TOOLS } from "./prompts.js";
 import { getSkillTools, getSkillSystemPrompt } from "../skills/index.js";
 
-// Merge skill tools into the base definitions (skill tools are always available for dispatch)
-const ALL_TOOL_DEFINITIONS = [...BASE_TOOL_DEFINITIONS, ...getSkillTools()];
+// Merge skill tools into the LLM-facing definitions (skill tools are always available for dispatch)
+const ALL_AGENT_TOOL_DEFINITIONS = [...AGENT_TOOL_DEFINITIONS, ...getSkillTools()];
 import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
 import { AuthError } from "../services/auth.js";
 import { formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { getClient } from "../services/vault.js";
-import { checkNavImpact, getNavShieldThreshold } from "../services/navGuard.js";
+import { checkNavImpact, getNavShieldThreshold, MAX_NAV_DROP_PCT } from "../services/navGuard.js";
 import {
   getSwapShieldTolerance,
   getStoredSlippage,
@@ -28,6 +28,7 @@ import {
   MIN_SLIPPAGE_BPS,
   MAX_SLIPPAGE_BPS,
   DEFAULT_MAX_DIVERGENCE_PCT,
+  MAX_TEMP_DIVERGENCE_PCT,
   checkSwapPrice,
 } from "../services/swapShield.js";
 import { TOOL_HANDLER_REGISTRY } from "./handlers/index.js";
@@ -42,6 +43,28 @@ const POOL_ERROR_SELECTORS: Record<string, string> = {
   "0x162e92dd": "SameChainTransfer — the source and destination chain resolved to the same chain. This usually means the NAV equalization auto-corrected the direction incorrectly.",
   "0xec8f2f9a": "TransferFromRecipientNotSettler — the 0x Settler contract rejected this swap because the vault is not recognized as a valid recipient. This token pair may not be supported via 0x for vault swaps. Try using Uniswap instead (omit 'using 0x').",
 };
+
+/**
+ * Reject a promise after `ms` milliseconds so long-running external calls
+ * (Workers AI, DEX APIs, RPC) cannot stall the Worker until wall-time limits.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, context: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${context} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
 
 /**
  * Map hallucinated LLM tool names to the correct canonical tool name.
@@ -79,12 +102,18 @@ export function isVerifiedOperatorContext(
  *
  * Keep this as the single source of truth instead of scattering checks in
  * individual tool handlers.
+ *
+ * Security note: settings tools are additionally excluded from AGENT_TOOL_DEFINITIONS
+ * so the chat LLM cannot even propose them. A prompt-injected agent therefore has no
+ * path to mutate slippage, swap-shield tolerance, or NAV-shield threshold.
  */
 export const OPERATOR_VERIFIED_TOOLS = new Set<string>([
-  // Operator-scoped KV mutations
+  // Operator-scoped KV mutations — safety settings must never be mutable by x402 agents
   "set_default_slippage",
   "set_swap_shield_tolerance",
   "enable_swap_shield",
+  "set_nav_shield_threshold",
+  "enable_nav_shield",
   // Strategy visibility is operator-private
   "list_strategies",
   // NAV Sync: reads/writes operator-private KV configs
@@ -256,7 +285,7 @@ async function callWorkersAI(
   model: string,
   messages: OpenAI.ChatCompletionMessageParam[],
   tools?: OpenAI.ChatCompletionTool[],
-  onReasoningToken?: (accumulated: string) => void,
+  onStreamEvent?: (event: StreamEvent) => void,
 ): Promise<OpenAI.ChatCompletion> {
   // Workers AI rejects null content (which the OpenAI spec allows for assistant
   // messages that contain tool_calls). Normalise to "" before sending so the
@@ -266,34 +295,46 @@ async function callWorkersAI(
     content: m.content === null ? "" : m.content,
   }));
 
-  // For Kimi K2.6: use higher max_tokens to allow full reasoning.
+  // For Kimi K2.7 Code: keep internal thinking enabled so the model can reason
+  // about tool selection, parameter extraction, and multi-step plans. Streaming
+  // surfaces reasoning tokens in real time, so the user sees progress instead of
+  // a silent wait.
   const isKimi = model.includes('kimi') || model.includes('moonshotai');
 
   // ── Streaming mode (all models when callback provided) ──
   // Streams tokens in real-time so the user sees progress immediately.
-  // Kimi K2.6: emits native delta tool_calls; plain-text replies stream as text tokens.
-  if (onReasoningToken) {
-    const stream = await (ai as any).run(model, {
-      messages: sanitizedMessages as any,
-      ...(tools ? { tools: tools as any } : {}),
-      max_tokens: 16384,
-      stream: true,
-    });
+  // Kimi K2.7 Code: emits native delta tool_calls; plain-text replies stream as text tokens.
+  if (onStreamEvent) {
+    return await withTimeout(
+      (async () => {
+        const stream = await (ai as any).run(model, {
+          messages: sanitizedMessages as any,
+          ...(tools ? { tools: tools as any } : {}),
+          max_tokens: 16384,
+          stream: true,
+          ...(isKimi ? { chat_template_kwargs: { thinking: { type: "enabled" } } } : {}),
+        });
 
-    // Parse the SSE stream and emit reasoning tokens in real-time
-    const reader = (stream as ReadableStream).getReader();
+        // Parse the SSE stream and emit reasoning tokens in real-time
+        const reader = (stream as ReadableStream).getReader();
     const decoder = new TextDecoder();
     let fullText = '';
     let lineBuffer = '';
-    let reasoning = '';
-    // Throttle reasoning events: emit at most every 150ms to avoid flooding the SSE pipe
+    let reasoningAcc = '';
+    // Throttle reasoning/text events: emit at most every 150ms to avoid flooding the SSE pipe
     let lastEmitTime = 0;
     // Collect native tool_call deltas (OpenAI streaming format)
     // index → {id, name, arguments}
     const deltaToolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
+    const tFirstToken = Date.now();
+    let firstTokenLogged = false;
 
     while (true) {
       const { done, value } = await reader.read();
+      if (!firstTokenLogged && (done || value)) {
+        console.log(`[LLM] first token after ${Date.now() - tFirstToken}ms (model=${model})`);
+        firstTokenLogged = true;
+      }
       if (done) break;
 
       lineBuffer += decoder.decode(value, { stream: true });
@@ -308,7 +349,7 @@ async function callWorkersAI(
         try {
           const json = JSON.parse(trimmed.slice(6));
 
-          // Collect native tool_call deltas (Kimi K2.6 uses OpenAI structured format)
+          // Collect native tool_call deltas (Kimi K2.7 Code uses OpenAI structured format)
           const deltaToolCalls = json.choices?.[0]?.delta?.tool_calls;
           if (Array.isArray(deltaToolCalls)) {
             for (const tc of deltaToolCalls) {
@@ -323,21 +364,55 @@ async function callWorkersAI(
             }
           }
 
-          // Workers AI uses json.response (legacy) or json.choices[0].delta.content (OpenAI-compat)
-          const token: string = json.response || json.choices?.[0]?.delta?.content || '';
-          if (!token) continue;
-          fullText += token;
-
-          // Kimi K2.6: emit text tokens until tool-call JSON starts.
-          // Kimi typically uses native delta tool_calls (handled above), but falls
-          // through here for plain-text responses.
-          const jsonStarted = fullText.trimStart().startsWith('{') ||
-            /\{[^}]*"(?:name|type|function|parameters|arguments)"\s*:/.test(fullText);
-          if (token && !jsonStarted) {
+          // Kimi K2.7 Code streams chain-of-thought through delta.reasoning_content
+          // before emitting delta.content. Surface it as a real-time reasoning stream.
+          const reasoningToken: string = json.choices?.[0]?.delta?.reasoning_content || '';
+          if (reasoningToken) {
+            reasoningAcc += reasoningToken;
             const now = Date.now();
             if (now - lastEmitTime > 150) {
-              onReasoningToken(fullText.trim());
+              onStreamEvent({ type: 'reasoning', content: reasoningAcc.trim() });
               lastEmitTime = now;
+            }
+          }
+
+          // Workers AI uses json.response (legacy) or json.choices[0].delta.content (OpenAI-compat)
+          const token: string = json.response || json.choices?.[0]?.delta?.content || '';
+          if (token) {
+            fullText += token;
+
+            // Some models emit chain-of-thought inside <think>...</think> tags in delta.content
+            // instead of a separate reasoning_content field. Surface it as a real-time reasoning stream.
+            const thinkOpen = fullText.indexOf('<think>');
+            const thinkClose = fullText.indexOf('</think>');
+            if (thinkOpen !== -1) {
+              const thinkEnd = thinkClose !== -1 ? thinkClose : fullText.length;
+              const thinkBody = fullText.slice(thinkOpen + '<think>'.length, thinkEnd).trim();
+              if (thinkBody && thinkBody !== reasoningAcc) {
+                reasoningAcc = thinkBody;
+                const now = Date.now();
+                if (now - lastEmitTime > 150) {
+                  onStreamEvent({ type: 'reasoning', content: reasoningAcc });
+                  lastEmitTime = now;
+                }
+              }
+            }
+
+            // Display text strips any closed or still-open <think> block so reasoning
+            // does not leak into the public plan text.
+            let displayText = fullText.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+            const openThink = displayText.indexOf('<think>');
+            if (openThink !== -1) displayText = displayText.slice(0, openThink).trim();
+
+            // Kimi K2.7 Code: emit text tokens until tool-call JSON starts.
+            const jsonStarted = displayText.startsWith('{') ||
+              /\{[^}]*"(?:name|type|function|parameters|arguments)"\s*:/.test(displayText);
+            if (displayText && !jsonStarted) {
+              const now = Date.now();
+              if (now - lastEmitTime > 150) {
+                onStreamEvent({ type: 'text', content: displayText });
+                lastEmitTime = now;
+              }
             }
           }
         } catch {
@@ -347,8 +422,8 @@ async function callWorkersAI(
     }
 
     // Final reasoning emit (un-throttled)
-    if (reasoning.trim()) {
-      onReasoningToken(reasoning.trim());
+    if (reasoningAcc.trim()) {
+      onStreamEvent({ type: 'reasoning', content: reasoningAcc.trim() });
     }
 
     // Now process the accumulated fullText exactly like the non-streaming path
@@ -367,7 +442,7 @@ async function callWorkersAI(
     }
 
     // Prefer native delta tool_calls over text-embedded extraction.
-    // Kimi K2.6 returns structured tool_calls in the streaming delta —
+    // Kimi K2.7 Code returns structured tool_calls in the streaming delta —
     // these are more reliable than the regex text-extraction fallback.
     if (deltaToolCallMap.size > 0) {
       const assembled = Array.from(deltaToolCallMap.entries())
@@ -460,20 +535,33 @@ async function callWorkersAI(
         },
         finish_reason: (hasToolCalls ? "tool_calls" : "stop") as any,
       }],
-      _reasoning: extractedReasoning,
+      _reasoning: reasoningAcc || extractedReasoning,
     } as any;
+      })(),
+      40_000,
+      "Workers AI streaming",
+    );
   }
 
   // ── Non-streaming path (all models when no streaming callback provided) ──
-  const result = await (ai as any).run(model, {
-    messages: sanitizedMessages as any,
-    ...(tools ? { tools: tools as any } : {}),
-    max_tokens: isKimi ? 16384 : 4096,
-  });
+  // Keep Kimi's internal thinking enabled so the model can reason through the
+  // request even when the caller is not consuming the streaming deltas.
+  const tNonStream = Date.now();
+  const result = (await withTimeout(
+    (ai as any).run(model, {
+      messages: sanitizedMessages as any,
+      ...(tools ? { tools: tools as any } : {}),
+      max_tokens: isKimi ? 8192 : 4096,
+      ...(isKimi ? { chat_template_kwargs: { thinking: { type: "enabled" } } } : {}),
+    }),
+    40_000,
+    "Workers AI",
+  )) as any;
+  console.log(`[LLM] non-streaming response in ${Date.now() - tNonStream}ms (model=${model})`);
 
   // Workers AI returns text in different fields depending on model:
   // - Legacy format: result.response (string)
-  // - OpenAI-compat format (Kimi K2.6, newer models): result.choices[0].message.content
+  // - OpenAI-compat format (Kimi K2.7 Code, newer models): result.choices[0].message.content
   const rawToolCalls = result.tool_calls ?? result.choices?.[0]?.message?.tool_calls;
   let hasToolCalls = Array.isArray(rawToolCalls) && rawToolCalls.length > 0;
   let toolCalls = hasToolCalls ? rawToolCalls : undefined;
@@ -481,6 +569,15 @@ async function callWorkersAI(
     ? result.response
     : (typeof result.choices?.[0]?.message?.content === 'string' ? result.choices[0].message.content : null);
   let textContent: string | null = rawText;
+
+  // Kimi K2.7 Code may return reasoning in a separate field even in non-streaming mode.
+  const rawReasoning = result.choices?.[0]?.message?.reasoning_content
+    || result.reasoning_content
+    || result.reasoning
+    || null;
+  if (typeof rawReasoning === 'string' && rawReasoning.trim()) {
+    (onStreamEvent as ((e: StreamEvent) => void) | undefined)?.({ type: "reasoning", content: rawReasoning.trim() });
+  }
 
   // Resolve tool name aliases in structured tool_calls (e.g. "swap" → "build_vault_swap").
   // If ALL tool_calls have unknown names even after aliasing, discard them and try
@@ -510,7 +607,7 @@ async function callWorkersAI(
     }
   }
 
-  // ── Extract reasoning from <think>...</think> blocks ──
+  // ── Extract reasoning from <think>...</think> blocks or dedicated field ──
   // The reasoning trace is stored on the response object for the caller to surface.
   let reasoning: string | null = null;
   if (textContent) {
@@ -520,6 +617,9 @@ async function callWorkersAI(
       textContent = textContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim() || null;
       console.log(`[Workers AI] Extracted reasoning (${reasoning.length} chars)`);
     }
+  }
+  if (!reasoning && typeof rawReasoning === 'string' && rawReasoning.trim()) {
+    reasoning = rawReasoning.trim();
   }
 
   // Workers AI sometimes embeds tool calls as JSON text instead of structured
@@ -626,16 +726,18 @@ export async function processChat(
   onToolResult?: (toolName: string, result: string, isError: boolean) => Promise<void>,
   onStreamEvent?: (event: StreamEvent) => void,
 ): Promise<ChatResponse> {
+  const t0 = Date.now();
   onStreamEvent?.({ type: "status", message: "Analyzing request..." });
+  console.log(`[processChat] start vault=${ctx.vaultAddress} chain=${ctx.chainId}`);
 
   // ── LLM provider resolution ──
   // Priority: 1) User-provided key → 2) Workers AI binding (zero-config) → 3) Server OpenAI key
   // Like MetaMask's default RPC: works out of the box, but users can bring their own key.
   //
   // Workers AI strategy:
-  //   - Kimi K2.6 (1T param MoE, 262k context): primary model — handles reasoning,
+  //   - Kimi K2.7 Code (1T param MoE, 262k context): primary model — handles reasoning,
   //     tool calling, and multi-step planning natively in a single call.
-  const KIMI_MODEL = "@cf/moonshotai/kimi-k2.6";
+  const KIMI_MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
   let openai: OpenAI | null = null;
   let useBinding = false;
@@ -657,7 +759,7 @@ export async function processChat(
     // User-provided key: same model for all calls
   } else if (env.AI) {
     // Workers AI via binding (default — no API key needed, zero-config)
-    // Kimi K2.6 as primary: natively handles reasoning + tool calling in one call.
+    // Kimi K2.7 Code as primary: natively handles reasoning + tool calling in one call.
     useBinding = true;
     llmModel = KIMI_MODEL;
   } else if (env.OPENAI_API_KEY) {
@@ -678,30 +780,51 @@ export async function processChat(
   }, streamReasoning?: boolean) => {
     recordModel(params.model);
     if (useBinding) {
-      // When streamReasoning is true AND we have an onStreamEvent callback,
-      // pass it to callWorkersAI so tokens stream in real-time.
-      // Kimi K2.6 → 'text' events (any analysis/plan text before the tool call)
+      // Stream when the caller provided an event callback and this is a Kimi
+      // reasoning-capable model. Workers AI streams reasoning_content deltas
+      // for Kimi K2.7 Code, which callWorkersAI surfaces as reasoning/text events.
       const isStreamingModel = params.model.includes('kimi') || params.model.includes('moonshotai');
-      const reasoningCallback = ((streamReasoning || isStreamingModel) && onStreamEvent)
-        ? (accumulated: string) => onStreamEvent({
-            type: 'text',
-            content: accumulated,
-          })
-        : undefined;
-      return callWorkersAI(env.AI!, params.model, params.messages, params.tools, reasoningCallback);
+      const shouldStream = (streamReasoning || isStreamingModel) && onStreamEvent;
+      return callWorkersAI(
+        env.AI!,
+        params.model,
+        params.messages,
+        params.tools,
+        shouldStream ? onStreamEvent : undefined,
+      );
     }
     return openai!.chat.completions.create(params);
   };
 
+  // Keep conversation history short to protect Workers AI latency budget.
+  // The system prompt carries all static policy; only recent turns need context.
+  const MAX_HISTORY_MESSAGES = 10;
+  const recentMessages = messages.length > MAX_HISTORY_MESSAGES
+    ? messages.slice(-MAX_HISTORY_MESSAGES)
+    : messages;
+
   // Build system prompt with vault context — MODULAR: only load relevant domain sections
-  const detectedDomains = detectDomains(messages as Array<{ role: string; content: string }>);
+  const detectedDomains = detectDomains(recentMessages as Array<{ role: string; content: string }>);
   const skillPrompts = getSkillSystemPrompt();
   const systemPrompt = buildSystemPrompt(detectedDomains, skillPrompts || undefined);
 
-  // Filter tools to only include relevant domains (reduces token count significantly)
-  const TOOL_DEFINITIONS = filterToolsForDomains(ALL_TOOL_DEFINITIONS, detectedDomains);
+  // Domain-aware tool filtering: only expose tools that match the detected intent.
+  // This shrinks the LLM context, cuts first-token latency, and reduces hallucinated
+  // tool calls on simple requests. Core tools are always available; skill tools are
+  // kept because they are few and domain-specific (TWAP, nav sync).
+  const allowedToolNames = new Set<string>(CORE_TOOLS);
+  for (const domain of detectedDomains) {
+    const names = DOMAIN_TOOLS[domain];
+    if (names) names.forEach((n) => allowedToolNames.add(n));
+  }
+  const filteredTools = ALL_AGENT_TOOL_DEFINITIONS.filter((t) =>
+    allowedToolNames.has(t.function.name),
+  );
+  const TOOL_DEFINITIONS = filteredTools.length > 0
+    ? [...filteredTools, ...getSkillTools()]
+    : ALL_AGENT_TOOL_DEFINITIONS;
 
-  console.log(`[processChat] Detected domains: ${[...detectedDomains].join(", ")} (${TOOL_DEFINITIONS.length} tools, ${Math.round(systemPrompt.length / 4)} est. tokens)`);
+  console.log(`[processChat] Detected domains: ${[...detectedDomains].join(", ")} (${TOOL_DEFINITIONS.length} tools, ${Math.round(systemPrompt.length / 4)} est. tokens) +${Date.now() - t0}ms`);
 
   const executionModeNote = ctx.executionMode === "delegated"
     ? "The operator has enabled DELEGATED mode. After you build a transaction, the agent wallet will execute it automatically once the operator confirms the trade details. The operator does NOT need to sign the transaction manually."
@@ -740,7 +863,7 @@ ${executionModeNote}${contextDocsBlock}`;
   // Prepend system prompt
   const fullMessages: OpenAI.ChatCompletionMessageParam[] = [
     { role: "system", content: contextualPrompt },
-    ...messages.map((m) => ({
+    ...recentMessages.map((m) => ({
       role: m.role as "user" | "assistant",
       content: m.content,
     })),
@@ -754,7 +877,7 @@ ${executionModeNote}${contextDocsBlock}`;
   // Chain switch: always immediate — "switch to arbitrum" has zero ambiguity.
   // Swaps/LP/GMX: still defer to LLM first as a fallback for when the LLM produces
   // plain text instead of a tool call (the deferred fast-path below catches that).
-  const lastUserMsg = messages.filter(m => m.role === "user").pop()?.content?.trim() || "";
+  const lastUserMsg = recentMessages.filter(m => m.role === "user").pop()?.content?.trim() || "";
 
   // Capability/info questions should not trigger tool execution.
   const capabilityQuestion = tryFastPathCapabilityQuestion(lastUserMsg);
@@ -800,20 +923,24 @@ ${executionModeNote}${contextDocsBlock}`;
   }
 
   // Immediate fast-path: deterministic commands that never need an LLM call.
-  // Simple swaps are included here — "sell 200 ZRX for GRG using 0x" has zero
-  // ambiguity and the LLM may fail to tool-call on them anyway.
+  // Simple swaps, settings toggles, TWAP creation, bridge, and GMX increase are
+  // included here — they have unambiguous regex shapes. Bypassing the LLM avoids
+  // the 30-50s Workers AI latency with the full 55-tool catalog and prevents the
+  // model from hallucinating tool calls on trivial requests.
   // NOTE: crosschain_sync is intentionally NOT in the fast-path.
   // Cross-chain operations need LLM reasoning to show the user what was computed
   // (NAV data, direction, token, amount) and explain errors. Speed is not the
   // priority — correctness and transparency are.
   const immediateFastPath =
     tryFastPathChainSwitch(effectiveMsg) ||
-    (hasVault ? tryFastPathSwapShieldToggle(effectiveMsg) : null) ||
-    (hasVault ? tryFastPathStrategyQueries(effectiveMsg) : null) ||
-    (hasVault ? tryFastPathTwapCreate(effectiveMsg) : null) ||
-    (hasVault ? tryFastPathBridge(effectiveMsg) : null) ||
-    (hasVault ? tryFastPathGmxIncrease(effectiveMsg) : null) ||
-    (hasVault ? tryFastPathSwap(effectiveMsg) : null);
+    tryFastPathSwap(effectiveMsg) ||
+    tryFastPathSwapShieldToggle(effectiveMsg) ||
+    tryFastPathNavShieldThreshold(effectiveMsg) ||
+    tryFastPathSlippage(effectiveMsg) ||
+    tryFastPathBridge(effectiveMsg) ||
+    tryFastPathTwapCreate(effectiveMsg) ||
+    tryFastPathGmxIncrease(effectiveMsg) ||
+    tryFastPathStrategyQueries(effectiveMsg);
   if (immediateFastPath) {
     console.log(`[LLM] Immediate fast-path (no LLM): ${immediateFastPath.name}(${JSON.stringify(immediateFastPath.args)})`);
     try {
@@ -870,18 +997,19 @@ ${executionModeNote}${contextDocsBlock}`;
       : [{ role: "system" as const, content: contextualPrompt }, ...msgs];
 
   // First LLM call
-  console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools`);
+  console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools +${Date.now() - t0}ms`);
   // User-friendly model label for status messages
-  const modelLabel = llmModel.includes('kimi') || llmModel.includes('moonshotai') ? 'Kimi K2.6'
+  const modelLabel = llmModel.includes('kimi') || llmModel.includes('moonshotai') ? 'Kimi K2.7 Code'
     : llmModel.split('/').pop() || llmModel;
   onStreamEvent?.({ type: "status", message: `Thinking (${modelLabel})…` });
+  const tLlmStart = Date.now();
   const response = await callLLM({
     model: llmModel,
     messages: withRuntimeContext(fullMessages),
     tools: TOOL_DEFINITIONS,
     tool_choice: "auto",
   });
-  console.log(`[LLM] Response: finish_reason=${response.choices[0]?.finish_reason}, tool_calls=${response.choices[0]?.message?.tool_calls?.length ?? 0}`);
+  console.log(`[LLM] Response in ${Date.now() - tLlmStart}ms: finish_reason=${response.choices[0]?.finish_reason}, tool_calls=${response.choices[0]?.message?.tool_calls?.length ?? 0}`);
   // Don't emit "Model responded" — the next meaningful event (reasoning, tool_call, text) replaces it
 
   const choice = response.choices[0];
@@ -918,57 +1046,6 @@ ${executionModeNote}${contextDocsBlock}`;
   // until we reach an actionable outcome (tx batch / self-contained report) or max rounds.
   //
   let orchestrationChoice = choice;
-
-  // ── Deferred fast-path (swap safety net) ──
-  // If the initial LLM call produced no tool calls, try the swap fast-path as a
-  // last resort. This catches cases where the user's phrasing was slightly too
-  // conversational for the immediate fast-path regex (e.g. stripped prefixes,
-  // minor reformulations) but simple enough that the LLM should have called
-  // build_vault_swap and didn't.
-  if (!orchestrationChoice.message.tool_calls?.length && hasVault) {
-    const deferredSwap = tryFastPathSwap(effectiveMsg);
-    if (deferredSwap) {
-      console.log(`[LLM] Deferred fast-path (after LLM miss): ${deferredSwap.name}(${JSON.stringify(deferredSwap.args)})`);
-      try {
-        onStreamEvent?.({ type: "status", message: `Executing ${deferredSwap.name}...` });
-        const toolResult = await executeToolCall(env, ctx, deferredSwap.name, deferredSwap.args);
-        let deferredReply = toolResult.message;
-        if (toolResult.transaction && !toolResult.transaction.navShieldChecked && toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress?.toLowerCase()) {
-          const navCheck = await preCheckNavImpact(env, ctx, toolResult.transaction);
-          toolResult.transaction.navShieldChecked = true;
-          if (navCheck.warning) deferredReply += '\n' + navCheck.warning;
-          if (navCheck.metrics) {
-            toolResult.metadata = { ...toolResult.metadata, navMetrics: navCheck.metrics };
-            if (toolResult.transaction) toolResult.transaction.metrics = toolResult.metadata;
-          }
-        }
-        return {
-          reply: deferredReply,
-          toolCalls: [{ name: deferredSwap.name, arguments: deferredSwap.args, result: deferredReply, error: false }],
-          transaction: toolResult.transaction,
-          transactions: toolResult.transaction ? [toolResult.transaction] : undefined,
-          chainSwitch: toolResult.chainSwitch,
-          suggestions: toolResult.suggestions,
-          metadata: toolResult.metadata,
-          reasoning: orchestrationReasoning,
-          modelsUsed,
-          finalModel: "tooling",
-        };
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        console.warn(`[LLM] Deferred fast-path error: ${errMsg}`);
-        const friendlyMsg = friendlyError(sanitizeError(errMsg));
-        onStreamEvent?.({ type: "tool_result", name: deferredSwap.name, result: `Error: ${friendlyMsg}`, error: true });
-        return {
-          reply: friendlyMsg,
-          toolCalls: [{ name: deferredSwap.name, arguments: deferredSwap.args, result: `Error: ${friendlyMsg}`, error: true }],
-          reasoning: orchestrationReasoning,
-          modelsUsed,
-          finalModel: "tooling",
-        };
-      }
-    }
-  }
 
   if (orchestrationChoice.message.tool_calls && orchestrationChoice.message.tool_calls.length > 0) {
     let currentMessage = orchestrationChoice.message;
@@ -1008,7 +1085,7 @@ ${executionModeNote}${contextDocsBlock}`;
 
         // Sanitize swap tool arguments — the LLM often gets amounts/dex wrong
         if (name === "get_swap_quote" || name === "build_vault_swap") {
-          const lastUserMsg = messages.filter(m => m.role === "user").pop()?.content || "";
+          const lastUserMsg = recentMessages.filter(m => m.role === "user").pop()?.content || "";
           args = sanitizeSwapArgs(args, lastUserMsg);
           console.log(`[LLM] Sanitized args: ${JSON.stringify(args)}`);
         }
@@ -1214,7 +1291,7 @@ ${executionModeNote}${contextDocsBlock}`;
           onStreamEvent?.({ type: "transaction", transaction: tx });
         }
         const result: ChatResponse = {
-          reply: "",
+          reply: toolCallResults.filter(tc => !tc.error && tc.result).pop()?.result || "",
           toolCalls: toolCallResults,
           transaction: pendingTransactions[pendingTransactions.length - 1],
           transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
@@ -1527,8 +1604,18 @@ export async function preCheckNavImpact(
       }
       // BLOCKED — NAV would drop more than the threshold. Hard security block.
       const maxDrop = storedNavThreshold ? Number(storedNavThreshold) : 10;
-      const reason = `NAV shield blocked: this trade would reduce vault unit value by ${result.dropPct}% ` +
-        `(max allowed: ${maxDrop}%). ${result.reason || ""}`;
+      const dropPctNum = Number(result.dropPct);
+      const suggestedNavThreshold = Math.min(
+        Number(MAX_NAV_DROP_PCT),
+        Math.max(1, Math.ceil(dropPctNum)),
+      );
+      const navShieldGuidance = ctx.isTelegram
+        ? `use /navshield ${suggestedNavThreshold}% in Telegram`
+        : `raise the threshold to ${suggestedNavThreshold}% in Settings → NAV Shield`;
+      const reason =
+        `NAV shield blocked: this trade would reduce vault unit value by ${result.dropPct}% ` +
+        `(max allowed: ${maxDrop}%). ${result.reason || ""}\n\n` +
+        `To allow a larger loss per trade, ${navShieldGuidance}.`;
       throw new Error(reason.trim());
     }
 
@@ -1845,17 +1932,25 @@ export async function runSwapShield(
       : `is ${magnitudePct}% worse than the on-chain oracle price`;
     const normalizedMaxDiv = maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT;
     const thresholdText = `${normalizedMaxDiv}% tolerance`;
+    const divergenceAbs = Number.isFinite(divergence) ? Math.abs(divergence) : 0;
+    const suggestedTolerance = Math.min(
+      MAX_TEMP_DIVERGENCE_PCT,
+      Math.max(1, Math.ceil(divergenceAbs)),
+    );
+    const isTelegram = ctx.isTelegram === true;
+    const raiseToleranceLine = isTelegram
+      ? `use /swapshield ${suggestedTolerance}%`
+      : `raise it to ${suggestedTolerance}% in Settings → Swap Shield`;
     const explanation = isFavorable
       ? `This can indicate a stale oracle or a manipulated routing path producing an implausibly favorable quote.`
       : `This usually indicates significant price impact from the trade size.`;
     const toleranceShieldOption = isVerifiedOperatorContext(ctx)
-      ? `3. **Raise tolerance** — say "set swap shield tolerance to 30%" (or up to 50%) ` +
-        `to temporarily allow more divergence for 10 minutes. ` +
+      ? `3. **Raise tolerance** — ${raiseToleranceLine} to temporarily allow more divergence for 10 minutes (max ${MAX_TEMP_DIVERGENCE_PCT}%). ` +
         (isFavorable
           ? `Use with caution — you accept oracle/route integrity risk.\n`
           : `Use with caution — you accept full price impact risk.\n`)
-      : `3. **Raise tolerance** — requires operator authentication; sign in as the vault owner first ` +
-        `then say "set swap shield tolerance to 30%"\n`;
+      : `3. **Raise tolerance** — requires operator authentication; sign in as the vault owner first, ` +
+        `then ${raiseToleranceLine} (max ${MAX_TEMP_DIVERGENCE_PCT}%).\n`;
     const refreshOracleOption = isFavorable
       ? `4. **Refresh oracle feed** — say "refresh oracle feed for ${sellSymbol} with 0.001 ETH" to ` +
         `swap a tiny amount of ETH on the BackgeoOracle pool from your operator wallet, creating a ` +
@@ -2087,14 +2182,14 @@ function tryFastPathChainSwitch(msg: string): FastPathResult | null {
  * magic string __enable_swap_shield__ and the legacy __disable_swap_shield__
  * alias (mapped to 50% tolerance).
  */
-function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
+export function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
   const m = msg.toLowerCase().trim();
 
   if (m === "__enable_swap_shield__" || /^(?:re-?)?enable\s+swap\s+shield$/i.test(m)) {
     return { name: "enable_swap_shield", args: {} };
   }
-  // "set swap shield tolerance to 30%" / "swap shield tolerance 50%"
-  const toleranceMatch = m.match(/^(?:set\s+)?swap\s+shield\s+tolerance\s+(?:to\s+)?([0-9]+(?:\.[0-9]+)?)%?$/i);
+  // "set swap shield to 30%" / "set swap shield tolerance to 30%" / "swap shield 50%"
+  const toleranceMatch = m.match(/^(?:set\s+)?swap\s+shield(?:\s+tolerance)?(?:\s+to)?\s+([0-9]+(?:\.[0-9]+)?)%?$/i);
   if (toleranceMatch) {
     return { name: "set_swap_shield_tolerance", args: { tolerance: `${toleranceMatch[1]}%` } };
   }
@@ -2103,6 +2198,36 @@ function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
     return { name: "set_swap_shield_tolerance", args: { tolerance: "50%" } };
   }
 
+  return null;
+}
+
+// ── Fast-path: NAV Shield threshold ──────────────────────────────────
+
+/**
+ * Detect NAV shield threshold commands like:
+ *   "set nav shield to 15%" / "nav shield threshold 20%" / "nav shield 15%"
+ */
+export function tryFastPathNavShieldThreshold(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+  const match = m.match(/^(?:set\s+)?nav\s+shield(?:\s+threshold)?(?:\s+to)?\s+([0-9]+(?:\.[0-9]+)?)%?$/i);
+  if (match) {
+    return { name: "set_nav_shield_threshold", args: { threshold: `${match[1]}%` } };
+  }
+  return null;
+}
+
+// ── Fast-path: default slippage ──────────────────────────────────────
+
+/**
+ * Detect default slippage commands like:
+ *   "set slippage to 2%" / "slippage 0.5%" / "default slippage 1%"
+ */
+export function tryFastPathSlippage(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+  const match = m.match(/^(?:set\s+(?:default\s+)?)?slippage(?:\s+to)?\s+([0-9]+(?:\.[0-9]+)?)%?$/i);
+  if (match) {
+    return { name: "set_default_slippage", args: { slippage: `${match[1]}%` } };
+  }
   return null;
 }
 

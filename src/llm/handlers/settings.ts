@@ -19,11 +19,21 @@ import {
   MAX_NAV_DROP_PCT,
 } from "../../services/navGuard.js";
 
-/** Settings tools may only be invoked by browser-based operators — not x402 agents. */
-function ensureBrowserOnly(ctx: RequestContext, toolName: string): void {
-  if (!ctx.isBrowserRequest) {
+/**
+ * Settings tools may only be invoked by authenticated vault operators.
+ *
+ * `operatorVerified` is true only when the caller has proven vault ownership:
+ * - Browser UI: verified EIP-191 signature (header or body auth).
+ * - Telegram: paired vault with on-chain owner check.
+ *
+ * x402-paid external agents never receive `operatorVerified = true`; they pay
+ * for API access only. This prevents a rogue agent from raising slippage or
+ * swap-shield tolerance to drain a vault.
+ */
+function ensureOperatorOnly(ctx: RequestContext, toolName: string): void {
+  if (!ctx.operatorVerified) {
     throw new Error(
-      `The '${toolName}' tool can only be used via the web UI. ` +
+      `The '${toolName}' tool can only be used by the vault operator. ` +
       `External agents cannot modify operator safety settings.`,
     );
   }
@@ -35,7 +45,7 @@ export async function handle_set_default_slippage(
   args: Record<string, unknown>,
   toolName: string,
 ): Promise<ToolResult> {
-  ensureBrowserOnly(ctx, toolName);
+  ensureOperatorOnly(ctx, toolName);
 
   const raw = String(args.slippage ?? "").trim();
   let bps: number;
@@ -89,7 +99,7 @@ export async function handle_set_swap_shield_tolerance(
   args: Record<string, unknown>,
   toolName: string,
 ): Promise<ToolResult> {
-  ensureBrowserOnly(ctx, toolName);
+  ensureOperatorOnly(ctx, toolName);
 
   const raw = String(args.tolerance ?? "").trim();
   let pct: number;
@@ -131,7 +141,7 @@ export async function handle_enable_swap_shield(
   args: Record<string, unknown>,
   toolName: string,
 ): Promise<ToolResult> {
-  ensureBrowserOnly(ctx, toolName);
+  ensureOperatorOnly(ctx, toolName);
 
   await clearSwapShieldTolerance(
     env.KV,
@@ -149,7 +159,7 @@ export async function handle_set_nav_shield_threshold(
   args: Record<string, unknown>,
   toolName: string,
 ): Promise<ToolResult> {
-  ensureBrowserOnly(ctx, toolName);
+  ensureOperatorOnly(ctx, toolName);
 
   const raw = String(args.threshold ?? "").trim();
   let pct: bigint;
@@ -174,9 +184,10 @@ export async function handle_set_nav_shield_threshold(
   await setNavShieldThreshold(env.KV, ctx.operatorAddress!, pct);
   return {
     message: (
-      `🛡️ NAV Shield threshold set to ${Number(pct)}%. ` +
-      `Trades that would reduce the vault's unit price by more than ${Number(pct)}% will be blocked.\n\n` +
-      `Use 'reset NAV shield to default' to restore the ${Number(MIN_NAV_DROP_PCT)}%–${Number(MAX_NAV_DROP_PCT)}% default.`
+      `🛡️ NAV Shield set to ${Number(pct)}%. ` +
+      `Any trade that would drop your pool's unit price by more than ${Number(pct)}% will now be blocked.\n\n` +
+      `This setting applies to all your vaults on every chain. ` +
+      `Say "reset NAV shield to default" to return to ${Number(DEFAULT_MAX_NAV_DROP_PCT)}%.`
     ),
   };
 }
@@ -187,7 +198,7 @@ export async function handle_enable_nav_shield(
   args: Record<string, unknown>,
   toolName: string,
 ): Promise<ToolResult> {
-  ensureBrowserOnly(ctx, toolName);
+  ensureOperatorOnly(ctx, toolName);
 
   await clearNavShieldThreshold(env.KV, ctx.operatorAddress!);
   return {

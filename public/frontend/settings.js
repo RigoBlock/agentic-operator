@@ -58,7 +58,7 @@ function onAiProviderChange() {
   const provider = document.getElementById('ai-provider').value;
   aiSettings.provider = provider;
   const showCustom = provider !== 'server';
-  // Routing mode removed -- Kimi K2.6 is the fixed default
+  // Routing mode removed -- Kimi K2.7 Code is the fixed default
   document.getElementById('ai-key-row').style.display = showCustom ? '' : 'none';
   document.getElementById('ai-model-row').style.display = showCustom ? '' : 'none';
   if (showCustom) {
@@ -81,7 +81,7 @@ function onAiProviderChange() {
   } else {
     aiSettings.apiKey = '';
     aiSettings.model = '';
-    document.getElementById('ai-status').textContent = 'Using Workers AI Kimi K2.6 -- native reasoning + tool calling. No API key needed.';
+    document.getElementById('ai-status').textContent = 'Using Workers AI Kimi K2.7 Code -- native reasoning + tool calling. No API key needed.';
   }
   saveAiSettings();
 }
@@ -97,7 +97,7 @@ const modelSel = document.getElementById('ai-model');
 if (modelSel) {
   modelSel.addEventListener('change', () => { aiSettings.model = modelSel.value; saveAiSettings(); });
 }
-// Routing mode removed -- Kimi K2.6 is the fixed default
+// Routing mode removed -- Kimi K2.7 Code is the fixed default
 
 function getAiRequestParams() {
   if (aiSettings.provider === 'server') {
@@ -204,11 +204,11 @@ async function onSwapShieldToleranceChange() {
 
   input.disabled = true;
   try {
-    const res = await fetch('/api/chat', {
+    const res = await fetch('/api/settings/swap-shield', {
       method: 'POST',
       headers: apiHeaders(),
       body: JSON.stringify({
-        messages: [{ role: 'user', content: `set swap shield tolerance to ${pct}%` }],
+        tolerance: `${pct}%`,
         vaultAddress: vaultInput.value.trim(),
         chainId: currentChainId,
         operatorAddress: connectedAddress,
@@ -251,11 +251,11 @@ async function resetSwapShieldTolerance() {
   const input = document.getElementById('swap-shield-tolerance');
   input.disabled = true;
   try {
-    const res = await fetch('/api/chat', {
+    const res = await fetch('/api/settings/swap-shield', {
       method: 'POST',
       headers: apiHeaders(),
       body: JSON.stringify({
-        messages: [{ role: 'user', content: '__enable_swap_shield__' }],
+        reset: true,
         vaultAddress: vaultInput.value.trim(),
         chainId: currentChainId,
         operatorAddress: connectedAddress,
@@ -298,11 +298,11 @@ function startShieldTimer(expiry) {
       document.getElementById('swap-shield-reset').style.display = 'none';
       // Re-enable server-side
       if (connectedAddress && vaultInput.value.trim()) {
-        fetch('/api/chat', {
+        fetch('/api/settings/swap-shield', {
           method: 'POST',
           headers: apiHeaders(),
           body: JSON.stringify({
-            messages: [{ role: 'user', content: '__enable_swap_shield__' }],
+            reset: true,
             vaultAddress: vaultInput.value.trim(),
             chainId: currentChainId,
             operatorAddress: connectedAddress,
@@ -349,11 +349,11 @@ async function onNavShieldThresholdChange() {
 
   input.disabled = true;
   try {
-    const res = await fetch('/api/chat', {
+    const res = await fetch('/api/settings/nav-shield', {
       method: 'POST',
       headers: apiHeaders(),
       body: JSON.stringify({
-        messages: [{ role: 'user', content: `set NAV shield threshold to ${pct}%` }],
+        threshold: `${pct}%`,
         vaultAddress: vaultInput.value.trim(),
         chainId: currentChainId,
         operatorAddress: connectedAddress,
@@ -386,11 +386,11 @@ async function resetNavShieldThreshold() {
   const input = document.getElementById('nav-shield-threshold');
   input.disabled = true;
   try {
-    const res = await fetch('/api/chat', {
+    const res = await fetch('/api/settings/nav-shield', {
       method: 'POST',
       headers: apiHeaders(),
       body: JSON.stringify({
-        messages: [{ role: 'user', content: 'reset NAV shield to default' }],
+        reset: true,
         vaultAddress: vaultInput.value.trim(),
         chainId: currentChainId,
         operatorAddress: connectedAddress,

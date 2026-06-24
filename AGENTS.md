@@ -145,14 +145,14 @@ The `authTimestamp` value MUST be included in the signed message exactly as show
 
 ## AI Model Selection
 
-The service uses **Workers AI (Kimi K2.6)** by default — zero-config,
-no API key needed, included in the x402 price. Kimi K2.6 is a 1-trillion-parameter
-MoE model that natively handles both reasoning and tool calling in a single call,
+The service uses **Workers AI (Kimi K2.7 Code)** by default — zero-config,
+no API key needed, included in the x402 price. Kimi K2.7 Code is a 1-trillion-parameter
+MoE coding/agentic model that natively handles both reasoning and tool calling in a single call,
 with a 262k token context window.
 
 Agents that need a specific model or provider can override inference by including
 these **optional** fields in the `/api/chat` request body. This is an advanced
-option — the default Kimi K2.6 model is recommended for most use cases and is
+option — the default Kimi K2.7 Code model is recommended for most use cases and is
 what all x402 usage pricing is based on:
 
 | Field | Type | Description |
@@ -162,7 +162,7 @@ what all x402 usage pricing is based on:
 | `aiBaseUrl` | string | Provider base URL (e.g. `"https://openrouter.ai/api/v1"`) |
 
 **Resolution priority:**
-1. **Workers AI binding** — Kimi K2.6 (reasoning + native function calling, **default**)
+1. **Workers AI binding** — Kimi K2.7 Code (reasoning + native function calling, **default**)
 2. **User-provided key** (`aiApiKey` + `aiModel` + `aiBaseUrl`) — agent's own provider
 3. **Server OpenAI key** — server fallback
 
@@ -272,7 +272,8 @@ on the vault's Net Asset Value per unit:
 - Atomically simulates: `multicall([swap, updateUnitaryValue])`
 - Compares post-swap NAV against the **higher of:** pre-swap NAV or 24-hour baseline
 - Default threshold: **10%** NAV drop per trade → **transaction BLOCKED**
-- Operator-configurable range: **1%–100%** (set via the web UI; stored per operator in KV)
+- Operator-configurable range: **1%–100%** (set via the web UI or Telegram; stored per operator in KV)
+- **Partial-recovery rule:** a trade that results in `post-swap unitaryValue >= pre-swap unitaryValue` is always allowed, even if the vault is still below the 24h baseline or the drop from baseline exceeds the normal threshold. Only trades that reduce the current unit price are blocked.
 - This check runs outside the agent's control surface — it cannot be disabled,
   bypassed, or circumvented by any API caller. The agent is bound by whatever
   threshold the operator has configured.
@@ -416,7 +417,10 @@ GET /api/quote/0x?chainId=8453&sellToken=ETH&buyToken=USDC&sellAmount=1000000000
 X-PAYMENT: <x402-payment-header>
 ```
 
-**Query parameters:** Same as the [0x API v2 `/swap/allowance-holder/quote`](https://0x.org/docs/api#tag/Swap/operation/swapAllowanceHolderQuote) endpoint. All standard parameters are forwarded.
+**Query parameters:** Same as the [0x API v2 `/swap/allowance-holder/quote`](https://0x.org/docs/api#tag/Swap/operation/swapAllowanceHolderQuote) endpoint, including native exact-output support via `buyAmount`. All standard parameters are forwarded.
+
+- **Exact-input:** pass `sellAmount` (the amount to sell). Response includes `buyAmount`, `minBuyAmount`, `sellAmount`.
+- **Exact-output:** pass `buyAmount` (the amount to receive). Response includes `buyAmount`, `estimatedNetSellAmount`, `maxSellAmount`, and a `routes.refund` leg for surplus.
 
 **Response:** Upstream 0x quote + oracle enrichment (three extra fields appended to the standard 0x response):
 ```json
@@ -792,6 +796,23 @@ requests it. Each slice is treated as a fresh independent operation.
 For full technical specifications including data model, KV schema, execution
 context, and DEX integrator requirements, see
 [content/twap-orders.md](content/twap-orders.md).
+
+---
+
+## Telegram Operator Commands
+
+Operators can manage safety settings directly from a paired Telegram account.
+These commands bypass the LLM and invoke the same verified-operator handlers as
+the web UI:
+
+| Command | Description |
+|---------|-------------|
+| `/slippage <0.5%>` | Set default slippage (0.1%–5%) |
+| `/swapshield <30%>` or `/swapshield reset` | Temporarily raise oracle-divergence tolerance up to 50% for 10 minutes, or reset to the default 5% |
+| `/navshield <15%>` or `/navshield reset` | Set the max NAV drop threshold (1%–100%), or reset to the default 10% |
+
+These settings can only be changed by the vault operator (via the web UI or
+Telegram). External API callers and the LLM cannot modify them.
 
 ---
 
