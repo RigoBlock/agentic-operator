@@ -191,7 +191,7 @@ describe("handle_get_swap_quote", () => {
 
     expect(mockGetZeroXQuote).toHaveBeenCalledTimes(1);
     expect(mockGetUniswapQuote).toHaveBeenCalledTimes(1);
-    expect(result.message).toContain("0x had no liquidity");
+    expect(result.message).toContain("0x could not route");
     expect(result.message).toContain("Uniswap quote instead");
   });
 
@@ -233,7 +233,7 @@ describe("handle_build_vault_swap", () => {
 
     expect(mockGetZeroXQuote).toHaveBeenCalledTimes(1);
     expect(mockGetUniswapQuote).toHaveBeenCalledTimes(1);
-    expect(result.message).toContain("0x had no liquidity");
+    expect(result.message).toContain("0x could not route");
     expect(result.message).toContain("routed via Uniswap instead");
     expect(result.transaction?.swapMeta?.dex).toBe("Uniswap");
   });

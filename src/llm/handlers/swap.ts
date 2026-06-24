@@ -30,8 +30,8 @@ const AUNISWAP_ABI = [
 
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 
-/** Detect 0x errors that indicate missing/unsupported liquidity — candidates for Uniswap fallback. */
-function isZeroXLiquidityError(message: string): boolean {
+/** Detect 0x errors that should trigger a Uniswap fallback. */
+function isZeroXFatalError(message: string): boolean {
   const lower = message.toLowerCase();
   return (
     lower.includes("no liquidity found on 0x") ||
@@ -39,7 +39,12 @@ function isZeroXLiquidityError(message: string): boolean {
     lower.includes("token pair may not be fully supported by 0x") ||
     lower.includes("0x returned empty transaction data") ||
     lower.includes("0x quote response is missing a valid") ||
-    lower.includes("0x api timed out")
+    lower.includes("0x api timed out") ||
+    // Rigoblock's A0xRouter adapter blocks settler actions that are not in the chain-specific
+    // allowlist (e.g., the CHECK_SLIPPAGE action on Unichain). Route these through Uniswap instead.
+    lower.includes("actionnotallowed") ||
+    lower.includes("settler action") ||
+    lower.includes("a0xrouter")
   );
 }
 
@@ -96,10 +101,10 @@ export async function handle_get_swap_quote(
       return { message: formatZeroXQuoteForDisplay(intent, quote), chainSwitch: chainSwitched };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (isZeroXLiquidityError(msg)) {
-        console.warn(`[get_swap_quote] 0x liquidity error, falling back to Uniswap: ${msg}`);
+      if (isZeroXFatalError(msg)) {
+        console.warn(`[get_swap_quote] 0x error, falling back to Uniswap: ${msg}`);
         dex = "uniswap";
-        fallbackNote = `0x had no liquidity for ${intent.tokenIn} → ${intent.tokenOut}; showing Uniswap quote instead.`;
+        fallbackNote = `0x could not route ${intent.tokenIn} → ${intent.tokenOut}; showing Uniswap quote instead.`;
       } else {
         throw err;
       }
@@ -473,9 +478,9 @@ export async function handle_build_vault_swap(
       return await buildVaultSwapWith0x(env, ctx, intent, chainSwitched, chainName);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (isZeroXLiquidityError(msg)) {
-        console.warn(`[build_vault_swap] 0x liquidity error, falling back to Uniswap: ${msg}`);
-        const fallbackNote = `0x had no liquidity for ${intent.tokenIn} → ${intent.tokenOut}; routed via Uniswap instead.`;
+      if (isZeroXFatalError(msg)) {
+        console.warn(`[build_vault_swap] 0x error, falling back to Uniswap: ${msg}`);
+        const fallbackNote = `0x could not route ${intent.tokenIn} → ${intent.tokenOut}; routed via Uniswap instead.`;
         return buildVaultSwapWithUniswap(env, ctx, intent, chainSwitched, chainName, fallbackNote);
       }
       throw err;

@@ -42,6 +42,7 @@ import {
 } from "./bundler.js";
 import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
 import { getClient, ALCHEMY_ORIGIN } from "./vault.js";
+import { decodeRevertData, extractRevertData } from "./errorDecoder.js";
 
 /**
  * Parse simulation revert messages to detect common ERC20/DEX token balance issues.
@@ -49,6 +50,45 @@ import { getClient, ALCHEMY_ORIGIN } from "./vault.js";
  */
 function parseSimulationRevert(raw: string): string | null {
   const lower = raw.toLowerCase();
+
+  // Try to decode any raw revert hex data first — this gives the most precise reason.
+  const revertData = extractRevertData(raw);
+  if (revertData) {
+    const decoded = decodeRevertData(revertData);
+    if (decoded) {
+      // Translate common decoded errors into actionable guidance.
+      const decodedLower = decoded.toLowerCase();
+      if (
+        decodedLower.includes("erc20insufficientbalance") ||
+        decodedLower.includes("toolittlereceived") ||
+        decodedLower.includes("insufficientoutputamount") ||
+        decodedLower.includes("safetransferfrom") ||
+        decodedLower.includes("transfer amount exceeds")
+      ) {
+        return (
+          "The vault does not hold enough of the sell token for this swap. " +
+          "Check the vault's token balances and try a smaller amount."
+        );
+      }
+      if (decodedLower.includes("transactiontooold") || decodedLower.includes("deadline")) {
+        return "The swap quote has expired. Please request a fresh quote.";
+      }
+      if (
+        decodedLower.includes("toomuchrequested") ||
+        decodedLower.includes("slippage") ||
+        decodedLower.includes("minimum amount")
+      ) {
+        return "The swap would result in too much slippage. Try again with a fresh quote or smaller amount.";
+      }
+      if (decodedLower.includes("notdelegated") || decodedLower.includes("unauthorized") || decodedLower.includes("onlyowner")) {
+        return (
+          "The agent wallet is not delegated for this swap selector on the vault. " +
+          "Update your delegation settings, or sign this transaction directly from your wallet."
+        );
+      }
+      return decoded;
+    }
+  }
 
   // Common ERC20 / Uniswap / 0x revert patterns indicating insufficient token balance
   if (
@@ -142,12 +182,13 @@ function parseSponsoredError(_raw: string, _chainId: number, _agentAddress: stri
  * even if the RPC returns an absurd priority fee estimate.
  */
 const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }> = {
-  1:     { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.1") },
-  10:    { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
-  56:    { maxFeePerGas: parseGwei("5"),   maxPriorityFee: parseGwei("0.1") },
-  137:   { maxFeePerGas: parseGwei("500"), maxPriorityFee: parseGwei("500") },
-  8453:  { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
-  42161: { maxFeePerGas: parseGwei("1"),   maxPriorityFee: parseGwei("0.01") },
+  1:     { maxFeePerGas: parseGwei("10"),    maxPriorityFee: parseGwei("0.1") },
+  10:    { maxFeePerGas: parseGwei("1"),     maxPriorityFee: parseGwei("0.01") },
+  56:    { maxFeePerGas: parseGwei("5"),     maxPriorityFee: parseGwei("0.1") },
+  130:   { maxFeePerGas: parseGwei("0.01"),  maxPriorityFee: parseGwei("0.001") }, // Unichain
+  137:   { maxFeePerGas: parseGwei("500"),   maxPriorityFee: parseGwei("500") },
+  8453:  { maxFeePerGas: parseGwei("1"),     maxPriorityFee: parseGwei("0.01") },
+  42161: { maxFeePerGas: parseGwei("1"),     maxPriorityFee: parseGwei("0.01") },
   // Testnets
   11155111: { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.1") },
   84532:   { maxFeePerGas: parseGwei("1"),    maxPriorityFee: parseGwei("0.01") },
@@ -183,12 +224,17 @@ const FAST_CHAIN_IDS = new Set([10, 42161, 8453, 130, 56, 84532]);
  * L1/Polygon/BSC have higher base fees.
  */
 const MIN_BALANCE: Record<number, bigint> = {
-  1:     500_000_000_000_000n,     // 0.0005 ETH  — L1 Ethereum
-  56:    500_000_000_000_000n,     // 0.0005 BNB  — BSC
-  137:   50_000_000_000_000_000n,   // 0.05 POL    — Polygon
+  1:        500_000_000_000_000n,    // 0.0005 ETH  — L1 Ethereum
+  10:       1_000_000_000_000n,      // 0.000001 ETH — Optimism
+  56:       500_000_000_000_000n,    // 0.0005 BNB  — BSC
+  130:      1_000_000_000_000n,      // 0.000001 ETH — Unichain
+  137:      50_000_000_000_000_000n, // 0.05 POL    — Polygon
+  8453:     1_000_000_000_000n,      // 0.000001 ETH — Base
+  42161:    1_000_000_000_000n,      // 0.000001 ETH — Arbitrum
+  // Testnets
+  11155111: 500_000_000_000_000n,    // 0.0005 ETH  — Sepolia
+  84532:    1_000_000_000_000n,      // 0.000001 ETH — Base Sepolia
 };
-/** L2 default: 0.000001 ETH (~$0.003) — covers several L2 transactions */
-const DEFAULT_MIN_BALANCE = 1_000_000_000_000n;
 
 // ── Block explorer URLs ───────────────────────────────────────────────
 const EXPLORER_TX_URL: Record<number, string> = {
@@ -220,6 +266,12 @@ export async function estimateFees(
   chainId: number,
 ): Promise<FeeEstimate> {
   const caps = GAS_CAPS[chainId];
+  if (!caps) {
+    throw new ExecutionError(
+      `Unsupported chain ID: ${chainId}. Gas fee caps are not configured for this chain.`,
+      "UNSUPPORTED_CHAIN",
+    );
+  }
 
   // ── Base fee from the latest block (gas oracle) ──
   // We read the actual protocol base fee, then buffer it 2× to cover
@@ -262,6 +314,12 @@ export async function estimateFees(
  */
 function bumpFees(fees: FeeEstimate, chainId: number): FeeEstimate {
   const caps = GAS_CAPS[chainId];
+  if (!caps) {
+    throw new ExecutionError(
+      `Unsupported chain ID: ${chainId}. Cannot bump fees for an unconfigured chain.`,
+      "UNSUPPORTED_CHAIN",
+    );
+  }
 
   const bumpedMaxFee = fees.maxFeePerGas + (fees.maxFeePerGas * RESUBMIT_FEE_BUMP_PCT) / 100n;
   const bumpedPriority = fees.maxPriorityFeePerGas + (fees.maxPriorityFeePerGas * RESUBMIT_FEE_BUMP_PCT) / 100n;
@@ -1160,7 +1218,13 @@ export async function checkAgentBalance(
   const client = getClient(chainId, env.ALCHEMY_API_KEY);
 
   const balance = await client.getBalance({ address: agentAccount.address });
-  const minBal = MIN_BALANCE[chainId] ?? DEFAULT_MIN_BALANCE;
+  const minBal = MIN_BALANCE[chainId];
+  if (minBal === undefined) {
+    throw new ExecutionError(
+      `Unsupported chain ID: ${chainId}. No minimum-balance threshold is configured for this chain.`,
+      "UNSUPPORTED_CHAIN",
+    );
+  }
 
   return {
     address: agentAccount.address,

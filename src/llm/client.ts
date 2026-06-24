@@ -32,6 +32,7 @@ import {
   checkSwapPrice,
 } from "../services/swapShield.js";
 import { TOOL_HANDLER_REGISTRY } from "./handlers/index.js";
+import { decodeRevertData, extractRevertData } from "../services/errorDecoder.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
 // These appear as 4-byte hex prefixes in "execution reverted" messages.
@@ -1474,7 +1475,13 @@ export async function estimateGas(
       e = e.cause;
     }
     const label = _category ? `${_category} ` : '';
-    throw new Error(`${label}transaction would revert on-chain${detail ? ': ' + detail : ''}`);
+    let reason = `${label}transaction would revert on-chain`;
+    if (detail) {
+      const revertHex = detail.startsWith('revert data: ') ? detail.slice(13).trim() : extractRevertData(detail);
+      const decoded = revertHex ? decodeRevertData(revertHex) : null;
+      reason += decoded ? `: ${decoded}` : `: ${detail}`;
+    }
+    throw new Error(reason);
   }
   // 20% buffer — covers execution-time variance (adapter routing, internal
   // approvals, oracle reads). The on-chain estimate is already accurate for
