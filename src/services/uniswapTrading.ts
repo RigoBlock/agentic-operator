@@ -33,10 +33,10 @@ const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 const VAULT_GAS_OVERHEAD = 200_000n;
 
 /**
- * Fetch with retry + exponential backoff for 429 / 5xx errors.
- * Max 3 attempts, 500ms → 1s → 2s delays.
+ * Fetch with retry + short backoff for transient 429 / 5xx errors.
+ * 3s timeout, one retry. Timeouts fail fast (no retry) to keep user latency low.
  */
-async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 3, timeoutMs = 15_000): Promise<Response> {
+async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 2, timeoutMs = 3_000): Promise<Response> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const res = await fetch(url, {
@@ -49,16 +49,16 @@ async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 3, ti
       const isTimeout = err instanceof Error && err.name === "AbortError";
       if (isTimeout) {
         console.warn(`[uniswap] Request timed out after ${timeoutMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+        // Fail fast on timeout — don't burn another 3s on a slow/overloaded API.
+        throw new Error(`Uniswap API timed out after ${timeoutMs}ms`);
       }
       if (attempt === maxRetries - 1) {
         throw new Error(
-          isTimeout
-            ? `Uniswap API timed out after ${timeoutMs * maxRetries}ms`
-            : `Uniswap API request failed: ${err instanceof Error ? err.message : String(err)}`,
+          `Uniswap API request failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
-    const delay = Math.min(500 * Math.pow(2, attempt) + Math.random() * 100, 5000);
+    const delay = Math.min(300 * Math.pow(2, attempt) + Math.random() * 100, 1_500);
     console.log(`[uniswap] Retry ${attempt + 1}/${maxRetries}, waiting ${Math.round(delay)}ms`);
     await new Promise((r) => setTimeout(r, delay));
   }

@@ -17,6 +17,11 @@ import {
   handle_set_swap_shield_tolerance,
   handle_enable_swap_shield,
 } from "../src/llm/handlers/settings.js";
+import {
+  tryFastPathSwapShieldToggle,
+  tryFastPathNavShieldThreshold,
+  tryFastPathSlippage,
+} from "../src/llm/client.js";
 import type { RequestContext } from "../src/types.js";
 
 // ── Mock KV namespace ──
@@ -213,5 +218,60 @@ describe("Settings — operator-only restriction", () => {
     await expect(
       handle_enable_swap_shield(env, ctx, {}, "enable_swap_shield"),
     ).rejects.toThrow("can only be used by the vault operator");
+  });
+});
+
+
+describe("Settings fast-path parsers", () => {
+  it("parses swap shield tolerance commands", () => {
+    expect(tryFastPathSwapShieldToggle("set swap shield to 10%")).toEqual({
+      name: "set_swap_shield_tolerance",
+      args: { tolerance: "10%" },
+    });
+    expect(tryFastPathSwapShieldToggle("swap shield tolerance 30%")).toEqual({
+      name: "set_swap_shield_tolerance",
+      args: { tolerance: "30%" },
+    });
+    expect(tryFastPathSwapShieldToggle("enable swap shield")).toEqual({
+      name: "enable_swap_shield",
+      args: {},
+    });
+    expect(tryFastPathSwapShieldToggle("disable swap shield")).toEqual({
+      name: "set_swap_shield_tolerance",
+      args: { tolerance: "50%" },
+    });
+    expect(tryFastPathSwapShieldToggle("random message")).toBeNull();
+  });
+
+  it("parses nav shield threshold commands", () => {
+    expect(tryFastPathNavShieldThreshold("set nav shield to 15%")).toEqual({
+      name: "set_nav_shield_threshold",
+      args: { threshold: "15%" },
+    });
+    expect(tryFastPathNavShieldThreshold("nav shield threshold 20%")).toEqual({
+      name: "set_nav_shield_threshold",
+      args: { threshold: "20%" },
+    });
+    expect(tryFastPathNavShieldThreshold("nav shield 7%")).toEqual({
+      name: "set_nav_shield_threshold",
+      args: { threshold: "7%" },
+    });
+    expect(tryFastPathNavShieldThreshold("random message")).toBeNull();
+  });
+
+  it("parses slippage commands", () => {
+    expect(tryFastPathSlippage("set slippage to 0.5%")).toEqual({
+      name: "set_default_slippage",
+      args: { slippage: "0.5%" },
+    });
+    expect(tryFastPathSlippage("slippage 2%")).toEqual({
+      name: "set_default_slippage",
+      args: { slippage: "2%" },
+    });
+    expect(tryFastPathSlippage("set default slippage 1%")).toEqual({
+      name: "set_default_slippage",
+      args: { slippage: "1%" },
+    });
+    expect(tryFastPathSlippage("random message")).toBeNull();
   });
 });

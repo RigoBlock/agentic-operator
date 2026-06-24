@@ -10,7 +10,7 @@
 import OpenAI from "openai";
 import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, RequestContext, StreamEvent, ExecutionResult } from "../types.js";
 import { AGENT_TOOL_DEFINITIONS, RUNTIME_CONTEXT_PACK } from "./tools.js";
-import { detectDomains, buildSystemPrompt } from "./prompts.js";
+import { detectDomains, buildSystemPrompt, DOMAIN_TOOLS, CORE_TOOLS } from "./prompts.js";
 import { getSkillTools, getSkillSystemPrompt } from "../skills/index.js";
 
 // Merge skill tools into the LLM-facing definitions (skill tools are always available for dispatch)
@@ -20,7 +20,7 @@ import { AuthError } from "../services/auth.js";
 import { formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { getClient } from "../services/vault.js";
-import { checkNavImpact, getNavShieldThreshold } from "../services/navGuard.js";
+import { checkNavImpact, getNavShieldThreshold, MAX_NAV_DROP_PCT } from "../services/navGuard.js";
 import {
   getSwapShieldTolerance,
   getStoredSlippage,
@@ -28,6 +28,7 @@ import {
   MIN_SLIPPAGE_BPS,
   MAX_SLIPPAGE_BPS,
   DEFAULT_MAX_DIVERGENCE_PCT,
+  MAX_TEMP_DIVERGENCE_PCT,
   checkSwapPrice,
 } from "../services/swapShield.js";
 import { TOOL_HANDLER_REGISTRY } from "./handlers/index.js";
@@ -537,7 +538,7 @@ async function callWorkersAI(
       _reasoning: reasoningAcc || extractedReasoning,
     } as any;
       })(),
-      28_000,
+      40_000,
       "Workers AI streaming",
     );
   }
@@ -553,7 +554,7 @@ async function callWorkersAI(
       max_tokens: isKimi ? 8192 : 4096,
       ...(isKimi ? { chat_template_kwargs: { thinking: { type: "enabled" } } } : {}),
     }),
-    28_000,
+    40_000,
     "Workers AI",
   )) as any;
   console.log(`[LLM] non-streaming response in ${Date.now() - tNonStream}ms (model=${model})`);
@@ -807,10 +808,21 @@ export async function processChat(
   const skillPrompts = getSkillSystemPrompt();
   const systemPrompt = buildSystemPrompt(detectedDomains, skillPrompts || undefined);
 
-  // Let the model see every tool. Domain detection only selects which extra prompt
-  // sections to include; the agent decides which tool to call by reasoning over the
-  // full tool catalog instead of being constrained by hardcoded domain buckets.
-  const TOOL_DEFINITIONS = ALL_AGENT_TOOL_DEFINITIONS;
+  // Domain-aware tool filtering: only expose tools that match the detected intent.
+  // This shrinks the LLM context, cuts first-token latency, and reduces hallucinated
+  // tool calls on simple requests. Core tools are always available; skill tools are
+  // kept because they are few and domain-specific (TWAP, nav sync).
+  const allowedToolNames = new Set<string>(CORE_TOOLS);
+  for (const domain of detectedDomains) {
+    const names = DOMAIN_TOOLS[domain];
+    if (names) names.forEach((n) => allowedToolNames.add(n));
+  }
+  const filteredTools = ALL_AGENT_TOOL_DEFINITIONS.filter((t) =>
+    allowedToolNames.has(t.function.name),
+  );
+  const TOOL_DEFINITIONS = filteredTools.length > 0
+    ? [...filteredTools, ...getSkillTools()]
+    : ALL_AGENT_TOOL_DEFINITIONS;
 
   console.log(`[processChat] Detected domains: ${[...detectedDomains].join(", ")} (${TOOL_DEFINITIONS.length} tools, ${Math.round(systemPrompt.length / 4)} est. tokens) +${Date.now() - t0}ms`);
 
@@ -911,16 +923,24 @@ ${executionModeNote}${contextDocsBlock}`;
   }
 
   // Immediate fast-path: deterministic commands that never need an LLM call.
-  // Simple swaps are included here — "sell 200 ZRX for GRG using 0x" has zero
-  // ambiguity and the LLM may fail to tool-call on them anyway.
+  // Simple swaps, settings toggles, TWAP creation, bridge, and GMX increase are
+  // included here — they have unambiguous regex shapes. Bypassing the LLM avoids
+  // the 30-50s Workers AI latency with the full 55-tool catalog and prevents the
+  // model from hallucinating tool calls on trivial requests.
   // NOTE: crosschain_sync is intentionally NOT in the fast-path.
   // Cross-chain operations need LLM reasoning to show the user what was computed
   // (NAV data, direction, token, amount) and explain errors. Speed is not the
   // priority — correctness and transparency are.
-  // Only the chain-switch fast-path is kept: it is unambiguous, state-only, and
-  // avoids wasting an LLM call on a pure context change. All other actions are
-  // routed through the LLM so the agent reasons and picks the right tool directly.
-  const immediateFastPath = tryFastPathChainSwitch(effectiveMsg);
+  const immediateFastPath =
+    tryFastPathChainSwitch(effectiveMsg) ||
+    tryFastPathSwap(effectiveMsg) ||
+    tryFastPathSwapShieldToggle(effectiveMsg) ||
+    tryFastPathNavShieldThreshold(effectiveMsg) ||
+    tryFastPathSlippage(effectiveMsg) ||
+    tryFastPathBridge(effectiveMsg) ||
+    tryFastPathTwapCreate(effectiveMsg) ||
+    tryFastPathGmxIncrease(effectiveMsg) ||
+    tryFastPathStrategyQueries(effectiveMsg);
   if (immediateFastPath) {
     console.log(`[LLM] Immediate fast-path (no LLM): ${immediateFastPath.name}(${JSON.stringify(immediateFastPath.args)})`);
     try {
@@ -1584,8 +1604,18 @@ export async function preCheckNavImpact(
       }
       // BLOCKED — NAV would drop more than the threshold. Hard security block.
       const maxDrop = storedNavThreshold ? Number(storedNavThreshold) : 10;
-      const reason = `NAV shield blocked: this trade would reduce vault unit value by ${result.dropPct}% ` +
-        `(max allowed: ${maxDrop}%). ${result.reason || ""}`;
+      const dropPctNum = Number(result.dropPct);
+      const suggestedNavThreshold = Math.min(
+        Number(MAX_NAV_DROP_PCT),
+        Math.max(1, Math.ceil(dropPctNum)),
+      );
+      const navShieldGuidance = ctx.isTelegram
+        ? `use /navshield ${suggestedNavThreshold}% in Telegram`
+        : `raise the threshold to ${suggestedNavThreshold}% in Settings → NAV Shield`;
+      const reason =
+        `NAV shield blocked: this trade would reduce vault unit value by ${result.dropPct}% ` +
+        `(max allowed: ${maxDrop}%). ${result.reason || ""}\n\n` +
+        `To allow a larger loss per trade, ${navShieldGuidance}.`;
       throw new Error(reason.trim());
     }
 
@@ -1902,17 +1932,25 @@ export async function runSwapShield(
       : `is ${magnitudePct}% worse than the on-chain oracle price`;
     const normalizedMaxDiv = maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT;
     const thresholdText = `${normalizedMaxDiv}% tolerance`;
+    const divergenceAbs = Number.isFinite(divergence) ? Math.abs(divergence) : 0;
+    const suggestedTolerance = Math.min(
+      MAX_TEMP_DIVERGENCE_PCT,
+      Math.max(1, Math.ceil(divergenceAbs)),
+    );
+    const isTelegram = ctx.isTelegram === true;
+    const raiseToleranceLine = isTelegram
+      ? `use /swapshield ${suggestedTolerance}%`
+      : `raise it to ${suggestedTolerance}% in Settings → Swap Shield`;
     const explanation = isFavorable
       ? `This can indicate a stale oracle or a manipulated routing path producing an implausibly favorable quote.`
       : `This usually indicates significant price impact from the trade size.`;
     const toleranceShieldOption = isVerifiedOperatorContext(ctx)
-      ? `3. **Raise tolerance** — say "set swap shield tolerance to 30%" (or up to 50%) ` +
-        `to temporarily allow more divergence for 10 minutes. ` +
+      ? `3. **Raise tolerance** — ${raiseToleranceLine} to temporarily allow more divergence for 10 minutes (max ${MAX_TEMP_DIVERGENCE_PCT}%). ` +
         (isFavorable
           ? `Use with caution — you accept oracle/route integrity risk.\n`
           : `Use with caution — you accept full price impact risk.\n`)
-      : `3. **Raise tolerance** — requires operator authentication; sign in as the vault owner first ` +
-        `then say "set swap shield tolerance to 30%"\n`;
+      : `3. **Raise tolerance** — requires operator authentication; sign in as the vault owner first, ` +
+        `then ${raiseToleranceLine} (max ${MAX_TEMP_DIVERGENCE_PCT}%).\n`;
     const refreshOracleOption = isFavorable
       ? `4. **Refresh oracle feed** — say "refresh oracle feed for ${sellSymbol} with 0.001 ETH" to ` +
         `swap a tiny amount of ETH on the BackgeoOracle pool from your operator wallet, creating a ` +
@@ -2144,14 +2182,14 @@ function tryFastPathChainSwitch(msg: string): FastPathResult | null {
  * magic string __enable_swap_shield__ and the legacy __disable_swap_shield__
  * alias (mapped to 50% tolerance).
  */
-function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
+export function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
   const m = msg.toLowerCase().trim();
 
   if (m === "__enable_swap_shield__" || /^(?:re-?)?enable\s+swap\s+shield$/i.test(m)) {
     return { name: "enable_swap_shield", args: {} };
   }
-  // "set swap shield tolerance to 30%" / "swap shield tolerance 50%"
-  const toleranceMatch = m.match(/^(?:set\s+)?swap\s+shield\s+tolerance\s+(?:to\s+)?([0-9]+(?:\.[0-9]+)?)%?$/i);
+  // "set swap shield to 30%" / "set swap shield tolerance to 30%" / "swap shield 50%"
+  const toleranceMatch = m.match(/^(?:set\s+)?swap\s+shield(?:\s+tolerance)?(?:\s+to)?\s+([0-9]+(?:\.[0-9]+)?)%?$/i);
   if (toleranceMatch) {
     return { name: "set_swap_shield_tolerance", args: { tolerance: `${toleranceMatch[1]}%` } };
   }
@@ -2160,6 +2198,36 @@ function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null {
     return { name: "set_swap_shield_tolerance", args: { tolerance: "50%" } };
   }
 
+  return null;
+}
+
+// ── Fast-path: NAV Shield threshold ──────────────────────────────────
+
+/**
+ * Detect NAV shield threshold commands like:
+ *   "set nav shield to 15%" / "nav shield threshold 20%" / "nav shield 15%"
+ */
+export function tryFastPathNavShieldThreshold(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+  const match = m.match(/^(?:set\s+)?nav\s+shield(?:\s+threshold)?(?:\s+to)?\s+([0-9]+(?:\.[0-9]+)?)%?$/i);
+  if (match) {
+    return { name: "set_nav_shield_threshold", args: { threshold: `${match[1]}%` } };
+  }
+  return null;
+}
+
+// ── Fast-path: default slippage ──────────────────────────────────────
+
+/**
+ * Detect default slippage commands like:
+ *   "set slippage to 2%" / "slippage 0.5%" / "default slippage 1%"
+ */
+export function tryFastPathSlippage(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+  const match = m.match(/^(?:set\s+(?:default\s+)?)?slippage(?:\s+to)?\s+([0-9]+(?:\.[0-9]+)?)%?$/i);
+  if (match) {
+    return { name: "set_default_slippage", args: { slippage: `${match[1]}%` } };
+  }
   return null;
 }
 

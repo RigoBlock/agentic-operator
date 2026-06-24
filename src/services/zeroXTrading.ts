@@ -15,7 +15,7 @@
  */
 
 import type { Address, Hex } from "viem";
-import type { Env, SwapIntent } from "../types.js";
+import type { Env, SwapIntent, RequestContext } from "../types.js";
 import { resolveTokenAddress } from "../config.js";
 import { parseUnits, formatUnits } from "viem";
 import { getTokenDecimals } from "./vault.js";
@@ -68,8 +68,8 @@ function getHeaders(env: Env): Record<string, string> {
 async function fetchWithRetry(
   url: string,
   init: RequestInit,
-  maxRetries = 3,
-  timeoutMs = 15_000,
+  maxRetries = 2,
+  timeoutMs = 3_000,
 ): Promise<Response> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -77,24 +77,27 @@ async function fetchWithRetry(
         ...init,
         signal: AbortSignal.timeout(timeoutMs),
       });
+      // Success or non-retryable client error — return immediately.
       if (res.status !== 429 && res.status < 500) return res;
       if (attempt === maxRetries - 1) return res;
     } catch (err) {
       const isTimeout = err instanceof Error && err.name === "AbortError";
       if (isTimeout) {
         console.warn(`[0x] Request timed out after ${timeoutMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+        // Fail fast on timeout: the API is slow/overloaded, retrying likely wastes
+        // user-facing latency. Let the caller fall back or surface the error.
+        throw new Error(`0x API timed out after ${timeoutMs}ms`);
       }
       if (attempt === maxRetries - 1) {
         throw new Error(
-          isTimeout
-            ? `0x API timed out after ${timeoutMs * maxRetries}ms`
-            : `0x API request failed: ${err instanceof Error ? err.message : String(err)}`,
+          `0x API request failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
+    // Retry only transient server/rate-limit errors, with a short backoff.
     const delay = Math.min(
-      500 * Math.pow(2, attempt) + Math.random() * 100,
-      5000,
+      300 * Math.pow(2, attempt) + Math.random() * 100,
+      1_500,
     );
     console.log(
       `[0x] Retry ${attempt + 1}/${maxRetries}, waiting ${Math.round(delay)}ms`,
@@ -116,6 +119,7 @@ export async function getZeroXQuote(
   intent: SwapIntent,
   chainId: number,
   taker: string,
+  ctx?: Pick<RequestContext, "isTelegram">,
 ): Promise<ZeroXQuote> {
   // 0x API uses 0xEeee...EEeE for native ETH, not the zero address
   const NATIVE_ETH_0X = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
@@ -277,11 +281,14 @@ export async function getZeroXQuote(
     const desiredBuyRaw = parseUnits(intent.amountOut, decimalsOut);
     // Allow 1% downward deviation (surplus refunds can make it slightly higher)
     if (actualBuyRaw * 100n < desiredBuyRaw * 99n) {
+      const slippageGuidance = ctx?.isTelegram
+        ? "To raise slippage tolerance, use /slippage in Telegram."
+        : "To raise slippage tolerance, go to Settings → Slippage in the web app.";
       throw new Error(
         `0x quote output (${formatUnits(actualBuyRaw, decimalsOut)} ${intent.tokenOut}) ` +
         `is below the requested ${intent.amountOut} ${intent.tokenOut}. ` +
-        `Liquidity may be too shallow or slippage was exceeded. ` +
-        `Try a different DEX (uniswap) or a smaller amount.`
+        `Liquidity may be too shallow or slippage was exceeded.\n\n` +
+        `${slippageGuidance} You can also try a different DEX (uniswap) or a smaller amount.`
       );
     }
   }

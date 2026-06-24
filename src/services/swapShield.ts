@@ -23,7 +23,7 @@ const SWAP_SHIELD_TOLERANCE_PREFIX = "swap-shield-tolerance:";
 const SWAP_SHIELD_TOLERANCE_TTL = 600;
 
 /** Maximum temporary divergence an operator can set (50%) */
-const MAX_TEMP_DIVERGENCE_PCT = 50;
+export const MAX_TEMP_DIVERGENCE_PCT = 50;
 
 function formatBpsAsPct(bps: bigint): string {
   const sign = bps < 0n ? "-" : "";
@@ -314,12 +314,13 @@ export async function checkSwapPrice(
       priceFeedExists: true,
       code: "BLOCKED",
       reason:
-        `⚠️ Swap Shield blocked: the DEX quote diverges ${divergencePctDisplay}% from the oracle spot price ` +
-        `(max allowed: ${normalizedMaxDivergencePct}%) on ${getChainName(chainId)}. ` +
+        `⚠️ Swap Shield blocked: the DEX quote is ${divergencePctDisplay}% worse than the oracle spot price, ` +
+        `exceeding the ${normalizedMaxDivergencePct}% tolerance on ${getChainName(chainId)}. ` +
         `This likely indicates significant price impact, a bad route, or stale liquidity.\n\n` +
         `Oracle expected: ${oracleAmountRaw} | DEX quoted: ${dexExpectedOutRaw} (base units)\n\n` +
-        `To proceed anyway, you can temporarily raise the tolerance (up to 50% for 10 min): "set swap shield tolerance to 30%"\n` +
-        `Or split the trade into smaller amounts using a TWAP order to reduce price impact.`,
+        `To proceed, temporarily raise the tolerance above ${divergencePctDisplay}% ` +
+        `(up to ${MAX_TEMP_DIVERGENCE_PCT}% for 10 min) or split the trade into smaller amounts ` +
+        `using a TWAP order to reduce price impact.`,
     };
   }
 
@@ -349,7 +350,8 @@ export async function checkSwapPrice(
           `exceeding the ${normalizedMaxDivergencePct}% tolerance on ${getChainName(chainId)}. ` +
           `This may indicate a stale oracle or manipulated route.\n\n` +
           `Oracle expected: ${oracleAmountRaw} | DEX quoted: ${dexExpectedOutRaw} (base units)\n\n` +
-          `To proceed anyway, temporarily raise the tolerance (up to 50% for 10 min): "set swap shield tolerance to 30%"`,
+          `To proceed, temporarily raise the tolerance above ${favorablePctDisplay}% ` +
+          `(up to ${MAX_TEMP_DIVERGENCE_PCT}% for 10 min).`,
       };
     }
   }

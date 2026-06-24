@@ -30,7 +30,7 @@ import {
   handle_set_nav_shield_threshold,
   handle_enable_nav_shield,
 } from "../llm/handlers/settings.js";
-import { isDelegationActive, isDelegationActiveAnyChain, getDelegationConfig, getActiveChains } from "../services/delegation.js";
+import { getDelegationConfig, getActiveChains } from "../services/delegation.js";
 import { executeTxList, formatOutcomesMarkdown, type TxExecOutcome } from "../services/execution.js";
 import { initTokenResolver } from "../services/tokenResolver.js";
 import {
@@ -66,6 +66,11 @@ import { SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
 import type { TelegramVaultLink } from "../types.js";
 
 const telegram = new Hono<{ Bindings: Env }>();
+
+/** Strip accidental tool-name prefixes like [build_vault_swap]: from LLM/tool output. */
+function stripToolPrefix(text: string): string {
+  return text.replace(/^\[[A-Za-z0-9_-]+\]:\s*/, "");
+}
 
 // ── Webhook: receives Telegram updates ────────────────────────────────
 
@@ -686,11 +691,44 @@ async function handleMessage(
     }
   }
 
-  // Check if delegation is active on current chain OR any chain
-  // This allows multi-chain swaps where target chains have delegation
-  const delegationOnCurrentChain = await isDelegationActive(env.KV, vault.address, vault.chainId);
-  const delegationOnAnyChain = delegationOnCurrentChain || await isDelegationActiveAnyChain(env.KV, vault.address);
-  const executionMode = delegationOnAnyChain ? "delegated" : "manual";
+  // Discard any stale pending transaction. If the user sends a new message
+  // instead of tapping Execute/Cancel, the old quote is no longer relevant
+  // (sponsored transactions are only valid for ~3 minutes anyway).
+  const txKey = `tg-pending-tx:${userId}`;
+  const pendingTxRaw = await env.KV.get(txKey);
+  let staleTxNote: string | undefined;
+  if (pendingTxRaw) {
+    try {
+      const pendingTx = JSON.parse(pendingTxRaw) as { txs: unknown[]; createdAt: number; messageId?: number };
+      await env.KV.delete(txKey);
+      if (pendingTx.messageId) {
+        await editMessageText(
+          token, chatId, pendingTx.messageId,
+          "⏹️ Previous trade discarded — a new request replaced it.",
+          { replyMarkup: { inline_keyboard: [] } },
+        ).catch(() => {});
+      }
+    } catch {
+      await env.KV.delete(txKey);
+    }
+    staleTxNote = "The user's previous prepared transaction has been discarded because they sent a new request. Treat this as a fresh request.";
+  }
+
+  // Neutralize the last assistant turn if it advertised a pending transaction,
+  // so the model doesn't ask the user about a stale confirmation state.
+  for (let i = conv.messages.length - 1; i >= 0; i--) {
+    if (conv.messages[i].role === "assistant" && /🔔 .*ready\.|Tap ✅ Execute|Trade ready/i.test(conv.messages[i].content)) {
+      conv.messages[i].content = "A transaction was prepared but not executed; it has been discarded because the user sent a new request.";
+      staleTxNote = "The user's previous prepared transaction has been discarded. Treat this as a fresh request.";
+      break;
+    }
+  }
+
+  // Telegram is always treated as a delegated-style interface: the operator has
+  // already verified vault ownership at pairing time, and we present Execute/Cancel
+  // buttons for every ready transaction. The actual on-chain delegation check runs
+  // when the user taps Execute.
+  const executionMode = "delegated";
 
   // Load execution mode preference: "autonomous" = auto-execute, "confirm" (default) = show buttons
   const execModePref = await env.KV.get(`tg-execmode:${userId}`);
@@ -705,8 +743,10 @@ async function handleMessage(
     operatorAddress: vault.operatorAddress || user.operatorAddress,
     operatorVerified: true,
     isBrowserRequest: false,
+    isTelegram: true,
     executionMode,
     aiModel: undefined,
+    contextDocs: staleTxNote ? [staleTxNote] : undefined,
   };
 
   try {
@@ -752,7 +792,7 @@ async function handleMessage(
             break;
           case "tool_result": {
             const prefix = event.error ? "⚠️ " : "✅ ";
-            const firstLine = event.result.split("\n")[0].slice(0, 200);
+            const firstLine = stripToolPrefix(event.result.split("\n")[0]).slice(0, 200);
             progressLines.push(`${prefix}${escapeHtml(firstLine)}`);
             void updateProgress().catch(() => {});
             break;
@@ -789,123 +829,79 @@ async function handleMessage(
     // shown live in the progress message and are folded into response.reply.
     const replyParts: string[] = [];
     if (response.reply) {
-      replyParts.push(formatForTelegram(response.reply));
+      replyParts.push(formatForTelegram(stripToolPrefix(response.reply)));
     }
 
     // Handle transactions
-    if (txList.length > 0 && executionMode === "delegated") {
-      // Pre-check per-chain delegation for each transaction
+    if (txList.length > 0) {
+      // Optional: warn if delegation is not active on a transaction's chain.
+      // The Execute button is still shown; the execution service will enforce
+      // on-chain delegation and return a clear error if it is missing.
       const delegConfig = await getDelegationConfig(env.KV, vault.address);
       const activeDelegChains = delegConfig ? getActiveChains(delegConfig) : [];
-      const executableTxs: UnsignedTransaction[] = [];
-      const blockedTxs: { tx: UnsignedTransaction; chainName: string }[] = [];
+      const txChainIds = [...new Set(txList.map(tx => tx.chainId))];
+      const missingChainNames = txChainIds
+        .filter(chainId => !activeDelegChains.includes(chainId))
+        .map(chainId => SUPPORTED_CHAINS.find(ch => ch.id === chainId)?.name
+          || TESTNET_CHAINS.find(ch => ch.id === chainId)?.name
+          || `Chain ${chainId}`);
 
-      for (const tx of txList) {
-        const chainName = SUPPORTED_CHAINS.find(ch => ch.id === tx.chainId)?.name
-          || TESTNET_CHAINS.find(ch => ch.id === tx.chainId)?.name
-          || String(tx.chainId);
-        if (activeDelegChains.includes(tx.chainId)) {
-          executableTxs.push(tx);
-        } else {
-          blockedTxs.push({ tx, chainName });
-        }
-      }
-
-      // Warn about chains without delegation
-      if (blockedTxs.length > 0) {
-        const blockedLabels = blockedTxs.map(({ tx, chainName }) => {
-          const meta = tx.swapMeta;
-          const label = meta
-            ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
-            : tx.description || "Transaction";
-          return `• ${escapeHtml(label)} — <b>${chainName}</b>`;
-        });
+      if (missingChainNames.length > 0) {
         replyParts.push(
-          `⚠️ <b>Delegation not active on ${blockedTxs.length === 1 ? "this chain" : "these chains"}:</b>\n` +
-          blockedLabels.join("\n") +
-          `\n\nSet up delegation at <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to execute from Telegram.`,
+          `⚠️ Delegation is not active on ${missingChainNames.join(", ")}. ` +
+          `Tapping Execute may fail until you set it up at <a href="https://trader.rigoblock.com">trader.rigoblock.com</a>.`,
         );
       }
 
-      if (executableTxs.length > 0) {
-        // Build trade summary for executable transactions
-        const tradeLabels: string[] = [];
-        for (const tx of executableTxs) {
-          const meta = tx.swapMeta;
-          const label = meta
-            ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
-            : tx.description || "Transaction";
-          const chainName = SUPPORTED_CHAINS.find(ch => ch.id === tx.chainId)?.name
-            || TESTNET_CHAINS.find(ch => ch.id === tx.chainId)?.name
-            || String(tx.chainId);
-          tradeLabels.push(`• ${escapeHtml(label)} (${chainName})`);
-        }
+      if (autoExecuteFromTelegram) {
+        // ⚡ Autonomous mode — execute immediately, no confirmation needed
+        const tradeCount = txList.length > 1 ? `${txList.length} trades` : "trade";
+        replyParts.push(`\n⚡ <b>Executing ${tradeCount}…</b>`);
+        const statusReply = replyParts.join("\n\n");
+        const truncated = statusReply.length > 4000 ? statusReply.slice(0, 3990) + "…" : statusReply;
+        const statusMsg = await sendMessage(token, chatId, truncated);
 
-        const tradeCount = executableTxs.length > 1 ? `${executableTxs.length} trades` : "Trade";
-
-        if (autoExecuteFromTelegram) {
-          // ⚡ Autonomous mode — execute immediately, no confirmation needed
-          replyParts.push(`\n⚡ <b>Executing ${tradeCount.toLowerCase()}…</b>\n${tradeLabels.join("\n")}`);
-          const statusReply = replyParts.join("\n\n");
-          const truncated = statusReply.length > 4000 ? statusReply.slice(0, 3990) + "…" : statusReply;
-          const statusMsg = await sendMessage(token, chatId, truncated);
-
-          try {
-            const outcomes = await executeTxList(
-              env,
-              executableTxs,
-              vault.address,
-            );
-            const summary = formatOutcomesMarkdown(outcomes);
-            const resultText = `✅ <b>Executed:</b>\n${formatForTelegram(summary)}`;
-            if (statusMsg?.message_id) {
-              await editMessageText(token, chatId, statusMsg.message_id,
-                (truncated + "\n\n" + resultText).slice(0, 4000),
-              ).catch(() => {});
-            } else {
-              await sendMessage(token, chatId, resultText);
-            }
-          } catch (execErr) {
-            const errMsg = execErr instanceof Error ? execErr.message : "Execution failed";
-            await sendMessage(token, chatId, `⚠️ Execution error: ${escapeHtml(sanitizeError(errMsg).slice(0, 200))}`);
+        try {
+          const outcomes = await executeTxList(env, txList, vault.address);
+          const summary = formatOutcomesMarkdown(outcomes);
+          const resultText = `✅ <b>Executed:</b>\n${formatForTelegram(summary)}`;
+          if (statusMsg?.message_id) {
+            await editMessageText(token, chatId, statusMsg.message_id,
+              (truncated + "\n\n" + resultText).slice(0, 4000),
+            ).catch(() => {});
+          } else {
+            await sendMessage(token, chatId, resultText);
           }
-        } else {
-          // 🔔 Confirm mode (default) — show Execute/Cancel buttons
-          replyParts.push(`\n🔔 <b>${tradeCount} ready:</b>\n${tradeLabels.join("\n")}`);
-
-          // Store executable transactions with timestamp for staleness detection
-          const txKey = `tg-pending-tx:${userId}`;
-          const payload = { txs: executableTxs, createdAt: Date.now() };
-          await env.KV.put(txKey, JSON.stringify(payload), {
-            expirationTtl: 120, // 2 min — swap quotes expire quickly
-          });
-
-          const keyboard: TgInlineKeyboardMarkup = {
-            inline_keyboard: [
-              [
-                { text: `✅ Execute${executableTxs.length > 1 ? " All" : ""}`, callback_data: `exec:${userId}` },
-                { text: "❌ Cancel", callback_data: `cancel:${userId}` },
-              ],
-            ],
-          };
-
-          const fullReply = replyParts.join("\n\n") || "Ready.";
-          const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
-          await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
+        } catch (execErr) {
+          const errMsg = execErr instanceof Error ? execErr.message : "Execution failed";
+          await sendMessage(token, chatId, `⚠️ Execution error: ${escapeHtml(sanitizeError(errMsg).slice(0, 200))}`);
         }
       } else {
-        // All transactions blocked — no Execute button
-        const fullReply = replyParts.join("\n\n") || "No executable trades.";
+        // 🔔 Confirm mode (default) — show Execute/Cancel buttons for every ready tx
+        const tradeCount = txList.length > 1 ? `${txList.length} trades` : "trade";
+        const execLabel = txList.length > 1 ? "Execute All" : "Execute";
+        replyParts.push(`\n🔔 <b>${tradeCount.charAt(0).toUpperCase() + tradeCount.slice(1)} ready.</b>\nTap ✅ ${execLabel} to confirm or ❌ Cancel.`);
+
+        const keyboard: TgInlineKeyboardMarkup = {
+          inline_keyboard: [
+            [
+              { text: `✅ ${execLabel}`, callback_data: `exec:${userId}` },
+              { text: "❌ Cancel", callback_data: `cancel:${userId}` },
+            ],
+          ],
+        };
+
+        const fullReply = replyParts.join("\n\n") || "Ready.";
         const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
-        await sendMessage(token, chatId, truncated);
+        const sent = await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
+
+        // Store all transactions with timestamp and the message id so we can
+        // invalidate the keyboard if the user sends a new request before acting.
+        const payload = { txs: txList, createdAt: Date.now(), messageId: sent?.message_id };
+        await env.KV.put(txKey, JSON.stringify(payload), {
+          expirationTtl: 120, // 2 min — swap quotes expire quickly
+        });
       }
-    } else if (txList.length > 0 && executionMode === "manual") {
-      // Manual mode — can't sign from Telegram
-      const tradeCount = txList.length > 1 ? `These ${txList.length} trades require` : "This trade requires";
-      replyParts.push(`\n⚠️ ${tradeCount} wallet signing. Please complete in the web app, or set up delegation to execute from Telegram.`);
-      const fullReply = replyParts.join("\n\n") || "Ready.";
-      const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
-      await sendMessage(token, chatId, truncated);
     } else {
       const fullReply = replyParts.join("\n\n") || "Done.";
       const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
@@ -933,7 +929,7 @@ async function handleMessage(
     {
       const toolSummary = (response.toolCalls ?? [])
         .filter(tc => !tc.error && tc.result)
-        .map(tc => `[${tc.name}]: ${tc.result!.slice(0, 500)}`)
+        .map(tc => stripToolPrefix(tc.result!.slice(0, 500)))
         .join("\n---\n");
       const assistantContent = [
         toolSummary,
@@ -1034,6 +1030,7 @@ async function handleCallbackQuery(
       operatorAddress: (rec.operatorAddress) as Address,
       operatorVerified: true,
       isBrowserRequest: false,
+      isTelegram: true,
       executionMode: "delegated",
     };
 
@@ -1158,6 +1155,16 @@ async function handleCallbackQuery(
     const truncated = finalMsg.length > 4000 ? finalMsg.slice(0, 3990) + "…" : finalMsg;
     await editMessageText(token, chatId, messageId, truncated);
 
+    // Update conversation context so the next user message doesn't see a stale
+    // "Trade ready" prompt.
+    await updatePendingAssistantMessage(
+      env.KV,
+      userId,
+      allSuccess
+        ? (txList.length > 1 ? `All ${txList.length} trades confirmed.` : "Trade confirmed.")
+        : "Some trades failed.",
+    );
+
     return;
   }
 
@@ -1167,6 +1174,10 @@ async function handleCallbackQuery(
     const txKey = `tg-pending-tx:${userId}`;
     await env.KV.delete(txKey);
     await editMessageText(token, chatId, messageId, "Trade cancelled.");
+
+    // Update conversation context so the next user message doesn't see a stale
+    // "Trade ready" prompt.
+    await updatePendingAssistantMessage(env.KV, userId, "Trade cancelled.");
     return;
   }
 
@@ -1219,6 +1230,23 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
     }
   }
   return lines.join("\n");
+}
+
+/** Replace the last assistant message that advertised a pending Telegram transaction. */
+async function updatePendingAssistantMessage(
+  kv: KVNamespace,
+  userId: number,
+  replacement: string,
+): Promise<void> {
+  const conv = await getConversation(kv, userId);
+  if (!conv) return;
+  for (let i = conv.messages.length - 1; i >= 0; i--) {
+    if (conv.messages[i].role === "assistant" && /🔔 .*ready\.|Tap ✅ Execute|Trade ready/i.test(conv.messages[i].content)) {
+      conv.messages[i].content = replacement;
+      break;
+    }
+  }
+  await saveConversation(kv, userId, conv);
 }
 
 // ── Help message ──────────────────────────────────────────────────────

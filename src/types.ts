@@ -310,6 +310,8 @@ export interface RequestContext {
    * gate vault-transaction tools: browser callers without auth are blocked (sign in),
    * while x402 agents without auth are allowed in manual mode (Tier 1 AGENTS.md). */
   isBrowserRequest: boolean;
+  /** True when the request comes from the Telegram bot. Used to tailor command guidance in errors. */
+  isTelegram?: boolean;
   /** Execution mode for this request */
   executionMode?: ExecutionMode;
   /** User-provided AI API key (overrides server OPENAI_API_KEY) */
