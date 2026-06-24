@@ -92,4 +92,39 @@ describe.skipIf(!hasKey)("getZeroXQuote — live 0x API", () => {
     expect(BigInt(quote.sellAmount) > 0n).toBe(true);
     expect(quote.transaction.data).not.toBe("0x");
   });
+
+  // ETH → GRG on Arbitrum and POL → GRG on Polygon are reported low-liquidity
+  // pairs. 0x exact-input sometimes has liquidity; exact-output is frequently
+  // unavailable. The chat layer falls back to Uniswap when 0x reports no
+  // liquidity, so we only assert the exact-input path here to keep the suite
+  // stable. Exact-output behavior is covered by mocked unit tests.
+  it("fetches an exact-input quote for ETH → GRG on Arbitrum", { timeout: 15_000 }, async () => {
+    const intent: SwapIntent = {
+      tokenIn: "ETH",
+      tokenOut: "GRG",
+      amountIn: "0.0005",
+      slippageBps: 100,
+    };
+
+    const quote = await getZeroXQuote(env(), intent, 42161, TAKER);
+
+    expect(quote.buyAmount).toBeDefined();
+    expect(BigInt(quote.buyAmount) > 0n).toBe(true);
+    expect(quote.transaction.data).not.toBe("0x");
+  });
+
+  it("fetches an exact-input quote for POL → GRG on Polygon", { timeout: 15_000 }, async () => {
+    const intent: SwapIntent = {
+      tokenIn: "POL",
+      tokenOut: "GRG",
+      amountIn: "1",
+      slippageBps: 100,
+    };
+
+    const quote = await getZeroXQuote(env(), intent, 137, TAKER);
+
+    expect(quote.buyAmount).toBeDefined();
+    expect(BigInt(quote.buyAmount) > 0n).toBe(true);
+    expect(quote.transaction.data).not.toBe("0x");
+  });
 });

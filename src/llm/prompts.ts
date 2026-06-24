@@ -29,46 +29,48 @@ export type DomainKey =
 export function detectDomains(messages: Array<{ role: string; content: string }>): Set<DomainKey> {
   const domains = new Set<DomainKey>();
 
-  // Look at the last 3 user messages for context continuity
-  const recentUserMsgs = messages
+  // Use only the latest user message for domain detection. Previous assistant
+  // messages contain execution outcomes ("delegation active") that trigger false
+  // positives, and older user turns often mention unrelated domains.
+  const lastUserMsg = messages
     .filter(m => m.role === "user")
-    .slice(-3)
-    .map(m => m.content.toLowerCase())
-    .join(" ");
+    .slice(-1)[0]?.content.toLowerCase() ?? "";
 
-  // Swap (use \bsell\B to catch "selling", \bbuy\B to catch "buying", etc.)
-  if (/\b(swap|buy\B|sell\B|exchange|convert|trade|quote|price|slippage|swap.?shield|oracle)\b/.test(recentUserMsgs) &&
-      !/\b(long|short|perp|leverage|\dx)\b/.test(recentUserMsgs)) {
+  // Swap: match full keywords (buy/sell also catch buying/selling because
+  // the regex only needs a partial match inside the word).
+  if (/\b(swap|buy|sell|exchange|convert|trade|quote|price|slippage|swap.?shield|oracle)\b/.test(lastUserMsg) &&
+      !/\b(long|short|perp|leverage|\dx)\b/.test(lastUserMsg)) {
     domains.add("swap");
   }
 
-  // GMX perpetuals
-  if (/\b(long|short|perp|perpetual|leverage|\dx|position|margin|gmx|funding fee|stop.?loss|take.?profit)\b/.test(recentUserMsgs)) {
+  // GMX perpetuals — keep detection narrow. Avoid generic words like "position"
+  // or "margin" that appear in normal spot/LP conversations.
+  if (/\b(long|short|perp|perpetual|leverage|\dx|gmx|funding fee|stop.?loss|take.?profit)\b/.test(lastUserMsg)) {
     domains.add("gmx");
   }
 
   // Uniswap LP
-  if (/\b(lp|liquidity|pool.?info|uniswap|tick|range|burn.?position|collect.?fee|nft|position.*id)\b/.test(recentUserMsgs)) {
+  if (/\b(lp|liquidity|pool.?info|uniswap|tick|range|burn.?position|collect.?fee|nft|position.*id)\b/.test(lastUserMsg)) {
     domains.add("lp");
   }
 
   // Cross-chain bridge
-  if (/\b(bridge|cross.?chain|transfer.*to|move.*to|across|sync.*nav|rebalance|consolidate|aggregated?\s*nav|multichain|multi.chain)\b/.test(recentUserMsgs)) {
+  if (/\b(bridge|cross.?chain|transfer.*to|move.*to|across|sync.*nav|rebalance|consolidate|aggregated?\s*nav|multichain|multi.chain)\b/.test(lastUserMsg)) {
     domains.add("bridge");
   }
 
   // GRG Staking
-  if (/\b(stak|unstake|undelegate|epoch|grg.*reward|claim.*reward|staking)\b/.test(recentUserMsgs)) {
+  if (/\b(stake|staking|staked|unstake|undelegate|undelegating|epoch|grg reward|claim reward)\b/.test(lastUserMsg)) {
     domains.add("staking");
   }
 
   // Delegation
-  if (/\b(delegat|revoke|agent.*wallet|auto.?trade|enable.*agent|disable.*agent|selector)\b/.test(recentUserMsgs)) {
+  if (/\b(delegate|delegation|delegating|revoke|agent wallet|auto trade|enable agent|disable agent|selector)\b/.test(lastUserMsg)) {
     domains.add("delegation");
   }
 
   // Vault management
-  if (/\b(vault|pool.*deploy|deploy.*pool|fund.*pool|mint.*pool|deposit.*capital|create.*pool|new.*pool|vault.*info|balance|token.*balance)\b/.test(recentUserMsgs)) {
+  if (/\b(vault|pool.*deploy|deploy.*pool|fund.*pool|mint.*pool|deposit.*capital|create.*pool|new.*pool|vault.*info|balance|token.*balance)\b/.test(lastUserMsg)) {
     domains.add("vault");
   }
 
@@ -76,8 +78,8 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
   // Detect: "every N min", "N at a time", "DCA", "TWAP", "slice", etc.
   // Note: "every.*min" inside \b fails on "every 5 minutes" — check separately.
   if (
-    /\b(strateg|cron|automat|recurring|dca|twap|scheduled|timer|at\s+a\s+time|slice|in\s+parts|incrementally|gradually)\b/.test(recentUserMsgs) ||
-    /every\s+\d+\s*(min|hour|hr)/i.test(recentUserMsgs)
+    /\b(strategy|strategies|strategic|cron|automated|automatic|automation|recurring|dca|twap|scheduled|timer|at\s+a\s+time|slice|in\s+parts|incrementally|gradually)\b/.test(lastUserMsg) ||
+    /every\s+\d+\s*(min|hour|hr)/i.test(lastUserMsg)
   ) {
     domains.add("strategy");
   }
@@ -93,7 +95,7 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
 
 /** Map domains to their tool names — used to filter tool definitions. */
 export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
-  swap: ["get_swap_quote", "build_vault_swap", "set_default_slippage", "set_swap_shield_tolerance", "enable_swap_shield", "set_nav_shield_threshold", "enable_nav_shield", "refresh_oracle_feed"],
+  swap: ["get_swap_quote", "build_vault_swap", "refresh_oracle_feed"],
   gmx: [
     "gmx_decrease_position", "gmx_increase_position",
     "gmx_get_positions", "gmx_cancel_order", "gmx_update_order",
@@ -145,7 +147,7 @@ Agent execution is optional and ancillary to the core function: protecting vault
 
 PERPETUAL vs SWAP DISAMBIGUATION — TOP PRIORITY:
 When the user says "long" or "short", this is ALWAYS a GMX perpetual position, NEVER a spot swap.
-Keywords that ALWAYS mean GMX perpetuals: long, short, perp, leverage, Nx (5x, 10x, etc.), position, margin.
+Keywords that ALWAYS mean GMX perpetuals: long, short, perp, leverage, Nx (5x, 10x, etc.).
 Keywords that mean spot swap: buy, sell, swap, exchange, convert, trade ... for/to/into.
 Pair suffixes like USD, USDC, USDT after a token symbol (e.g. ETHUSD, UNIUSDC, BTCUSD) indicate a GMX perpetual market.
 
@@ -190,7 +192,7 @@ RULES:
 - NEVER claim the vault "now holds" a specific amount unless you called get_token_balance to verify it.
 - Token symbols resolve automatically. If resolution fails, retry with the contract address from the reference below.
 - Users may use full names (e.g., "chainlink"→LINK, "uniswap"→UNI, "wrapped bitcoin"→WBTC).
-- Default slippage: 1% (100 bps). Configurable by the operator via settings or "set slippage to X%".
+- Default slippage: 1% (100 bps). Slippage and safety-shield settings are managed by the operator — either in the web UI or, if Telegram is paired, via slash commands: /slippage, /swapshield, /navshield. You cannot change these settings.
 
 TOKEN ADDRESS REFERENCE:
 Chain 1 (Ethereum): ETH=native, WETH=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2, USDC=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48, USDT=0xdAC17F958D2ee523a2206206994597C13D831ec7, DAI=0x6B175474E89094C44Da98b954EedeAC495271d0F, WBTC=0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599, GRG=0x4FbB350052Bca5417566f188eB2EBCE5b19BC964, XAUT=0x68749665FF8D2d112Fa859AA293F07A622782F38
@@ -240,20 +242,12 @@ The check is two-sided with a unified tolerance:
 - When a swap is blocked by the Swap Shield, explain the divergence and suggest:
   1. Using a TWAP order to split the trade into smaller slices
   2. Reducing the trade amount
-  3. Temporarily raising the tolerance (e.g. "set swap shield tolerance to 30%")
-- The operator can raise tolerance up to 50% for 10 minutes via "set swap shield tolerance to X%"
-  (use set_swap_shield_tolerance tool). The shield resets to 5% automatically.
-- Reset early to default with "enable swap shield" (use enable_swap_shield tool)
+  3. The operator can temporarily raise the tolerance (up to 50% for 10 minutes) from the web UI or via Telegram /swapshield — you cannot change it.
 - The NAV shield (default 10% max loss, configurable 1%–100%) still runs independently of Swap Shield settings.
-- The operator can change the NAV shield threshold via "set NAV shield threshold to 15%" (use set_nav_shield_threshold tool).
-- Reset to default with "reset NAV shield to default" (use enable_nav_shield tool).
-- When confirming a shield setting change, keep the response concise and friendly. Use the tool result directly; do not add technical disclaimers like "per-operator across all chains" unless the user asks.
 
 SLIPPAGE:
-- Default: 1% (100 bps). Configurable by the operator.
-- The operator can change default slippage via "set slippage to 0.5%" (use set_default_slippage tool).
-- Valid range: 0.1% to 5%.
-- When the user mentions slippage, call set_default_slippage. Do NOT pass it as a swap parameter.
+- Default: 1% (100 bps). Configurable by the operator in the web UI or via Telegram /slippage — you cannot change it.
+- Do NOT pass slippage as a swap parameter.
 
 MULTI-CHAIN SWAPS:
 When the user requests multiple swaps in one message, make ONE build_vault_swap call PER swap.

@@ -72,6 +72,7 @@ const PUBLIC_API_PREFIXES: ReadonlyArray<{ method: string; prefix: string }> = [
   { method: "GET", prefix: "/api/delegation/" },
   { method: "POST", prefix: "/api/telegram/" },
   { method: "GET", prefix: "/api/telegram/" },
+  { method: "POST", prefix: "/api/settings/" },
 ];
 
 export function isPublicApiRoute(method: string, path: string): boolean {
@@ -331,7 +332,10 @@ export const PROTECTED_ROUTES: RoutesConfig = {
               chainId: "Chain ID (e.g. 8453)",
               sellToken: "Token to sell (address or symbol)",
               buyToken: "Token to buy (address or symbol)",
-              sellAmount: "Amount to sell in base units",
+              sellAmount: "Amount to sell in base units. Provide either sellAmount (exact-input) or buyAmount (exact-output).",
+              buyAmount: "Amount to buy in base units. Provide either sellAmount (exact-input) or buyAmount (exact-output).",
+              slippageBps: "Slippage tolerance in basis points (e.g. 100 for 1%)",
+              taker: "Address that will execute the swap",
             },
           },
           output: {

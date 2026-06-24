@@ -112,6 +112,7 @@ function makeCtx(overrides: Partial<RequestContext> = {}): RequestContext {
     chainId: 8453,
     isBrowserRequest: true,
     operatorAddress: OPERATOR as `0x${string}`,
+    operatorVerified: true,
     ...overrides,
   };
 }
@@ -120,7 +121,7 @@ function makeEnv(kv: KVNamespace): any {
   return { KV: kv, ALCHEMY_API_KEY: "test-key" };
 }
 
-describe("Settings — browser-only restriction", () => {
+describe("Settings — operator-only restriction", () => {
   let kv: KVNamespace;
 
   beforeEach(() => {
@@ -152,12 +153,19 @@ describe("Settings — browser-only restriction", () => {
     expect(result.message).toContain("10 minutes");
   });
 
-  it("rejects NAV shield threshold from non-browser requests", async () => {
+  it("rejects NAV shield threshold from unverified operators (external agents)", async () => {
     const env = makeEnv(kv);
-    const ctx = makeCtx({ isBrowserRequest: false });
+    const ctx = makeCtx({ operatorVerified: false });
     await expect(
       handle_set_nav_shield_threshold(env, ctx, { threshold: "25" }, "set_nav_shield_threshold"),
-    ).rejects.toThrow("can only be used via the web UI");
+    ).rejects.toThrow("can only be used by the vault operator");
+  });
+
+  it("allows NAV shield threshold from Telegram (verified operator)", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ isBrowserRequest: false });
+    const result = await handle_set_nav_shield_threshold(env, ctx, { threshold: "25" }, "set_nav_shield_threshold");
+    expect(result.message).toContain("25%");
   });
 
   it("allows reset NAV shield from browser requests", async () => {
@@ -169,33 +177,41 @@ describe("Settings — browser-only restriction", () => {
     expect(await getNavShieldThreshold(kv, OPERATOR)).toBeNull();
   });
 
-  it("rejects reset NAV shield from non-browser requests", async () => {
+  it("rejects reset NAV shield from unverified operators", async () => {
     const env = makeEnv(kv);
-    const ctx = makeCtx({ isBrowserRequest: false });
-    await expect(handle_enable_nav_shield(env, ctx, {}, "enable_nav_shield")).rejects.toThrow("can only be used via the web UI");
+    const ctx = makeCtx({ operatorVerified: false });
+    await expect(handle_enable_nav_shield(env, ctx, {}, "enable_nav_shield")).rejects.toThrow("can only be used by the vault operator");
   });
 
-  it("rejects slippage change from non-browser requests", async () => {
+  it("allows reset NAV shield from Telegram (verified operator)", async () => {
     const env = makeEnv(kv);
     const ctx = makeCtx({ isBrowserRequest: false });
+    await setNavShieldThreshold(kv, OPERATOR, 50n);
+    const result = await handle_enable_nav_shield(env, ctx, {}, "enable_nav_shield");
+    expect(result.message).toContain("10%");
+    expect(await getNavShieldThreshold(kv, OPERATOR)).toBeNull();
+  });
+
+  it("rejects slippage change from unverified operators", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ operatorVerified: false });
     await expect(
       handle_set_default_slippage(env, ctx, { slippage: "1%" }, "set_default_slippage"),
-    ).rejects.toThrow("can only be used via the web UI");
+    ).rejects.toThrow("can only be used by the vault operator");
   });
 
-  it("rejects swap shield tolerance from non-browser requests", async () => {
+  it("allows swap shield tolerance from Telegram (verified operator)", async () => {
     const env = makeEnv(kv);
     const ctx = makeCtx({ isBrowserRequest: false });
-    await expect(
-      handle_set_swap_shield_tolerance(env, ctx, { tolerance: "30%" }, "set_swap_shield_tolerance"),
-    ).rejects.toThrow("can only be used via the web UI");
+    const result = await handle_set_swap_shield_tolerance(env, ctx, { tolerance: "30%" }, "set_swap_shield_tolerance");
+    expect(result.message).toContain("30%");
   });
 
-  it("rejects enable swap shield from non-browser requests", async () => {
+  it("rejects enable swap shield from unverified operators", async () => {
     const env = makeEnv(kv);
-    const ctx = makeCtx({ isBrowserRequest: false });
+    const ctx = makeCtx({ operatorVerified: false });
     await expect(
       handle_enable_swap_shield(env, ctx, {}, "enable_swap_shield"),
-    ).rejects.toThrow("can only be used via the web UI");
+    ).rejects.toThrow("can only be used by the vault operator");
   });
 });

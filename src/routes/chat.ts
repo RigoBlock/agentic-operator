@@ -80,8 +80,8 @@ chat.post("/", async (c) => {
     // Delegated execution and vault-tx tool execution ALWAYS require proven vault
     // ownership (operatorVerified).
     const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
-    let operatorVerified = false;
     const isBrowserRequest = c.get("operatorAuthVerified") ?? false;
+    let operatorVerified = isBrowserRequest;
 
     if (hasAuthCredentials) {
       await verifyOperatorAuth({

@@ -412,7 +412,7 @@ export const ALLOWED_VAULT_SELECTORS = {
   // multicall(bytes32,bytes[])
   multicallHash: "0x1f0464d1" as `0x${string}`,
   // ── 0x Aggregator (IA0x / AllowanceHolder) ──
-  // execute(address,address,uint256,address,bytes) — AllowanceHolder entry point
+  // exec(address,address,uint256,address,bytes) — A0xRouter / AllowanceHolder entry point
   zeroXExecute: "0x2213bc0b" as `0x${string}`,
   // ── GMX v2 Adapter (IAGmxV2) ──
   cancelOrder: "0x7489ec23" as `0x${string}`,

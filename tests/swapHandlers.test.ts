@@ -132,6 +132,29 @@ function makeUniswapQuote() {
   };
 }
 
+function makeZeroXQuoteExactOutput(): any {
+  return {
+    buyAmount: "2500000000000000000",
+    buyToken: "0x3b3e4b4741e91af52d0e9ad8660573e951c88524",
+    sellAmount: "462706493551181",
+    sellToken: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    maxSellAmount: "467689939752184",
+    gas: "378832",
+    gasPrice: "100000000",
+    totalNetworkFee: "37883200000000",
+    transaction: {
+      to: "0x0000000000001fF3684f28c67538d4D072C22734" as Address,
+      data: "0x2213bc0bdeadbeef" as Hex,
+      gas: "378832",
+      gasPrice: "100000000",
+      value: "467689939752184",
+    },
+    decimalsIn: 18,
+    decimalsOut: 18,
+    _raw: {},
+  };
+}
+
 function makeUniswapSwapTx(): { to: Address; from: Address; data: Hex; value: string; chainId: number } {
   const data = encodeFunctionData({
     abi: RIGOBLOCK_VAULT_ABI,
@@ -146,6 +169,8 @@ function makeUniswapSwapTx(): { to: Address; from: Address; data: Hex; value: st
     chainId: CHAIN_ID,
   };
 }
+
+
 
 describe("handle_get_swap_quote", () => {
   beforeEach(() => {
@@ -225,5 +250,21 @@ describe("handle_build_vault_swap", () => {
     ).rejects.toThrow("Swap Shield blocked this trade");
 
     expect(mockGetUniswapQuote).not.toHaveBeenCalled();
+  });
+
+  it("returns a transaction for exact-output native 0x swaps using the raw 0x calldata", async () => {
+    mockGetZeroXQuote.mockResolvedValue(makeZeroXQuoteExactOutput());
+    mockGetVaultTokenBalance.mockResolvedValue({ balance: BigInt("1000000000000000000"), decimals: 18, symbol: "ETH" });
+
+    const result = await handle_build_vault_swap(makeEnv(), makeCtx({ chainId: 42161 }), {
+      tokenIn: "ETH",
+      tokenOut: "GRG",
+      amountOut: "2.5",
+    }, "build_vault_swap");
+
+    expect(result.transaction).toBeDefined();
+    expect(result.transaction?.data.toLowerCase().startsWith("0x2213bc0b")).toBe(true);
+    expect(result.transaction?.value).toBe("0x0");
+    expect(result.transaction?.swapMeta?.dex).toBe("0x Aggregator");
   });
 });

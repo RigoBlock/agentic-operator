@@ -6,6 +6,9 @@
  *   - /pair <code>     → link Telegram to web account
  *   - /pool [name]     → switch active vault
  *   - /pools           → list paired vaults
+ *   - /slippage <pct>  → set default slippage
+ *   - /swapshield <pct>|reset → set/reset swap-shield tolerance
+ *   - /navshield <pct>|reset  → set/reset NAV-shield threshold
  *   - /clear           → reset conversation
  *   - /unpair <addr>   → remove a vault link
  *   - text messages    → processChat() (LLM + tools)
@@ -20,6 +23,13 @@ import { Hono, type Context } from "hono";
 import type { Env, ChatMessage, RequestContext, ChatResponse, TelegramConversation, UnsignedTransaction } from "../types.js";
 import type { Address } from "viem";
 import { processChat } from "../llm/client.js";
+import {
+  handle_set_default_slippage,
+  handle_set_swap_shield_tolerance,
+  handle_enable_swap_shield,
+  handle_set_nav_shield_threshold,
+  handle_enable_nav_shield,
+} from "../llm/handlers/settings.js";
 import { isDelegationActive, isDelegationActiveAnyChain, getDelegationConfig, getActiveChains } from "../services/delegation.js";
 import { executeTxList, formatOutcomesMarkdown, type TxExecOutcome } from "../services/execution.js";
 import { initTokenResolver } from "../services/tokenResolver.js";
@@ -410,6 +420,71 @@ async function handleMessage(
         return;
       }
 
+      case "/slippage":
+      case "/swapshield":
+      case "/navshield": {
+        const settingsUser = await getTelegramUser(env.KV, userId);
+        if (!settingsUser || settingsUser.vaults.length === 0) {
+          await sendMessage(token, chatId, "You haven't paired any vaults yet. Use the web app to pair Telegram first.");
+          return;
+        }
+        const settingsVault = settingsUser.vaults[settingsUser.activeVaultIndex];
+        if (!settingsVault) {
+          await sendMessage(token, chatId, "No active vault. Use <code>/pools</code> to select one.");
+          return;
+        }
+        const settingsCtx: RequestContext = {
+          vaultAddress: settingsVault.address,
+          chainId: settingsVault.chainId,
+          operatorAddress: settingsVault.operatorAddress || settingsUser.operatorAddress,
+          operatorVerified: true,
+          isBrowserRequest: false,
+          executionMode: "manual",
+        };
+        try {
+          let result: { message: string };
+          if (command === "/slippage") {
+            const value = args.join(" ").trim();
+            if (!value) {
+              await sendMessage(token, chatId,
+                "Usage: <code>/slippage 0.5%</code>\nValid range: 0.1% – 5%.");
+              return;
+            }
+            result = await handle_set_default_slippage(env, settingsCtx, { slippage: value }, "set_default_slippage");
+          } else if (command === "/swapshield") {
+            const value = args.join(" ").trim().toLowerCase();
+            if (!value) {
+              await sendMessage(token, chatId,
+                "Usage: <code>/swapshield 30%</code> or <code>/swapshield reset</code>\nMax temporary tolerance: 50%.");
+              return;
+            }
+            if (value === "reset") {
+              result = await handle_enable_swap_shield(env, settingsCtx, {}, "enable_swap_shield");
+            } else {
+              result = await handle_set_swap_shield_tolerance(env, settingsCtx, { tolerance: value }, "set_swap_shield_tolerance");
+            }
+          } else {
+            // /navshield
+            const value = args.join(" ").trim().toLowerCase();
+            if (!value) {
+              await sendMessage(token, chatId,
+                "Usage: <code>/navshield 15%</code> or <code>/navshield reset</code>\nValid range: 1% – 100%.");
+              return;
+            }
+            if (value === "reset") {
+              result = await handle_enable_nav_shield(env, settingsCtx, {}, "enable_nav_shield");
+            } else {
+              result = await handle_set_nav_shield_threshold(env, settingsCtx, { threshold: value }, "set_nav_shield_threshold");
+            }
+          }
+          await sendMessage(token, chatId, formatForTelegram(result.message));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await sendMessage(token, chatId, `⚠️ ${escapeHtml(sanitizeError(msg).slice(0, 300))}`);
+        }
+        return;
+      }
+
       case "/unpair": {
         const addr = args[0];
         if (!addr) {
@@ -638,32 +713,60 @@ async function handleMessage(
     // Initialize token resolver
     if (env.KV) initTokenResolver(env.KV);
 
-    // Track progress message for intermediate tool results
+    // Live progress message: shows real-time status and tool results, then is deleted
+    // before the final human-friendly reply is sent. This avoids duplicating output.
     let progressMsgId: number | undefined;
+    let progressStatus = "Thinking…";
     const progressLines: string[] = [];
+
+    const updateProgress = async () => {
+      const parts: string[] = [escapeHtml(progressStatus)];
+      if (progressLines.length > 0) {
+        parts.push(progressLines.join("\n"));
+      }
+      const text = parts.join("\n\n");
+      if (!progressMsgId) {
+        const sent = await sendMessage(token, chatId, text).catch(() => null);
+        if (sent?.message_id) progressMsgId = sent.message_id;
+      } else {
+        await editMessageText(token, chatId, progressMsgId, text).catch(() => {});
+      }
+    };
 
     const response: ChatResponse = await processChat(
       env,
       conv.messages as ChatMessage[],
       ctx,
-      async (toolName, result, isError) => {
-        // Show intermediate tool results as a live-updating message
-        const prefix = isError ? "⚠️ " : "✅ ";
-        // Show a short summary — first line of the result, max 200 chars
-        const firstLine = result.split("\n")[0].slice(0, 200);
-        progressLines.push(`${prefix}${escapeHtml(firstLine)}`);
-        const text = progressLines.join("\n");
-        if (!progressMsgId) {
-          const sent = await sendMessage(token, chatId, text).catch(() => null);
-          if (sent?.message_id) progressMsgId = sent.message_id;
-        } else {
-          await editMessageText(token, chatId, progressMsgId, text).catch(() => {});
+      undefined,
+      (event) => {
+        switch (event.type) {
+          case "status":
+          case "text":
+          case "reasoning":
+            progressStatus = event.type === "status" ? event.message : "Reasoning…";
+            void updateProgress().catch(() => {});
+            break;
+          case "tool_call":
+            progressStatus = `Running ${event.name}…`;
+            void updateProgress().catch(() => {});
+            break;
+          case "tool_result": {
+            const prefix = event.error ? "⚠️ " : "✅ ";
+            const firstLine = event.result.split("\n")[0].slice(0, 200);
+            progressLines.push(`${prefix}${escapeHtml(firstLine)}`);
+            void updateProgress().catch(() => {});
+            break;
+          }
+          case "transaction":
+            progressStatus = "Transaction ready";
+            void updateProgress().catch(() => {});
+            break;
         }
       },
     );
     clearInterval(typingInterval);
 
-    // Delete progress message — final reply will contain full details
+    // Delete progress message — final reply contains the single human-friendly output.
     if (progressMsgId) {
       await deleteMessage(token, chatId, progressMsgId).catch(() => {});
     }
@@ -681,37 +784,10 @@ async function handleMessage(
         ? [response.transaction]
         : [];
 
-    // Defensive: log when txList is empty but tool results suggest a transaction should exist.
-    const hasToolTx = response.toolCalls?.some(tc => tc.result?.includes('ready') || tc.result?.includes('Execute'));
-    if (hasToolTx && txList.length === 0) {
-      console.warn('[telegram] Tool result suggests a transaction but txList is empty. executionMode:', executionMode, 'toolCalls:', response.toolCalls?.map(tc => tc.name));
-    }
-
-    // Build the Telegram reply
-    let replyParts: string[] = [];
-
-    // Reasoning trace (shown first, collapsed in a blockquote)
-    if (response.reasoning) {
-      // Trim to ~800 chars for Telegram (avoid hitting 4096 char limit)
-      const trimmed = response.reasoning.length > 800
-        ? response.reasoning.slice(0, 800).replace(/\s+\S*$/, "") + "…"
-        : response.reasoning;
-      replyParts.push(`💭 <b>Reasoning:</b>\n<blockquote>${escapeHtml(trimmed)}</blockquote>`);
-    }
-
-    // Tool results
-    if (response.toolCalls?.length) {
-      for (const tc of response.toolCalls) {
-        if (tc.result && !tc.error) {
-          replyParts.push(formatForTelegram(tc.result));
-        }
-        if (tc.error && tc.result) {
-          replyParts.push(`⚠️ ${formatForTelegram(tc.result)}`);
-        }
-      }
-    }
-
-    // LLM reply
+    // Build the Telegram reply from the single human-friendly LLM reply.
+    // Tool results are intentionally NOT rendered again here — they were already
+    // shown live in the progress message and are folded into response.reply.
+    const replyParts: string[] = [];
     if (response.reply) {
       replyParts.push(formatForTelegram(response.reply));
     }
@@ -1169,7 +1245,9 @@ async function sendHelpMessage(token: string, chatId: number): Promise<void> {
     "/pools — list paired vaults",
     "/pool &lt;name&gt; — switch active vault",
     "/addpool &lt;0xAddr&gt; — add vault by address",
-    "/model — view current AI model (Kimi K2.7 Code, fixed)",
+    "/slippage &lt;0.5%&gt; — set default slippage",
+    "/swapshield &lt;30%&gt; | reset — temporary oracle-divergence tolerance",
+    "/navshield &lt;15%&gt; | reset — max NAV drop threshold",
     "/mode [autonomous|confirm] — toggle auto-execute or confirm",
     "/clear — reset conversation",
     "/unpair &lt;addr&gt; — unlink a vault",

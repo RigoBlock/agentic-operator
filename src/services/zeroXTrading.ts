@@ -69,17 +69,35 @@ async function fetchWithRetry(
   url: string,
   init: RequestInit,
   maxRetries = 3,
+  timeoutMs = 15_000,
 ): Promise<Response> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const res = await fetch(url, init);
-    if (res.status !== 429 && res.status < 500) return res;
-    if (attempt === maxRetries - 1) return res;
+    try {
+      const res = await fetch(url, {
+        ...init,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (res.status !== 429 && res.status < 500) return res;
+      if (attempt === maxRetries - 1) return res;
+    } catch (err) {
+      const isTimeout = err instanceof Error && err.name === "AbortError";
+      if (isTimeout) {
+        console.warn(`[0x] Request timed out after ${timeoutMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+      }
+      if (attempt === maxRetries - 1) {
+        throw new Error(
+          isTimeout
+            ? `0x API timed out after ${timeoutMs * maxRetries}ms`
+            : `0x API request failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     const delay = Math.min(
       500 * Math.pow(2, attempt) + Math.random() * 100,
       5000,
     );
     console.log(
-      `[0x] Retry ${attempt + 1}/${maxRetries} after ${res.status}, waiting ${Math.round(delay)}ms`,
+      `[0x] Retry ${attempt + 1}/${maxRetries}, waiting ${Math.round(delay)}ms`,
     );
     await new Promise((r) => setTimeout(r, delay));
   }
@@ -353,3 +371,4 @@ function formatTokenAmount(amount: string, decimals: number): string {
     .slice(0, 6);
   return `${whole}.${frac}`;
 }
+

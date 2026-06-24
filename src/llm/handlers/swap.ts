@@ -36,7 +36,8 @@ function isZeroXLiquidityError(message: string): boolean {
     lower.includes("token pair may not be supported by 0x") ||
     lower.includes("token pair may not be fully supported by 0x") ||
     lower.includes("0x returned empty transaction data") ||
-    lower.includes("0x quote response is missing a valid")
+    lower.includes("0x quote response is missing a valid") ||
+    lower.includes("0x api timed out")
   );
 }
 
@@ -155,8 +156,10 @@ async function buildVaultSwapWith0x(
   const shieldWarning0x = shield0x.warning;
 
   // The 0x API returns a complete transaction targeting AllowanceHolder.
-  // For the vault, we send the 0x calldata TO the vault address.
-  // The vault's 0x adapter (when built) will route it through AllowanceHolder.
+  // Rigoblock vaults expose the same exec(address,address,uint256,address,bytes) interface,
+  // so the 0x calldata is sent to the vault address unchanged.
+  // A0xRouter computes the native value internally and routes through AllowanceHolder.
+
   const outputAmount = formatRawAmount(zxQuote.buyAmount, zxQuote.decimalsOut);
   const inputAmount = formatRawAmount(zxQuote.sellAmount, zxQuote.decimalsIn);
   const isExactOutput = !!intent.amountOut;
@@ -185,7 +188,7 @@ async function buildVaultSwapWith0x(
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: zxQuote.transaction.data,
-    value: "0x0", // vault uses its own ETH, never pass value
+    value: "0x0", // A0xRouter computes native value from token/amount; do not pass msg.value
     chainId: ctx.chainId,
     gas: zxGas,
     description: descParts.join(" | "),

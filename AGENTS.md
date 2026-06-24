@@ -272,7 +272,8 @@ on the vault's Net Asset Value per unit:
 - Atomically simulates: `multicall([swap, updateUnitaryValue])`
 - Compares post-swap NAV against the **higher of:** pre-swap NAV or 24-hour baseline
 - Default threshold: **10%** NAV drop per trade → **transaction BLOCKED**
-- Operator-configurable range: **1%–100%** (set via the web UI; stored per operator in KV)
+- Operator-configurable range: **1%–100%** (set via the web UI or Telegram; stored per operator in KV)
+- **Partial-recovery rule:** a trade that results in `post-swap unitaryValue >= pre-swap unitaryValue` is always allowed, even if the vault is still below the 24h baseline or the drop from baseline exceeds the normal threshold. Only trades that reduce the current unit price are blocked.
 - This check runs outside the agent's control surface — it cannot be disabled,
   bypassed, or circumvented by any API caller. The agent is bound by whatever
   threshold the operator has configured.
@@ -795,6 +796,23 @@ requests it. Each slice is treated as a fresh independent operation.
 For full technical specifications including data model, KV schema, execution
 context, and DEX integrator requirements, see
 [content/twap-orders.md](content/twap-orders.md).
+
+---
+
+## Telegram Operator Commands
+
+Operators can manage safety settings directly from a paired Telegram account.
+These commands bypass the LLM and invoke the same verified-operator handlers as
+the web UI:
+
+| Command | Description |
+|---------|-------------|
+| `/slippage <0.5%>` | Set default slippage (0.1%–5%) |
+| `/swapshield <30%>` or `/swapshield reset` | Temporarily raise oracle-divergence tolerance up to 50% for 10 minutes, or reset to the default 5% |
+| `/navshield <15%>` or `/navshield reset` | Set the max NAV drop threshold (1%–100%), or reset to the default 10% |
+
+These settings can only be changed by the vault operator (via the web UI or
+Telegram). External API callers and the LLM cannot modify them.
 
 ---
 
