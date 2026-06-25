@@ -11,19 +11,35 @@ import { appendMessage } from "./chat-ui.js";
 
 import { fetchAgentBalance } from "./api.js";
 
+/** Format a numeric percentage string for display, trimming trailing zeros. */
+function formatPct(value, fallback = '0') {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  // Use up to 4 decimals, but trim trailing zeros and the trailing dot.
+  let formatted = num.toFixed(4).replace(/\.?0+$/, '');
+  if (formatted === '-0') formatted = '0';
+  return `${formatted}%`;
+}
+
 /** Format per-transaction metrics (NAV impact, swap-shield divergence) as HTML. */
 function formatTxMetrics(tx) {
   if (!tx?.metrics) return '';
   const m = tx.metrics;
+  // Debug: log raw metrics so we can diagnose display vs backend discrepancies.
+  if (m.navShield || m.swapShield) {
+    console.log('[tx-metrics] raw metrics:', JSON.stringify(m));
+  }
   const parts = [];
   if (m.navShield?.navImpactPct != null) {
-    const pct = String(m.navShield.navImpactPct);
+    // impactPct is signed: positive = NAV improved, negative = NAV dropped.
+    const pct = formatPct(m.navShield.navImpactPct);
     const cls = pct.startsWith('-') ? 'negative' : 'positive';
     parts.push(`<span class="metric-item"><span class="metric-label">NAV impact</span><span class="metric-value ${cls}">${escapeHtml(pct)}</span></span>`);
   }
   if (m.swapShield?.divergencePct != null) {
-    const pct = String(m.swapShield.divergencePct);
-    const cls = pct.startsWith('-') ? 'negative' : 'positive';
+    const pct = formatPct(m.swapShield.divergencePct);
+    // Positive divergence = DEX quote is worse than oracle (bad for the trader).
+    const cls = pct.startsWith('-') ? 'positive' : 'negative';
     parts.push(`<span class="metric-item"><span class="metric-label">Oracle divergence</span><span class="metric-value ${cls}">${escapeHtml(pct)}</span></span>`);
   }
   return parts.length ? `<div class="tx-metrics">${parts.join('')}</div>` : '';

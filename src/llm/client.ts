@@ -1628,12 +1628,13 @@ export async function preCheckNavImpact(
 
     if (result.verified) {
       console.log(
-        `[NavShield pre-check] ✓ Passed: NAV drop ${result.dropPct}% (chain ${tx.chainId})`,
+        `[NavShield pre-check] ✓ Passed: NAV drop ${result.dropPct}% / impact ${result.impactPct}% (chain ${tx.chainId})`,
       );
       return {
         warning: '',
         metrics: {
-          navImpactPct: result.dropPct,
+          // impactPct is signed: positive = NAV improved, negative = NAV dropped.
+          navImpactPct: result.impactPct,
           navReferenceValue: result.baselineUnitaryValue || result.preNavUnitaryValue,
           navPostValue: result.postNavUnitaryValue,
         },

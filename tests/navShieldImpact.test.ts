@@ -107,7 +107,8 @@ describe("NAV Shield impact logic", () => {
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
-    expect(result.dropPct).toBe("10.00");
+    expect(result.dropPct).toBe("10.0000");
+    expect(result.impactPct).toBe("-10.0000");
   });
 
   it("blocks a trade that exceeds the max NAV drop threshold", async () => {
@@ -118,6 +119,7 @@ describe("NAV Shield impact logic", () => {
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("BLOCKED");
     expect(Number(result.dropPct)).toBeGreaterThan(10);
+    expect(result.impactPct).toBe("-11.0000");
   });
 
   it("allows a recovery trade that improves NAV while below baseline", async () => {
@@ -130,6 +132,7 @@ describe("NAV Shield impact logic", () => {
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
     expect(result.dropPct).toBe("0");
+    expect(result.impactPct).toBe("6.2500");
     expect(result.reason).toContain("improves");
   });
 
@@ -141,6 +144,7 @@ describe("NAV Shield impact logic", () => {
     );
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("BLOCKED");
+    expect(result.impactPct).toBe("-6.2500");
     expect(result.reason).toContain("below the 24h baseline");
   });
 

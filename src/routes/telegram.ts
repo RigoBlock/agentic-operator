@@ -74,6 +74,30 @@ function stripToolPrefix(text: string): string {
   return text.replace(/^\[[A-Za-z0-9_-]+\]:\s*/, "");
 }
 
+/** Format a numeric percentage string for Telegram display. */
+function formatTelegramPct(value: unknown): string {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "N/A";
+  let formatted = num.toFixed(4).replace(/\.?0+$/, "");
+  if (formatted === "-0") formatted = "0";
+  return `${formatted}%`;
+}
+
+/** Format per-transaction safety metrics for Telegram confirmation messages. */
+function formatTelegramTxMetrics(tx: UnsignedTransaction): string {
+  if (!tx.metrics) return "";
+  const m = tx.metrics as Record<string, Record<string, unknown>>;
+  const lines: string[] = [];
+  if (m.navShield?.navImpactPct != null) {
+    // impactPct is signed: positive = NAV improved, negative = NAV dropped.
+    lines.push(`📉 NAV impact: ${formatTelegramPct(m.navShield.navImpactPct)}`);
+  }
+  if (m.swapShield?.divergencePct != null) {
+    lines.push(`🔮 Oracle divergence: ${formatTelegramPct(m.swapShield.divergencePct)}`);
+  }
+  return lines.length ? lines.join("\n") : "";
+}
+
 // ── Webhook: receives Telegram updates ────────────────────────────────
 
 telegram.post("/webhook", async (c) => {
@@ -898,6 +922,24 @@ async function handleMessage(
         // ⚡ Autonomous mode — execute immediately, no confirmation needed
         const tradeCount = txList.length > 1 ? `${txList.length} trades` : "trade";
         replyParts.push(`\n⚡ <b>Executing ${tradeCount}…</b>`);
+
+        // Surface NAV impact and oracle divergence before autonomous execution.
+        const metricsLines: string[] = [];
+        for (let i = 0; i < txList.length; i++) {
+          const tx = txList[i];
+          const metrics = formatTelegramTxMetrics(tx);
+          if (metrics) {
+            if (txList.length > 1) {
+              metricsLines.push(`<b>Trade ${i + 1}</b>\n${metrics}`);
+            } else {
+              metricsLines.push(metrics);
+            }
+          }
+        }
+        if (metricsLines.length > 0) {
+          replyParts.push(metricsLines.join("\n\n"));
+        }
+
         const statusReply = replyParts.join("\n\n");
         const truncated = statusReply.length > 4000 ? statusReply.slice(0, 3990) + "…" : statusReply;
         const statusMsg = await sendMessage(token, chatId, truncated);
@@ -922,6 +964,23 @@ async function handleMessage(
         const tradeCount = txList.length > 1 ? `${txList.length} trades` : "trade";
         const execLabel = txList.length > 1 ? "Execute All" : "Execute";
         replyParts.push(`\n🔔 <b>${tradeCount.charAt(0).toUpperCase() + tradeCount.slice(1)} ready.</b>\nTap ✅ ${execLabel} to confirm or ❌ Cancel.`);
+
+        // Surface NAV impact and oracle divergence so the operator can review before tapping Execute.
+        const metricsLines: string[] = [];
+        for (let i = 0; i < txList.length; i++) {
+          const tx = txList[i];
+          const metrics = formatTelegramTxMetrics(tx);
+          if (metrics) {
+            if (txList.length > 1) {
+              metricsLines.push(`<b>Trade ${i + 1}</b>\n${metrics}`);
+            } else {
+              metricsLines.push(metrics);
+            }
+          }
+        }
+        if (metricsLines.length > 0) {
+          replyParts.push(metricsLines.join("\n\n"));
+        }
 
         const keyboard: TgInlineKeyboardMarkup = {
           inline_keyboard: [

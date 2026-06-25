@@ -166,7 +166,10 @@ export interface NavShieldResult {
   verified: boolean;
   preNavUnitaryValue: string;
   postNavUnitaryValue: string;
+  /** Unsigned drop from the higher of pre-swap NAV or 24h baseline (used for threshold enforcement). */
   dropPct: string;
+  /** Signed percentage change from pre-swap to post-swap NAV (positive = NAV improved). */
+  impactPct: string;
   baselineUnitaryValue?: string;
   reason?: string;
   /** Distinguishes WHY the result is what it is:
@@ -180,6 +183,16 @@ export interface NavShieldResult {
 
 /** @deprecated Use NavShieldResult */
 export type NavGuardResult = NavShieldResult;
+
+/**
+ * Compute the signed percentage change from pre-swap to post-swap unitary value.
+ * Positive = NAV improved; negative = NAV dropped; zero = unchanged.
+ */
+function computeImpactPct(preUnitaryValue: bigint, postUnitaryValue: bigint): string {
+  if (preUnitaryValue === 0n) return "0";
+  const impactBps = ((postUnitaryValue - preUnitaryValue) * 10000n) / preUnitaryValue;
+  return (Number(impactBps) / 100).toFixed(4);
+}
 
 // ── Public API ───────────────────────────────────────────────────────
 
@@ -285,6 +298,7 @@ export async function checkNavImpact(
       preNavUnitaryValue: "0",
       postNavUnitaryValue: "0",
       dropPct: "0",
+      impactPct: "0",
       reason: `Cannot read vault NAV — RPC or vault may be unreachable on chain ${chainId}: ${msg.slice(0, 300)}`,
     };
   }
@@ -298,6 +312,7 @@ export async function checkNavImpact(
       preNavUnitaryValue: "0",
       postNavUnitaryValue: "0",
       dropPct: "0",
+      impactPct: "0",
       reason: "Empty vault (unitaryValue=0)",
     };
   }
@@ -406,6 +421,7 @@ export async function checkNavImpact(
       preNavUnitaryValue: preNav.unitaryValue.toString(),
       postNavUnitaryValue: "0",
       dropPct: "0",
+      impactPct: "0",
       reason,
     };
   }
@@ -475,6 +491,7 @@ export async function checkNavImpact(
       preNavUnitaryValue: preNav.unitaryValue.toString(),
       postNavUnitaryValue: postNav.unitaryValue.toString(),
       dropPct: "0",
+      impactPct: computeImpactPct(preNav.unitaryValue, postNav.unitaryValue),
       baselineUnitaryValue: baselineUnitaryValue?.toString(),
       reason: improvementPct > 0
         ? `Trade improves the pool unit price by ${improvementPct.toFixed(2)}%.`
@@ -512,7 +529,8 @@ export async function checkNavImpact(
       code: 'BLOCKED',
       preNavUnitaryValue: preNav.unitaryValue.toString(),
       postNavUnitaryValue: postNav.unitaryValue.toString(),
-      dropPct: dropFromRefPct.toFixed(2),
+      dropPct: dropFromRefPct.toFixed(4),
+      impactPct: computeImpactPct(preNav.unitaryValue, postNav.unitaryValue),
       baselineUnitaryValue: baselineUnitaryValue?.toString(),
       reason,
     };
@@ -538,7 +556,8 @@ export async function checkNavImpact(
     verified: true,
     preNavUnitaryValue: preNav.unitaryValue.toString(),
     postNavUnitaryValue: postNav.unitaryValue.toString(),
-    dropPct: dropFromRefPct.toFixed(2),
+    dropPct: dropFromRefPct.toFixed(4),
+    impactPct: computeImpactPct(preNav.unitaryValue, postNav.unitaryValue),
     baselineUnitaryValue: baselineUnitaryValue?.toString(),
   };
 }
