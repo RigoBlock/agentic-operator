@@ -248,16 +248,71 @@ export function formatForTelegram(text: string): string {
   const outLines: string[] = [];
   let tableBuffer: string[] = [];
 
+  function isNumericLike(s: string): boolean {
+    const trimmed = s.trim();
+    if (trimmed.length === 0 || !/\d/.test(trimmed)) return false;
+    if (!/^[+\-0-9$€£(]/.test(trimmed)) return false;
+    // Strip formatting/suffixes. If anything other than digits or dots remains
+    // (e.g. hex addresses), treat it as text.
+    const normalized = trimmed
+      .replace(/[+\-,$€£%()\s]/g, "")
+      .replace(/[KMBT]/g, "")
+      .replace(/x$/i, "");
+    return /^[0-9.]+$/.test(normalized);
+  }
+
   function flushTable() {
     if (tableBuffer.length === 0) return;
     // Filter out markdown separator rows (|-----|-----|)
     const contentRows = tableBuffer.filter((line) => !/^\|[-:|\s]+\|$/.test(line.trim()));
-    if (contentRows.length > 0) {
-      const preContent = contentRows
-        .map((line) => escapeHtml(line.trim()))
-        .join("\n");
-      outLines.push(`<pre>${preContent}</pre>`);
+    if (contentRows.length === 0) {
+      tableBuffer = [];
+      return;
     }
+
+    // Parse rows into cells and normalize to a common column count.
+    const rows = contentRows.map((line) =>
+      line
+        .trim()
+        .slice(1, -1)
+        .split("|")
+        .map((cell) => cell.trim()),
+    );
+    const colCount = Math.max(...rows.map((r) => r.length));
+    for (const row of rows) {
+      while (row.length < colCount) row.push("");
+    }
+
+    // Compute column widths and whether each column should be right-aligned.
+    const widths: number[] = Array(colCount).fill(0);
+    const rightAlign: boolean[] = Array(colCount).fill(true);
+    for (let c = 0; c < colCount; c++) {
+      for (let r = 0; r < rows.length; r++) {
+        const cell = rows[r][c];
+        widths[c] = Math.max(widths[c], cell.length);
+        // Use data rows (skip header) to decide alignment.
+        if (r > 0 && cell.trim().length > 0 && !isNumericLike(cell)) {
+          rightAlign[c] = false;
+        }
+      }
+    }
+
+    const formatRow = (cells: string[]) =>
+      `| ${cells
+        .map((cell, c) => (rightAlign[c] ? cell.padStart(widths[c]) : cell.padEnd(widths[c])))
+        .join(" | ")} |`;
+
+    const alignedRows: string[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      alignedRows.push(formatRow(rows[i]));
+      if (i === 0) {
+        alignedRows.push(
+          `| ${rows[i].map((_, c) => "-".repeat(widths[c])).join(" | ")} |`,
+        );
+      }
+    }
+
+    outLines.push(`<pre>${escapeHtml(alignedRows.join("\n"))}</pre>`);
     tableBuffer = [];
   }
 

@@ -200,6 +200,410 @@ export const GMX_READER_ABI = [
     ],
   },
 
+  // getAccountPositionInfoList(
+  //   DataStore dataStore,
+  //   IReferralStorage referralStorage,
+  //   address account,
+  //   address[] markets,
+  //   MarketUtils.MarketPrices[] marketPrices,
+  //   address uiFeeReceiver,
+  //   uint256 start,
+  //   uint256 end
+  // )
+  {
+    name: "getAccountPositionInfoList",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "dataStore", type: "address" },
+      { name: "referralStorage", type: "address" },
+      { name: "account", type: "address" },
+      { name: "markets", type: "address[]" },
+      {
+        name: "marketPrices",
+        type: "tuple[]",
+        components: [
+          {
+            name: "indexTokenPrice",
+            type: "tuple",
+            components: [
+              { name: "min", type: "uint256" },
+              { name: "max", type: "uint256" },
+            ],
+          },
+          {
+            name: "longTokenPrice",
+            type: "tuple",
+            components: [
+              { name: "min", type: "uint256" },
+              { name: "max", type: "uint256" },
+            ],
+          },
+          {
+            name: "shortTokenPrice",
+            type: "tuple",
+            components: [
+              { name: "min", type: "uint256" },
+              { name: "max", type: "uint256" },
+            ],
+          },
+        ],
+      },
+      { name: "uiFeeReceiver", type: "address" },
+      { name: "start", type: "uint256" },
+      { name: "end", type: "uint256" },
+    ],
+    outputs: [
+      {
+        name: "",
+        type: "tuple[]",
+        components: [
+          { name: "positionKey", type: "bytes32" },
+          {
+            name: "position",
+            type: "tuple",
+            components: [
+              {
+                name: "addresses",
+                type: "tuple",
+                components: [
+                  { name: "account", type: "address" },
+                  { name: "market", type: "address" },
+                  { name: "collateralToken", type: "address" },
+                ],
+              },
+              {
+                name: "numbers",
+                type: "tuple",
+                components: [
+                  { name: "sizeInUsd", type: "uint256" },
+                  { name: "sizeInTokens", type: "uint256" },
+                  { name: "collateralAmount", type: "uint256" },
+                  { name: "pendingImpactAmount", type: "int256" },
+                  { name: "borrowingFactor", type: "uint256" },
+                  { name: "fundingFeeAmountPerSize", type: "uint256" },
+                  { name: "longTokenClaimableFundingAmountPerSize", type: "uint256" },
+                  { name: "shortTokenClaimableFundingAmountPerSize", type: "uint256" },
+                  { name: "increasedAtTime", type: "uint256" },
+                  { name: "decreasedAtTime", type: "uint256" },
+                ],
+              },
+              {
+                name: "flags",
+                type: "tuple",
+                components: [{ name: "isLong", type: "bool" }],
+              },
+            ],
+          },
+          {
+            name: "fees",
+            type: "tuple",
+            components: [
+              {
+                name: "referral",
+                type: "tuple",
+                components: [
+                  { name: "referralCode", type: "bytes32" },
+                  { name: "affiliate", type: "address" },
+                  { name: "trader", type: "address" },
+                  { name: "totalRebateFactor", type: "uint256" },
+                  { name: "affiliateRewardFactor", type: "uint256" },
+                  { name: "adjustedAffiliateRewardFactor", type: "uint256" },
+                  { name: "traderDiscountFactor", type: "uint256" },
+                  { name: "totalRebateAmount", type: "uint256" },
+                  { name: "traderDiscountAmount", type: "uint256" },
+                  { name: "affiliateRewardAmount", type: "uint256" },
+                ],
+              },
+              {
+                name: "pro",
+                type: "tuple",
+                components: [
+                  { name: "traderTier", type: "uint256" },
+                  { name: "traderDiscountFactor", type: "uint256" },
+                  { name: "traderDiscountAmount", type: "uint256" },
+                ],
+              },
+              {
+                name: "funding",
+                type: "tuple",
+                components: [
+                  { name: "fundingFeeAmount", type: "uint256" },
+                  { name: "claimableLongTokenAmount", type: "uint256" },
+                  { name: "claimableShortTokenAmount", type: "uint256" },
+                  { name: "latestFundingFeeAmountPerSize", type: "uint256" },
+                  { name: "latestLongTokenClaimableFundingAmountPerSize", type: "uint256" },
+                  { name: "latestShortTokenClaimableFundingAmountPerSize", type: "uint256" },
+                ],
+              },
+              {
+                name: "borrowing",
+                type: "tuple",
+                components: [
+                  { name: "borrowingFeeUsd", type: "uint256" },
+                  { name: "borrowingFeeAmount", type: "uint256" },
+                  { name: "borrowingFeeReceiverFactor", type: "uint256" },
+                  { name: "borrowingFeeAmountForFeeReceiver", type: "uint256" },
+                ],
+              },
+              {
+                name: "ui",
+                type: "tuple",
+                components: [
+                  { name: "uiFeeReceiver", type: "address" },
+                  { name: "uiFeeReceiverFactor", type: "uint256" },
+                  { name: "uiFeeAmount", type: "uint256" },
+                ],
+              },
+              {
+                name: "liquidation",
+                type: "tuple",
+                components: [
+                  { name: "liquidationFeeUsd", type: "uint256" },
+                  { name: "liquidationFeeAmount", type: "uint256" },
+                  { name: "liquidationFeeReceiverFactor", type: "uint256" },
+                  { name: "liquidationFeeAmountForFeeReceiver", type: "uint256" },
+                ],
+              },
+              {
+                name: "collateralTokenPrice",
+                type: "tuple",
+                components: [
+                  { name: "min", type: "uint256" },
+                  { name: "max", type: "uint256" },
+                ],
+              },
+              { name: "positionFeeFactor", type: "uint256" },
+              { name: "protocolFeeAmount", type: "uint256" },
+              { name: "positionFeeReceiverFactor", type: "uint256" },
+              { name: "feeReceiverAmount", type: "uint256" },
+              { name: "feeAmountForPool", type: "uint256" },
+              { name: "positionFeeAmountForPool", type: "uint256" },
+              { name: "positionFeeAmount", type: "uint256" },
+              { name: "totalCostAmountExcludingFunding", type: "uint256" },
+              { name: "totalCostAmount", type: "uint256" },
+              { name: "totalDiscountAmount", type: "uint256" },
+            ],
+          },
+          {
+            name: "executionPriceResult",
+            type: "tuple",
+            components: [
+              { name: "priceImpactUsd", type: "int256" },
+              { name: "executionPrice", type: "uint256" },
+              { name: "balanceWasImproved", type: "bool" },
+              { name: "proportionalPendingImpactUsd", type: "int256" },
+              { name: "totalImpactUsd", type: "int256" },
+              { name: "priceImpactDiffUsd", type: "uint256" },
+            ],
+          },
+          { name: "basePnlUsd", type: "int256" },
+          { name: "uncappedBasePnlUsd", type: "int256" },
+          { name: "pnlAfterPriceImpactUsd", type: "int256" },
+        ],
+      },
+    ],
+  },
+
+  // getPositionInfoList(
+  //   DataStore dataStore,
+  //   IReferralStorage referralStorage,
+  //   bytes32[] positionKeys,
+  //   MarketUtils.MarketPrices[] prices,
+  //   address uiFeeReceiver
+  // )
+  {
+    name: "getPositionInfoList",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "dataStore", type: "address" },
+      { name: "referralStorage", type: "address" },
+      { name: "positionKeys", type: "bytes32[]" },
+      {
+        name: "prices",
+        type: "tuple[]",
+        components: [
+          {
+            name: "indexTokenPrice",
+            type: "tuple",
+            components: [
+              { name: "min", type: "uint256" },
+              { name: "max", type: "uint256" },
+            ],
+          },
+          {
+            name: "longTokenPrice",
+            type: "tuple",
+            components: [
+              { name: "min", type: "uint256" },
+              { name: "max", type: "uint256" },
+            ],
+          },
+          {
+            name: "shortTokenPrice",
+            type: "tuple",
+            components: [
+              { name: "min", type: "uint256" },
+              { name: "max", type: "uint256" },
+            ],
+          },
+        ],
+      },
+      { name: "uiFeeReceiver", type: "address" },
+    ],
+    outputs: [
+      {
+        name: "",
+        type: "tuple[]",
+        components: [
+          { name: "positionKey", type: "bytes32" },
+          {
+            name: "position",
+            type: "tuple",
+            components: [
+              {
+                name: "addresses",
+                type: "tuple",
+                components: [
+                  { name: "account", type: "address" },
+                  { name: "market", type: "address" },
+                  { name: "collateralToken", type: "address" },
+                ],
+              },
+              {
+                name: "numbers",
+                type: "tuple",
+                components: [
+                  { name: "sizeInUsd", type: "uint256" },
+                  { name: "sizeInTokens", type: "uint256" },
+                  { name: "collateralAmount", type: "uint256" },
+                  { name: "pendingImpactAmount", type: "int256" },
+                  { name: "borrowingFactor", type: "uint256" },
+                  { name: "fundingFeeAmountPerSize", type: "uint256" },
+                  { name: "longTokenClaimableFundingAmountPerSize", type: "uint256" },
+                  { name: "shortTokenClaimableFundingAmountPerSize", type: "uint256" },
+                  { name: "increasedAtTime", type: "uint256" },
+                  { name: "decreasedAtTime", type: "uint256" },
+                ],
+              },
+              {
+                name: "flags",
+                type: "tuple",
+                components: [{ name: "isLong", type: "bool" }],
+              },
+            ],
+          },
+          {
+            name: "fees",
+            type: "tuple",
+            components: [
+              {
+                name: "referral",
+                type: "tuple",
+                components: [
+                  { name: "referralCode", type: "bytes32" },
+                  { name: "affiliate", type: "address" },
+                  { name: "trader", type: "address" },
+                  { name: "totalRebateFactor", type: "uint256" },
+                  { name: "affiliateRewardFactor", type: "uint256" },
+                  { name: "adjustedAffiliateRewardFactor", type: "uint256" },
+                  { name: "traderDiscountFactor", type: "uint256" },
+                  { name: "totalRebateAmount", type: "uint256" },
+                  { name: "traderDiscountAmount", type: "uint256" },
+                  { name: "affiliateRewardAmount", type: "uint256" },
+                ],
+              },
+              {
+                name: "pro",
+                type: "tuple",
+                components: [
+                  { name: "traderTier", type: "uint256" },
+                  { name: "traderDiscountFactor", type: "uint256" },
+                  { name: "traderDiscountAmount", type: "uint256" },
+                ],
+              },
+              {
+                name: "funding",
+                type: "tuple",
+                components: [
+                  { name: "fundingFeeAmount", type: "uint256" },
+                  { name: "claimableLongTokenAmount", type: "uint256" },
+                  { name: "claimableShortTokenAmount", type: "uint256" },
+                  { name: "latestFundingFeeAmountPerSize", type: "uint256" },
+                  { name: "latestLongTokenClaimableFundingAmountPerSize", type: "uint256" },
+                  { name: "latestShortTokenClaimableFundingAmountPerSize", type: "uint256" },
+                ],
+              },
+              {
+                name: "borrowing",
+                type: "tuple",
+                components: [
+                  { name: "borrowingFeeUsd", type: "uint256" },
+                  { name: "borrowingFeeAmount", type: "uint256" },
+                  { name: "borrowingFeeReceiverFactor", type: "uint256" },
+                  { name: "borrowingFeeAmountForFeeReceiver", type: "uint256" },
+                ],
+              },
+              {
+                name: "ui",
+                type: "tuple",
+                components: [
+                  { name: "uiFeeReceiver", type: "address" },
+                  { name: "uiFeeReceiverFactor", type: "uint256" },
+                  { name: "uiFeeAmount", type: "uint256" },
+                ],
+              },
+              {
+                name: "liquidation",
+                type: "tuple",
+                components: [
+                  { name: "liquidationFeeUsd", type: "uint256" },
+                  { name: "liquidationFeeAmount", type: "uint256" },
+                  { name: "liquidationFeeReceiverFactor", type: "uint256" },
+                  { name: "liquidationFeeAmountForFeeReceiver", type: "uint256" },
+                ],
+              },
+              {
+                name: "collateralTokenPrice",
+                type: "tuple",
+                components: [
+                  { name: "min", type: "uint256" },
+                  { name: "max", type: "uint256" },
+                ],
+              },
+              { name: "positionFeeFactor", type: "uint256" },
+              { name: "protocolFeeAmount", type: "uint256" },
+              { name: "positionFeeReceiverFactor", type: "uint256" },
+              { name: "feeReceiverAmount", type: "uint256" },
+              { name: "feeAmountForPool", type: "uint256" },
+              { name: "positionFeeAmountForPool", type: "uint256" },
+              { name: "positionFeeAmount", type: "uint256" },
+              { name: "totalCostAmountExcludingFunding", type: "uint256" },
+              { name: "totalCostAmount", type: "uint256" },
+              { name: "totalDiscountAmount", type: "uint256" },
+            ],
+          },
+          {
+            name: "executionPriceResult",
+            type: "tuple",
+            components: [
+              { name: "priceImpactUsd", type: "int256" },
+              { name: "executionPrice", type: "uint256" },
+              { name: "balanceWasImproved", type: "bool" },
+              { name: "proportionalPendingImpactUsd", type: "int256" },
+              { name: "totalImpactUsd", type: "int256" },
+              { name: "priceImpactDiffUsd", type: "uint256" },
+            ],
+          },
+          { name: "basePnlUsd", type: "int256" },
+          { name: "uncappedBasePnlUsd", type: "int256" },
+          { name: "pnlAfterPriceImpactUsd", type: "int256" },
+        ],
+      },
+    ],
+  },
+
   // getAccountOrders(address dataStore, address account, uint256 start, uint256 end)
   {
     name: "getAccountOrders",

@@ -8,7 +8,7 @@
  * - convertTokenAmountViaOracle (amount conversion replicating EOracle)
  * - hasPriceFeedForPair (pair availability)
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Address } from "viem";
 
 const mockReadContract = vi.fn();

@@ -13,12 +13,11 @@
     "isolatedModules": true,
     "noEmit": true,
     "outDir": "./dist",
-    "rootDir": "./src",
     "ignoreDeprecations": "5.0",
     "paths": {
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.test.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -22,7 +22,7 @@
 import { Hono, type Context } from "hono";
 import type { Env, ChatMessage, RequestContext, ChatResponse, TelegramConversation, UnsignedTransaction } from "../types.js";
 import { formatUnits, type Address } from "viem";
-import { processChat } from "../llm/client.js";
+import { processChat, executeToolCall, type ToolResult } from "../llm/client.js";
 import {
   handle_set_default_slippage,
   handle_set_swap_shield_tolerance,
@@ -96,6 +96,117 @@ function formatTelegramTxMetrics(tx: UnsignedTransaction): string {
     lines.push(`🔮 Oracle divergence: ${formatTelegramPct(m.swapShield.divergencePct)}`);
   }
   return lines.length ? lines.join("\n") : "";
+}
+
+/**
+ * Parse a suggestion-chip label to see if it should bypass the LLM entirely.
+ * Returns a direct action (tool invocation or static reply) for known GMX chips.
+ */
+export function parseTelegramDirectChip(label: string):
+  | { type: "tool"; toolName: string; args: Record<string, unknown> }
+  | { type: "reply"; text: string }
+  | null {
+  const lower = label.toLowerCase().trim();
+
+  // Fully-specified, read-only chips → invoke tool directly
+  if (lower === "refresh positions") {
+    return { type: "tool", toolName: "gmx_get_positions", args: {} };
+  }
+  if (lower === "show gmx markets") {
+    return { type: "tool", toolName: "gmx_get_markets", args: {} };
+  }
+
+  // Opening a position requires parameters we can't collect from an inline button.
+  // Reply with a concrete prompt instead of routing through the LLM.
+  if (lower === "open new position" || lower === "open a position") {
+    return {
+      type: "reply",
+      text:
+        "To open a new GMX position, type your request, for example:\n" +
+        "• <code>long 1000 ETHUSDC 5x</code>\n" +
+        "• <code>short 500 BTC 10x</code>",
+    };
+  }
+  if (lower === "open a long") {
+    return {
+      type: "reply",
+      text: "To open a long, type:\n<code>long &lt;size&gt; &lt;market&gt; &lt;leverage&gt;</code>\nExample: <code>long 1000 ETHUSDC 5x</code>",
+    };
+  }
+  if (lower === "open a short") {
+    return {
+      type: "reply",
+      text: "To open a short, type:\n<code>short &lt;size&gt; &lt;market&gt; &lt;leverage&gt;</code>\nExample: <code>short 500 BTC 10x</code>",
+    };
+  }
+
+  // Cancel order needs an order key — prompt for it directly.
+  if (lower === "cancel order") {
+    return {
+      type: "reply",
+      text:
+        "To cancel a pending order, type:\n" +
+        "<code>cancel order 0xOrderKey</code>\n" +
+        "You can get the order key from your positions.",
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Send the result of a direct tool invocation to Telegram and persist the turn.
+ * Handles read-only tool results (message + suggestion chips + conversation).
+ */
+async function sendDirectToolResult(
+  env: Env,
+  token: string,
+  userId: number,
+  chatId: number,
+  ctx: RequestContext,
+  toolResult: ToolResult,
+  userMessageText: string,
+): Promise<void> {
+  const replyParts: string[] = [];
+  if (toolResult.message) {
+    replyParts.push(formatForTelegram(stripToolPrefix(toolResult.message)));
+  }
+  const fullReply = replyParts.join("\n\n") || "Done.";
+  const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
+
+  let keyboard: TgInlineKeyboardMarkup | undefined;
+  if (toolResult.suggestions?.length) {
+    keyboard = {
+      inline_keyboard: [
+        toolResult.suggestions.slice(0, 3).map((s) => ({
+          text: s,
+          callback_data: `say:${s.slice(0, 60)}`,
+        })),
+      ],
+    };
+  }
+
+  await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
+
+  // Persist the turn so follow-up messages retain context.
+  let conv = await getConversation(env.KV, userId);
+  if (!conv || conv.vaultAddress.toLowerCase() !== (ctx.vaultAddress as Address).toLowerCase()) {
+    conv = {
+      messages: [],
+      vaultAddress: ctx.vaultAddress as Address,
+      chainId: ctx.chainId,
+      lastActivity: Date.now(),
+    };
+  }
+  conv.messages.push({ role: "user", content: userMessageText });
+  const assistantContent = toolResult.message ? stripToolPrefix(toolResult.message).slice(0, 1500) : "";
+  if (assistantContent.trim()) {
+    conv.messages.push({ role: "assistant", content: assistantContent });
+  }
+  if (toolResult.chainSwitch) {
+    conv.chainId = toolResult.chainSwitch;
+  }
+  await saveConversation(env.KV, userId, conv);
 }
 
 // ── Webhook: receives Telegram updates ────────────────────────────────
@@ -1067,17 +1178,70 @@ async function handleCallbackQuery(
     return;
   }
 
-  // ── Suggestion chip: inject as a user message ──
+  // ── Suggestion chip: bypass the LLM for known direct-action chips ──
   if (data.startsWith("say:")) {
     const text = data.slice(4);
-    await answerCallbackQuery(token, query.id);
-    // Handle as if the user typed this message
-    await handleMessage(env, token, {
-      message_id: 0,
-      from: query.from,
-      chat: { id: chatId },
-      text,
-    });
+    const direct = parseTelegramDirectChip(text);
+
+    if (!direct) {
+      // Unknown chip — fall back to normal LLM flow
+      await answerCallbackQuery(token, query.id);
+      await handleMessage(env, token, {
+        message_id: 0,
+        from: query.from,
+        chat: { id: chatId },
+        text,
+      });
+      return;
+    }
+
+    await answerCallbackQuery(token, query.id, "Processing…");
+
+    if (direct.type === "reply") {
+      await sendMessage(token, chatId, direct.text);
+      return;
+    }
+
+    // Direct tool invocation
+    await sendChatAction(token, chatId);
+
+    const user = await getTelegramUser(env.KV, userId);
+    if (!user || user.vaults.length === 0) {
+      await sendMessage(
+        token,
+        chatId,
+        "You haven't paired any vaults yet.\n\n1. Open the web app\n2. Click the Telegram icon\n3. Send the code here with <code>/pair CODE</code>",
+      );
+      return;
+    }
+
+    const vault = user.vaults[user.activeVaultIndex];
+    if (!vault) {
+      await sendMessage(token, chatId, "No active vault. Use <code>/pools</code> to select one.");
+      return;
+    }
+
+    if (env.KV) initTokenResolver(env.KV);
+
+    const ctx: RequestContext = {
+      vaultAddress: vault.address,
+      chainId: vault.chainId,
+      operatorAddress: vault.operatorAddress || user.operatorAddress,
+      operatorVerified: true,
+      isBrowserRequest: false,
+      isTelegram: true,
+      executionMode: "delegated",
+    };
+
+    try {
+      const toolResult = await executeToolCall(env, ctx, direct.toolName, direct.args);
+      await sendDirectToolResult(env, token, userId, chatId, ctx, toolResult, text);
+    } catch (err) {
+      console.error("[telegram] direct tool error:", err);
+      const rawMsg = err instanceof Error ? err.message : "Unknown error";
+      const safeMsg = sanitizeError(rawMsg);
+      await sendMessage(token, chatId, `⚠️ ${escapeHtml(safeMsg.slice(0, 300))}`);
+    }
     return;
   }
 

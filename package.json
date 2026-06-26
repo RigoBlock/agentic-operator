@@ -21,6 +21,7 @@
     "@account-kit/infra": "^4.84.1",
     "@account-kit/wallet-client": "^4.84.1",
     "@coinbase/x402": "^2.1.0",
+    "@gmx-io/sdk": "1.6.3",
     "@metamask/smart-accounts-kit": "^0.4.0-beta.1",
     "@uniswap/sdk-core": "^7.12.2",
     "@uniswap/v3-sdk": "^3.29.1",

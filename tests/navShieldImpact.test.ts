@@ -49,7 +49,7 @@ function encodeNavReturn(unitaryValue: bigint): Hex {
   return encodeFunctionResult({
     abi: RIGOBLOCK_VAULT_ABI,
     functionName: "updateUnitaryValue",
-    result: [unitaryValue, unitaryValue * 1000n, 0n],
+    result: [unitaryValue, unitaryValue * 1000n, 0n] as any,
   });
 }
 
