@@ -202,6 +202,18 @@ function parseDirectToolCall(label) {
   if (lower === 'refresh positions') {
     return { toolName: 'gmx_get_positions', args: {} };
   }
+  if (lower === 'show gmx markets') {
+    return { toolName: 'gmx_get_markets', args: {} };
+  }
+  if (lower === 'open new position' || lower === 'open a position') {
+    return { toolName: 'gmx_increase_position', args: {} };
+  }
+  if (lower === 'open a long') {
+    return { toolName: 'gmx_increase_position', args: { isLong: true } };
+  }
+  if (lower === 'open a short') {
+    return { toolName: 'gmx_increase_position', args: { isLong: false } };
+  }
 
   // GMX position action chips: "<Action> <SYMBOL> <long|short>"
   const gmxMatch = label.match(/^(Close|Increase|Decrease|Add collateral to|Withdraw collateral from)\s+(\S+)\s+(long|short)$/i);
@@ -288,6 +300,26 @@ async function invokeDirectTool(toolInfo) {
 
   // Prompt for missing params based on tool
   if (toolInfo.toolName === 'gmx_decrease_position') {
+    if (!args.market) {
+      const market = prompt('Market symbol to decrease (e.g. ETH):');
+      if (market === null) return;
+      const trimmed = market.trim().toUpperCase();
+      if (!trimmed) {
+        appendMessage('system', 'Market symbol is required.');
+        return;
+      }
+      args.market = trimmed;
+    }
+    if (args.isLong === undefined) {
+      const side = prompt('Side (long or short):');
+      if (side === null) return;
+      const s = side.trim().toLowerCase();
+      if (s !== 'long' && s !== 'short') {
+        appendMessage('system', 'Side must be "long" or "short".');
+        return;
+      }
+      args.isLong = s === 'long';
+    }
     if (!args.sizeDeltaUsd) {
       // Default to full close — user can type a partial close in chat if needed
       args.sizeDeltaUsd = 'all';
@@ -300,6 +332,26 @@ async function invokeDirectTool(toolInfo) {
     }
   }
   if (toolInfo.toolName === 'gmx_increase_position') {
+    if (!args.market) {
+      const market = prompt('Market symbol to trade (e.g. ETH):');
+      if (market === null) return;
+      const trimmed = market.trim().toUpperCase();
+      if (!trimmed) {
+        appendMessage('system', 'Market symbol is required.');
+        return;
+      }
+      args.market = trimmed;
+    }
+    if (args.isLong === undefined) {
+      const side = prompt('Side (long or short):');
+      if (side === null) return;
+      const s = side.trim().toLowerCase();
+      if (s !== 'long' && s !== 'short') {
+        appendMessage('system', 'Side must be "long" or "short".');
+        return;
+      }
+      args.isLong = s === 'long';
+    }
     // Pure collateral add (sizeDeltaUsd already set to '0' by caller)
     if (args.sizeDeltaUsd === '0' && !args.collateralAmount) {
       const col = prompt('Collateral amount to add:');
@@ -392,9 +444,9 @@ async function invokeDirectTool(toolInfo) {
 /**
  * Enhance a GMX positions message with inline action buttons.
  * Replaces the plain markdown table with an interactive version:
- * - Refresh PnL button at the top
- * - Close button per position
- * - Size / Collateral / PnL cells are interactive (hover on desktop, click on mobile)
+ * - Refresh button above the table
+ * - Expandable per-row details (size in tokens, collateral, fee breakdown)
+ * - Actions dropdown per position (increase/decrease size, add/withdraw collateral, close)
  */
 function enhanceGmxPositions(msgDiv, positions) {
   const contentDiv = msgDiv.querySelector('.msg-content');
@@ -404,10 +456,8 @@ function enhanceGmxPositions(msgDiv, positions) {
   if (contentDiv.dataset.gmxEnhanced === 'true') return;
 
   // Find the positions table (first table after the summary line)
-  const tables = contentDiv.querySelectorAll('table');
-  if (tables.length === 0) return;
-
-  const posTable = tables[0];
+  const posTable = contentDiv.querySelector('table');
+  if (!posTable) return;
   const rows = posTable.querySelectorAll('tr');
   if (rows.length < 2) return; // header + at least one data row
 
@@ -423,98 +473,125 @@ function enhanceGmxPositions(msgDiv, positions) {
   refreshBtn.onclick = () => refreshGmxPositions(msgDiv);
   posTable.parentElement.insertBefore(refreshBtn, posTable);
 
+  // Add Actions header cell
+  const headerRow = rows[0];
+  const actionsTh = document.createElement('th');
+  actionsTh.textContent = 'Actions';
+  headerRow.appendChild(actionsTh);
+
   // Enhance each data row
   dataRows.forEach((row, idx) => {
     const pos = positions[idx];
     if (!pos) return;
     const cells = row.querySelectorAll('td');
-    if (cells.length < 8) return;
+    if (cells.length < 9) return;
 
     const market = pos.indexTokenSymbol;
     const isLong = pos.isLong;
     const collateralSymbol = pos.collateralSymbol;
 
-    // Add Close button as last cell
-    const closeCell = document.createElement('td');
-    closeCell.innerHTML = `<button class="gmx-action-btn close" title="Close position">✕</button>`;
-    closeCell.querySelector('button').onclick = () => closeGmxPosition(market, isLong, collateralSymbol);
-    row.appendChild(closeCell);
+    // Expand icon in the Market cell — toggles the fee-breakdown details row
+    const marketCell = cells[0];
+    const expandIcon = document.createElement('span');
+    expandIcon.className = 'gmx-expand-icon';
+    expandIcon.textContent = '▶';
+    expandIcon.title = 'Show fee breakdown';
+    marketCell.insertBefore(expandIcon, marketCell.firstChild);
 
-    // Make Size cell interactive
-    const sizeCell = cells[2];
-    makeInteractiveCell(sizeCell, [
-      { label: '▲ Increase', action: () => modifyGmxSize(market, isLong, 'increase', collateralSymbol) },
-      { label: '▼ Decrease', action: () => modifyGmxSize(market, isLong, 'decrease', collateralSymbol) },
-    ]);
+    const detailsRow = document.createElement('tr');
+    detailsRow.className = 'gmx-details-row';
+    detailsRow.style.display = 'none';
+    const detailsTd = document.createElement('td');
+    detailsTd.colSpan = 10;
+    detailsTd.innerHTML = buildGmxDetailsHtml(pos);
+    detailsRow.appendChild(detailsTd);
+    row.parentNode.insertBefore(detailsRow, row.nextSibling);
 
-    // Make Collateral cell interactive
-    const colCell = cells[3];
-    makeInteractiveCell(colCell, [
-      { label: '+ Add', action: () => modifyGmxCollateral(market, isLong, 'add', collateralSymbol) },
-      { label: '− Withdraw', action: () => modifyGmxCollateral(market, isLong, 'withdraw', collateralSymbol) },
-    ]);
+    expandIcon.onclick = (e) => {
+      e.stopPropagation();
+      const isOpen = detailsRow.style.display !== 'none';
+      detailsRow.style.display = isOpen ? 'none' : 'table-row';
+      expandIcon.textContent = isOpen ? '▶' : '▼';
+    };
 
-    // PnL cell — color by gain/loss + info tooltip
+    // Actions dropdown cell
+    const actionsCell = document.createElement('td');
+    actionsCell.style.position = 'relative';
+    const actionsBtn = document.createElement('button');
+    actionsBtn.className = 'gmx-action-btn actions';
+    actionsBtn.textContent = '⋯';
+    actionsBtn.title = 'Position actions';
+    actionsCell.appendChild(actionsBtn);
+
+    const menu = document.createElement('div');
+    menu.className = 'gmx-cell-menu';
+    const menuItems = [
+      { label: '▲ Increase size', action: () => modifyGmxSize(market, isLong, 'increase', collateralSymbol) },
+      { label: '▼ Decrease size', action: () => modifyGmxSize(market, isLong, 'decrease', collateralSymbol) },
+      { label: '+ Add collateral', action: () => modifyGmxCollateral(market, isLong, 'add', collateralSymbol) },
+      { label: '− Withdraw collateral', action: () => modifyGmxCollateral(market, isLong, 'withdraw', collateralSymbol) },
+      { label: '✕ Close position', action: () => closeGmxPosition(market, isLong, collateralSymbol), danger: true },
+    ];
+    for (const item of menuItems) {
+      const btn = document.createElement('button');
+      btn.className = 'gmx-menu-item' + (item.danger ? ' danger' : '');
+      btn.textContent = item.label;
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        menu.style.display = 'none';
+        item.action();
+      };
+      menu.appendChild(btn);
+    }
+    actionsCell.appendChild(menu);
+
+    actionsBtn.onclick = (e) => {
+      e.stopPropagation();
+      document.querySelectorAll('.gmx-cell-menu').forEach(m => {
+        if (m !== menu) m.style.display = 'none';
+      });
+      menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
+    };
+
+    document.addEventListener('click', (e) => {
+      if (!actionsCell.contains(e.target)) {
+        menu.style.display = 'none';
+      }
+    });
+
+    row.appendChild(actionsCell);
+
+    // Net PnL cell — color by gain/loss
     const pnlCell = cells[5];
     const pnlValue = parseFloat(pos.unrealizedPnl.replace(/[^0-9.-]/g, '')) || 0;
     pnlCell.style.color = pnlValue >= 0 ? 'var(--success)' : 'var(--error)';
     pnlCell.style.fontWeight = '600';
-    if (pnlValue !== 0) {
-      pnlCell.title = pnlValue > 0
-        ? 'Positive PnL is realized when you close or decrease the position. Use Collateral → Withdraw to reduce collateral without changing size.'
-        : 'Negative PnL is realized when you close or decrease the position.';
-      pnlCell.style.cursor = 'help';
-    }
   });
-
-  // Add Close header cell
-  const headerRow = rows[0];
-  const th = document.createElement('th');
-  th.textContent = 'Close';
-  headerRow.appendChild(th);
 
   contentDiv.dataset.gmxEnhanced = 'true';
 }
 
-/** Wrap a table cell with an interactive tooltip menu */
-function makeInteractiveCell(cell, actions) {
-  cell.classList.add('gmx-interactive-cell');
-  cell.style.cursor = 'pointer';
-
-  const menu = document.createElement('div');
-  menu.className = 'gmx-cell-menu';
-  for (const act of actions) {
-    const btn = document.createElement('button');
-    btn.className = 'gmx-menu-item' + (act.disabled ? ' disabled' : '');
-    btn.textContent = act.label;
-    btn.title = act.title || '';
-    if (!act.disabled) {
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        menu.style.display = 'none';
-        act.action();
-      };
-    }
-    menu.appendChild(btn);
+/** Build the HTML for an expandable per-position fee breakdown. */
+function buildGmxDetailsHtml(pos) {
+  const rows = [
+    ['Size (tokens)', `${pos.sizeInTokens} ${pos.indexTokenSymbol}`],
+    ['Collateral', `${pos.collateralAmount} ${pos.collateralSymbol}`],
+    ['Gross PnL', pos.grossPnl],
+    ['Net price impact', pos.priceImpact],
+    ['Borrow fee', pos.borrowingFee],
+    ['Funding fee', pos.fundingFee],
+    ['Close fee', pos.closeFee],
+    ['Liq. price', pos.liquidationPrice],
+  ];
+  if (pos.uiFee && pos.uiFee !== '$0.00') {
+    rows.push(['UI fee', pos.uiFee]);
   }
-  cell.appendChild(menu);
+  rows.push(['Net costs', pos.totalCosts]);
 
-  // Toggle menu on click (works for both desktop and mobile)
-  cell.addEventListener('click', (e) => {
-    // Close any other open menus
-    document.querySelectorAll('.gmx-cell-menu').forEach(m => {
-      if (m !== menu) m.style.display = 'none';
-    });
-    const isOpen = menu.style.display === 'block';
-    menu.style.display = isOpen ? 'none' : 'block';
-  });
-
-  // Close menu when clicking outside
-  document.addEventListener('click', (e) => {
-    if (!cell.contains(e.target)) {
-      menu.style.display = 'none';
-    }
-  });
+  const grid = rows.map(([k, v]) =>
+    `<div class="gmx-detail"><span class="gmx-detail-key">${k}:</span> <span class="gmx-detail-value">${v}</span></div>`
+  ).join('');
+  return `<div class="gmx-details-grid">${grid}</div>`;
 }
 
 function closeGmxPosition(market, isLong, collateralSymbol) {

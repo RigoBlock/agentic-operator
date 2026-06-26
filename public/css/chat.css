@@ -105,20 +105,59 @@
     .gmx-refresh-btn:hover {
       color: var(--accent); text-decoration: underline;
     }
-    .gmx-interactive-cell {
-      position: relative;
+    .gmx-expand-icon {
+      display: inline-block;
+      margin-right: 6px;
+      font-size: 0.75em;
+      color: var(--muted);
+      cursor: pointer;
+      transition: transform 0.15s;
+      user-select: none;
     }
-    .gmx-interactive-cell::after {
-      content: '⋮'; margin-left: 4px; opacity: 0.5; font-size: 11px;
+    .gmx-expand-icon:hover { color: var(--accent); }
+    .gmx-details-row {
+      background: rgba(0, 0, 0, 0.15);
     }
-    .gmx-interactive-cell:hover::after {
-      opacity: 1; color: var(--accent);
+    .gmx-details-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 6px 16px;
+      padding: 8px 12px;
+      font-size: 12px;
+    }
+    .gmx-detail-key {
+      color: var(--muted);
+    }
+    .gmx-detail-value {
+      font-weight: 500;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .gmx-action-btn {
+      font-size: 12px; padding: 2px 8px; border-radius: 4px;
+      border: 1px solid var(--error); background: rgba(248, 81, 73, 0.08);
+      color: var(--error); cursor: pointer; font-weight: 500;
+      transition: background 0.15s;
+    }
+    .gmx-action-btn:hover {
+      background: rgba(248, 81, 73, 0.18);
+    }
+    .gmx-action-btn.actions {
+      border-color: var(--border);
+      background: var(--surface);
+      color: var(--text);
+      font-weight: 600;
+      padding: 1px 6px;
+    }
+    .gmx-action-btn.actions:hover {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+      color: var(--accent);
     }
     .gmx-cell-menu {
       display: none; position: absolute; z-index: 10;
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-      padding: 4px; min-width: 140px; top: 100%; left: 0;
+      padding: 4px; min-width: 160px; top: 100%; right: 0;
     }
     .gmx-menu-item {
       display: block; width: 100%; text-align: left;
@@ -129,17 +168,14 @@
     .gmx-menu-item:hover {
       background: rgba(88, 166, 255, 0.12);
     }
+    .gmx-menu-item.danger {
+      color: var(--error);
+    }
+    .gmx-menu-item.danger:hover {
+      background: rgba(248, 81, 73, 0.12);
+    }
     .gmx-menu-item.disabled {
       opacity: 0.5; cursor: not-allowed;
-    }
-    .gmx-action-btn {
-      font-size: 12px; padding: 2px 8px; border-radius: 4px;
-      border: 1px solid var(--error); background: rgba(248, 81, 73, 0.08);
-      color: var(--error); cursor: pointer; font-weight: 500;
-      transition: background 0.15s;
-    }
-    .gmx-action-btn:hover {
-      background: rgba(248, 81, 73, 0.18);
     }
 
     /* ── Input ──────────────────────────────────────────── */
@@ -163,4 +199,3 @@
     #send:disabled { opacity: 0.4; cursor: not-allowed; }
     #send.stopping { background: #dc2626; }
     #send.stopping:hover { background: #b91c1c; }
-
