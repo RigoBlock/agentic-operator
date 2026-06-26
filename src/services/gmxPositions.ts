@@ -655,8 +655,7 @@ function formatPositionsReport(
     lines.push("|--------|------|------|-----------|----------|---------|-------|------|-----------|");
 
     for (const pos of positions) {
-      const isProfitable = parseUsdString(pos.unrealizedPnl) >= 0;
-      const side = `${isProfitable ? "🟢" : "🔴"} ${pos.isLong ? "LONG" : "SHORT"}`;
+      const side = pos.isLong ? "LONG" : "SHORT";
       lines.push(
         `| ${pos.marketSymbol} | ${side} | ${pos.sizeInUsd} | ${pos.netValue} | ${pos.leverage} | ${pos.unrealizedPnl} (${pos.unrealizedPnlPercent}) | ${pos.entryPrice} | ${pos.markPrice} | ${pos.liquidationPrice} |`,
       );
