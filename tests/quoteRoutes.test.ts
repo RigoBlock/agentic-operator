@@ -69,7 +69,7 @@ describe("POST /api/quote/uniswap", () => {
     );
 
     expect(res.status).toBe(401);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.error).toContain("Authentication required");
   });
 
@@ -111,7 +111,7 @@ describe("POST /api/quote/uniswap", () => {
     );
 
     expect(res.status).toBe(200);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.routing).toBe("CLASSIC");
     expect(json.priceFeedExists).toBe(true);
     expect(json.deltaBps).toBe(5);
@@ -149,7 +149,7 @@ describe("POST /api/quote/uniswap", () => {
     );
 
     expect(res.status).toBe(400);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.errorCode).toBe("INVALID_TOKEN");
   });
 
@@ -180,7 +180,7 @@ describe("POST /api/quote/uniswap", () => {
     );
 
     expect(res.status).toBe(200);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.routing).toBe("CLASSIC");
     expect(json.priceFeedExists).toBe(false);
     expect(json.deltaBps).toBe(0);
@@ -219,7 +219,7 @@ describe("POST /api/quote/uniswap", () => {
     );
 
     expect(res.status).toBe(200);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.priceFeedExists).toBe(false);
     expect(json.deltaBps).toBe(0);
     expect(json.oracleAmount).toBe("0");
@@ -258,7 +258,7 @@ describe("POST /api/quote/uniswap", () => {
     );
 
     expect(res.status).toBe(200);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.priceFeedExists).toBe(false);
     expect(json.deltaBps).toBe(0);
     expect(json.oracleAmount).toBe("0");
@@ -282,7 +282,7 @@ describe("GET /api/quote/0x", () => {
     );
 
     expect(res.status).toBe(401);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.error).toContain("Authentication required");
   });
 
@@ -309,7 +309,7 @@ describe("GET /api/quote/0x", () => {
     );
 
     expect(res.status).toBe(200);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.buyAmount).toBe("2000000000");
     expect(json.priceFeedExists).toBe(true);
     expect(json.deltaBps).toBe(-3);
@@ -340,7 +340,7 @@ describe("GET /api/quote/0x", () => {
     );
 
     expect(res.status).toBe(400);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.reason).toBe("Validation Failed");
   });
 
@@ -368,7 +368,7 @@ describe("GET /api/quote/0x", () => {
     );
 
     expect(res.status).toBe(200);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.buyAmount).toBe("2000000000");
     expect(json.priceFeedExists).toBe(true);
     expect(json.deltaBps).toBe(2);

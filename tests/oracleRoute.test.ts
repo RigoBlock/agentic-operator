@@ -70,7 +70,7 @@ describe("POST /api/oracle/refresh", () => {
       mockEnv(),
     );
     expect(res.status).toBe(400);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.error).toContain("token");
   });
 
@@ -86,7 +86,7 @@ describe("POST /api/oracle/refresh", () => {
       mockEnv(),
     );
     expect(res.status).toBe(400);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.error).toContain("chainId");
   });
 
@@ -102,7 +102,7 @@ describe("POST /api/oracle/refresh", () => {
       mockEnv(),
     );
     expect(res.status).toBe(400);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.error).toContain("direction must be 'buy' or 'sell'");
   });
 
@@ -118,7 +118,7 @@ describe("POST /api/oracle/refresh", () => {
       mockEnv(),
     );
     expect(res.status).toBe(400);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.error).toContain("positive decimal number");
   });
 
@@ -134,7 +134,7 @@ describe("POST /api/oracle/refresh", () => {
       mockEnv(),
     );
     expect(res.status).toBe(400);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.error).toContain("Scientific notation is not supported");
   });
 
@@ -150,7 +150,7 @@ describe("POST /api/oracle/refresh", () => {
       mockEnv(),
     );
     expect(res.status).toBe(400);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.error).toContain("vaultAddress must be a valid non-zero EVM address");
   });
 

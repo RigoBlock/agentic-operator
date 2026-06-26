@@ -68,7 +68,7 @@ describe("Settings routes", () => {
       { KV: createMockKV(), ALCHEMY_API_KEY: "test" },
     );
     expect(res.status).toBe(401);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.error).toContain("Missing operator authentication");
   });
 
@@ -84,7 +84,7 @@ describe("Settings routes", () => {
       { KV: createMockKV(), ALCHEMY_API_KEY: "test" },
     );
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.ok).toBe(true);
     expect(body.message).toContain("0.5%");
   });
@@ -101,7 +101,7 @@ describe("Settings routes", () => {
       { KV: createMockKV(), ALCHEMY_API_KEY: "test" },
     );
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.ok).toBe(true);
     expect(body.message).toContain("30%");
   });
@@ -118,7 +118,7 @@ describe("Settings routes", () => {
       { KV: createMockKV(), ALCHEMY_API_KEY: "test" },
     );
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.ok).toBe(true);
     expect(body.message).toContain("5%");
   });
@@ -135,7 +135,7 @@ describe("Settings routes", () => {
       { KV: createMockKV(), ALCHEMY_API_KEY: "test" },
     );
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.ok).toBe(true);
     expect(body.message).toContain("15%");
   });
@@ -152,7 +152,7 @@ describe("Settings routes", () => {
       { KV: createMockKV(), ALCHEMY_API_KEY: "test" },
     );
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.ok).toBe(true);
     expect(body.message).toContain("10%");
   });

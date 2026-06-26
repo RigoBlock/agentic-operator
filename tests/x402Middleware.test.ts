@@ -60,7 +60,7 @@ describe("operator signature bypass", () => {
       env,
     );
     expect(res.status).toBe(200);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.auth).toBe(true);
   });
 
@@ -80,7 +80,7 @@ describe("operator signature bypass", () => {
       env,
     );
     expect(res.status).toBe(200);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.auth).toBe(true);
   });
 
@@ -103,7 +103,7 @@ describe("operator signature bypass", () => {
     // so the frontend knows to re-authenticate instead of confusing the user
     // with a 402 "Payment Required".
     expect(res.status).toBe(401);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.error).toContain("Authentication expired");
   });
 
@@ -111,7 +111,7 @@ describe("operator signature bypass", () => {
     mockVerifySig.mockResolvedValue(true);
     const { app, env } = createApp();
     const res = await app.request("/api/chat", { method: "POST" }, env);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.auth).toBe(false);
   });
 
@@ -133,7 +133,7 @@ describe("operator signature bypass", () => {
     // Unlisted routes fall through to x402 server (which fails in tests → next()).
     // This is a pre-existing behavior when the facilitator is unreachable.
     expect(res.status).toBe(200);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.ok).toBe(true);
   });
 });
@@ -194,7 +194,7 @@ describe("rate limiting", () => {
     );
 
     expect(res.status).toBe(429);
-    const json = await res.json();
+    const json = (await res.json()) as any;
     expect(json.error).toBe("Rate limit exceeded");
     expect(res.headers.get("X-RateLimit-Remaining")).toBe("0");
     expect(Number(res.headers.get("Retry-After"))).toBeGreaterThan(0);
