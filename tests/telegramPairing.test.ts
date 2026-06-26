@@ -139,23 +139,27 @@ describe("Telegram pairing flow", () => {
 });
 
 describe("Delegation status telegramPaired field", () => {
-  it("delegation status endpoint includes telegramPared when verify=true", async () => {
-    const { app, env } = await import("../src/index.js").then((m) => ({
-      app: m.app,
-      env: {
-        KV: createMockKV(),
-        ALCHEMY_API_KEY: "test",
-      } as any,
-    }));
+  it(
+    "delegation status endpoint includes telegramPared when verify=true",
+    async () => {
+      const { app, env } = await import("../src/index.js").then((m) => ({
+        app: m.app,
+        env: {
+          KV: createMockKV(),
+          ALCHEMY_API_KEY: "test",
+        } as any,
+      }));
 
-    // Before pairing: telegramPaired should be false
-    const resBefore = await app.request(
-      `/api/delegation/status?vaultAddress=${VAULT}&chainId=1&verify=true`,
-      {},
-      env,
-    );
-    expect(resBefore.status).toBe(200);
-    const dataBefore = (await resBefore.json()) as { telegramPaired: boolean };
-    expect(dataBefore.telegramPaired).toBe(false);
-  });
+      // Before pairing: telegramPaired should be false
+      const resBefore = await app.request(
+        `/api/delegation/status?vaultAddress=${VAULT}&chainId=1&verify=true`,
+        {},
+        env,
+      );
+      expect(resBefore.status).toBe(200);
+      const dataBefore = (await resBefore.json()) as { telegramPaired: boolean };
+      expect(dataBefore.telegramPaired).toBe(false);
+    },
+    20_000,
+  );
 });

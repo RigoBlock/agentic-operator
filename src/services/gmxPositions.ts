@@ -1,69 +1,57 @@
 /**
  * GMX v2 Positions Service
  *
- * Reads open GMX positions for a Rigoblock vault directly from the GMX v2
- * Reader contract on Arbitrum. The Rigoblock vault IS the GMX account.
- *
- * We use Reader.getAccountPositionInfoList() — a single aggregated RPC call —
- * to fetch every open position together with the full GMX fee/PnL breakdown
- * (borrowing, funding, close fee, net price impact). This mirrors the data
- * shown in the GMX UI and avoids spamming the RPC with per-position reads.
+ * Uses the official `@gmx-io/sdk` v1 client to read open GMX positions for a
+ * Rigoblock vault on Arbitrum. The SDK returns `liquidationPrice`, PnL, fees,
+ * leverage, and price impact directly, so we no longer need to maintain a
+ * manual reimplementation of the GMX liquidation math or DataStore parameter
+ * fetching.
  */
 
-import {
-  formatUnits,
-  keccak256,
-  encodeAbiParameters,
-  zeroAddress,
-  type Address,
-} from "viem";
+import { type Address } from "viem";
 import { getClient } from "./vault.js";
-import {
-  GMX_READER_ABI,
-  GMX_CHAINLINK_PRICE_FEED_ABI,
-  GMX_ADDRESSES,
-} from "../abi/gmx.js";
+import { GMX_READER_ABI, GMX_ADDRESSES } from "../abi/gmx.js";
 import {
   getGmxTickers,
   getGmxMarkets,
   getGmxTokenDecimals,
   warmTokenDecimalsCache,
   type GmxTickerPrice,
-  type GmxMarketInfo,
 } from "./gmxTrading.js";
-
-// ── Types ──────────────────────────────────────────────────────────────
+import { createGmxSdk } from "./gmxSdk.js";
+import type { PositionInfo, PositionsInfoData } from "@gmx-io/sdk/utils/positions";
+import type { TokenData } from "@gmx-io/sdk/utils/tokens";
 
 export interface GmxPosition {
   market: string;
   collateralToken: string;
   isLong: boolean;
-  sizeInUsd: string;     // human-readable USD
-  sizeInUsdRaw: string;  // exact 10^30 raw value for calldata building
-  sizeInTokens: string;  // human-readable tokens
-  sizeInTokensRaw: string; // exact raw token amount for calldata
-  collateralAmount: string; // human-readable
-  collateralAmountRaw: string; // exact raw token amount for calldata
-  entryPrice: string;    // human-readable USD
-  markPrice: string;     // human-readable USD
-  leverage: string;      // e.g. "5.2x"
-  unrealizedPnl: string; // net PnL after all fees, with sign
-  unrealizedPnlPercent: string; // e.g. "+12.5%"
-  grossPnl: string;      // price-only PnL before fees, with sign
-  netValue: string;      // collateral + net PnL
-  fundingFee: string;    // estimated funding cost (signed)
-  borrowingFee: string;  // estimated borrowing cost (signed)
-  closeFee: string;      // estimated close fee (signed)
-  uiFee: string;         // estimated UI fee (signed)
-  priceImpact: string;   // net price impact on full close (signed)
-  totalCosts: string;    // borrow + funding + close + ui - net price impact (signed)
-  liquidationPrice: string; // estimated liquidation price
-  marketSymbol: string;  // e.g. "ETH/USD"
+  sizeInUsd: string;
+  sizeInUsdRaw: string;
+  sizeInTokens: string;
+  sizeInTokensRaw: string;
+  collateralAmount: string;
+  collateralAmountRaw: string;
+  entryPrice: string;
+  markPrice: string;
+  leverage: string;
+  unrealizedPnl: string;
+  unrealizedPnlPercent: string;
+  grossPnl: string;
+  netValue: string;
+  fundingFee: string;
+  borrowingFee: string;
+  closeFee: string;
+  uiFee: string;
+  priceImpact: string;
+  totalCosts: string;
+  liquidationPrice: string;
+  marketSymbol: string;
   collateralSymbol: string;
   indexTokenSymbol: string;
-  indexToken: string;    // index token address (for price lookup)
-  longToken: string;     // long token address
-  shortToken: string;    // short token address
+  indexToken: string;
+  longToken: string;
+  shortToken: string;
 }
 
 export interface GmxPendingOrder {
@@ -88,9 +76,6 @@ export interface GmxPositionsSummary {
   formattedReport: string;
 }
 
-
-// ── Order type labels ──────────────────────────────────────────────────
-
 const ORDER_TYPE_LABELS: Record<number, string> = {
   0: "Market Swap",
   1: "Limit Swap",
@@ -102,8 +87,6 @@ const ORDER_TYPE_LABELS: Record<number, string> = {
   7: "Liquidation",
 };
 
-// ── Helpers ────────────────────────────────────────────────────────────
-
 /** Normalize isLong to boolean, handling both boolean and string inputs from LLMs. */
 function normalizeIsLong(value: unknown): boolean {
   if (typeof value === "boolean") return value;
@@ -111,44 +94,20 @@ function normalizeIsLong(value: unknown): boolean {
   return Boolean(value);
 }
 
-/**
- * GMX v2 leverage formula — single source of truth.
- * leverage = sizeUsd / netValueUsd
- *
- * Net value includes collateral + unrealized PnL + net price impact - fees,
- * matching the GMX UI: the displayed leverage increases as losses and costs
- * erode the position's effective collateral.
- */
 export function computeGmxLeverage(sizeUsd: number, positionCollateralUsd: number): number {
   return positionCollateralUsd > 0 ? sizeUsd / positionCollateralUsd : 0;
 }
 
-/**
- * Derive effective collateral from size and leverage.
- * Inverse of computeGmxLeverage.
- */
 export function computeEffectiveCollateral(sizeUsd: number, leverage: number): number {
   return leverage > 0 ? sizeUsd / leverage : 0;
 }
 
-function buildMarketPrices(
-  marketInfo: { indexToken: string; longToken: string; shortToken: string } | undefined,
-  tickerMap: Map<string, GmxTickerPrice>,
-): {
-  indexTokenPrice: { min: bigint; max: bigint };
-  longTokenPrice: { min: bigint; max: bigint };
-  shortTokenPrice: { min: bigint; max: bigint };
-} {
-  const raw = (addr?: string) => {
-    const t = addr ? tickerMap.get(addr.toLowerCase()) : undefined;
-    if (!t) return { min: 0n, max: 0n };
-    return { min: BigInt(t.minPrice), max: BigInt(t.maxPrice) };
-  };
-  return {
-    indexTokenPrice: raw(marketInfo?.indexToken),
-    longTokenPrice: raw(marketInfo?.longToken),
-    shortTokenPrice: raw(marketInfo?.shortToken),
-  };
+function rawToUsd(value: bigint): number {
+  return Number(value) / 1e30;
+}
+
+function rawToTokenAmount(value: bigint, decimals: number): number {
+  return Number(value) / 10 ** decimals;
 }
 
 function formatUsd(value: number): string {
@@ -174,14 +133,6 @@ function formatTokenValue(value: number): string {
   return value.toFixed(2);
 }
 
-function formatPrice(value: number): string {
-  if (value >= 1000) return `$${value.toFixed(2)}`;
-  if (value >= 1) return `$${value.toFixed(3)}`;
-  if (value >= 0.01) return `$${value.toFixed(4)}`;
-  if (value >= 0.0001) return `$${value.toFixed(6)}`;
-  return `$${value.toExponential(4)}`;
-}
-
 /** GMX-style 4-decimal price formatting for entry, mark, and liquidation prices. */
 function formatPrice4(value: number): string {
   if (value >= 0.0001) return `$${value.toFixed(4)}`;
@@ -196,144 +147,63 @@ function parseUsdString(s: string): number {
   })) || 0;
 }
 
-function tokenToUsd(amount: bigint, price: number, decimals: number): number {
-  return (Number(amount) / 10 ** decimals) * price;
+function displaySymbol(token?: TokenData): string {
+  return (token?.symbol || "???").replace(/\.v\d+$/i, "");
 }
 
-// ── Core functions ─────────────────────────────────────────────────────
-
 /**
- * Build a single GmxPosition object from raw on-chain data plus the enriched
- * info returned by Reader.getAccountPositionInfoList().
+ * Map an SDK PositionInfo object into our consumer-facing GmxPosition shape.
  */
-function buildGmxPosition(
-  rawPosition: {
-    addresses: { account: Address; market: Address; collateralToken: Address };
-    numbers: {
-      sizeInUsd: bigint;
-      sizeInTokens: bigint;
-      collateralAmount: bigint;
-      borrowingFactor: bigint;
-    };
-    flags: { isLong: boolean };
-  },
-  marketInfo: { indexToken: string; longToken: string; shortToken: string } | undefined,
-  tickerMap: Map<string, GmxTickerPrice>,
-  minCollateralFactorMap: Map<string, bigint>,
-  info?: {
-    fees: {
-      collateralTokenPrice: { min: bigint; max: bigint };
-      borrowing: { borrowingFeeUsd: bigint };
-      funding: { fundingFeeAmount: bigint };
-      ui: { uiFeeAmount: bigint };
-      positionFeeAmount: bigint;
-      totalDiscountAmount: bigint;
-    };
-    executionPriceResult: { totalImpactUsd: bigint };
-    basePnlUsd: bigint;
-  },
-): GmxPosition {
-  const marketAddr = rawPosition.addresses.market.toLowerCase();
-  const collateralAddr = rawPosition.addresses.collateralToken.toLowerCase();
-  const isLong = rawPosition.flags.isLong;
+export function buildGmxPositionFromSdk(info: PositionInfo): GmxPosition {
+  const market = info.market;
+  const indexToken = info.indexToken;
+  const collateralToken = info.collateralToken;
 
-  const sizeInUsd = rawPosition.numbers.sizeInUsd;
-  const sizeInTokens = rawPosition.numbers.sizeInTokens;
-  const collateralAmount = rawPosition.numbers.collateralAmount;
+  const indexSymbol = displaySymbol(indexToken);
+  const collateralSymbol = displaySymbol(collateralToken);
 
-  const indexTokenAddr = marketInfo?.indexToken?.toLowerCase() || "";
-  const indexTicker = tickerMap.get(indexTokenAddr);
-  const collateralTicker = tickerMap.get(collateralAddr);
+  const indexDecimals = indexToken?.decimals ?? 18;
+  const collateralDecimals = collateralToken?.decimals ?? 18;
 
-  const indexSymbol = (indexTicker?.tokenSymbol || "???").replace(/\.v\d+$/i, "");
-  const collateralSymbol = (collateralTicker?.tokenSymbol || "???").replace(/\.v\d+$/i, "");
+  const sizeInUsd = info.sizeInUsd;
+  const sizeInTokens = info.sizeInTokens;
+  const collateralAmount = info.collateralAmount;
 
-  const collateralDecimals = getGmxTokenDecimals(collateralAddr);
-  const indexDecimals = getGmxTokenDecimals(indexTokenAddr);
+  const sizeUsdNum = rawToUsd(sizeInUsd);
+  const entryPrice = info.entryPrice ? rawToUsd(info.entryPrice) : 0;
+  const markPrice = rawToUsd(info.markPrice);
+  const liquidationPrice = info.liquidationPrice ? rawToUsd(info.liquidationPrice) : 0;
 
-  const indexPrice = indexTicker
-    ? (Number(BigInt(indexTicker.minPrice)) + Number(BigInt(indexTicker.maxPrice))) / 2 / (10 ** (30 - indexDecimals))
+  const collateralNum = rawToTokenAmount(collateralAmount, collateralDecimals);
+
+  const grossPnl = rawToUsd(info.pnl);
+  const netPnl = rawToUsd(info.pnlAfterAllFees);
+  const netValue = rawToUsd(info.netValue);
+  const pnlPercent = info.pnlAfterAllFeesPercentage
+    ? Number(info.pnlAfterAllFeesPercentage) / 100
     : 0;
+  const leverage = info.leverage ? Number(info.leverage) / 10_000 : 0;
 
-  let entryPrice = 0;
-  if (sizeInTokens > 0n) {
-    entryPrice = (Number(sizeInUsd) / 1e30) / (Number(sizeInTokens) / 10 ** indexDecimals);
-  }
-
-  const sizeUsdNum = Number(sizeInUsd) / 1e30;
-  const markValue = (Number(sizeInTokens) / 10 ** indexDecimals) * indexPrice;
-  let grossPnl: number;
-  if (isLong) {
-    grossPnl = markValue - sizeUsdNum;
-  } else {
-    grossPnl = sizeUsdNum - markValue;
-  }
-
-  // Prefer GMX's own capped basePnlUsd when fee info is available
-  if (info) {
-    grossPnl = Number(info.basePnlUsd) / 1e30;
-  }
-
-  const collateralNum = Number(collateralAmount) / 10 ** collateralDecimals;
-  const collateralPrice = info
-    ? (Number(info.fees.collateralTokenPrice.min) + Number(info.fees.collateralTokenPrice.max)) / 2 / (10 ** (30 - collateralDecimals))
-    : collateralTicker
-      ? (Number(BigInt(collateralTicker.minPrice)) + Number(BigInt(collateralTicker.maxPrice))) / 2 / (10 ** (30 - collateralDecimals))
-      : 0;
-  const collateralValueUsd = collateralNum * collateralPrice;
-
-  let borrowingFeeUsd = 0;
-  let fundingFeeUsd = 0;
-  let closeFeeUsd = 0;
-  let uiFeeUsd = 0;
-  let priceImpactUsd = 0;
-
-  if (info) {
-    borrowingFeeUsd = Number(info.fees.borrowing.borrowingFeeUsd) / 1e30;
-    fundingFeeUsd = tokenToUsd(info.fees.funding.fundingFeeAmount, collateralPrice, collateralDecimals);
-    uiFeeUsd = tokenToUsd(info.fees.ui.uiFeeAmount, collateralPrice, collateralDecimals);
-
-    const positionFeeAmount = BigInt(info.fees.positionFeeAmount);
-    const totalDiscountAmount = BigInt(info.fees.totalDiscountAmount);
-    const discountedFeeAmount = positionFeeAmount > totalDiscountAmount ? positionFeeAmount - totalDiscountAmount : 0n;
-    closeFeeUsd = tokenToUsd(discountedFeeAmount, collateralPrice, collateralDecimals);
-
-    priceImpactUsd = Number(info.executionPriceResult.totalImpactUsd) / 1e30;
-  }
+  const borrowingFeeUsd = rawToUsd(info.pendingBorrowingFeesUsd);
+  const fundingFeeUsd = rawToUsd(info.pendingFundingFeesUsd);
+  const closeFeeUsd = rawToUsd(info.closingFeeUsd);
+  const uiFeeUsd = rawToUsd(info.uiFeeUsd);
+  const priceImpactUsd = rawToUsd(info.netPriceImapctDeltaUsd);
 
   const totalCostUsd = borrowingFeeUsd + fundingFeeUsd + closeFeeUsd + uiFeeUsd - priceImpactUsd;
-  const netPnl = grossPnl - totalCostUsd;
-  const netValue = collateralValueUsd + netPnl;
-
-  const leverage = computeGmxLeverage(sizeUsdNum, netValue);
-  const pnlPercent = collateralValueUsd > 0 ? (netPnl / collateralValueUsd) * 100 : 0;
-
-  // Estimated liquidation price using the market's min collateral factor.
-  // This mirrors the GMX UI: remaining collateral (net value) must stay above
-  // size * minCollateralFactor. Fees/impact are held constant at current values.
-  const mcfRaw = minCollateralFactorMap.get(marketAddr) ?? 5_000_000_000_000_000_000_000_000_000n;
-  const minCollateralFactor = Number(mcfRaw) / 1e30;
-  const sizeTokensNum = Number(sizeInTokens) / 10 ** indexDecimals;
-  let liquidationPrice = 0;
-  if (sizeTokensNum > 0) {
-    const delta = (sizeUsdNum * minCollateralFactor - netValue) / sizeTokensNum;
-    liquidationPrice = isLong ? indexPrice + delta : indexPrice - delta;
-    if (liquidationPrice < 0) liquidationPrice = 0;
-  }
 
   return {
-    market: rawPosition.addresses.market,
-    collateralToken: rawPosition.addresses.collateralToken,
-    isLong,
+    market: market.marketTokenAddress,
+    collateralToken: info.collateralTokenAddress,
+    isLong: info.isLong,
     sizeInUsd: formatUsd(sizeUsdNum),
     sizeInUsdRaw: sizeInUsd.toString(),
-    sizeInTokens: formatTokenValue(Number(sizeInTokens) / 10 ** indexDecimals),
+    sizeInTokens: formatTokenValue(rawToTokenAmount(sizeInTokens, indexDecimals)),
     sizeInTokensRaw: sizeInTokens.toString(),
     collateralAmount: formatTokenValue(collateralNum),
     collateralAmountRaw: collateralAmount.toString(),
     entryPrice: formatPrice4(entryPrice),
-    markPrice: formatPrice4(indexPrice),
-    liquidationPrice: liquidationPrice > 0 ? formatPrice4(liquidationPrice) : "N/A",
+    markPrice: formatPrice4(markPrice),
     leverage: `${leverage.toFixed(1)}x`,
     unrealizedPnl: formatSignedUsd(netPnl),
     unrealizedPnlPercent: formatPercent(pnlPercent),
@@ -345,109 +215,40 @@ function buildGmxPosition(
     uiFee: uiFeeUsd > 0 ? formatSignedUsd(-uiFeeUsd) : "$0.00",
     priceImpact: formatSignedUsd(priceImpactUsd),
     totalCosts: totalCostUsd !== 0 ? formatSignedUsd(-totalCostUsd) : "$0.00",
+    liquidationPrice: liquidationPrice > 0 ? formatPrice4(liquidationPrice) : "N/A",
     marketSymbol: `${indexSymbol}/USD`,
     collateralSymbol,
     indexTokenSymbol: indexSymbol,
-    indexToken: marketInfo?.indexToken || "",
-    longToken: marketInfo?.longToken || "",
-    shortToken: marketInfo?.shortToken || "",
+    indexToken: market.indexTokenAddress,
+    longToken: market.longTokenAddress,
+    shortToken: market.shortTokenAddress,
   };
 }
 
 /**
- * Fetch all open GMX positions for a vault (Arbitrum only) in a single
- * Reader.getAccountPositionInfoList() call.
+ * Fetch all open GMX positions for a vault (Arbitrum only) using the official SDK.
  */
 export async function getGmxPositions(
   vaultAddress: Address,
   alchemyKey?: string,
 ): Promise<GmxPosition[]> {
-  const client = getClient(42161, alchemyKey);
+  const sdk = createGmxSdk(vaultAddress, alchemyKey);
 
-  // Fetch markets and tickers in parallel, then ensure token decimals are cached
-  // so size/collateral normalization is accurate for every collateral token.
-  const [markets, tickers] = await Promise.all([
-    getGmxMarkets(),
-    getGmxTickers(),
-  ]);
-  await warmTokenDecimalsCache(tickers, alchemyKey);
-
-  const tickerMap = new Map<string, GmxTickerPrice>();
-  for (const t of tickers) {
-    tickerMap.set(t.tokenAddress.toLowerCase(), t);
+  const marketsInfo = await sdk.markets.getMarketsInfo();
+  if (!marketsInfo.marketsInfoData || !marketsInfo.tokensData) {
+    return [];
   }
 
-  const marketMap = new Map<string, { indexToken: string; longToken: string; shortToken: string }>();
-  for (const m of markets) {
-    marketMap.set(m.marketToken.toLowerCase(), {
-      indexToken: m.indexToken,
-      longToken: m.longToken,
-      shortToken: m.shortToken,
-    });
-  }
-
-  // Fetch each market's min collateral factor in one multicall for liquidation-price estimation.
-  const MIN_COLLATERAL_FACTOR = keccak256(encodeAbiParameters([{ type: "string" }], ["MIN_COLLATERAL_FACTOR"]));
-  const dataStoreAbi = [{ name: "getUint", type: "function", stateMutability: "view", inputs: [{ name: "key", type: "bytes32" }], outputs: [{ type: "uint256" }] }] as const;
-  const minCollateralFactorKeys = markets.map((m) =>
-    keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "address" }], [MIN_COLLATERAL_FACTOR, m.marketToken as Address])),
-  );
-  const minCollateralFactorResults = await client.multicall({
-    contracts: minCollateralFactorKeys.map((key) => ({
-      address: GMX_ADDRESSES.DATA_STORE,
-      abi: dataStoreAbi,
-      functionName: "getUint" as const,
-      args: [key],
-    })),
-    allowFailure: true,
+  const positionsInfoData: PositionsInfoData = await sdk.positions.getPositionsInfo({
+    marketsInfoData: marketsInfo.marketsInfoData,
+    tokensData: marketsInfo.tokensData,
+    showPnlInLeverage: true,
   });
-  const defaultMinCollateralFactor = 5_000_000_000_000_000_000_000_000_000n; // 0.5%
-  const minCollateralFactorMap = new Map<string, bigint>();
-  for (let i = 0; i < markets.length; i++) {
-    const r = minCollateralFactorResults[i];
-    minCollateralFactorMap.set(
-      markets[i].marketToken.toLowerCase(),
-      r.status === "success" && r.result > 0n ? r.result : defaultMinCollateralFactor,
-    );
-  }
-
-  // Single aggregated RPC call: all positions + fees + net price impact.
-  let accountInfoList: any[] = [];
-  try {
-    const marketAddresses = markets.map((m) => m.marketToken as Address);
-    const marketPrices = markets.map((m) =>
-      buildMarketPrices(marketMap.get(m.marketToken.toLowerCase()), tickerMap),
-    );
-
-    accountInfoList = (await client.readContract({
-      address: GMX_ADDRESSES.READER,
-      abi: GMX_READER_ABI,
-      functionName: "getAccountPositionInfoList",
-      args: [
-        GMX_ADDRESSES.DATA_STORE,
-        GMX_ADDRESSES.REFERRAL_STORAGE,
-        vaultAddress,
-        marketAddresses,
-        marketPrices,
-        zeroAddress,
-        0n,
-        1000n,
-      ],
-    })) as any[];
-  } catch (err) {
-    console.warn("[gmx-positions] getAccountPositionInfoList failed:", err);
-    throw new Error(
-      `Failed to read GMX positions: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
 
   const positions: GmxPosition[] = [];
-  for (const info of accountInfoList) {
-    const raw = info?.position;
-    if (!raw || raw.numbers.sizeInUsd === 0n) continue;
-
-    const marketInfo = marketMap.get(raw.addresses.market.toLowerCase());
-    positions.push(buildGmxPosition(raw, marketInfo, tickerMap, minCollateralFactorMap, info));
+  for (const info of Object.values(positionsInfoData)) {
+    if (!info || info.sizeInUsd === 0n) continue;
+    positions.push(buildGmxPositionFromSdk(info));
   }
 
   return positions;
@@ -455,9 +256,6 @@ export async function getGmxPositions(
 
 /**
  * Find a specific GMX position by market, direction, and optionally collateral.
- * Throws clear errors when no match is found or when multiple matches are ambiguous.
- * This is the single source of truth for position resolution — both read and write
- * tools use it so they never disagree about which position exists.
  */
 export async function findGmxPosition(
   vaultAddress: Address,
@@ -475,7 +273,6 @@ export async function findGmxPosition(
   );
 
   if (candidates.length === 0) {
-    // List what we DO have so the error is actionable
     const available = positions
       .map((p) => `${p.indexTokenSymbol} ${p.isLong ? "long" : "short"} (${p.collateralSymbol})`)
       .join(", ") || "none";
@@ -489,7 +286,6 @@ export async function findGmxPosition(
     return candidates[0];
   }
 
-  // Multiple positions — disambiguate by collateral hint
   const hint = (collateralSymbolHint || "").toUpperCase();
   const byCollateral = hint
     ? candidates.find((p) => p.collateralSymbol.toUpperCase() === hint)
@@ -510,6 +306,10 @@ export async function findGmxPosition(
 
 /**
  * Fetch all pending GMX orders for a vault.
+ *
+ * This still uses the Reader contract directly because the SDK order helpers are
+ * oriented around building new orders; reading existing pending orders is a simple
+ * contract call.
  */
 export async function getGmxPendingOrders(
   vaultAddress: Address,
@@ -573,12 +373,15 @@ export async function getGmxPositionsSummary(
   vaultAddress: Address,
   alchemyKey?: string,
 ): Promise<GmxPositionsSummary> {
+  // Warm token decimals so pending-order formatting is accurate even though
+  // the SDK-based position read no longer does it.
+  await warmTokenDecimalsCache(await getGmxTickers(), alchemyKey);
+
   const [positions, pendingOrders] = await Promise.all([
     getGmxPositions(vaultAddress, alchemyKey),
     getGmxPendingOrders(vaultAddress, alchemyKey),
   ]);
 
-  // Calculate totals using net (after-fee) figures
   let totalNetPnl = 0;
   let totalNetValue = 0;
   let totalSize = 0;
@@ -589,8 +392,6 @@ export async function getGmxPositionsSummary(
     totalSize += parseUsdString(p.sizeInUsd);
   }
 
-  // totalCollateralUsd is kept for backwards compatibility and now represents
-  // the sum of raw collateral token values (same USD basis as net value).
   const totalCollateralUsd = positions.reduce((sum, p) => {
     const netValue = parseUsdString(p.netValue);
     const netPnl = parseUsdString(p.unrealizedPnl);
@@ -617,14 +418,6 @@ export async function getGmxPositionsSummary(
   };
 }
 
-// ── Report formatting ──────────────────────────────────────────────────
-
-/**
- * Generate a positions report with a compact markdown-style table for the chat.
- * URLs are rendered clickable by the frontend. The fee breakdown is intentionally
- * omitted from the main table; the web frontend shows it on demand via an
- * expandable details row, and Telegram users can ask for the full breakdown.
- */
 function formatPositionsReport(
   positions: GmxPosition[],
   pendingOrders: GmxPendingOrder[],
@@ -643,14 +436,12 @@ function formatPositionsReport(
   lines.push("");
 
   if (positions.length > 0) {
-    // Summary bar
     const pnlEmoji = totalNetPnl >= 0 ? "🟢" : "🔴";
     lines.push(
       `${pnlEmoji} Total Net PnL: ${formatSignedUsd(totalNetPnl)}  |  Net Value: ${formatUsd(totalNetValue)}  |  Size: ${formatUsd(totalSize)}  |  Positions: ${positions.length}`,
     );
     lines.push("");
 
-    // Compact table: matches the GMX UI columns
     lines.push("| Market | Side | Size | Net Value | Leverage | Net PnL | Entry | Mark | Liq Price |");
     lines.push("|--------|------|------|-----------|----------|---------|-------|------|-----------|");
 
@@ -685,6 +476,3 @@ function formatPositionsReport(
 
   return lines.join("\n");
 }
-
-// Re-export for consumers that need Chainlink feed ABI
-export { GMX_CHAINLINK_PRICE_FEED_ABI };
