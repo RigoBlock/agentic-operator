@@ -941,7 +941,8 @@ ${executionModeNote}${contextDocsBlock}`;
     tryFastPathBridge(effectiveMsg) ||
     tryFastPathTwapCreate(effectiveMsg) ||
     tryFastPathGmxIncrease(effectiveMsg) ||
-    tryFastPathStrategyQueries(effectiveMsg);
+    tryFastPathStrategyQueries(effectiveMsg) ||
+    tryFastPathPendingTx(effectiveMsg);
   if (immediateFastPath) {
     console.log(`[LLM] Immediate fast-path (no LLM): ${immediateFastPath.name}(${JSON.stringify(immediateFastPath.args)})`);
     try {
@@ -2599,5 +2600,31 @@ function tryFastPathGmxIncrease(msg: string): FastPathResult | null {
     return { name: "gmx_get_markets", args: {} };
   }
 
+  return null;
+}
+
+// ── Fast-path: pending / stuck transaction status ─────────────────────
+
+/**
+ * Detect user questions about a pending or stuck sponsored/agent transaction.
+ * Examples:
+ *   "do I have a stuck sponsored transaction on alchemy?"
+ *   "status of my pending transaction"
+ *   "is my trade still pending?"
+ */
+export function tryFastPathPendingTx(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+  const isPendingQuery =
+    /\b(stuck|pending|delayed|slow)\s+(sponsored\s+)?transaction/i.test(m) ||
+    /\bstatus\s+of\s+(my\s+)?(pending\s+)?(transaction|trade|swap|order)/i.test(m) ||
+    /\bis\s+my\s+(trade|swap|transaction|order)\s+(still\s+)?(pending|stuck|delayed|lost)/i.test(m) ||
+    /\bdo\s+i\s+have\s+a\s+(stuck|pending|delayed)/i.test(m) ||
+    /\b(what\s+happened\s+to|where\s+is|did)\s+my\s+(trade|swap|transaction|order)/i.test(m) ||
+    /\bmy\s+(trade|swap|transaction|order)\s+is\s+(stuck|pending|delayed|lost)/i.test(m) ||
+    /^status[\s?.!]*$/i.test(m);
+
+  if (isPendingQuery) {
+    return { name: "check_pending_tx", args: {} };
+  }
   return null;
 }

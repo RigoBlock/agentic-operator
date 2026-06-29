@@ -12,9 +12,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Address } from "viem";
 
 const mockReadContract = vi.fn();
+const mockMulticall = vi.fn();
 
 vi.mock("../src/services/vault.js", () => ({
-  getClient: () => ({ readContract: mockReadContract }),
+  getClient: () => ({ readContract: mockReadContract, multicall: mockMulticall }),
 }));
 
 vi.mock("../src/services/oraclePool.js", () => ({
@@ -26,6 +27,8 @@ vi.mock("../src/services/oraclePool.js", () => ({
 
 beforeEach(() => {
   mockReadContract.mockReset();
+  mockMulticall.mockReset();
+  clearOracleTickCache();
 });
 
 import {
@@ -34,6 +37,7 @@ import {
   getOracleSpotTick,
   convertTokenAmountViaOracle,
   hasPriceFeedForPair,
+  clearOracleTickCache,
 } from "../src/services/oraclePrice.js";
 
 describe("normalizeTokenAddress", () => {
@@ -133,6 +137,18 @@ describe("getOracleSpotTick", () => {
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
     await expect(getOracleSpotTick(99999, TOKEN, "test-key")).rejects.toThrow("not deployed");
   });
+
+  it("caches observe results to avoid redundant RPC calls", async () => {
+    mockReadContract.mockResolvedValueOnce([[5000n, 4000n], []]);
+    const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
+
+    const tick1 = await getOracleSpotTick(8453, TOKEN, "test-key");
+    const tick2 = await getOracleSpotTick(8453, TOKEN, "test-key");
+
+    expect(tick1).toBe(1000);
+    expect(tick2).toBe(1000);
+    expect(mockReadContract).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("convertTokenAmountViaOracle", () => {
@@ -182,25 +198,24 @@ describe("convertTokenAmountViaOracle", () => {
     expect(result).toBe(1000n);
   });
 
-  it("converts tokenA → tokenB using difference of ticks", async () => {
+  it("converts tokenA → tokenB using difference of ticks (batched multicall)", async () => {
     // tokenA tick = 1000, tokenB tick = 2000
     // conversionTick = 2000 - 1000 = 1000
     // getOracleSpotTick returns tickCumulatives[0] - tickCumulatives[1]
-    // Use mockImplementation to handle concurrent Promise.all calls deterministically
     const TOKEN_A = "0xaaaa000000000000000000000000000000000001" as Address;
     const TOKEN_B = "0xbbbb000000000000000000000000000000000002" as Address;
 
-    mockReadContract.mockImplementation((args: any) => {
-      const currency1 = args.args[0].currency1;
-      if (currency1 === TOKEN_B) return Promise.resolve([[3000n, 1000n], []]); // tick = 2000
-      if (currency1 === TOKEN_A) return Promise.resolve([[1000n, 0n], []]);   // tick = 1000
-      return Promise.resolve([[0n, 0n], []]);
-    });
+    mockMulticall.mockResolvedValueOnce([
+      [[1000n, 0n], []],   // tick = 1000
+      [[3000n, 1000n], []], // tick = 2000
+    ]);
 
     const result = await convertTokenAmountViaOracle(8453, TOKEN_A, 1000n, TOKEN_B, "test-key");
 
     // With tick=1000, sqrtPriceX96 > 2^96, so price > 1, result > 1000
     expect(result).toBeGreaterThan(1000n);
+    expect(mockMulticall).toHaveBeenCalledTimes(1);
+    expect(mockReadContract).not.toHaveBeenCalled();
   });
 
   it("throws when conversion tick is out of bounds", async () => {
@@ -208,12 +223,10 @@ describe("convertTokenAmountViaOracle", () => {
     const TOKEN_A = "0xaaaa000000000000000000000000000000000001" as Address;
     const TOKEN_B = "0xbbbb000000000000000000000000000000000002" as Address;
 
-    mockReadContract.mockImplementation((args: any) => {
-      const currency1 = args.args[0].currency1;
-      if (currency1 === TOKEN_B) return Promise.resolve([[900000n, 0n], []]);
-      if (currency1 === TOKEN_A) return Promise.resolve([[-900000n, 0n], []]);
-      return Promise.resolve([[0n, 0n], []]);
-    });
+    mockMulticall.mockResolvedValueOnce([
+      [[-900000n, 0n], []],
+      [[900000n, 0n], []],
+    ]);
 
     await expect(
       convertTokenAmountViaOracle(8453, TOKEN_A, 1000n, TOKEN_B, "test-key"),
@@ -235,21 +248,25 @@ describe("hasPriceFeedForPair", () => {
     mockReadContract.mockReset();
   });
 
-  it("returns true when both tokens have feeds", async () => {
-    mockReadContract
-      .mockResolvedValueOnce({ index: 0, cardinality: 5, cardinalityNext: 5 })
-      .mockResolvedValueOnce({ index: 0, cardinality: 3, cardinalityNext: 3 });
+  it("returns true when both tokens have feeds (batched multicall)", async () => {
+    mockMulticall.mockResolvedValueOnce([
+      { status: "success", result: { index: 0, cardinality: 5, cardinalityNext: 5 } },
+      { status: "success", result: { index: 0, cardinality: 3, cardinalityNext: 3 } },
+    ]);
 
     const result = await hasPriceFeedForPair(
       8453, "0xaaaa" as Address, "0xbbbb" as Address, "test-key",
     );
     expect(result).toBe(true);
+    expect(mockMulticall).toHaveBeenCalledTimes(1);
+    expect(mockReadContract).not.toHaveBeenCalled();
   });
 
   it("returns false when one token lacks a feed", async () => {
-    mockReadContract
-      .mockResolvedValueOnce({ index: 0, cardinality: 5, cardinalityNext: 5 })
-      .mockResolvedValueOnce({ index: 0, cardinality: 0, cardinalityNext: 0 });
+    mockMulticall.mockResolvedValueOnce([
+      { status: "success", result: { index: 0, cardinality: 5, cardinalityNext: 5 } },
+      { status: "success", result: { index: 0, cardinality: 0, cardinalityNext: 0 } },
+    ]);
 
     const result = await hasPriceFeedForPair(
       8453, "0xaaaa" as Address, "0xbbbb" as Address, "test-key",
@@ -265,5 +282,6 @@ describe("hasPriceFeedForPair", () => {
     );
     expect(result).toBe(true);
     expect(mockReadContract).toHaveBeenCalledTimes(1); // Only token checked
+    expect(mockMulticall).not.toHaveBeenCalled();
   });
 });

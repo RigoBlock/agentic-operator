@@ -658,7 +658,7 @@ export async function executeViaDelegation(
 
   // Store pending tx in KV for async monitoring (if not yet confirmed)
   if (!result.confirmed) {
-    await storePendingTx(env.KV, result);
+    await storePendingTx(env.KV, vaultAddress, result);
   }
 
   return result;
@@ -1237,22 +1237,92 @@ export async function checkAgentBalance(
 
 /**
  * Store a pending (unconfirmed) transaction in KV for async monitoring.
+ * Also maintains a per-vault index so users can ask "is my transaction stuck?"
+ * without knowing the hash.
  */
-async function storePendingTx(kv: KVNamespace, result: ExecutionResult): Promise<void> {
+async function storePendingTx(kv: KVNamespace, vaultAddress: string, result: ExecutionResult): Promise<void> {
   const key = `pending-tx:${result.txHash}`;
   await kv.put(key, JSON.stringify({
     ...result,
     storedAt: Date.now(),
   }), { expirationTtl: 3600 });
+
+  // Per-vault index keyed by chain so we can look up the latest pending tx.
+  const indexKey = `pending-tx-by-vault:${vaultAddress.toLowerCase()}:${result.chainId}`;
+  await kv.put(indexKey, result.txHash, { expirationTtl: 3600 });
+}
+
+/** KV key for the per-vault pending transaction index. */
+export function getPendingTxIndexKey(vaultAddress: string, chainId: number): string {
+  return `pending-tx-by-vault:${vaultAddress.toLowerCase()}:${chainId}`;
+}
+
+/**
+ * Get the latest pending transaction hash for a vault on a chain.
+ * Returns null if no pending tx is recorded.
+ */
+export async function getPendingTxHashForVault(
+  kv: KVNamespace,
+  vaultAddress: string,
+  chainId: number,
+): Promise<string | null> {
+  return kv.get(getPendingTxIndexKey(vaultAddress, chainId));
+}
+
+/**
+ * Check the latest pending transaction for a vault and return a user-friendly summary.
+ * Returns null if there is no recorded pending tx.
+ */
+export async function checkPendingTxForVault(
+  env: Env,
+  vaultAddress: string,
+  chainId: number,
+): Promise<{
+  status: "confirmed" | "reverted" | "pending" | "unknown";
+  txHash?: string;
+  explorerUrl?: string;
+  blockNumber?: number;
+  message: string;
+} | null> {
+  const hash = await getPendingTxHashForVault(env.KV, vaultAddress, chainId);
+  if (!hash) return null;
+
+  const result = await checkPendingTxStatus(env, hash, chainId, vaultAddress);
+  if (!result) {
+    return {
+      status: "pending",
+      txHash: hash,
+      message: `Transaction <code>${hash}</code> is still pending on chain ${chainId}. It may take a few minutes to land, especially on Ethereum mainnet.`,
+    };
+  }
+
+  if (result.confirmed) {
+    return {
+      status: "confirmed",
+      txHash: hash,
+      explorerUrl: result.explorerUrl,
+      blockNumber: result.blockNumber,
+      message: `Transaction <code>${hash}</code> confirmed in block ${result.blockNumber}.${result.explorerUrl ? ` <a href="${result.explorerUrl}">View on explorer</a>` : ""}`,
+    };
+  }
+
+  return {
+    status: "reverted",
+    txHash: hash,
+    explorerUrl: result.explorerUrl,
+    message: `Transaction <code>${hash}</code> reverted on-chain.${result.explorerUrl ? ` <a href="${result.explorerUrl}">View on explorer</a>` : ""}`,
+  };
 }
 
 /**
  * Check the status of a pending transaction.
+ * If a receipt is found, cleans up both the tx record and the per-vault index.
  */
 export async function checkPendingTxStatus(
   env: Env,
   hash: string,
   chainId: number,
+  vaultAddress?: string,
 ): Promise<ExecutionResult | null> {
   const rpcUrl = getRpcUrl(chainId, env.ALCHEMY_API_KEY);
 
@@ -1286,6 +1356,9 @@ export async function checkPendingTxStatus(
 
     // Clean up KV
     await env.KV.delete(`pending-tx:${hash}`);
+    if (vaultAddress) {
+      await env.KV.delete(getPendingTxIndexKey(vaultAddress, chainId));
+    }
     return result;
   } catch {
     return null;
@@ -1364,10 +1437,16 @@ export function formatOutcomesMarkdown(outcomes: TxExecOutcome[]): string {
       const link = result.explorerUrl || result.txHash;
       parts.push(`⚠️ ${desc} reverted on-chain${gasWasted}. [View failed tx](${link})`);
     } else if (result) {
-      const pendingNote = result.sponsored && result.gasCostEth?.includes("timed out")
+      const isSponsoredTimeout = result.sponsored && result.gasCostEth?.includes("timed out");
+      const hashLabel = result.sponsored ? "Sponsored transaction hash" : "Transaction hash";
+      const pendingNote = isSponsoredTimeout
         ? " The status check timed out; the transaction may still confirm on-chain."
         : " Waiting for confirmation…";
-      parts.push(`⏳ Transaction submitted: ${result.txHash}.${pendingNote}`);
+      const checkHint = " Ask me for a status update anytime (e.g. \"is my transaction stuck?\").";
+      const sponsoredHint = result.sponsored
+        ? " This is a sponsored UserOp hash — it may not appear in the public mempool until it lands."
+        : "";
+      parts.push(`⏳ ${desc} submitted.\n${hashLabel}: \`${result.txHash}\`${sponsoredHint}${pendingNote}${checkHint}`);
     } else if (error) {
       const fallbackHint = fallbackToManual
         ? " You can sign this transaction directly from your wallet."

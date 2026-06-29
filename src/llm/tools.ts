@@ -406,6 +406,28 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "check_pending_tx",
+      description:
+        "Check the status of the most recent pending or stuck sponsored/agent transaction for the vault. " +
+        "Use this whenever the user asks about a pending, stuck, missing, or slow transaction, swap, or trade — " +
+        "for example 'is my trade stuck?', 'what happened to my swap?', 'do I have a pending transaction?', " +
+        "or 'did my transaction go through?'. Returns confirmed, reverted, or still-pending status along with " +
+        "the transaction hash and explorer link when available.",
+      parameters: {
+        type: "object",
+        properties: {
+          chain: {
+            type: "string",
+            description: "Chain to check. Uses current chain if omitted.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
 
   // ── Pool Deployment ─────────────────────────────────────────────────
 

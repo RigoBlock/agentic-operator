@@ -28,6 +28,7 @@ import { handle_setup_delegation } from "./delegation.js";
 import { handle_revoke_delegation } from "./delegation.js";
 import { handle_check_delegation_status } from "./delegation.js";
 import { handle_revoke_selectors } from "./delegation.js";
+import { handle_check_pending_tx } from "./delegation.js";
 import { handle_deploy_smart_pool } from "./vault-mgmt.js";
 import { handle_fund_pool } from "./vault-mgmt.js";
 import { handle_crosschain_transfer } from "./bridge.js";
@@ -70,6 +71,7 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "gmx_update_order": handle_gmx_update_order,
   "gmx_claim_funding_fees": handle_gmx_claim_funding_fees,
   "gmx_get_markets": handle_gmx_get_markets,
+  "check_pending_tx": handle_check_pending_tx,
   "setup_delegation": handle_setup_delegation,
   "revoke_delegation": handle_revoke_delegation,
   "check_delegation_status": handle_check_delegation_status,

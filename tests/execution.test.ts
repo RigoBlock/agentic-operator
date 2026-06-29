@@ -7,6 +7,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { parseGwei, type PublicClient } from "viem";
 import { ExecutionError, estimateFees } from "../src/services/execution.js";
+import { handle_check_pending_tx } from "../src/llm/handlers/delegation.js";
+import type { Env, RequestContext } from "../src/types.js";
 
 describe("ExecutionError", () => {
   it("has correct name and code", () => {
@@ -194,5 +196,31 @@ describe("estimateFees priority fee floor", () => {
     expect(fees.maxPriorityFeePerGas).toBe(parseGwei("0.01"));
     // Base maxFee cap is 1 gwei; buffered base (1.5 gwei) + priority exceeds it.
     expect(fees.maxFeePerGas).toBe(parseGwei("1"));
+  });
+});
+
+describe("handle_check_pending_tx", () => {
+  function makeKV(): KVNamespace {
+    const store = new Map<string, string>();
+    return {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => { store.set(k, v); },
+      delete: async (k: string) => { store.delete(k); },
+      list: async () => ({ keys: [], list_complete: true, cursor: undefined }),
+      getWithMetadata: async (k: string) => ({ value: store.get(k) ?? null, metadata: null }),
+    } as unknown as KVNamespace;
+  }
+
+  it("reports no pending transaction when none is stored", async () => {
+    const env = { KV: makeKV(), ALCHEMY_API_KEY: "test-key" } as unknown as Env;
+    const ctx = {
+      vaultAddress: "0xd14d4321a33F7eD001Ba5B60cE54b0F7Ba621247",
+      chainId: 8453,
+    } as unknown as RequestContext;
+
+    const result = await handle_check_pending_tx(env, ctx, {}, "check_pending_tx");
+
+    expect(result.selfContained).toBe(true);
+    expect(result.message).toContain("No pending transaction is recorded");
   });
 });

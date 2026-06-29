@@ -14,7 +14,30 @@ import {
   checkDelegationOnChain, buildDefaultSelectors, getDelegationConfig, revokeDelegationOnChain,
 } from "../../services/delegation.js";
 import { getAgentWalletInfo } from "../../services/agentWallet.js";
+import { checkPendingTxForVault } from "../../services/execution.js";
 import { estimateGas, resolveChainArg, resolveChainName } from "../client.js";
+
+export async function handle_check_pending_tx(
+  env: Env,
+  ctx: RequestContext,
+  _args: Record<string, unknown>,
+  _toolName: string,
+): Promise<ToolResult> {
+  const status = await checkPendingTxForVault(env, ctx.vaultAddress as string, ctx.chainId);
+
+  if (!status) {
+    return {
+      message: `No pending transaction is recorded for this vault on chain ${ctx.chainId}. ` +
+        `If you recently submitted a trade, it may have already confirmed or the record expired.`,
+      selfContained: true,
+    };
+  }
+
+  return {
+    message: status.message,
+    selfContained: true,
+  };
+}
 
 export async function handle_setup_delegation(
   env: Env,

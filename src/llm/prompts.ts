@@ -115,7 +115,7 @@ export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
   ],
   delegation: [
     "setup_delegation", "revoke_delegation", "check_delegation_status",
-    "revoke_selectors",
+    "check_pending_tx", "revoke_selectors",
   ],
   vault: [
     "get_vault_info", "get_token_balance", "switch_chain",
@@ -130,7 +130,7 @@ export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
 
 /** Always-included tools regardless of domain detection. */
 export const CORE_TOOLS = [
-  "get_vault_info", "get_token_balance", "switch_chain",
+  "get_vault_info", "get_token_balance", "switch_chain", "check_pending_tx",
 ];
 
 // ── Core system prompt (always sent) ──────────────────────────────────

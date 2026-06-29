@@ -603,7 +603,7 @@ and returns a result (quote, unsigned transaction, analytics summary, etc.).
 | **GRG staking** | Stake, undelegate, unstake, claim rewards (via vault adapter); end epoch (via staking proxy — manual only) |
 | **Cross-chain bridge** | Transfer tokens (Across Protocol), sync NAV, get bridge quote, aggregated NAV, rebalance plan |
 | **Vault management** | Get info, check token balance, deploy pool, fund pool (mint) |
-| **Delegation** | Setup, revoke all, revoke specific selectors, check status |
+| **Delegation** | Setup, revoke all, revoke specific selectors, check status, check pending transaction status |
 | **TWAP orders** | Create, cancel, list — scheduled slice execution with Swap Shield + NAV shield on every slice |
 | **Strategies** | Create (manual or autonomous), remove, list automated strategies |
 | **Chain** | Switch active chain |
@@ -813,6 +813,45 @@ the web UI:
 
 These settings can only be changed by the vault operator (via the web UI or
 Telegram). External API callers and the LLM cannot modify them.
+
+---
+
+## Parallel UI Updates: Web + Telegram
+
+The operator can interact with this service through two first-class channels:
+**the web chat UI** and **the Telegram bot**. These channels are not alternatives
+— they are peer surfaces that must stay in sync.
+
+### Rule: never update only one channel
+
+When adding or changing any user-facing execution flow, confirmation message,
+status update, error hint, or safety explanation, you **must** update both the
+web chat path and the Telegram path unless the change is explicitly scoped to
+a single channel.
+
+| What changed | Web path | Telegram path |
+|--------------|----------|---------------|
+| Execution result formatting | `src/services/execution.ts` (`formatOutcomesMarkdown`) | `src/routes/telegram.ts` (`formatTelegramOutcomes`) |
+| Pending/stuck tx messaging | `src/services/execution.ts` + `src/routes/chat.ts` | `src/routes/telegram.ts` (`pollPendingTelegramTxs`) |
+| New tool or fast-path handler | `src/llm/tools.ts`, `src/llm/prompts.ts`, `src/llm/client.ts` | Telegram fast-path regex in `src/llm/client.ts` + HTML formatting |
+| Safety-setting confirmation | `src/llm/handlers/settings.ts` | Telegram command handler in `src/routes/telegram.ts` |
+
+### Pending sponsored transactions
+
+Sponsored transactions (Alchemy ERC-4337 UserOps) can return a pending status
+when `waitForCallsStatus()` times out, even though Alchemy is still processing
+the UserOp. Both surfaces must:
+
+1. **Surface the pending hash** so the user has a reference.
+2. **Explain that the hash is a sponsored UserOp** and may not be visible in the
+   public mempool until it lands.
+3. **Provide a way to check status again** — either through background polling
+   (Telegram) or by telling the user they can ask "is my transaction stuck?"
+   (web chat and Telegram).
+
+The LLM is always given the `check_pending_tx` tool, so it can answer any
+pending/stuck/missing-transaction question even when the fast-path regex is
+not triggered.
 
 ---
 

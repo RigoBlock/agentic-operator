@@ -33,7 +33,7 @@ import {
 import { getDelegationConfig, getActiveChains } from "../services/delegation.js";
 import { getAgentWalletInfo } from "../services/agentWallet.js";
 import { getCurrentDayBucket, DEFAULT_GAS_SPENDING_LIMIT_USD, GAS_SPEND_KEY } from "./gasPolicy.js";
-import { executeTxList, formatOutcomesMarkdown, type TxExecOutcome } from "../services/execution.js";
+import { executeTxList, formatOutcomesMarkdown, checkPendingTxStatus, type TxExecOutcome } from "../services/execution.js";
 import { initTokenResolver } from "../services/tokenResolver.js";
 import {
   sendMessage,
@@ -1388,6 +1388,20 @@ async function handleCallbackQuery(
     // The vault address is always tx.to (validated by executeViaDelegation)
     const vaultAddress = txList[0].to;
 
+    // Keep the user informed during long mainnet sponsorship polling. For a
+    // single transaction, update the elapsed time every 5 seconds.
+    const executionStart = Date.now();
+    let progressTimer: ReturnType<typeof setInterval> | undefined;
+    if (txList.length === 1) {
+      progressTimer = setInterval(() => {
+        const elapsedSec = Math.round((Date.now() - executionStart) / 1000);
+        editMessageText(
+          token, chatId, messageId,
+          `⏳ Executing trade… (${elapsedSec}s)`,
+        ).catch(() => {});
+      }, 5_000);
+    }
+
     const outcomes = await executeTxList(env, txList, vaultAddress, async (idx, total, soFar) => {
       if (total > 1) {
         const done = soFar.length > 0 ? "\n\n" + formatTelegramOutcomes(soFar) : "";
@@ -1398,9 +1412,15 @@ async function handleCallbackQuery(
       }
     });
 
-    // We need outcomes to be available inside the callback, so collect them first
-    const resultLines = formatTelegramOutcomes(outcomes);
-    const allSuccess = outcomes.every(o => o.result?.confirmed && !o.result?.reverted);
+    if (progressTimer) clearInterval(progressTimer);
+
+    // Separate outcomes into final states vs. still-pending (e.g., sponsored
+    // mainnet tx whose status check timed out before on-chain confirmation).
+    const pendingOutcomes = outcomes.filter(o => o.result && !o.result.confirmed && !o.result.reverted);
+    const finalOutcomes = outcomes.filter(o => !pendingOutcomes.includes(o));
+
+    const hasErrors = finalOutcomes.some(o => o.error || o.result?.reverted);
+    const allFinalSuccess = finalOutcomes.every(o => o.result?.confirmed && !o.result?.reverted) && finalOutcomes.length > 0;
 
     // Detect stale swap quote failures: simulation failed on a swap that sat too long
     const hasSimFailure = outcomes.some(o => o.error?.includes("simulation failed") || o.error?.includes("would revert"));
@@ -1411,10 +1431,13 @@ async function handleCallbackQuery(
         : "\n\n💡 The swap may have reverted due to an expired quote or changed market conditions. Please request the swap again for a fresh quote.";
     }
 
-    // Final summary
-    const header = allSuccess
+    // Build the summary we have so far.
+    const resultLines = formatTelegramOutcomes([...finalOutcomes, ...pendingOutcomes]);
+    const header = allFinalSuccess && !hasErrors && pendingOutcomes.length === 0
       ? (txList.length > 1 ? `✅ <b>All ${txList.length} trades confirmed</b>` : "✅ <b>Trade confirmed</b>")
-      : "⚠️ <b>Some trades failed</b>";
+      : hasErrors
+        ? "⚠️ <b>Some trades failed</b>"
+        : (txList.length > 1 ? `⏳ <b>${txList.length} trades submitted</b>` : "⏳ <b>Trade submitted</b>");
     const finalMsg = `${header}\n\n${resultLines}${staleHint}`;
     const truncated = finalMsg.length > 4000 ? finalMsg.slice(0, 3990) + "…" : finalMsg;
     await editMessageText(token, chatId, messageId, truncated);
@@ -1424,10 +1447,21 @@ async function handleCallbackQuery(
     await updatePendingAssistantMessage(
       env.KV,
       userId,
-      allSuccess
+      allFinalSuccess && pendingOutcomes.length === 0
         ? (txList.length > 1 ? `All ${txList.length} trades confirmed.` : "Trade confirmed.")
-        : "Some trades failed.",
+        : hasErrors
+          ? "Some trades failed."
+          : "Trade submitted — waiting for on-chain confirmation.",
     );
+
+    // For pending sponsored transactions, keep polling in the background and
+    // update the Telegram message once they land. This handles the common case
+    // where Alchemy's waitForCallsStatus times out before mainnet confirmation.
+    if (pendingOutcomes.length > 0) {
+      pollPendingTelegramTxs(env, token, chatId, messageId, pendingOutcomes, userId, staleHint).catch(err =>
+        console.error("[telegram] Background pending-tx polling failed:", err),
+      );
+    }
 
     return;
   }
@@ -1465,10 +1499,18 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
       const link = result.explorerUrl ? `<a href="${result.explorerUrl}">↗</a>` : "";
       lines.push(`❌ ${escapeHtml(desc)} — reverted ${link}`);
     } else if (result) {
-      const pendingNote = result.sponsored && result.gasCostEth?.includes("timed out")
+      const isSponsoredTimeout = result.sponsored && result.gasCostEth?.includes("timed out");
+      const pendingNote = isSponsoredTimeout
         ? "\n(status check timed out; may still confirm)"
         : "";
-      lines.push(`⏳ ${escapeHtml(desc)} — submitted: <code>${result.txHash.slice(0, 14)}…</code>${pendingNote}`);
+      const sponsoredHint = result.sponsored
+        ? "\n(sponsored UserOp — may not appear in the public mempool until it lands)"
+        : "";
+      lines.push(
+        `⏳ ${escapeHtml(desc)} — submitted\n` +
+        `Hash: <code>${escapeHtml(result.txHash)}</code>${sponsoredHint}${pendingNote}\n` +
+        `Reply with "status" or "is my transaction stuck?" for an update.`
+      );
     } else if (error) {
       // Provide actionable guidance for delegation errors
       if (error.includes("not in the delegated selectors") || error.includes("selector") && error.includes("not")) {
@@ -1494,6 +1536,70 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
     }
   }
   return lines.join("\n");
+}
+
+/**
+ * Background polling for Telegram trades that returned a pending status.
+ * Keeps checking on-chain receipts and edits the original Telegram message
+ * once each pending tx confirms or reverts.
+ */
+async function pollPendingTelegramTxs(
+  env: Env,
+  token: string,
+  chatId: number,
+  messageId: number,
+  pendingOutcomes: TxExecOutcome[],
+  userId: number,
+  staleHint: string,
+): Promise<void> {
+  const pollIntervalMs = 5_000;
+  const maxPollMs = 3 * 60 * 1_000; // 3 minutes matches Alchemy policy expiry
+  const start = Date.now();
+
+  const mutableOutcomes = pendingOutcomes.map(o => ({ ...o }));
+
+  while (Date.now() - start < maxPollMs) {
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+
+    let changed = false;
+    for (const outcome of mutableOutcomes) {
+      if (!outcome.result || outcome.result.confirmed || outcome.result.reverted) continue;
+
+      const status = await checkPendingTxStatus(env, outcome.result.txHash, outcome.result.chainId).catch(() => null);
+      if (status) {
+        outcome.result = status;
+        changed = true;
+      }
+    }
+
+    if (!changed) continue;
+
+    const allDone = mutableOutcomes.every(o => o.result?.confirmed || o.result?.reverted);
+    const resultLines = formatTelegramOutcomes(mutableOutcomes);
+    const allSuccess = mutableOutcomes.every(o => o.result?.confirmed && !o.result?.reverted);
+    const hasErrors = mutableOutcomes.some(o => o.result?.reverted || o.error);
+
+    const header = allSuccess
+      ? (mutableOutcomes.length > 1 ? `✅ <b>All ${mutableOutcomes.length} trades confirmed</b>` : "✅ <b>Trade confirmed</b>")
+      : hasErrors
+        ? "⚠️ <b>Some trades failed</b>"
+        : (mutableOutcomes.length > 1 ? `⏳ <b>${mutableOutcomes.length} trades submitted</b>` : "⏳ <b>Trade submitted</b>");
+    const msg = `${header}\n\n${resultLines}${staleHint}`;
+    const truncated = msg.length > 4000 ? msg.slice(0, 3990) + "…" : msg;
+    await editMessageText(token, chatId, messageId, truncated).catch(() => {});
+
+    await updatePendingAssistantMessage(
+      env.KV,
+      userId,
+      allSuccess
+        ? (mutableOutcomes.length > 1 ? `All ${mutableOutcomes.length} trades confirmed.` : "Trade confirmed.")
+        : hasErrors
+          ? "Some trades failed."
+          : "Trade submitted — waiting for on-chain confirmation.",
+    );
+
+    if (allDone) break;
+  }
 }
 
 /** Replace the last assistant message that advertised a pending Telegram transaction. */

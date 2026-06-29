@@ -32,6 +32,7 @@ const READONLY_TOOLS = new Set<string>([
   "gmx_get_positions",
   "gmx_get_markets",
   "check_delegation_status",
+  "check_pending_tx",
   "get_crosschain_quote",
   "get_aggregated_nav",
   "get_rebalance_plan",
@@ -50,7 +51,7 @@ function getToolCategory(name: string): string {
   if (name.startsWith("crosschain_") || name.startsWith("get_aggregated_nav") || name.startsWith("get_rebalance_plan") || name.startsWith("verify_bridge_arrival")) return "Cross-Chain";
   if (name.startsWith("grg_")) return "GRG Staking";
   if (name === "deploy_smart_pool" || name === "fund_pool") return "Vault Management";
-  if (name.startsWith("setup_delegation") || name.startsWith("revoke_delegation") || name.startsWith("check_delegation_status") || name.startsWith("revoke_selectors")) return "Delegation";
+  if (name.startsWith("setup_delegation") || name.startsWith("revoke_delegation") || name.startsWith("check_delegation_status") || name === "check_pending_tx" || name.startsWith("revoke_selectors")) return "Delegation";
   if (name.startsWith("create_twap_") || name.startsWith("cancel_twap_") || name.startsWith("list_twap_")) return "TWAP Orders";
   if (name.startsWith("create_nav_sync") || name.startsWith("list_nav_syncs") || name.startsWith("cancel_nav_sync")) return "NAV Sync";
   if (name.startsWith("set_default_slippage") || name.startsWith("set_swap_shield_tolerance") || name.startsWith("enable_swap_shield")) return "Operator Settings";
