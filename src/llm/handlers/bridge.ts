@@ -117,7 +117,6 @@ export async function handle_crosschain_sync(
   const srcChainArg = args.sourceChain as string | undefined;
   const destChainArg = args.destinationChain as string;
   const navToleranceBps = args.navToleranceBps as number | undefined;
-  const equalizeNav = args.equalizeNav as boolean | undefined;
   const useNativeEth = args.useNativeEth === true || args.useNativeEth === "true";
   // Default: same token on both sides (ETH→ETH when useNativeEth, WETH→WETH otherwise).
   // LLM overrides explicitly for cross-form requests: ETH→WETH (false) or WETH→ETH (true).
@@ -125,11 +124,18 @@ export async function handle_crosschain_sync(
     ? (args.shouldUnwrapOnDestination === true || args.shouldUnwrapOnDestination === "true")
     : useNativeEth;
 
-  // When equalizeNav=true, IGNORE LLM-provided amount and token.
-  // These are computed DETERMINISTICALLY by the equalization algorithm.
-  // The LLM's only job is to pass the two chain names + equalizeNav=true.
-  const tokenSymbol = equalizeNav ? undefined : (args.token as string | undefined);
-  const amount = equalizeNav ? undefined : (args.amount as string | undefined);
+  const tokenSymbol = args.token as string | undefined;
+  const amount = args.amount as string | undefined;
+
+  // CRITICAL: the LLM must never invent an amount for a sync.
+  //   - If amount is omitted → deterministic NAV equalization computes it.
+  //   - If amount is provided → token must also be provided (operator-specified sync).
+  if (amount && !tokenSymbol) {
+    throw new Error(
+      `crosschain_sync requires a token when an amount is provided. ` +
+        `Either provide both token and amount, or omit amount for deterministic NAV equalization.`,
+    );
+  }
 
   if (!destChainArg) {
     throw new Error("destinationChain is required for crosschain_sync.");
@@ -153,7 +159,6 @@ export async function handle_crosschain_sync(
     tokenSymbol,
     amount,
     navToleranceBps,
-    equalizeNav,
     useNativeEth,
     shouldUnwrapOnDestination,
     alchemyKey: env.ALCHEMY_API_KEY,
@@ -177,15 +182,16 @@ export async function handle_crosschain_sync(
   const navContext = eq
     ? [
         `NAV equalization${eq.directionAutoSwapped ? ' (direction auto-corrected)' : ''}:`,
-        `  ${effectiveSrcName} NAV: ${eq.srcNavFormatted} | ${effectiveDstName} NAV: ${eq.dstNavFormatted}`,
-        `  Divergence: ${(eq.divergenceBps / 100).toFixed(2)}% → ~${(eq.postDivergenceBps / 100).toFixed(2)}% after sync`,
+        `  Global target price: ${eq.targetPrice} per pool token`,
+        `  ${effectiveSrcName} price: ${eq.srcPrice} ${eq.srcBaseTokenSymbol} | ${effectiveDstName} price: ${eq.dstPrice} ${eq.dstBaseTokenSymbol}`,
+        `  Divergence from target: ${(eq.divergenceBps / 100).toFixed(2)}% → ~${(eq.postDivergenceBps / 100).toFixed(2)}% after sync`,
         ...(eq.capped ? [`  ⚠ ${eq.capReason}`] : []),
       ].join('\n')
     : (navImpact && navImpact.preUnitaryValue !== "0"
       ? [
           `Projected source-chain NAV impact:`,
-          `  Pre-sync unitary value: ${navImpact.preUnitaryValue}`,
-          `  Post-sync unitary value: ${navImpact.postUnitaryValue}`,
+          `  Pre-sync price: ${navImpact.preUnitaryValue}`,
+          `  Post-sync price: ${navImpact.postUnitaryValue}`,
           `  Impact: ${Number(navImpact.impactPct).toFixed(2)}% (negative = NAV drop)`,
         ].join('\n')
       : '');
@@ -357,34 +363,24 @@ export async function handle_get_aggregated_nav(
     env.KV,
   );
 
-  // Per-chain: only base token, unitary value, and effective supply.
-  const chainLines: string[] = [];
+  const messageLines = [
+    `📊 Aggregated assets — ${ctx.vaultAddress}`,
+    "",
+    `Global target price: ${nav.globalNav.targetPrice}`,
+    `Total assets: ${nav.globalNav.totalUsdc} USDC`,
+  ];
+
   for (const snap of nav.chains) {
-    if (snap.error) {
-      chainLines.push(`${snap.chainName}: no data`);
-      continue;
-    }
-    if (snap.effectiveSupply === 0n) continue;
+    if (snap.error || snap.effectiveSupply === 0n) continue;
     const divisor = 10 ** snap.baseTokenDecimals;
-    const unitaryStr = (Number(snap.unitaryValue) / divisor).toFixed(6);
+    const priceBaseStr = (Number(snap.unitaryValue) / divisor).toFixed(6);
     const supplyStr = (Number(snap.effectiveSupply) / divisor).toFixed(4);
-    chainLines.push(
-      `${snap.chainName}: base=${snap.baseTokenSymbol} | unitary=${unitaryStr} ${snap.baseTokenSymbol} | supply=${supplyStr}`,
+    messageLines.push(
+      `  ${snap.chainName}: base=${snap.baseTokenSymbol} | price=${priceBaseStr} ${snap.baseTokenSymbol} | supply=${supplyStr}`,
     );
   }
 
-  const messageLines = [
-    `📊 Aggregated NAV — ${ctx.vaultAddress}`,
-    "",
-    `Global unitary NAV: ${nav.globalNav.unitaryUsdc} USDC per normalized pool token`,
-  ];
-  if (nav.globalNav.totalUsdc && nav.globalNav.totalUsdc !== "0.00") {
-    messageLines.push(`Total NAV: ${nav.globalNav.totalUsdc} USDC`);
-  }
-
-  if (chainLines.length > 0) {
-    messageLines.push("", ...chainLines);
-  } else {
+  if (messageLines.length <= 4) {
     messageLines.push("", "No vault data found on any chain.");
   }
 

@@ -28,6 +28,17 @@ const CHAIN_TO_PLATFORM: Record<number, string> = {
   11155111: "", // testnet — no CoinGecko data
 };
 
+/** Reverse lookup used for error messages */
+const PLATFORM_TO_CHAIN_NAME: Record<string, string> = {
+  ethereum: "Ethereum",
+  "optimistic-ethereum": "Optimism",
+  "binance-smart-chain": "BSC",
+  unichain: "Unichain",
+  "polygon-pos": "Polygon",
+  base: "Base",
+  "arbitrum-one": "Arbitrum",
+};
+
 /** In-memory cache: `SYMBOL:chainId` → address */
 const memoryCache = new Map<string, `0x${string}`>();
 
@@ -47,6 +58,49 @@ const CG_HEADERS: Record<string, string> = {
   "User-Agent": "RigoblockOperator/1.0",
   Accept: "application/json",
 };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Retry fetch helper for transient CoinGecko failures (429 / 5xx / network).
+ * Backs off linearly with jitter to avoid thundering herd.
+ */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit = {},
+  { retries = 3, baseDelay = 500 }: { retries?: number; baseDelay?: number } = {},
+): Promise<Response> {
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok) return res;
+
+      // Retry on rate limits and server errors; do not retry client errors
+      if (res.status === 429 || res.status >= 500) {
+        const text = await res.text().catch(() => "");
+        lastError = new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+      } else {
+        // 4xx errors are final
+        return res;
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+    }
+
+    if (attempt < retries) {
+      const jitter = Math.floor(Math.random() * 200);
+      await sleep(baseDelay * (attempt + 1) + jitter);
+    }
+  }
+
+  throw new Error(
+    `CoinGecko request failed after ${retries + 1} attempts: ${lastError?.message || "unknown"}`,
+  );
+}
 
 /**
  * Resolve a token symbol to a contract address on the given chain.
@@ -88,9 +142,10 @@ export async function resolveTokenBySymbol(
   }
 
   // Layer 3: CoinGecko API
-  const searchRes = await fetch(
+  const searchRes = await fetchWithRetry(
     `${COINGECKO_API}/search?query=${encodeURIComponent(symbol)}`,
     { headers: CG_HEADERS },
+    { retries: 3, baseDelay: 500 },
   );
   if (!searchRes.ok) {
     const status = searchRes.status;
@@ -139,36 +194,93 @@ export async function resolveTokenBySymbol(
     rank: number | null;
   }> = [];
 
-  for (const match of exactMatches.slice(0, 5)) {
-    const coinRes = await fetch(
-      `${COINGECKO_API}/coins/${match.id}?localization=false&tickers=false&market_data=false&community_data=false&developer_data=false`,
-      { headers: CG_HEADERS },
-    );
-    if (!coinRes.ok) {
-      console.error(
-        `[tokenResolver] CoinGecko coin/${match.id} failed: ${coinRes.status}`,
+  let fetchFailures = 0;
+  const checkedDetails: Array<{
+    id: string;
+    name: string;
+    platforms?: Record<string, string>;
+    fetchFailed: boolean;
+  }> = [];
+
+  for (const match of exactMatches) {
+    try {
+      const coinRes = await fetchWithRetry(
+        `${COINGECKO_API}/coins/${match.id}?localization=false&tickers=false&market_data=false&community_data=false&developer_data=false`,
+        { headers: CG_HEADERS },
+        { retries: 3, baseDelay: 750 },
       );
-      continue;
-    }
+      if (!coinRes.ok) {
+        fetchFailures++;
+        checkedDetails.push({
+          id: match.id,
+          name: match.name,
+          fetchFailed: true,
+        });
+        continue;
+      }
 
-    const coinData = (await coinRes.json()) as {
-      platforms?: Record<string, string>;
-    };
+      const coinData = (await coinRes.json()) as {
+        platforms?: Record<string, string>;
+      };
 
-    const address = coinData.platforms?.[platform];
-    if (address && address.startsWith("0x")) {
-      candidates.push({
+      checkedDetails.push({
+        id: match.id,
         name: match.name,
-        address: address as `0x${string}`,
-        rank: match.market_cap_rank,
+        platforms: coinData.platforms || {},
+        fetchFailed: false,
+      });
+
+      const address = coinData.platforms?.[platform];
+      if (address && address.startsWith("0x")) {
+        candidates.push({
+          name: match.name,
+          address: address as `0x${string}`,
+          rank: match.market_cap_rank,
+        });
+      }
+    } catch (err) {
+      fetchFailures++;
+      console.error(
+        `[tokenResolver] CoinGecko coin/${match.id} failed:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      checkedDetails.push({
+        id: match.id,
+        name: match.name,
+        fetchFailed: true,
       });
     }
   }
 
   if (candidates.length === 0) {
     const topMatch = exactMatches[0];
+
+    // If every detail fetch failed, say so instead of pretending the token
+    // does not exist on this chain.
+    if (fetchFailures === exactMatches.length) {
+      throw new Error(
+        `Token "${symbol}" (${topMatch.id}) was found on CoinGecko, but its contract details could not be retrieved. ` +
+          `This is usually a temporary rate-limit from CoinGecko. Please retry shortly or provide the contract address.`,
+      );
+    }
+
+    // Otherwise, the token genuinely has no contract on this chain. List the
+    // chains where the top match is available so the user can switch chain or
+    // paste an address.
+    const topDetails = checkedDetails.find((d) => d.id === topMatch.id);
+    const availableChains = topDetails?.platforms
+      ? Object.keys(topDetails.platforms)
+          .map((p) => PLATFORM_TO_CHAIN_NAME[p] || p)
+          .filter(Boolean)
+          .join(", ")
+      : "";
+
+    const hint = availableChains
+      ? ` It is available on: ${availableChains}.`
+      : "";
+
     throw new Error(
-      `Token "${symbol}" (${topMatch.id}) found on CoinGecko but has no contract on chain ${chainId}. ` +
+      `Token "${symbol}" (${topMatch.id}) found on CoinGecko but has no contract on chain ${chainId}.${hint} ` +
         `Try a different chain or provide the contract address.`,
     );
   }

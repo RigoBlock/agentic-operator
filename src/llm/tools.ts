@@ -564,14 +564,14 @@ export const TOOL_DEFINITIONS = [
         "preserving supply and updating NAV. " +
         "Supports explicit amount/token OR deterministic equalization. " +
         "Supports WETH↔ETH forms via useNativeEth and shouldUnwrapOnDestination. " +
-        "When equalizeNav=true: the tool DETERMINISTICALLY computes direction, token, and amount. " +
-        "It reads getPoolTokens() on both chains, normalizes unitaryValue accounting for decimal " +
-        "differences (e.g. USDT is 6-dec on Arbitrum but 18-dec on BSC), applies a closed-form " +
-        "formula to find the exact bridge amount that equalizes NAV, and simulates post-bridge " +
-        "NAV to verify convergence. Do NOT pass amount or token when equalizeNav=true — they " +
-        "are ignored in favor of the deterministic calculation. " +
-        "When equalizeNav is false or omitted: use the operator-specified amount and token. " +
-        "If amount/token are omitted, the tool falls back to a small default amount to propagate NAV state.",
+        "DETERMINISTIC EQUALIZATION (amount OMITTED): the tool reads getPoolTokens() on both " +
+        "chains, normalizes unitaryValue accounting for decimal differences (e.g. USDT is 6-dec " +
+        "on Arbitrum but 18-dec on BSC), applies a closed-form formula to find the exact bridge " +
+        "amount that equalizes NAV, and simulates post-bridge NAV to verify convergence. " +
+        "Direction, token, and amount are auto-determined. An optional token can be provided as " +
+        "a preference. The LLM must NEVER guess an amount. " +
+        "EXPLICIT AMOUNT (amount PROVIDED): bridges exactly the operator-specified amount. " +
+        `Token is required in this mode.`,
       parameters: {
         type: "object",
         properties: {
@@ -585,11 +585,13 @@ export const TOOL_DEFINITIONS = [
           },
           token: {
             type: "string",
-            description: "Token to bridge for the sync message (USDC, USDT, WETH, WBTC). Required when equalizeNav is false/omitted and the user names a token; IGNORED when equalizeNav=true.",
+            description: "Token to bridge for the sync message (USDC, USDT, WETH, WBTC). " +
+              "REQUIRED when amount is provided. OPTIONAL when amount is omitted — used as the preferred token for deterministic equalization.",
           },
           amount: {
             type: "string",
-            description: "Explicit amount to bridge (human-readable). Use this when the operator specifies an amount for the sync. IGNORED when equalizeNav=true — computed by closed-form formula.",
+            description: "Explicit amount to bridge (human-readable). Omit for deterministic NAV equalization; " +
+              "if provided, token must also be provided.",
           },
           navToleranceBps: {
             type: "number",
@@ -599,16 +601,6 @@ export const TOOL_DEFINITIONS = [
               "because a sync moves tokens out without burning virtual supply, the source-chain unit price drops, and the contract rejects the tx if the drop exceeds this tolerance. " +
               "Raise this (e.g. to 500-1000 bps = 5-10%) if the sync amount is large relative to vault NAV. " +
               "This is INDEPENDENT of the server-side NAV shield threshold controlled via /navshield or Settings → NAV Shield.",
-          },
-          equalizeNav: {
-            type: "boolean",
-            description:
-              "When true: deterministic NAV equalization. Reads pool state on both chains, " +
-              "normalizes for decimal differences, computes exact bridge amount via closed-form " +
-              "formula, and shows pre/post NAV simulation. Direction, token, and amount are ALL " +
-              "auto-determined — do NOT set them. " +
-              "Use when user says 'equalise NAV', 'match unitary prices', 'same price on both chains', " +
-              "or 'calculate the amount for sync'.",
           },
           useNativeEth: {
             type: "boolean",

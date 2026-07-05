@@ -16,6 +16,23 @@
  * the unitary value drops >10%. This automatically covers `depositV3`
  * and any future vault methods — no per-method extension needed.
  *
+ * ## Multi-chain NAV calculation
+ * Each chain's NAV is computed locally from `updateUnitaryValue()` and converted
+ * to chain-local USDC via the BackgeoOracle. A single unit-less global target
+ * unitary is derived from:
+ *   target = Σ(total USDC) / Σ(USDC value of effective supplies)
+ * where for each chain:
+ *   supplyValueUsdc = totalUsdcNormalized × 10^baseTokenDecimals / unitaryValue
+ * The target has no unit; it is interpreted on each chain as the target number
+ * of base-token units per pool token (e.g. 2.45 ETH on Ethereum, 2.45 POL on
+ * Polygon, 2.45 BNB on BSC). NAV sync moves value from chains above the target
+ * to chains below the target, using stablecoins when base assets differ.
+ *
+ * NOTE: The oracle conversions use spot prices (`observe([0,1])`), not TWAP.
+ * This is acceptable for the off-chain NAV aggregation and rebalancing use case
+ * because the on-chain NAV shield and swap shield still enforce their own
+ * slippage/TWAP protections at execution time.
+ *
  * ## Decimals
  * Token decimals vary across chains (BSC USDC/USDT are 18 vs 6 elsewhere).
  * Amounts are sent to the Across API in the input token's native decimals.
@@ -79,19 +96,6 @@ const DEFAULT_NAV_TOLERANCE_BPS = 100;
 /** Across suggested-fees API base URL */
 const ACROSS_API = "https://app.across.to/api/suggested-fees";
 
-/**
- * Fallback sync amounts per token type (human-readable).
- * Used only when no amount is specified and equalization is not active.
- * The Across `isAmountTooLow` flag and on-chain OutputAmountTooLow revert
- * are the real guards — these are just sensible defaults for manual sync.
- */
-const FALLBACK_SYNC_AMOUNTS: Record<BridgeableTokenType, string> = {
-  USDC: "2",
-  USDT: "2",
-  WETH: "0.001",
-  WBTC: "0.0001",
-};
-
 // ── Types ─────────────────────────────────────────────────────────────
 
 export interface AcrossFeeQuote {
@@ -151,6 +155,8 @@ export interface ChainNavSnapshot {
   baseTokenDecimals: number;
   /** Total pool value converted to USDC and normalized to 6 decimals via the oracle */
   totalUsdcNormalized: bigint;
+  /** USDC value of this chain's effective supply: totalUsdcNormalized * 10^baseTokenDecimals / unitaryValue */
+  supplyValueUsdc: bigint;
   /** Bridgeable token balances held by the vault on this chain */
   tokenBalances: TokenBalance[];
   /** Whether delegation is active for the agent on this chain */
@@ -178,10 +184,12 @@ export interface AggregatedNav {
   globalNav: {
     /** Total vault assets across all chains in normalized USDC. */
     totalUsdc: string;
-    /** Global unitary NAV in USDC per 18-decimal normalized pool token. */
-    unitaryUsdc: string;
-    /** Per-chain breakdown (chainId -> USDC NAV and USDC unitary value). */
-    chainUsdc: Record<number, { totalUsdc: string; unitaryUsdc: string }>;
+    /** Unit-less global target price. Interpreted on each chain as the
+     *  target number of base-token units per pool token. */
+    targetPrice: string;
+    /** Total USDC value of all effective supplies across all chains. Used as the
+     *  denominator for the global target unitary. */
+    totalSupplyValueUsdc: string;
   };
 }
 
@@ -259,31 +267,30 @@ export async function getAggregatedNav(
     throw new Error(`Cannot compute global NAV: ${details}`);
   }
 
-  // Global NAV in normalized USDC: each chain's netTotalValue (base token) is
-  // converted to chain-local USDC via the on-chain oracle, normalized to 6
-  // decimals, and summed. Effective supplies are normalized to a common 18-
-  // decimal pool-token basis so the global unitary NAV is comparable across
-  // chains with different base-token decimals.
-  const NORMALIZED_DECIMALS = 18;
+  // Compute a unit-less global target unitary value.
+  // Each chain's NAV is denominated in its own base token. We convert both the
+  // total value and the effective supply to USDC via the oracle, then divide:
+  //   globalUnitary = Σ(totalUsdc_i) / Σ(supplyValueUsdc_i)
+  // where supplyValueUsdc_i = totalUsdc_i * 10^baseTokenDecimals / unitaryValue_i.
+  // The result has no unit; it is interpreted on each chain as the target number
+  // of base-token units per pool token (e.g. 2.45 ETH on Ethereum, 2.45 POL on Polygon).
+  const GLOBAL_UNITARY_PRECISION = 18;
   let totalUsdcNormalized = 0n;
-  let totalNormalizedSupply = 0n;
-  const chainUsdc: AggregatedNav["globalNav"]["chainUsdc"] = {};
+  let totalSupplyValueUsdc = 0n;
+
   for (const snap of snapshots) {
-    if (snap.error || snap.effectiveSupply === 0n || snap.totalUsdcNormalized === 0n) continue;
-    const normalizedSupply = normalizeToDecimals(snap.effectiveSupply, snap.baseTokenDecimals, NORMALIZED_DECIMALS);
-    const chainUnitaryUsdc = normalizedSupply > 0n
-      ? Number(formatUnits(snap.totalUsdcNormalized, 6)) / Number(formatUnits(normalizedSupply, NORMALIZED_DECIMALS))
-      : 0;
+    if (snap.error || snap.effectiveSupply === 0n || snap.totalUsdcNormalized === 0n || snap.unitaryValue === 0n) {
+      continue;
+    }
+    const supplyValueUsdc = (snap.totalUsdcNormalized * (10n ** BigInt(snap.baseTokenDecimals))) / snap.unitaryValue;
+    snap.supplyValueUsdc = supplyValueUsdc;
     totalUsdcNormalized += snap.totalUsdcNormalized;
-    totalNormalizedSupply += normalizedSupply;
-    chainUsdc[snap.chainId] = {
-      totalUsdc: formatUnits(snap.totalUsdcNormalized, 6),
-      unitaryUsdc: chainUnitaryUsdc.toFixed(6),
-    };
+    totalSupplyValueUsdc += supplyValueUsdc;
   }
-  const globalUnitaryUsdc = totalNormalizedSupply > 0n
-    ? Number(formatUnits(totalUsdcNormalized, 6)) / Number(formatUnits(totalNormalizedSupply, NORMALIZED_DECIMALS))
-    : 0;
+
+  const globalUnitaryRaw = totalSupplyValueUsdc > 0n
+    ? (totalUsdcNormalized * (10n ** BigInt(GLOBAL_UNITARY_PRECISION))) / totalSupplyValueUsdc
+    : 0n;
 
   const missingDelegationChains = snapshots
     .filter((s) => !s.delegationActive && !s.error && (s.totalValue > 0n || s.effectiveSupply > 0n))
@@ -295,8 +302,8 @@ export async function getAggregatedNav(
     missingDelegationChains,
     globalNav: {
       totalUsdc: formatUnits(totalUsdcNormalized, 6),
-      unitaryUsdc: globalUnitaryUsdc.toFixed(6),
-      chainUsdc,
+      targetPrice: formatUnits(globalUnitaryRaw, GLOBAL_UNITARY_PRECISION),
+      totalSupplyValueUsdc: formatUnits(totalSupplyValueUsdc, 6),
     },
   };
 }
@@ -346,14 +353,6 @@ export function sameBaseAsset(chainIdA: number, baseA: Address, chainIdB: number
   return false;
 }
 
-/** Stable grouping key for a base asset. Native / wrapped-native tokens group by
- *  native symbol; all other tokens group by exact address. */
-export function baseAssetKey(chainId: number, baseToken: Address): string {
-  if (isNativeBaseToken(chainId, baseToken)) {
-    return `native:${getNativeTokenSymbol(chainId)}`;
-  }
-  return `erc20:${baseToken.toLowerCase()}`;
-}
 
 /**
  * Read a single chain's NAV + token balances. Non-throwing — captures errors.
@@ -407,6 +406,8 @@ async function readChainSnapshot(
         baseTokenSymbol: tokenBalances.length > 0 ? "UNKNOWN" : "N/A",
         baseTokenDecimals: 18,
         totalUsdcNormalized: 0n,
+        supplyValueUsdc: 0n,
+
         tokenBalances,
         delegationActive,
       };
@@ -435,6 +436,8 @@ async function readChainSnapshot(
           baseTokenSymbol,
           baseTokenDecimals: state.decimals,
           totalUsdcNormalized: 0n,
+          supplyValueUsdc: 0n,
+  
           tokenBalances,
           delegationActive,
           error: `No USDC configured on chain ${chainId} — cannot price base token ${baseTokenSymbol}`,
@@ -461,6 +464,8 @@ async function readChainSnapshot(
           baseTokenSymbol,
           baseTokenDecimals: state.decimals,
           totalUsdcNormalized: 0n,
+          supplyValueUsdc: 0n,
+  
           tokenBalances,
           delegationActive,
           error: `Oracle pricing failed for ${baseTokenSymbol}: ${err instanceof Error ? err.message : String(err)}`,
@@ -479,6 +484,7 @@ async function readChainSnapshot(
       baseTokenSymbol,
       baseTokenDecimals: state.decimals,
       totalUsdcNormalized,
+      supplyValueUsdc: 0n,
       tokenBalances,
       delegationActive,
     };
@@ -494,6 +500,7 @@ async function readChainSnapshot(
       baseTokenSymbol: "N/A",
       baseTokenDecimals: 18,
       totalUsdcNormalized: 0n,
+      supplyValueUsdc: 0n,
       tokenBalances: [],
       delegationActive,
       error: err instanceof Error ? err.message : String(err),
@@ -1355,49 +1362,60 @@ export async function buildCrosschainTransfer(params: {
 
 /** Result of NAV equalization computation — fully deterministic, no LLM involvement.
  *
- * The algorithm:
- *   1. Read getPoolTokens() + getPool() on both chains → unitaryValue, totalSupply, decimals
- *   2. Normalize to common decimal base: normDec = min(dec_A, dec_B)
- *   3. Determine direction: bridge FROM higher-NAV chain
- *   4. Closed-form formula for exact bridge amount:
- *        X = ts_src × ts_dst × (uv_src − uv_dst) / (10^normDec × (ts_src + ts_dst))
- *      where ts = totalSupply, uv = unitaryValue (all in normalized units)
- *   5. Convert X to bridge token's source-chain decimals
- *   6. Apply constraints (min amount, max 87.5% of balance)
- *   7. Simulate post-bridge NAV on both chains
+ * Algorithm (global unit-less target unitary):
+ *   1. Read aggregated NAV for the vault via getAggregatedNav().
+ *   2. Compute the global target unitary as a unit-less ratio:
+ *        target = Σ(total USDC) / Σ(USDC value of effective supplies)
+ *   3. For the requested pair, compute each chain's deviation from target in USDC:
+ *        deviation = chain total USDC − target × chain supplyValueUsdc
+ *   4. Direction: bridge FROM the chain with positive deviation (above target)
+ *      TO the chain with negative deviation (below target).
+ *   5. Bridge amount in USDC = min(source excess, −destination deficit) so the
+ *      operation never overshoots the global target for either chain.
+ *   6. Convert the USDC bridge amount to the chosen bridge token via the oracle.
+ *   7. Cap to available vault balance on the source chain.
+ *   8. Simulate post-bridge NAV for verification.
+ *
+ * The global target is unit-less: 2.45 means 2.45 ETH per pool token on an ETH
+ * chain and 2.45 POL per pool token on a POL chain. This matches the model where
+ * each chain computes NAV in its own base token and cross-chain sync converges
+ * the numeric unitary value across all chains.
  */
 export interface NavEqualizationResult {
-  /** Source chain (bridges FROM here — the higher-NAV side) */
+  /** Source chain (bridges FROM here — the chain above the global target) */
   srcChainId: number;
-  /** Destination chain (bridges TO here — the lower-NAV side) */
+  /** Destination chain (bridges TO here — the chain below the global target) */
   dstChainId: number;
   /** Whether the tool auto-swapped the user's source/destination */
   directionAutoSwapped: boolean;
 
-  // ── Pre-bridge state (per chain, at correct pool.decimals) ──
-  srcNavFormatted: string;
-  dstNavFormatted: string;
+  /** Unit-less global target price */
+  targetPrice: string;
+
+  // ── Pre-bridge state (base-token prices) ──
+  srcPrice: string;
+  dstPrice: string;
+  srcBaseTokenSymbol: string;
+  dstBaseTokenSymbol: string;
   srcEffectiveSupply: string;
   dstEffectiveSupply: string;
-  srcTotalValue: string;
-  dstTotalValue: string;
-  srcDecimals: number;
-  dstDecimals: number;
-  /** Common decimal base used for all cross-chain comparisons */
-  normalizedDecimals: number;
+  srcTotalUsdc: string;
+  dstTotalUsdc: string;
+  srcDeviationUsdc: string;
+  dstDeviationUsdc: string;
 
-  // ── Divergence ──
+  // ── Divergence from global target ──
   divergenceBps: number;
 
   // ── Computed bridge ──
   bridgeToken: BridgeableToken;
   bridgeAmountFormatted: string;
   bridgeAmountRaw: bigint;
+  bridgeAmountUsdc: string;
 
-  // ── Post-bridge simulation (all in normalizedDecimals) ──
-  postSrcNav: string;
-  postDstNav: string;
-  targetNav: string;
+  // ── Post-bridge simulation (base-token prices) ──
+  postSrcPrice: string;
+  postDstPrice: string;
   postDivergenceBps: number;
 
   /** When true, bridge amount was constrained */
@@ -1496,32 +1514,25 @@ export async function projectSyncNavImpact(params: {
 }
 
 /**
- * Compute the exact bridge amount to equalize NAV across two chains.
+ * Compute the bridge amount needed to move two chains toward their shared
+ * per-base-asset group target NAV.
  *
  * This is a PURE DETERMINISTIC computation — no LLM interpretation.
- * The LLM's only job is to pass the two chain IDs and equalizeNav=true.
+ * The caller only has to pass the two chain IDs; the algorithm derives the
+ * direction, token, and amount from live pool state.
  *
- * Handles decimal differences between chains (e.g., USDT is 6-dec on
- * Arbitrum but 18-dec on BSC). Uses updateUnitaryValue() simulation to read
- * the EFFECTIVE pool state (accounts for virtual supply from crosschain
- * transfers), then normalizes to a common decimal base.
+ * Uses getAggregatedNav() to read the full multi-chain state and compute the
+ * group target in USDC as the common denominator. NAV sync only makes sense
+ * between chains that share the same base asset (ETH↔ETH, USDC↔USDC, ...).
  *
- * Uses updateUnitaryValue() instead of getPoolTokens() because:
- *   - getPoolTokens().totalSupply = 0 when all supply is from crosschain
- *     transfers (virtual supply only). updateUnitaryValue() computes the
- *     LIVE NAV including virtual supply → we derive effectiveSupply from it.
- *   - updateUnitaryValue() is a write function but we call it via eth_call
- *     (no state change) to read the live-computed netTotalValue + unitaryValue.
+ * The bridge amount in USDC is:
+ *   bridgeUsdc = min(srcDeviation, −dstDeviation)
+ * where deviation = chain total USDC − targetUnitaryUsdc × chain normalized supply.
+ * This avoids overshooting the group target for either chain.
  *
- * Closed-form formula (using total value directly):
- *   Post-bridge NAV equality constraint:
- *     (tv_src − X) / es_src = (tv_dst + X) / es_dst
- *   Solving for X (normalized value units):
- *     X = (es_dst × tv_src − es_src × tv_dst) / (es_src + es_dst)
- *
- * The formula gives the EXACT amount that makes both chains' NAV per pool
- * token equal. Subject to constraints: min bridge amount (relay fees),
- * max 87.5% of balance, available balance.
+ * Subject to constraints: available vault balance on the source chain,
+ * minimum bridge amount imposed by the Across solver, and the on-chain
+ * MINIMUM_SUPPLY_RATIO.
  */
 export async function computeNavEqualization(params: {
   vaultAddress: Address;
@@ -1532,217 +1543,269 @@ export async function computeNavEqualization(params: {
   preferredToken?: string;
   alchemyKey?: string;
 }): Promise<NavEqualizationResult> {
-  // 1. Read effective pool state on both chains in parallel
-  // Uses updateUnitaryValue() simulation to get live NAV including virtual supply
-  const [stateA, stateB] = await Promise.all([
-    getEffectivePoolState(params.userSrcChainId, params.vaultAddress, params.alchemyKey),
-    getEffectivePoolState(params.userDstChainId, params.vaultAddress, params.alchemyKey),
-  ]);
-
-  if (stateA.effectiveSupply === 0n && stateB.effectiveSupply === 0n) {
-    throw new Error("Both chains have zero effective supply. Nothing to equalize.");
+  if (params.userSrcChainId === params.userDstChainId) {
+    throw new Error("NAV equalization requires two different chains.");
   }
-  if (stateA.effectiveSupply === 0n || stateB.effectiveSupply === 0n) {
-    const zeroChain = stateA.effectiveSupply === 0n ? params.userSrcChainId : params.userDstChainId;
+
+  const GLOBAL_UNITARY_PRECISION = 18;
+
+  // 1. Read aggregated NAV to obtain the global unit-less target price.
+  const nav = await getAggregatedNav(
+    params.vaultAddress,
+    params.alchemyKey ?? "",
+  );
+
+  const srcSnap = nav.chains.find((s) => s.chainId === params.userSrcChainId);
+  const dstSnap = nav.chains.find((s) => s.chainId === params.userDstChainId);
+
+  if (!srcSnap) {
+    throw new Error(`No NAV data for source chain ${chainName(params.userSrcChainId)}.`);
+  }
+  if (!dstSnap) {
+    throw new Error(`No NAV data for destination chain ${chainName(params.userDstChainId)}.`);
+  }
+  if (srcSnap.error) {
+    throw new Error(`Cannot read NAV for ${chainName(params.userSrcChainId)}: ${srcSnap.error}`);
+  }
+  if (dstSnap.error) {
+    throw new Error(`Cannot read NAV for ${chainName(params.userDstChainId)}: ${dstSnap.error}`);
+  }
+  if (srcSnap.effectiveSupply === 0n || dstSnap.effectiveSupply === 0n) {
+    const zeroChainId = srcSnap.effectiveSupply === 0n ? params.userSrcChainId : params.userDstChainId;
     throw new Error(
-      `${chainName(zeroChain)} has zero effective supply. NAV equalization requires active pools on both chains.`,
+      `${chainName(zeroChainId)} has zero effective supply. ` +
+      `NAV equalization requires active pools on both chains.`,
     );
   }
 
-  // Equalization only makes sense when both chains denominate NAV in the same
-  // underlying asset. Comparing raw unitary values across ETH, BNB, POL, etc.
-  // would produce a meaningless bridge amount.
-  if (!sameBaseAsset(params.userSrcChainId, stateA.baseToken, params.userDstChainId, stateB.baseToken)) {
-    const srcBaseSymbol = getBaseTokenSymbol(params.userSrcChainId, stateA.baseToken);
-    const dstBaseSymbol = getBaseTokenSymbol(params.userDstChainId, stateB.baseToken);
+  // 2. Compute each chain's deviation from the global target in USDC.
+  const globalPriceRaw = parseUnits(nav.globalNav.targetPrice, GLOBAL_UNITARY_PRECISION);
+  const targetTotalUsdcSrc = (globalPriceRaw * srcSnap.supplyValueUsdc) / (10n ** BigInt(GLOBAL_UNITARY_PRECISION));
+  const targetTotalUsdcDst = (globalPriceRaw * dstSnap.supplyValueUsdc) / (10n ** BigInt(GLOBAL_UNITARY_PRECISION));
+
+  const srcDeviationUsdc = srcSnap.totalUsdcNormalized - targetTotalUsdcSrc;
+  const dstDeviationUsdc = dstSnap.totalUsdcNormalized - targetTotalUsdcDst;
+
+  const srcPriceBase = Number(formatUnits(srcSnap.unitaryValue, srcSnap.baseTokenDecimals));
+  const dstPriceBase = Number(formatUnits(dstSnap.unitaryValue, dstSnap.baseTokenDecimals));
+  const targetPriceBase = Number(nav.globalNav.targetPrice);
+
+  // 3. Determine direction: bridge FROM positive deviation (above target)
+  //    TO negative deviation (below target).
+  let srcChainId = params.userSrcChainId;
+  let dstChainId = params.userDstChainId;
+  let srcSnapFinal = srcSnap;
+  let dstSnapFinal = dstSnap;
+  let srcDeviationFinal = srcDeviationUsdc;
+  let dstDeviationFinal = dstDeviationUsdc;
+  let srcPriceBaseFinal = srcPriceBase;
+  let dstPriceBaseFinal = dstPriceBase;
+  let directionAutoSwapped = false;
+
+  if (srcDeviationUsdc > 0n && dstDeviationUsdc < 0n) {
+    // Use requested direction.
+  } else if (srcDeviationUsdc < 0n && dstDeviationUsdc > 0n) {
+    srcChainId = params.userDstChainId;
+    dstChainId = params.userSrcChainId;
+    srcSnapFinal = dstSnap;
+    dstSnapFinal = srcSnap;
+    srcDeviationFinal = dstDeviationUsdc;
+    dstDeviationFinal = srcDeviationUsdc;
+    srcPriceBaseFinal = dstPriceBase;
+    dstPriceBaseFinal = srcPriceBase;
+    directionAutoSwapped = true;
+  } else {
     throw new Error(
-      `Cannot equalize NAV between chains with different base assets ` +
-      `(${srcBaseSymbol} on ${chainName(params.userSrcChainId)} vs ` +
-      `${dstBaseSymbol} on ${chainName(params.userDstChainId)}). ` +
-      `NAV sync only makes sense between chains that share the same base asset.`,
+      `Both chains are on the same side of the global target (${nav.globalNav.targetPrice}). ` +
+      `${chainName(params.userSrcChainId)}: ${srcPriceBase.toFixed(6)} ${srcSnap.baseTokenSymbol}, ` +
+      `${chainName(params.userDstChainId)}: ${dstPriceBase.toFixed(6)} ${dstSnap.baseTokenSymbol}. ` +
+      `No equalization is possible between these two chains.`,
     );
   }
 
-  // 2. Normalize to common decimal base
-  // pool.decimals may differ between chains because the same token (USDT)
-  // has different decimals on different chains (6 on Arbitrum, 18 on BSC).
-  const normDec = Math.min(stateA.decimals, stateB.decimals);
-  const scaleA = 10n ** BigInt(stateA.decimals - normDec);
-  const scaleB = 10n ** BigInt(stateB.decimals - normDec);
-  const normDecPow = 10n ** BigInt(normDec);
+  // 4. Bridge amount in USDC: don't overshoot either chain.
+  const bridgeUsdc = srcDeviationFinal < -dstDeviationFinal
+    ? srcDeviationFinal
+    : -dstDeviationFinal;
 
-  const normUvA = stateA.unitaryValue / scaleA;
-  const normUvB = stateB.unitaryValue / scaleB;
-
-  // 3. Determine direction: bridge FROM higher-NAV chain TO lower-NAV chain
-  const aIsHigher = normUvA >= normUvB;
-  const srcChainId = aIsHigher ? params.userSrcChainId : params.userDstChainId;
-  const dstChainId = aIsHigher ? params.userDstChainId : params.userSrcChainId;
-  const srcState = aIsHigher ? stateA : stateB;
-  const dstState = aIsHigher ? stateB : stateA;
-  const srcScale = aIsHigher ? scaleA : scaleB;
-  const dstScale = aIsHigher ? scaleB : scaleA;
-  const directionAutoSwapped = srcChainId !== params.userSrcChainId;
-
-  const normSrcUv = srcState.unitaryValue / srcScale;
-  const normDstUv = dstState.unitaryValue / dstScale;
-
-  // Normalize effective supply and total value for cross-chain comparison
-  const normSrcEs = srcState.effectiveSupply / srcScale;
-  const normDstEs = dstState.effectiveSupply / dstScale;
-  const normSrcTv = srcState.netTotalValue / srcScale;
-  const normDstTv = dstState.netTotalValue / dstScale;
-
-  // 4. Pre-bridge divergence
-  const divergenceBps = normSrcUv > 0n
-    ? Number((normSrcUv - normDstUv) * 10000n / normSrcUv)
-    : 0;
-
-  if (divergenceBps === 0) {
+  if (bridgeUsdc <= 0n) {
     throw new Error(
-      `NAV is already equal on both chains ` +
-      `(${formatUnits(stateA.unitaryValue, stateA.decimals)} on ${chainName(params.userSrcChainId)}, ` +
-      `${formatUnits(stateB.unitaryValue, stateB.decimals)} on ${chainName(params.userDstChainId)}). ` +
-      `No equalization needed.`,
+      `Calculated bridge amount is zero. ` +
+      `${chainName(srcChainId)} is ${formatUnits(srcDeviationFinal, 6)} USDC above target, ` +
+      `${chainName(dstChainId)} is ${formatUnits(-dstDeviationFinal, 6)} USDC below target.`,
     );
   }
 
-  // 5. Closed-form bridge amount using total value directly
-  //
-  // Post-bridge equality: (tv_src − X) / es_src == (tv_dst + X) / es_dst
-  // Solving: X = (es_dst × tv_src − es_src × tv_dst) / (es_src + es_dst)
-  //
-  // This formulation uses netTotalValue directly — more robust than the UV-based
-  // formula because it handles virtual supply correctly without reconstruction.
-  const numerator = normDstEs * normSrcTv - normSrcEs * normDstTv;
-  const denominator = normSrcEs + normDstEs;
-  const bridgeValueNorm = numerator / denominator;
-
-  // 6. Find bridge token — prefer base token type for exact 1:1 value conversion
+  // 5. Select bridge token on source chain.
   const srcTokens = CROSSCHAIN_TOKENS[srcChainId] || [];
-  const dstTokenTypes = new Set((CROSSCHAIN_TOKENS[dstChainId] || []).map(t => t.type));
+  const dstTokenTypes = new Set((CROSSCHAIN_TOKENS[dstChainId] || []).map((t) => t.type));
 
   // Identify base token type on source chain
   let baseTokenType: BridgeableTokenType | undefined;
   const zeroAddr = "0x0000000000000000000000000000000000000000";
-  if (srcState.baseToken.toLowerCase() !== zeroAddr) {
+  if (srcSnapFinal.baseToken.toLowerCase() !== zeroAddr) {
     const match = srcTokens.find(
-      t => t.address.toLowerCase() === srcState.baseToken.toLowerCase(),
+      (t) => t.address.toLowerCase() === srcSnapFinal.baseToken.toLowerCase(),
     );
     if (match) baseTokenType = match.type;
   } else {
     baseTokenType = "WETH"; // native token (ETH/BNB) → WETH
   }
 
-  // Find the best token: prefer base token type, then highest balance
-  let candidates = srcTokens.filter(t => dstTokenTypes.has(t.type));
+  const crossBaseAsset = !sameBaseAsset(
+    srcSnapFinal.chainId, srcSnapFinal.baseToken,
+    dstSnapFinal.chainId, dstSnapFinal.baseToken,
+  );
+
+  let candidates = srcTokens.filter((t) => dstTokenTypes.has(t.type));
   if (params.preferredToken) {
     const pref = params.preferredToken.toUpperCase();
-    const filtered = candidates.filter(t => t.type === pref || t.symbol === pref);
+    const filtered = candidates.filter((t) => t.type === pref || t.symbol === pref);
     if (filtered.length > 0) candidates = filtered;
   }
 
+  // Prefer base token when both chains share the same base asset (1:1 value transfer).
+  // For cross-base-asset syncs, force stablecoins to avoid mismatched bridge tokens.
   let bestToken: BridgeableToken | undefined;
   let bestBalance = 0n;
   let isBaseMatch = false;
+  let isStableMatch = false;
 
   for (const candidate of candidates) {
     const { balance } = await getVaultTokenBalance(
-      srcChainId, params.vaultAddress, candidate.address, params.alchemyKey,
+      srcChainId,
+      params.vaultAddress,
+      candidate.address,
+      params.alchemyKey,
     ).catch(() => ({ balance: 0n, decimals: candidate.decimals, symbol: candidate.symbol }));
 
     const isBT = candidate.type === baseTokenType;
+    const isStable = candidate.type === "USDC" || candidate.type === "USDT";
+
+    if (crossBaseAsset && !isStable) continue;
+
     if (isBT && balance > 0n && (!isBaseMatch || balance > bestBalance)) {
       bestToken = candidate;
       bestBalance = balance;
       isBaseMatch = true;
-    } else if (!isBT && !isBaseMatch && balance > bestBalance) {
+    } else if (isStable && !isBaseMatch && balance > 0n && (!isStableMatch || balance > bestBalance)) {
+      bestToken = candidate;
+      bestBalance = balance;
+      isStableMatch = true;
+    } else if (!isBT && !isStable && !isBaseMatch && !isStableMatch && balance > bestBalance) {
       bestToken = candidate;
       bestBalance = balance;
     }
   }
 
   if (!bestToken || bestBalance === 0n) {
-    const available = candidates.map(t => t.symbol).join(", ");
+    const available = candidates.map((t) => t.symbol).join(", ");
     throw new Error(
       `No bridgeable token with balance on ${chainName(srcChainId)} for NAV equalization. ` +
       `Checked: ${available || "none bridgeable"}.`,
     );
   }
 
-  // 7. Convert normalized value to bridge token amount (source chain decimals)
-  //
-  // bridgeValueNorm is in normDec-unit value. The bridge token's economic
-  // denomination matches the pool's base token (1:1 for stablecoins).
-  // Scale to the bridge token's native decimals on the source chain:
-  //   bridgeAmount = bridgeValueNorm × 10^(bridgeTokenDec − normDec)
-  const bridgeTokenDec = bestToken.decimals;
+  // 6. Convert USDC bridge amount to bridge token units.
+  const usdcToken = srcTokens.find((t) => t.type === "USDC");
   let bridgeAmountRaw: bigint;
-  if (bridgeTokenDec >= normDec) {
-    bridgeAmountRaw = bridgeValueNorm * (10n ** BigInt(bridgeTokenDec - normDec));
+  if (bestToken.type === "USDC") {
+    bridgeAmountRaw = normalizeToDecimals(bridgeUsdc, 6, bestToken.decimals);
   } else {
-    bridgeAmountRaw = bridgeValueNorm / (10n ** BigInt(normDec - bridgeTokenDec));
+    if (!usdcToken) {
+      throw new Error(
+        `Cannot convert bridge amount to ${bestToken.symbol}: no USDC token configured on ${chainName(srcChainId)}.`,
+      );
+    }
+    bridgeAmountRaw = await convertTokenAmountViaOracle(
+      srcChainId,
+      usdcToken.address,
+      bridgeUsdc,
+      bestToken.address,
+      params.alchemyKey ?? "",
+    );
   }
 
-  // 8. Apply constraints (max cap only — no minimum floor)
+  // 7. Apply constraints (max cap only — no minimum floor)
   // If the amount is too small for the Across solver, the API returns
   // isAmountTooLow=true and the on-chain OutputAmountTooLow revert guards it.
   let capped = false;
   let capReason: string | undefined;
+  let actualBridgeUsdc = bridgeUsdc;
 
-  // Can't bridge more than available balance
   if (bridgeAmountRaw > bestBalance) {
     bridgeAmountRaw = bestBalance;
     capped = true;
-    capReason = `Capped at available balance (${formatUnits(bestBalance, bridgeTokenDec)} ${bestToken.symbol})`;
+    capReason = `Capped at available balance (${formatUnits(bestBalance, bestToken.decimals)} ${bestToken.symbol})`;
+    // Recompute the USDC value of the capped amount for simulation.
+    if (bestToken.type === "USDC") {
+      actualBridgeUsdc = normalizeToDecimals(bridgeAmountRaw, bestToken.decimals, 6);
+    } else if (usdcToken) {
+      actualBridgeUsdc = await convertTokenAmountViaOracle(
+        srcChainId,
+        bestToken.address,
+        bridgeAmountRaw,
+        usdcToken.address,
+        params.alchemyKey ?? "",
+      );
+    }
   }
 
-  // 9. Post-bridge NAV simulation
-  // Convert actual bridge amount back to normalized units
-  let actualBridgeValueNorm: bigint;
-  if (bridgeTokenDec >= normDec) {
-    actualBridgeValueNorm = bridgeAmountRaw / (10n ** BigInt(bridgeTokenDec - normDec));
-  } else {
-    actualBridgeValueNorm = bridgeAmountRaw * (10n ** BigInt(normDec - bridgeTokenDec));
-  }
+  // 8. Post-bridge NAV simulation in base-token unitaries
+  const postSrcTotalUsdc = srcSnapFinal.totalUsdcNormalized - actualBridgeUsdc;
+  const postDstTotalUsdc = dstSnapFinal.totalUsdcNormalized + actualBridgeUsdc;
 
-  // Use netTotalValue directly for post-bridge simulation
-  const post_tv_src = normSrcTv - actualBridgeValueNorm;
-  const post_tv_dst = normDstTv + actualBridgeValueNorm;
-
-  const postSrcUv = normSrcEs > 0n ? post_tv_src * normDecPow / normSrcEs : 0n;
-  const postDstUv = normDstEs > 0n ? post_tv_dst * normDecPow / normDstEs : 0n;
-  const targetUv = (normSrcEs + normDstEs) > 0n
-    ? (normSrcTv + normDstTv) * normDecPow / (normSrcEs + normDstEs)
-    : 0n;
-
-  const higher = postSrcUv > postDstUv ? postSrcUv : postDstUv;
-  const lower = postSrcUv > postDstUv ? postDstUv : postSrcUv;
-  const postDivergenceBps = higher > 0n
-    ? Number((higher - lower) * 10000n / higher)
+  const postSrcPriceBase = srcSnapFinal.supplyValueUsdc > 0n
+    ? Number(formatUnits(
+        postSrcTotalUsdc * (10n ** BigInt(srcSnapFinal.baseTokenDecimals)) / srcSnapFinal.supplyValueUsdc,
+        srcSnapFinal.baseTokenDecimals,
+      ))
+    : 0;
+  const postDstPriceBase = dstSnapFinal.supplyValueUsdc > 0n
+    ? Number(formatUnits(
+        postDstTotalUsdc * (10n ** BigInt(dstSnapFinal.baseTokenDecimals)) / dstSnapFinal.supplyValueUsdc,
+        dstSnapFinal.baseTokenDecimals,
+      ))
     : 0;
 
+  const preSrcDeviationBps = targetPriceBase > 0
+    ? Math.round(Math.abs(srcPriceBaseFinal - targetPriceBase) / targetPriceBase * 10000)
+    : 0;
+  const preDstDeviationBps = targetPriceBase > 0
+    ? Math.round(Math.abs(dstPriceBaseFinal - targetPriceBase) / targetPriceBase * 10000)
+    : 0;
+  const divergenceBps = Math.max(preSrcDeviationBps, preDstDeviationBps);
+
+  const postSrcDeviationBps = targetPriceBase > 0
+    ? Math.round(Math.abs(postSrcPriceBase - targetPriceBase) / targetPriceBase * 10000)
+    : 0;
+  const postDstDeviationBps = targetPriceBase > 0
+    ? Math.round(Math.abs(postDstPriceBase - targetPriceBase) / targetPriceBase * 10000)
+    : 0;
+  const postDivergenceBps = Math.max(postSrcDeviationBps, postDstDeviationBps);
 
   return {
     srcChainId,
     dstChainId,
     directionAutoSwapped,
-    srcNavFormatted: formatUnits(srcState.unitaryValue, srcState.decimals),
-    dstNavFormatted: formatUnits(dstState.unitaryValue, dstState.decimals),
-    srcEffectiveSupply: formatUnits(srcState.effectiveSupply, srcState.decimals),
-    dstEffectiveSupply: formatUnits(dstState.effectiveSupply, dstState.decimals),
-    srcTotalValue: formatUnits(srcState.netTotalValue, srcState.decimals),
-    dstTotalValue: formatUnits(dstState.netTotalValue, dstState.decimals),
-    srcDecimals: srcState.decimals,
-    dstDecimals: dstState.decimals,
-    normalizedDecimals: normDec,
+    targetPrice: nav.globalNav.targetPrice,
+    srcPrice: srcPriceBaseFinal.toFixed(6),
+    dstPrice: dstPriceBaseFinal.toFixed(6),
+    srcBaseTokenSymbol: srcSnapFinal.baseTokenSymbol,
+    dstBaseTokenSymbol: dstSnapFinal.baseTokenSymbol,
+    srcEffectiveSupply: formatUnits(srcSnapFinal.effectiveSupply, srcSnapFinal.baseTokenDecimals),
+    dstEffectiveSupply: formatUnits(dstSnapFinal.effectiveSupply, dstSnapFinal.baseTokenDecimals),
+    srcTotalUsdc: formatUnits(srcSnapFinal.totalUsdcNormalized, 6),
+    dstTotalUsdc: formatUnits(dstSnapFinal.totalUsdcNormalized, 6),
+    srcDeviationUsdc: formatUnits(srcDeviationFinal, 6),
+    dstDeviationUsdc: formatUnits(dstDeviationFinal, 6),
     divergenceBps,
     bridgeToken: bestToken,
-    bridgeAmountFormatted: formatUnits(bridgeAmountRaw, bridgeTokenDec),
+    bridgeAmountFormatted: formatUnits(bridgeAmountRaw, bestToken.decimals),
     bridgeAmountRaw,
-    postSrcNav: formatUnits(postSrcUv, normDec),
-    postDstNav: formatUnits(postDstUv, normDec),
-    targetNav: formatUnits(targetUv, normDec),
+    bridgeAmountUsdc: formatUnits(actualBridgeUsdc, 6),
+    postSrcPrice: postSrcPriceBase.toFixed(6),
+    postDstPrice: postDstPriceBase.toFixed(6),
     postDivergenceBps,
     capped,
     capReason,
@@ -1752,21 +1815,31 @@ export async function computeNavEqualization(params: {
 /**
  * Build a cross-chain sync transaction (OpType.Sync).
  *
- * When equalizeNav=true, uses computeNavEqualization() for a mathematically
- * sound, deterministic calculation that accounts for decimal differences
- * between chains. The LLM should NOT pass amount or token — they are computed.
+ * TWO MODES — determined by whether `amount` is provided:
  *
- * When equalizeNav=false (default), sends a minimal amount to propagate
- * NAV state. Picks a bridgeable token available on both chains.
+ * 1. Deterministic NAV equalization (amount OMITTED):
+ *    Uses computeNavEqualization() to move the requested pair toward the
+ *    per-base-asset group target NAV computed by getAggregatedNav(). The target
+ *    is derived from aggregate USDC total assets divided by aggregate normalized
+ *    effective supply within the group. Direction, token, and amount are all
+ *    computed deterministically from live pool state. The optional `tokenSymbol`
+ *    is treated as a preferred token when multiple bridgeable tokens are
+ *    available.
+ *
+ * 2. Explicit amount sync (amount PROVIDED):
+ *    Bridges exactly the operator-specified amount of `tokenSymbol`. The caller
+ *    must provide both `amount` and `tokenSymbol`.
+ *
+ * The LLM must NEVER invent an amount. Either the operator supplies one, or the
+ * closed-form equalization computes it.
  */
 export async function buildCrosschainSync(params: {
   vaultAddress: Address;
   srcChainId: number;
   dstChainId: number;
-  tokenSymbol?: string;   // auto-selects if omitted
-  amount?: string;        // auto-calculates if omitted
+  tokenSymbol?: string;   // required when amount is provided; preferred token when equalizing
+  amount?: string;        // omit for deterministic NAV equalization
   navToleranceBps?: number;
-  equalizeNav?: boolean;
   useNativeEth?: boolean; // true = vault wraps native ETH→WETH via sourceNativeAmount
   shouldUnwrapOnDestination?: boolean;
   alchemyKey?: string;
@@ -1794,15 +1867,16 @@ export async function buildCrosschainSync(params: {
   let amount = params.amount;
   let navEqualization: NavEqualizationResult | undefined;
 
-  // ── NAV equalization: deterministic, decimal-aware calculation ──
-  // When equalizeNav=true, computeNavEqualization() handles everything:
+  // ── Deterministic NAV equalization (amount omitted) ──
+  // computeNavEqualization() handles everything:
   //   - Reads getPoolTokens() + getPool() on both chains for correct per-chain decimals
   //   - Normalizes to common decimal base (handles 6 vs 18 dec differences)
   //   - Auto-corrects direction (bridges FROM higher-NAV chain)
   //   - Closed-form formula: exact bridge amount for price convergence
   //   - Post-bridge NAV simulation for verification
-  // The LLM should NOT pass amount or token — they are computed deterministically.
-  if (params.equalizeNav) {
+  // The caller must NOT invent an amount; either the operator provides it or
+  // the algorithm computes it.
+  if (amount === undefined) {
     navEqualization = await computeNavEqualization({
       vaultAddress: params.vaultAddress,
       userSrcChainId: params.srcChainId,
@@ -1816,45 +1890,12 @@ export async function buildCrosschainSync(params: {
     dstChainId = navEqualization.dstChainId;
     tokenSymbol = navEqualization.bridgeToken.type;
     amount = navEqualization.bridgeAmountFormatted;
-  }
-
-  // Auto-select token if still not determined (non-equalization path)
-  if (!tokenSymbol) {
-    const srcTokens = CROSSCHAIN_TOKENS[srcChainId] || [];
-    const dstTokens = new Set(
-      (CROSSCHAIN_TOKENS[dstChainId] || []).map((t) => t.type),
+  } else if (!tokenSymbol) {
+    // Explicit amount mode requires an explicit token.
+    throw new Error(
+      `crosschain_sync requires a token when an amount is provided. ` +
+        `Either provide both token and amount, or omit amount for deterministic NAV equalization.`,
     );
-
-    for (const token of srcTokens) {
-      if (!dstTokens.has(token.type)) continue;
-      // When useNativeEth is requested, only WETH can source from native ETH.
-      if (params.useNativeEth && token.type !== "WETH") continue;
-      const balanceAddress = params.useNativeEth && token.type === "WETH"
-        ? "0x0000000000000000000000000000000000000000"
-        : token.address;
-      const { balance } = await getVaultTokenBalance(
-        srcChainId,
-        params.vaultAddress,
-        balanceAddress as Address,
-        params.alchemyKey,
-      );
-      if (balance > 0n) {
-        tokenSymbol = token.type;
-        break;
-      }
-    }
-    if (!tokenSymbol) {
-      throw new Error(
-        `No bridgeable token with sufficient balance found on ${chainName(srcChainId)} ` +
-        `for syncing to ${chainName(dstChainId)}.`,
-      );
-    }
-  }
-
-  // Auto-calculate amount if still not provided (fallback for non-equalization)
-  if (!amount) {
-    const t = findBridgeableToken(srcChainId, tokenSymbol);
-    amount = t ? FALLBACK_SYNC_AMOUNTS[t.type] : "2";
   }
 
   // Verify balance
@@ -1908,7 +1949,7 @@ export async function buildCrosschainSync(params: {
   );
 
   // Determine NAV tolerance.
-  // When equalizeNav computes the bridge amount to correct a divergence, the on-chain
+  // When equalization computes the bridge amount to correct a divergence, the on-chain
   // NavImpactLib checks that the source-chain NAV drop stays within navToleranceBps.
   // The default 1% (100 bps) is too tight when correcting larger divergences — the
   // bridge amount is intentionally sized to shift NAV, so the tolerance must accommodate
@@ -1979,13 +2020,14 @@ export async function buildCrosschainSync(params: {
     const eq = navEqualization;
     description = [
       `NAV sync ${srcName} → ${dstName}: ${amount} ${quote.inputToken.symbol}`,
-      `Pre-bridge NAV: ${srcName}=${eq.srcNavFormatted} (${eq.srcDecimals}dec), ${dstName}=${eq.dstNavFormatted} (${eq.dstDecimals}dec)`,
-      `Divergence: ${(eq.divergenceBps / 100).toFixed(2)}%`,
-      `Post-bridge NAV (projected): ${srcName}=${eq.postSrcNav}, ${dstName}=${eq.postDstNav} (target=${eq.targetNav})`,
-      `Post-divergence: ${(eq.postDivergenceBps / 100).toFixed(2)}%`,
+      `Global target price: ${eq.targetPrice} per pool token`,
+      `Pre-bridge price: ${srcName}=${eq.srcPrice} ${eq.srcBaseTokenSymbol}, ${dstName}=${eq.dstPrice} ${eq.dstBaseTokenSymbol}`,
+      `Divergence from target: ${(eq.divergenceBps / 100).toFixed(2)}%`,
+      `Post-bridge price (projected): ${srcName}=${eq.postSrcPrice} ${eq.srcBaseTokenSymbol}, ${dstName}=${eq.postDstPrice} ${eq.dstBaseTokenSymbol}`,
+      `Post-divergence from target: ${(eq.postDivergenceBps / 100).toFixed(2)}%`,
       `Fee: ${quote.feePct}`,
       eq.capped ? `Note: ${eq.capReason}` : '',
-      eq.directionAutoSwapped ? `Direction auto-corrected (bridging from higher-NAV chain)` : '',
+      eq.directionAutoSwapped ? `Direction auto-corrected (bridging from chain above global price target)` : '',
     ].filter(Boolean).join(' | ');
   } else {
     description =

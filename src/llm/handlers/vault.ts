@@ -35,7 +35,7 @@ export async function handle_get_vault_info(
   return {
     message: [
       `**${info.name}** (${info.symbol}) on ${chainLabel}`,
-      `Supply: ${supplyFormatted} | Unitary value: ${unitaryFormatted} | Total value: ${totalValueFormatted}`,
+      `Supply: ${supplyFormatted} | Price: ${unitaryFormatted} | Total value: ${totalValueFormatted}`,
     ].join("\n"),
     selfContained: true,
   };

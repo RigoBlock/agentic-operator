@@ -4,10 +4,11 @@
  * Builds on top of the `crosschain_sync` atomic tool. On each cron tick, for every
  * active NavSyncConfig the skill:
  *   1. Reads aggregated NAV across all chains via getAggregatedNav().
- *   2. Finds chain pairs whose unitary-value deviates from the highest observed value
- *      by more than `thresholdBps` basis points.
- *   3. Issues a crosschain_sync for each deviant pair (source = deviant chain →
- *      destination = chain with the highest unitary value).
+ *   2. Computes a single global unit-less target unitary from aggregate USDC total
+ *      assets divided by aggregate USDC value of effective supplies.
+ *   3. Flags chains whose base-token price deviates from the global target
+ *      by more than `thresholdBps`. Bridges FROM chains above the target TO chains
+ *      below the target using deterministic NAV equalization.
  *   4. Reports outcomes via Telegram if the operator has a Telegram pairing.
  *
  * Like TWAP, this is fully deterministic — no LLM judgment in the execution loop.
@@ -21,8 +22,9 @@ import type { StrategySkill, SkillToolDefinition, SkillToolResult } from "./type
 import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 import { sendMessage, escapeHtml } from "../services/telegram.js";
 import { executeTxList, formatOutcomesMarkdown } from "../services/execution.js";
-import { sanitizeError, resolveChainId, resolveChainName } from "../config.js";
-import { getAggregatedNav, baseAssetKey, normalizeToDecimals } from "../services/crosschain.js";
+import { formatUnits } from "viem";
+import { sanitizeError, resolveChainName } from "../config.js";
+import { getAggregatedNav } from "../services/crosschain.js";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -115,8 +117,8 @@ async function handleCreate(
 
   return {
     message: `✅ NAV sync config #${config.id} created.\n` +
-      `Interval: every ${intervalMinutes} min | Threshold: ${(thresholdBps / 100).toFixed(2)}% deviation\n` +
-      `The skill will automatically sync NAV across all active chains whenever the unitary value deviates more than the threshold.`,
+      `Interval: every ${intervalMinutes} min | Threshold: ${(thresholdBps / 100).toFixed(2)}% deviation from global target\n` +
+      `The skill will automatically sync NAV across all active chains whenever a chain's base-token unitary deviates more than the threshold.`,
     suggestions: ["List NAV sync configs", "Cancel NAV sync"],
   };
 }
@@ -254,66 +256,46 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
     s => !s.error && s.effectiveSupply > 0n && s.unitaryValue > 0n,
   );
 
-  // 3. Group chains by base asset identity, not just symbol. NAV sync only makes
-  // sense between chains that share the same base asset. Native tokens are
-  // grouped by native symbol (ETH, BNB, POL, ...); non-native tokens are grouped
-  // by exact address. Unitary values are normalized to a common 18-decimal basis
-  // before comparing, because the same asset can have different decimals on
-  // different chains (e.g., USDC is 6-dec on Ethereum but 18-dec on BSC).
-  const chainsByBase = new Map<string, typeof activeSnaps>();
-  for (const snap of activeSnaps) {
-    const key = baseAssetKey(snap.chainId, snap.baseToken);
-    if (!chainsByBase.has(key)) chainsByBase.set(key, []);
-    chainsByBase.get(key)!.push(snap);
+  // 3. Compute deviation of each chain's base-token unitary from the global
+  //    unit-less target. Chains above the target are sources; chains below are destinations.
+  const globalTarget = parseFloat(agg.globalNav.targetPrice);
+  const deviations = activeSnaps
+    .map((snap) => {
+      const unitaryBase = Number(formatUnits(snap.unitaryValue, snap.baseTokenDecimals));
+      const deviationBps = globalTarget > 0
+        ? Math.round(((unitaryBase - globalTarget) / globalTarget) * 10000)
+        : 0;
+      return { snap, unitaryBase, deviationBps };
+    });
+
+  const above = deviations.filter((d) => d.deviationBps > config.thresholdBps);
+  const below = deviations.filter((d) => d.deviationBps < -config.thresholdBps);
+
+  // Sync the most-above chain with the most-below chain, second-most with second-most, etc.
+  above.sort((a, b) => b.deviationBps - a.deviationBps);
+  below.sort((a, b) => a.deviationBps - b.deviationBps);
+
+  const pairs: { src: typeof activeSnaps[number]; dst: typeof activeSnaps[number] }[] = [];
+  const pairCount = Math.min(above.length, below.length);
+  for (let i = 0; i < pairCount; i++) {
+    pairs.push({ src: above[i].snap, dst: below[i].snap });
   }
 
-  const allDeviant: typeof activeSnaps = [];
-  const references = new Map<string, typeof activeSnaps[number]>();
-  const thresholdPct = config.thresholdBps / 10000;
-
-  for (const [key, group] of chainsByBase) {
-    if (group.length < 2) continue;
-
-    // Normalize unitary values to a common 18-decimal basis before comparing.
-    const normalized = group.map(s => ({
-      snap: s,
-      unitaryNormalized: normalizeToDecimals(s.unitaryValue, s.baseTokenDecimals, 18),
-    }));
-
-    // Reference = highest normalized unitary value within this base-asset group.
-    const referenceEntry = normalized.reduce((best, cur) =>
-      cur.unitaryNormalized > best.unitaryNormalized ? cur : best,
-    );
-    const reference = referenceEntry.snap;
-    const refUv = referenceEntry.unitaryNormalized;
-    references.set(key, reference);
-
-    for (const { snap: s, unitaryNormalized } of normalized) {
-      if (s.chainId === reference.chainId) continue;
-      const deviation = Number(refUv - unitaryNormalized) / Number(refUv);
-      if (deviation > thresholdPct) {
-        allDeviant.push(s);
-      }
-    }
-  }
-
-  if (allDeviant.length === 0) {
+  if (pairs.length === 0) {
     return;
   }
 
-  // 5. Sync each deviant chain (source = deviant chain, destination = reference chain)
+  // 5. Execute deterministic NAV equalization for each pair.
   const outcomes: string[] = [];
 
-  for (const snap of allDeviant) {
-    const reference = references.get(baseAssetKey(snap.chainId, snap.baseToken));
-    if (!reference) continue;
+  for (const { src, dst } of pairs) {
     try {
       const { buildCrosschainSync } = await import("../services/crosschain.js");
 
       const result = await buildCrosschainSync({
         vaultAddress: config.vaultAddress as Address,
-        srcChainId: snap.chainId,
-        dstChainId: reference!.chainId,
+        srcChainId: src.chainId,
+        dstChainId: dst.chainId,
         alchemyKey: env.ALCHEMY_API_KEY,
         operatorAddress: config.operatorAddress as Address,
       });
@@ -322,14 +304,14 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
         to: config.vaultAddress as Address,
         data: result.calldata,
         value: "0x0",
-        chainId: snap.chainId,
+        chainId: src.chainId,
         gas: "0x7a120", // 500k gas — standard for crosschain sync
         description: result.description,
       };
 
       const [outcome] = await executeTxList(env, [tx], config.vaultAddress);
-      const srcName = resolveChainName(snap.chainId);
-      const dstName = resolveChainName(reference!.chainId);
+      const srcName = resolveChainName(src.chainId);
+      const dstName = resolveChainName(dst.chainId);
 
       if (outcome.result?.confirmed && !outcome.result?.reverted) {
         outcomes.push(`✅ ${srcName} → ${dstName}: ${outcome.result.txHash}`);
@@ -338,14 +320,14 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
       }
     } catch (err) {
       const msg = sanitizeError(err instanceof Error ? err.message : String(err));
-      outcomes.push(`❌ chain ${snap.chainId}: ${msg}`);
+      outcomes.push(`❌ ${resolveChainName(src.chainId)} → ${resolveChainName(dst.chainId)}: ${msg}`);
     }
   }
 
   // 6. Notify operator
   if (outcomes.length > 0) {
     await notifyOperator(env, config,
-      `📡 NAV sync #${config.id} executed (deviation > ${(thresholdPct * 100).toFixed(2)}%):\n${outcomes.join("\n")}`
+      `📡 NAV sync #${config.id} executed (global-target deviation > ${(config.thresholdBps / 100).toFixed(2)}%):\n${outcomes.join("\n")}`
     );
   }
 }
@@ -369,7 +351,7 @@ const navSyncTools: SkillToolDefinition[] = [
     type: "function",
     function: {
       name: "create_nav_sync",
-      description: "Create an automated NAV sync config that periodically synchronises NAV across chains when unitary value deviates beyond a threshold.",
+      description: "Create an automated NAV sync config that periodically synchronises NAV across chains when a chain's base-token unitary NAV deviates from the global unit-less target beyond a threshold.",
       parameters: {
         type: "object",
         properties: {
@@ -420,7 +402,8 @@ const navSyncTools: SkillToolDefinition[] = [
 // ── System prompt ─────────────────────────────────────────────────────
 
 const navSyncSystemPrompt = `NAV SYNC AUTOMATION:
-- create_nav_sync schedules PERIODIC cross-chain NAV synchronisation (default: every 30 min, threshold 2%). Use ONLY when the operator asks to automate, schedule, or run repeatedly.
+- create_nav_sync schedules PERIODIC cross-chain NAV synchronisation (default: every 30 min, threshold 2%).
+- Syncs use a single global unit-less target unitary computed from aggregate USDC total assets divided by aggregate USDC value of effective supplies. The target is interpreted as the target number of base-token units per pool token on each chain.
 - list_nav_syncs shows active configs.
 - cancel_nav_sync stops a config.
 - For a SINGLE immediate sync — including explicit amount/token syncs or deterministic NAV equalization — use the crosschain_sync tool directly, NOT create_nav_sync.`;

@@ -1,7 +1,7 @@
 /**
- * Aggregated NAV tests.
+ * Aggregated assets tests.
  *
- * Verifies that getAggregatedNav computes global NAV from the same on-chain
+ * Verifies that getAggregatedNav computes global assets from the same on-chain
  * values used by the NAV sync tool (netTotalValue + effectiveSupply), not from
  * bridgeable token balances.
  */
@@ -45,7 +45,7 @@ function makeKV(): KVNamespace {
   } as unknown as KVNamespace;
 }
 
-describe("getAggregatedNav global NAV", () => {
+describe("getAggregatedNav global assets", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetDelegationConfig.mockResolvedValue(null);
@@ -94,18 +94,13 @@ describe("getAggregatedNav global NAV", () => {
     // Total assets USDC = (82.5 + 1.5) ETH * 2,600 = 218,400 USDC
     expect(parseFloat(nav.globalNav.totalUsdc)).toBeCloseTo(218400, 0);
 
-    // Global unitary USDC = total assets / total effective supply (in token units)
-    // total supply = 33 + 0.5 = 33.5 tokens => 218400 / 33.5 ≈ 6,519.40 USDC
-    expect(parseFloat(nav.globalNav.unitaryUsdc)).toBeCloseTo(6519.4, 1);
-
-    // Per-chain values
-    expect(parseFloat(nav.globalNav.chainUsdc[1].totalUsdc)).toBeCloseTo(214500, 0);
-    expect(parseFloat(nav.globalNav.chainUsdc[42161].totalUsdc)).toBeCloseTo(3900, 0);
-
-    // Ethereum unitary USDC = 214500 / 33 = 6,500
-    expect(parseFloat(nav.globalNav.chainUsdc[1].unitaryUsdc)).toBeCloseTo(6500, 1);
-    // Arbitrum unitary USDC = 3900 / 0.5 = 7,800
-    expect(parseFloat(nav.globalNav.chainUsdc[42161].unitaryUsdc)).toBeCloseTo(7800, 1);
+    // Global unit-less target price = total USDC / total USDC value of supplies.
+    // Chain 1 supply value = 214500 / 2.5 = 85800 USDC.
+    // Chain 42161 supply value = 3900 / 3.5 = 1114.2857 USDC.
+    // Total supply value = 86914.2857 USDC.
+    // Global target = 218400 / 86914.2857 ≈ 2.51282
+    expect(parseFloat(nav.globalNav.totalSupplyValueUsdc)).toBeCloseTo(86914.29, 2);
+    expect(parseFloat(nav.globalNav.targetPrice)).toBeCloseTo(2.51282, 4);
   });
 
   it("throws when oracle cannot price the base token", async () => {

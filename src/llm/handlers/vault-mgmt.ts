@@ -192,7 +192,7 @@ export async function handle_fund_pool(
       `✅ Pool funding ready`,
       `Pool: ${poolData.name} (${poolData.symbol})`,
       `Deposit: ${amountStr} ${baseSymbol}`,
-      `NAV per token: ${unitaryValueFormatted} ${baseSymbol}`,
+      `Price per token: ${unitaryValueFormatted} ${baseSymbol}`,
       `Expected pool tokens: ~${parseFloat(expectedTokensFormatted).toFixed(6)} ${poolData.symbol}`,
       `Min pool tokens (5% slippage): ${parseFloat(minTokensFormatted).toFixed(6)} ${poolData.symbol}`,
       `Chain: ${chainName}`,

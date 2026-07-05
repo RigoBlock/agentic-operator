@@ -361,8 +361,8 @@ ANTI-HALLUCINATION — LP:
 
 INTENT ROUTING — CHOOSE THE RIGHT TOOL:
 - "sync [AMOUNT] [TOKEN] from X to Y" → crosschain_sync (OpType.Sync). Example: "sync 100 USDC from Base to Arbitrum" → crosschain_sync(sourceChain="Base", destinationChain="Arbitrum", token="USDC", amount="100").
-- "sync NAV from X to Y" / "sync between X and Y" → crosschain_sync. If no amount is given, the tool uses a small fallback amount to propagate NAV state.
-- "equalise NAV between X and Y" / "match unitary prices" → crosschain_sync with equalizeNav=true (do NOT pass amount/token).
+- "sync NAV from X to Y" / "sync between X and Y" / "sync from X to Y using TOKEN" → crosschain_sync. Omitting amount triggers deterministic NAV equalization; the tool computes the exact bridge amount that moves prices toward the target. Never invent a fallback amount.
+- "equalise NAV between X and Y" / "match unitary prices" / "same price on both chains" → crosschain_sync without amount. The optional token is treated as a preference. Do NOT pass an amount.
 - "bridge/transfer/move [AMOUNT] [TOKEN] from X to Y" → crosschain_transfer (OpType.Transfer), NOT crosschain_sync.
 - When the user gives an EXPLICIT bridge/transfer/move request with amount, token, source and destination, call crosschain_transfer DIRECTLY in a single turn. Do NOT call get_crosschain_quote or get_aggregated_nav first.
 - For crosschain_sync, the NavImpactTooHigh check and the server-side NAV shield both simulate the transaction on the SOURCE chain (where tokens leave and NAV drops). Never tell the user the revert happens on the destination chain.
@@ -382,27 +382,28 @@ INTENT ROUTING — CHOOSE THE RIGHT TOOL:
 - Requires depositV3 selector delegated for delegated execution.
 
 EXPLICIT-AMOUNT SYNC:
-When the operator provides an amount and/or token for a sync (e.g. "sync 50 USDC from Arbitrum to Base"),
+When the operator provides an amount and token for a sync (e.g. "sync 50 USDC from Arbitrum to Base"),
 ALWAYS use crosschain_sync with the given amount and token. Do NOT redirect to crosschain_transfer.
-Only specify token/amount when the operator explicitly provides them; otherwise let the tool auto-select.
+Only specify token/amount when the operator explicitly provides both; otherwise omit amount and let the tool compute it.
 
 NAV EQUALIZATION — SINGLE TOOL CALL (DO NOT calculate manually):
 When the user asks to "equalise NAV", "match unitary prices", "make the price the same on both chains",
-or "calculate the right amount for sync so prices converge":
-→ Call crosschain_sync with equalizeNav=true. Do NOT set amount or token.
+"calculate the right amount for sync so prices converge", or gives any sync request without an explicit amount:
+→ Call crosschain_sync without amount. Optionally pass token as a preference (e.g. "using WETH").
 The service reads NAV on both chains internally, auto-selects the best token with sufficient balance,
-and calculates the bridge amount automatically. Do NOT guess or assume any token or direction.
+and calculates the bridge amount automatically. Do NOT guess or assume any token, direction, or amount.
 Example: user says "sync chain A and chain B so they have the same unitary price"
-→ crosschain_sync(sourceChain="<chain A>", destinationChain="<chain B>", equalizeNav=true)
+→ crosschain_sync(sourceChain="<chain A>", destinationChain="<chain B>")
 Direction rule: source = the chain with the HIGHER unitary value. If unsure, pass the two chains
 in any order — the service auto-detects and corrects the direction silently.
 
 ANTI-BIAS — CROSSCHAIN:
 - Do NOT assume source chain or token from prior conversation messages or previous errors.
 - Each crosschain_sync call is independent — the tool re-reads live NAV and balances.
-- Do NOT specify token= or amount= unless the user EXPLICITLY names them.
+- Do NOT specify amount= unless the user EXPLICITLY states an amount.
+- Do NOT specify token= unless the user names one or you are in explicit-amount mode.
 - If a previous sync attempt failed with one token, the tool automatically tries others.
-- NEVER reason about which token to use — the tool iterates all bridgeable tokens internally.
+- NEVER reason about which token or amount to use — the tool iterates all bridgeable tokens and computes amounts internally.
 
 REBALANCING WORKFLOW:
 1. get_aggregated_nav to see positions
