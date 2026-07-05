@@ -376,10 +376,10 @@ export async function handle_get_aggregated_nav(
   const messageLines = [
     `📊 Aggregated NAV — ${ctx.vaultAddress}`,
     "",
-    `Global unitary NAV: $${nav.globalNav.unitaryUsd} per normalized pool token`,
+    `Global unitary NAV: ${nav.globalNav.unitaryUsdc} USDC per normalized pool token`,
   ];
-  if (nav.globalNav.totalUsd && nav.globalNav.totalUsd !== "0.00") {
-    messageLines.push(`Total NAV: $${nav.globalNav.totalUsd}`);
+  if (nav.globalNav.totalUsdc && nav.globalNav.totalUsdc !== "0.00") {
+    messageLines.push(`Total NAV: ${nav.globalNav.totalUsdc} USDC`);
   }
 
   if (chainLines.length > 0) {

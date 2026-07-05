@@ -11,6 +11,7 @@ import type { Address } from "viem";
 const mockGetEffectivePoolState = vi.hoisted(() => vi.fn());
 const mockGetVaultTokenBalance = vi.hoisted(() => vi.fn());
 const mockGetClient = vi.hoisted(() => vi.fn());
+const mockConvertTokenAmountViaOracle = vi.hoisted(() => vi.fn());
 const mockGetDelegationConfig = vi.hoisted(() => vi.fn());
 const mockGetActiveChains = vi.hoisted(() => vi.fn());
 
@@ -18,6 +19,10 @@ vi.mock("../src/services/vault.js", () => ({
   getEffectivePoolState: mockGetEffectivePoolState,
   getVaultTokenBalance: mockGetVaultTokenBalance,
   getClient: mockGetClient,
+}));
+
+vi.mock("../src/services/oraclePrice.js", () => ({
+  convertTokenAmountViaOracle: mockConvertTokenAmountViaOracle,
 }));
 
 vi.mock("../src/services/delegation.js", () => ({
@@ -40,18 +45,6 @@ function makeKV(): KVNamespace {
   } as unknown as KVNamespace;
 }
 
-function mockFetchWithEthPrice(ethUsd = 2600) {
-  return vi.fn(async (url: string) => {
-    if (url.includes("coingecko")) {
-      return {
-        ok: true,
-        json: async () => ({ ethereum: { usd: ethUsd } }),
-      } as Response;
-    }
-    throw new Error(`Unexpected fetch: ${url}`);
-  });
-}
-
 describe("getAggregatedNav global NAV", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -61,6 +54,11 @@ describe("getAggregatedNav global NAV", () => {
     mockGetClient.mockReturnValue({
       readContract: vi.fn().mockResolvedValue(0n),
     });
+    // Default oracle conversion: 1 ETH = 2600 USDC (6 decimals).
+    // Input is in base-token decimals (18 for ETH); output must be in USDC decimals (6).
+    mockConvertTokenAmountViaOracle.mockImplementation(async (_chainId, _token, amount) => {
+      return amount * 2600n / 1_000_000_000_000n;
+    });
   });
 
   afterEach(() => {
@@ -68,8 +66,6 @@ describe("getAggregatedNav global NAV", () => {
   });
 
   it("computes total NAV from netTotalValue (not bridgeable token balances)", async () => {
-    vi.stubGlobal("fetch", mockFetchWithEthPrice(2600));
-
     // Ethereum: 33 effective supply, unitary 2.5 ETH, total value 82.5 ETH
     mockGetEffectivePoolState.mockImplementation(async (chainId: number) => {
       if (chainId === 1) {
@@ -95,25 +91,25 @@ describe("getAggregatedNav global NAV", () => {
 
     const nav = await getAggregatedNav(VAULT, ALCHEMY_KEY, makeKV());
 
-    // Total assets USD = (82.5 + 1.5) ETH * $2,600 = $218,400
-    expect(parseFloat(nav.globalNav.totalUsd)).toBeCloseTo(218400, 0);
+    // Total assets USDC = (82.5 + 1.5) ETH * 2,600 = 218,400 USDC
+    expect(parseFloat(nav.globalNav.totalUsdc)).toBeCloseTo(218400, 0);
 
-    // Global unitary USD = total assets / total effective supply (in token units)
-    // total supply = 33 + 0.5 = 33.5 tokens => 218400 / 33.5 ≈ $6,519.40
-    expect(parseFloat(nav.globalNav.unitaryUsd)).toBeCloseTo(6519.4, 1);
+    // Global unitary USDC = total assets / total effective supply (in token units)
+    // total supply = 33 + 0.5 = 33.5 tokens => 218400 / 33.5 ≈ 6,519.40 USDC
+    expect(parseFloat(nav.globalNav.unitaryUsdc)).toBeCloseTo(6519.4, 1);
 
     // Per-chain values
-    expect(parseFloat(nav.globalNav.chainUsd[1].totalUsd)).toBeCloseTo(214500, 0);
-    expect(parseFloat(nav.globalNav.chainUsd[42161].totalUsd)).toBeCloseTo(3900, 0);
+    expect(parseFloat(nav.globalNav.chainUsdc[1].totalUsdc)).toBeCloseTo(214500, 0);
+    expect(parseFloat(nav.globalNav.chainUsdc[42161].totalUsdc)).toBeCloseTo(3900, 0);
 
-    // Ethereum unitary USD = 214500 / 33 = $6,500
-    expect(parseFloat(nav.globalNav.chainUsd[1].unitaryUsd)).toBeCloseTo(6500, 1);
-    // Arbitrum unitary USD = 3900 / 0.5 = $7,800
-    expect(parseFloat(nav.globalNav.chainUsd[42161].unitaryUsd)).toBeCloseTo(7800, 1);
+    // Ethereum unitary USDC = 214500 / 33 = 6,500
+    expect(parseFloat(nav.globalNav.chainUsdc[1].unitaryUsdc)).toBeCloseTo(6500, 1);
+    // Arbitrum unitary USDC = 3900 / 0.5 = 7,800
+    expect(parseFloat(nav.globalNav.chainUsdc[42161].unitaryUsdc)).toBeCloseTo(7800, 1);
   });
 
-  it("throws when CoinGecko USD price is unavailable", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 429 } as Response)));
+  it("throws when oracle cannot price the base token", async () => {
+    mockConvertTokenAmountViaOracle.mockRejectedValue(new Error("No oracle feed"));
 
     mockGetEffectivePoolState.mockImplementation(async (chainId: number) => {
       if (chainId === 1) {
@@ -128,6 +124,6 @@ describe("getAggregatedNav global NAV", () => {
       return null;
     });
 
-    await expect(getAggregatedNav(VAULT, ALCHEMY_KEY, makeKV())).rejects.toThrow(/CoinGecko/);
+    await expect(getAggregatedNav(VAULT, ALCHEMY_KEY, makeKV())).rejects.toThrow(/Oracle/);
   });
 });

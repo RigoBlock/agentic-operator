@@ -22,7 +22,7 @@ import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 import { sendMessage, escapeHtml } from "../services/telegram.js";
 import { executeTxList, formatOutcomesMarkdown } from "../services/execution.js";
 import { sanitizeError, resolveChainId, resolveChainName } from "../config.js";
-import { getAggregatedNav } from "../services/crosschain.js";
+import { getAggregatedNav, baseAssetKey, normalizeToDecimals } from "../services/crosschain.js";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -254,12 +254,15 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
     s => !s.error && s.effectiveSupply > 0n && s.unitaryValue > 0n,
   );
 
-  // 3. Group chains by base token symbol. NAV sync only makes sense between
-  // chains that share the same base token (and therefore the same price basis).
-  // Comparing raw unitary values across ETH, BNB and POL chains would be meaningless.
+  // 3. Group chains by base asset identity, not just symbol. NAV sync only makes
+  // sense between chains that share the same base asset. Native tokens are
+  // grouped by native symbol (ETH, BNB, POL, ...); non-native tokens are grouped
+  // by exact address. Unitary values are normalized to a common 18-decimal basis
+  // before comparing, because the same asset can have different decimals on
+  // different chains (e.g., USDC is 6-dec on Ethereum but 18-dec on BSC).
   const chainsByBase = new Map<string, typeof activeSnaps>();
   for (const snap of activeSnaps) {
-    const key = snap.baseTokenSymbol;
+    const key = baseAssetKey(snap.chainId, snap.baseToken);
     if (!chainsByBase.has(key)) chainsByBase.set(key, []);
     chainsByBase.get(key)!.push(snap);
   }
@@ -268,18 +271,26 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
   const references = new Map<string, typeof activeSnaps[number]>();
   const thresholdPct = config.thresholdBps / 10000;
 
-  for (const [baseSymbol, group] of chainsByBase) {
+  for (const [key, group] of chainsByBase) {
     if (group.length < 2) continue;
 
-    // Reference = highest unitary value within this base-token group
-    const reference = group.reduce((best, s) =>
-      s.unitaryValue > best.unitaryValue ? s : best,
-    );
-    references.set(baseSymbol, reference);
+    // Normalize unitary values to a common 18-decimal basis before comparing.
+    const normalized = group.map(s => ({
+      snap: s,
+      unitaryNormalized: normalizeToDecimals(s.unitaryValue, s.baseTokenDecimals, 18),
+    }));
 
-    for (const s of group) {
+    // Reference = highest normalized unitary value within this base-asset group.
+    const referenceEntry = normalized.reduce((best, cur) =>
+      cur.unitaryNormalized > best.unitaryNormalized ? cur : best,
+    );
+    const reference = referenceEntry.snap;
+    const refUv = referenceEntry.unitaryNormalized;
+    references.set(key, reference);
+
+    for (const { snap: s, unitaryNormalized } of normalized) {
       if (s.chainId === reference.chainId) continue;
-      const deviation = Number(reference.unitaryValue - s.unitaryValue) / Number(reference.unitaryValue);
+      const deviation = Number(refUv - unitaryNormalized) / Number(refUv);
       if (deviation > thresholdPct) {
         allDeviant.push(s);
       }
@@ -294,7 +305,7 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
   const outcomes: string[] = [];
 
   for (const snap of allDeviant) {
-    const reference = references.get(snap.baseTokenSymbol);
+    const reference = references.get(baseAssetKey(snap.chainId, snap.baseToken));
     if (!reference) continue;
     try {
       const { buildCrosschainSync } = await import("../services/crosschain.js");

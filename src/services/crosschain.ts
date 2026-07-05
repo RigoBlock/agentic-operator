@@ -40,7 +40,7 @@ import {
 } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { ACROSS_SPOKE_POOL_ABI } from "../abi/aIntents.js";
-import { getRpcUrl, getNativeTokenSymbol } from "../config.js";
+import { getRpcUrl, getNativeTokenSymbol, getWrappedNativeAddress } from "../config.js";
 import {
   OpType,
   ACROSS_SPOKE_POOL,
@@ -53,6 +53,7 @@ import {
 } from "./crosschainConfig.js";
 import { getVaultTokenBalance, getClient, getEffectivePoolState } from "./vault.js";
 import type { EffectivePoolState } from "./vault.js";
+import { convertTokenAmountViaOracle } from "./oraclePrice.js";
 import { getDelegationConfig, getActiveChains } from "./delegation.js";
 import type { DelegationConfig } from "../types.js";
 
@@ -148,6 +149,8 @@ export interface ChainNavSnapshot {
   baseTokenSymbol: string;
   /** Pool base token decimals */
   baseTokenDecimals: number;
+  /** Total pool value converted to USDC and normalized to 6 decimals via the oracle */
+  totalUsdcNormalized: bigint;
   /** Bridgeable token balances held by the vault on this chain */
   tokenBalances: TokenBalance[];
   /** Whether delegation is active for the agent on this chain */
@@ -170,15 +173,15 @@ export interface AggregatedNav {
   chains: ChainNavSnapshot[];
   /** Chains where delegation is NOT active (user must set up) */
   missingDelegationChains: number[];
-  /** Cross-chain total NAV in USD, computed from each chain's on-chain netTotalValue
-   *  and effectiveSupply (the same values used by the NAV sync tool). */
+  /** Cross-chain total NAV in USDC, computed from each chain's on-chain netTotalValue
+   *  converted to chain-local USDC via the oracle and normalized to 6 decimals. */
   globalNav: {
-    /** Total vault assets across all chains in USD. */
-    totalUsd: string;
-    /** Global unitary NAV in USD per normalized pool token. */
-    unitaryUsd: string;
-    /** Per-chain breakdown (chainId -> USD NAV and USD unitary value). */
-    chainUsd: Record<number, { totalUsd: string; unitaryUsd: string }>;
+    /** Total vault assets across all chains in normalized USDC. */
+    totalUsdc: string;
+    /** Global unitary NAV in USDC per 18-decimal normalized pool token. */
+    unitaryUsdc: string;
+    /** Per-chain breakdown (chainId -> USDC NAV and USDC unitary value). */
+    chainUsdc: Record<number, { totalUsdc: string; unitaryUsdc: string }>;
   };
 }
 
@@ -248,45 +251,38 @@ export async function getAggregatedNav(
     ),
   );
 
-  // Global NAV in USD using the same on-chain values as the NAV sync tool:
-  //   totalValue (netTotalValue) and effectiveSupply per chain.
-  // We convert each chain's total value to USD using its base-token price,
-  // normalize effective supplies to a common 18-decimal base, and compute a
-  // global unitary NAV (USD per normalized pool token). This is the supply-
-  // weighted average unitary value; it is the target all chains would converge
-  // to if fully synced.
-  const baseTokenSymbols = snapshots
-    .filter((s) => !s.error && s.effectiveSupply > 0n)
-    .map((s) => s.baseTokenSymbol);
-  const baseTokenPrices = await fetchCoinGeckoPricesUsd(baseTokenSymbols);
+  // Any active chain that failed oracle pricing makes the global NAV unreliable.
+  // Fail fast rather than silently dropping a chain.
+  const pricingErrors = snapshots.filter((s) => s.error && s.effectiveSupply > 0n);
+  if (pricingErrors.length > 0) {
+    const details = pricingErrors.map((s) => `${s.chainName}: ${s.error}`).join("; ");
+    throw new Error(`Cannot compute global NAV: ${details}`);
+  }
 
+  // Global NAV in normalized USDC: each chain's netTotalValue (base token) is
+  // converted to chain-local USDC via the on-chain oracle, normalized to 6
+  // decimals, and summed. Effective supplies are normalized to a common 18-
+  // decimal pool-token basis so the global unitary NAV is comparable across
+  // chains with different base-token decimals.
   const NORMALIZED_DECIMALS = 18;
-  let totalAssetsUsd = 0;
+  let totalUsdcNormalized = 0n;
   let totalNormalizedSupply = 0n;
-  const chainUsd: AggregatedNav["globalNav"]["chainUsd"] = {};
+  const chainUsdc: AggregatedNav["globalNav"]["chainUsdc"] = {};
   for (const snap of snapshots) {
-    if (snap.error || snap.effectiveSupply === 0n) continue;
-    const price = baseTokenPrices[snap.baseTokenSymbol.toUpperCase()];
-    if (price == null) {
-      throw new Error(`Missing USD price for base token ${snap.baseTokenSymbol} on ${snap.chainName}`);
-    }
-    const totalValueFloat = Number(formatUnits(snap.totalValue, snap.baseTokenDecimals));
-    const chainUsdValue = totalValueFloat * price;
-    const decimalDiff = NORMALIZED_DECIMALS - snap.baseTokenDecimals;
-    const normalizedSupply = decimalDiff >= 0
-      ? snap.effectiveSupply * (10n ** BigInt(decimalDiff))
-      : snap.effectiveSupply / (10n ** BigInt(-decimalDiff));
-    const normalizedSupplyFloat = Number(formatUnits(normalizedSupply, NORMALIZED_DECIMALS));
-    const chainUnitaryUsd = normalizedSupplyFloat > 0 ? chainUsdValue / normalizedSupplyFloat : 0;
-    totalAssetsUsd += chainUsdValue;
+    if (snap.error || snap.effectiveSupply === 0n || snap.totalUsdcNormalized === 0n) continue;
+    const normalizedSupply = normalizeToDecimals(snap.effectiveSupply, snap.baseTokenDecimals, NORMALIZED_DECIMALS);
+    const chainUnitaryUsdc = normalizedSupply > 0n
+      ? Number(formatUnits(snap.totalUsdcNormalized, 6)) / Number(formatUnits(normalizedSupply, NORMALIZED_DECIMALS))
+      : 0;
+    totalUsdcNormalized += snap.totalUsdcNormalized;
     totalNormalizedSupply += normalizedSupply;
-    chainUsd[snap.chainId] = {
-      totalUsd: chainUsdValue.toFixed(2),
-      unitaryUsd: chainUnitaryUsd.toFixed(6),
+    chainUsdc[snap.chainId] = {
+      totalUsdc: formatUnits(snap.totalUsdcNormalized, 6),
+      unitaryUsdc: chainUnitaryUsdc.toFixed(6),
     };
   }
-  const globalUnitaryUsd = totalNormalizedSupply > 0n
-    ? totalAssetsUsd / Number(formatUnits(totalNormalizedSupply, NORMALIZED_DECIMALS))
+  const globalUnitaryUsdc = totalNormalizedSupply > 0n
+    ? Number(formatUnits(totalUsdcNormalized, 6)) / Number(formatUnits(totalNormalizedSupply, NORMALIZED_DECIMALS))
     : 0;
 
   const missingDelegationChains = snapshots
@@ -298,11 +294,65 @@ export async function getAggregatedNav(
     chains: snapshots,
     missingDelegationChains,
     globalNav: {
-      totalUsd: totalAssetsUsd.toFixed(2),
-      unitaryUsd: globalUnitaryUsd.toFixed(6),
-      chainUsd,
+      totalUsdc: formatUnits(totalUsdcNormalized, 6),
+      unitaryUsdc: globalUnitaryUsdc.toFixed(6),
+      chainUsdc,
     },
   };
+}
+
+/** Normalize a bigint amount from one decimal scale to another. */
+export function normalizeToDecimals(value: bigint, fromDecimals: number, toDecimals: number): bigint {
+  if (fromDecimals === toDecimals) return value;
+  if (fromDecimals > toDecimals) return value / (10n ** BigInt(fromDecimals - toDecimals));
+  return value * (10n ** BigInt(toDecimals - fromDecimals));
+}
+
+/** Resolve the human-readable symbol for a vault's base token on a given chain. */
+function getBaseTokenSymbol(chainId: number, baseToken: Address): string {
+  const zeroAddr = "0x0000000000000000000000000000000000000000";
+  if (baseToken.toLowerCase() === zeroAddr) {
+    return getNativeTokenSymbol(chainId);
+  }
+  const bridgeableTokens = CROSSCHAIN_TOKENS[chainId] || [];
+  const match = bridgeableTokens.find(
+    (t) => t.address.toLowerCase() === baseToken.toLowerCase(),
+  );
+  return match?.symbol || "ERC20";
+}
+
+/**
+ * Determine whether two base tokens on two chains represent the same asset.
+ * - Native tokens (zero address) are compared by native symbol (ETH, BNB, POL, ...).
+ * - Non-native tokens are compared by exact address.
+ * No canonical wrapping assumptions are made.
+ */
+function isNativeBaseToken(chainId: number, baseToken: Address): boolean {
+  const zeroAddr = "0x0000000000000000000000000000000000000000";
+  if (baseToken.toLowerCase() === zeroAddr) return true;
+  const wrapped = getWrappedNativeAddress(chainId);
+  return wrapped ? baseToken.toLowerCase() === wrapped.toLowerCase() : false;
+}
+
+export function sameBaseAsset(chainIdA: number, baseA: Address, chainIdB: number, baseB: Address): boolean {
+  const aIsNative = isNativeBaseToken(chainIdA, baseA);
+  const bIsNative = isNativeBaseToken(chainIdB, baseB);
+  if (aIsNative && bIsNative) {
+    return getNativeTokenSymbol(chainIdA) === getNativeTokenSymbol(chainIdB);
+  }
+  if (!aIsNative && !bIsNative) {
+    return baseA.toLowerCase() === baseB.toLowerCase();
+  }
+  return false;
+}
+
+/** Stable grouping key for a base asset. Native / wrapped-native tokens group by
+ *  native symbol; all other tokens group by exact address. */
+export function baseAssetKey(chainId: number, baseToken: Address): string {
+  if (isNativeBaseToken(chainId, baseToken)) {
+    return `native:${getNativeTokenSymbol(chainId)}`;
+  }
+  return `erc20:${baseToken.toLowerCase()}`;
 }
 
 /**
@@ -356,22 +406,66 @@ async function readChainSnapshot(
         baseToken: zeroAddr,
         baseTokenSymbol: tokenBalances.length > 0 ? "UNKNOWN" : "N/A",
         baseTokenDecimals: 18,
+        totalUsdcNormalized: 0n,
         tokenBalances,
         delegationActive,
       };
     }
 
-    // Determine base token symbol — different on each chain.
-    // Zero address means the chain's native token (ETH, BNB, POL, ...); otherwise
-    // look it up among the bridgeable tokens. Decimals come from on-chain pool data.
-    let baseTokenSymbol: string;
-    if (state.baseToken.toLowerCase() === zeroAddr) {
-      baseTokenSymbol = getNativeTokenSymbol(chainId);
-    } else {
-      const match = bridgeableTokens.find(
-        (t) => t.address.toLowerCase() === state.baseToken.toLowerCase(),
-      );
-      baseTokenSymbol = match?.symbol || "ERC20";
+    // Determine base token symbol from on-chain data.
+    // Decimals come from on-chain pool data; symbol is derived from the base token
+    // address (zero address = native token).
+    const baseTokenSymbol = getBaseTokenSymbol(chainId, state.baseToken);
+
+    // Convert the chain's total value (in base token) to normalized USDC (6 dec)
+    // via the on-chain oracle. If no USDC exists or the oracle has no feed for
+    // the base token, mark this chain as errored rather than inventing a price.
+    let totalUsdcNormalized = 0n;
+    if (state.netTotalValue > 0n) {
+      const usdcToken = CROSSCHAIN_TOKENS[chainId]?.find((t) => t.type === "USDC");
+      if (!usdcToken) {
+        return {
+          chainId,
+          chainName: name,
+          unitaryValue: state.unitaryValue,
+          totalValue: state.netTotalValue,
+          totalSupply: totalSupplyRaw as bigint,
+          effectiveSupply: state.effectiveSupply,
+          baseToken: state.baseToken,
+          baseTokenSymbol,
+          baseTokenDecimals: state.decimals,
+          totalUsdcNormalized: 0n,
+          tokenBalances,
+          delegationActive,
+          error: `No USDC configured on chain ${chainId} — cannot price base token ${baseTokenSymbol}`,
+        };
+      }
+      try {
+        const totalUsdcRaw = await convertTokenAmountViaOracle(
+          chainId,
+          state.baseToken,
+          state.netTotalValue,
+          usdcToken.address,
+          alchemyKey,
+        );
+        totalUsdcNormalized = normalizeToDecimals(totalUsdcRaw, usdcToken.decimals, 6);
+      } catch (err) {
+        return {
+          chainId,
+          chainName: name,
+          unitaryValue: state.unitaryValue,
+          totalValue: state.netTotalValue,
+          totalSupply: totalSupplyRaw as bigint,
+          effectiveSupply: state.effectiveSupply,
+          baseToken: state.baseToken,
+          baseTokenSymbol,
+          baseTokenDecimals: state.decimals,
+          totalUsdcNormalized: 0n,
+          tokenBalances,
+          delegationActive,
+          error: `Oracle pricing failed for ${baseTokenSymbol}: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
     }
 
     return {
@@ -384,6 +478,7 @@ async function readChainSnapshot(
       baseToken: state.baseToken,
       baseTokenSymbol,
       baseTokenDecimals: state.decimals,
+      totalUsdcNormalized,
       tokenBalances,
       delegationActive,
     };
@@ -398,6 +493,7 @@ async function readChainSnapshot(
       baseToken: zeroAddr,
       baseTokenSymbol: "N/A",
       baseTokenDecimals: 18,
+      totalUsdcNormalized: 0n,
       tokenBalances: [],
       delegationActive,
       error: err instanceof Error ? err.message : String(err),
@@ -1450,6 +1546,20 @@ export async function computeNavEqualization(params: {
     const zeroChain = stateA.effectiveSupply === 0n ? params.userSrcChainId : params.userDstChainId;
     throw new Error(
       `${chainName(zeroChain)} has zero effective supply. NAV equalization requires active pools on both chains.`,
+    );
+  }
+
+  // Equalization only makes sense when both chains denominate NAV in the same
+  // underlying asset. Comparing raw unitary values across ETH, BNB, POL, etc.
+  // would produce a meaningless bridge amount.
+  if (!sameBaseAsset(params.userSrcChainId, stateA.baseToken, params.userDstChainId, stateB.baseToken)) {
+    const srcBaseSymbol = getBaseTokenSymbol(params.userSrcChainId, stateA.baseToken);
+    const dstBaseSymbol = getBaseTokenSymbol(params.userDstChainId, stateB.baseToken);
+    throw new Error(
+      `Cannot equalize NAV between chains with different base assets ` +
+      `(${srcBaseSymbol} on ${chainName(params.userSrcChainId)} vs ` +
+      `${dstBaseSymbol} on ${chainName(params.userDstChainId)}). ` +
+      `NAV sync only makes sense between chains that share the same base asset.`,
     );
   }
 
