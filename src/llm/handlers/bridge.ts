@@ -256,10 +256,12 @@ export async function handle_crosschain_sync(
         `That makes the source-chain unit price drop. The on-chain contract rejects the transaction on ${effectiveSrcName} when that drop exceeds navToleranceBps.`,
         ``,
         `What you can do:`,
-        `  1. Sync a smaller amount (e.g., 0.1 WETH instead of ${result.quote.inputAmount}).`,
-        `  2. Pass a higher navToleranceBps (e.g. 500-1000 = 5-10%) if you want to allow a larger source-chain NAV drop for this sync.`,
+        `  1. Tell me what navToleranceBps to use. Examples: 500 = 5%, 1000 = 10%, 4000 = 40%, up to 10000 = 100%.`,
+        `  2. Sync a smaller amount (e.g., 0.1 WETH instead of ${result.quote.inputAmount}).`,
         `  3. Use a plain bridge (crosschain_transfer) if you just want to move the tokens — transfers update virtual supply and avoid this limit.`,
         `  4. If the server-side NAV shield is also blocking, raise the per-trade threshold via Settings → NAV Shield or Telegram /navshield.`,
+        ``,
+        `Which option would you like? (If you want to proceed with a higher tolerance, just say the percentage, e.g. "40%".)`,
       );
     }
     throw new Error(errorLines.join('\n'));
@@ -355,76 +357,39 @@ export async function handle_get_aggregated_nav(
     env.KV,
   );
 
-  // Build per-chain summary
+  // Per-chain: only base token, unitary value, and effective supply.
   const chainLines: string[] = [];
   for (const snap of nav.chains) {
     if (snap.error) {
-      chainLines.push(`  ${snap.chainName}: ⚠️ ${snap.error}`);
+      chainLines.push(`${snap.chainName}: no data`);
       continue;
     }
-    if (snap.totalValue === 0n && snap.tokenBalances.every((b) => b.balance === 0n)
-        && snap.baseTokenSymbol === "N/A") {
-      continue; // skip chains where the pool doesn't exist
-    }
-    const delegation = snap.delegationActive ? "✅" : "❌";
+    if (snap.effectiveSupply === 0n) continue;
     const divisor = 10 ** snap.baseTokenDecimals;
     const unitaryStr = (Number(snap.unitaryValue) / divisor).toFixed(6);
-    const supplyStr = (Number(snap.totalSupply) / divisor).toFixed(4);
-    const tokenLines = snap.tokenBalances
-      .filter((b) => b.balance > 0n)
-      .map((b) => `    ${b.token.symbol}: ${b.balanceFormatted}`)
-      .join("\n");
-
+    const supplyStr = (Number(snap.effectiveSupply) / divisor).toFixed(4);
     chainLines.push(
-      `  **${snap.chainName}** (delegation: ${delegation})` +
-      `\n    Base token: ${snap.baseTokenSymbol} | Supply: ${supplyStr} | Unitary value: ${unitaryStr}` +
-      (tokenLines ? `\n${tokenLines}` : ""),
+      `${snap.chainName}: base=${snap.baseTokenSymbol} | unitary=${unitaryStr} ${snap.baseTokenSymbol} | supply=${supplyStr}`,
     );
   }
 
-  // Token totals
-  const totalLines: string[] = [];
-  for (const [tokenType, data] of Object.entries(nav.tokenTotals)) {
-    if (data.total === "0" || data.total === "0.000000") continue;
-    totalLines.push(`  ${tokenType}: ${data.total}`);
-  }
-
-  // Global NAV in USD
-  const globalLines: string[] = [];
+  const messageLines = [
+    `📊 Aggregated NAV — ${ctx.vaultAddress}`,
+    "",
+    `Global unitary NAV: $${nav.globalNav.unitaryUsd} per normalized pool token`,
+  ];
   if (nav.globalNav.totalUsd && nav.globalNav.totalUsd !== "0.00") {
-    globalLines.push(`**Total NAV: $${nav.globalNav.totalUsd}**`);
-    const tokenParts = Object.entries(nav.globalNav.tokenUsd)
-      .filter(([, usd]) => usd && usd !== "0.00")
-      .map(([token, usd]) => `${token}: $${usd}`);
-    if (tokenParts.length > 0) {
-      globalLines.push(tokenParts.join(" · "));
-    }
+    messageLines.push(`Total NAV: $${nav.globalNav.totalUsd}`);
   }
 
-  // Missing delegation
-  const missingNames = nav.missingDelegationChains.map(
-    (id) => crosschainChainName(id),
-  );
-
-  const message = [
-    `📊 **Aggregated NAV — ${ctx.vaultAddress}**`,
-    "",
-    globalLines.length > 0 ? globalLines.join("\n") : "",
-    "",
-    chainLines.length > 0 ? chainLines.join("\n\n") : "  No vault data found on any chain.",
-    "",
-    totalLines.length > 0
-      ? `**Bridgeable token totals:**\n${totalLines.join("\n")}`
-      : "",
-    missingNames.length > 0
-      ? `\n⚠️ **Missing delegation on:** ${missingNames.join(", ")}\nSet up agent delegation on these chains to enable cross-chain operations.`
-      : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  if (chainLines.length > 0) {
+    messageLines.push("", ...chainLines);
+  } else {
+    messageLines.push("", "No vault data found on any chain.");
+  }
 
   return {
-    message,
+    message: messageLines.join("\n"),
     selfContained: true,
     suggestions: [
       "Bridge USDT to Arbitrum",

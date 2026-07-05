@@ -251,51 +251,58 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
 
   // 2. Find chains with real data (non-zero supply, no error)
   const activeSnaps = agg.chains.filter(
-    s => !s.error && s.totalSupply > 0n && s.unitaryValue > 0n,
+    s => !s.error && s.effectiveSupply > 0n && s.unitaryValue > 0n,
   );
 
-  if (activeSnaps.length < 2) {
-    // Nothing to sync — only one chain active
-    return;
+  // 3. Group chains by base token symbol. NAV sync only makes sense between
+  // chains that share the same base token (and therefore the same price basis).
+  // Comparing raw unitary values across ETH, BNB and POL chains would be meaningless.
+  const chainsByBase = new Map<string, typeof activeSnaps>();
+  for (const snap of activeSnaps) {
+    const key = snap.baseTokenSymbol;
+    if (!chainsByBase.has(key)) chainsByBase.set(key, []);
+    chainsByBase.get(key)!.push(snap);
   }
 
-  // 3. Find the reference (highest unitary value)
-  const reference = activeSnaps.reduce((best, s) =>
-    s.unitaryValue > best.unitaryValue ? s : best,
-  );
-
-  // 4. Find deviant chains
+  const allDeviant: typeof activeSnaps = [];
+  const references = new Map<string, typeof activeSnaps[number]>();
   const thresholdPct = config.thresholdBps / 10000;
-  const deviant = activeSnaps.filter(s => {
-    if (s.chainId === reference.chainId) return false;
-    const deviation = Number(reference.unitaryValue - s.unitaryValue) / Number(reference.unitaryValue);
-    return deviation > thresholdPct;
-  });
 
-  if (deviant.length === 0) {
+  for (const [baseSymbol, group] of chainsByBase) {
+    if (group.length < 2) continue;
+
+    // Reference = highest unitary value within this base-token group
+    const reference = group.reduce((best, s) =>
+      s.unitaryValue > best.unitaryValue ? s : best,
+    );
+    references.set(baseSymbol, reference);
+
+    for (const s of group) {
+      if (s.chainId === reference.chainId) continue;
+      const deviation = Number(reference.unitaryValue - s.unitaryValue) / Number(reference.unitaryValue);
+      if (deviation > thresholdPct) {
+        allDeviant.push(s);
+      }
+    }
+  }
+
+  if (allDeviant.length === 0) {
     return;
   }
 
   // 5. Sync each deviant chain (source = deviant chain, destination = reference chain)
-  const ctx: RequestContext = {
-    vaultAddress: config.vaultAddress as Address,
-    chainId: reference.chainId,
-    operatorAddress: config.operatorAddress as Address,
-    isBrowserRequest: false,
-    executionMode: "delegated",
-    operatorVerified: true,
-  };
-
   const outcomes: string[] = [];
 
-  for (const snap of deviant) {
+  for (const snap of allDeviant) {
+    const reference = references.get(snap.baseTokenSymbol);
+    if (!reference) continue;
     try {
       const { buildCrosschainSync } = await import("../services/crosschain.js");
 
       const result = await buildCrosschainSync({
         vaultAddress: config.vaultAddress as Address,
         srcChainId: snap.chainId,
-        dstChainId: reference.chainId,
+        dstChainId: reference!.chainId,
         alchemyKey: env.ALCHEMY_API_KEY,
         operatorAddress: config.operatorAddress as Address,
       });
@@ -311,7 +318,7 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
 
       const [outcome] = await executeTxList(env, [tx], config.vaultAddress);
       const srcName = resolveChainName(snap.chainId);
-      const dstName = resolveChainName(reference.chainId);
+      const dstName = resolveChainName(reference!.chainId);
 
       if (outcome.result?.confirmed && !outcome.result?.reverted) {
         outcomes.push(`✅ ${srcName} → ${dstName}: ${outcome.result.txHash}`);

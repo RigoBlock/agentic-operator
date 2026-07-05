@@ -20,7 +20,7 @@
  */
 
 import { Hono, type Context } from "hono";
-import type { Env, ChatMessage, RequestContext, ChatResponse, TelegramConversation, UnsignedTransaction } from "../types.js";
+import type { Env, ChatMessage, RequestContext, ChatResponse, TelegramConversation, UnsignedTransaction, ToolCallResult } from "../types.js";
 import { formatUnits, type Address } from "viem";
 import { processChat, executeToolCall, type ToolResult } from "../llm/client.js";
 import {
@@ -108,6 +108,65 @@ function formatTelegramTxMetrics(tx: UnsignedTransaction): string {
     lines.push(`🔮 Oracle divergence: ${formatTelegramPct(m.swapShield.divergencePct)}`);
   }
   return lines.length ? lines.join("\n") : "";
+}
+
+/** Remove adjacent duplicate blocks from an LLM reply. The model sometimes echoes
+ *  the previous tool result (or itself) when the user repeats a request. */
+function collapseDuplicateBlocks(text: string): string {
+  const blocks = text.split(/\n{2,}/);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const block of blocks) {
+    const normalized = block
+      .toLowerCase()
+      .replace(/[^\w\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!normalized) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(block);
+  }
+  return out.join("\n\n");
+}
+
+/** Build a compact summary of prepared transactions / tool errors for the
+ *  conversation history. Full tool-result text makes the LLM echo itself, so
+ *  we keep this to one sentence. */
+function buildCompactTurnSummary(
+  txList: UnsignedTransaction[],
+  toolCalls?: ToolCallResult[],
+): string {
+  const chainName = (chainId: number) =>
+    SUPPORTED_CHAINS.find((c) => c.id === chainId)?.name
+    || TESTNET_CHAINS.find((c) => c.id === chainId)?.name
+    || `Chain ${chainId}`;
+
+  const parts: string[] = [];
+  for (const tx of txList) {
+    const meta = tx.swapMeta;
+    const isSync = /sync/i.test(tx.description || "");
+    const action = isSync ? "NAV sync" : (meta ? "Bridge" : "Transaction");
+    const amountLine = meta
+      ? `${meta.sellAmount} ${meta.sellToken} → ${meta.buyAmount} ${meta.buyToken}`
+      : (tx.description || "transaction");
+    parts.push(`${action} ${amountLine} on ${chainName(tx.chainId)}`);
+  }
+
+  for (const tc of toolCalls ?? []) {
+    if (!tc.error || !tc.result) continue;
+    const err = stripToolPrefix(tc.result).slice(0, 200);
+    const args = tc.arguments || {};
+    const tol = args.navToleranceBps
+      ? ` (tolerance ${(Number(args.navToleranceBps) / 100).toFixed(2)}%)`
+      : "";
+    const brief = err.includes("NavImpactTooHigh")
+      ? `NavImpactTooHigh${tol}`
+      : err;
+    parts.push(`${tc.name} failed: ${brief}`);
+  }
+
+  return parts.join("; ");
 }
 
 /** Build the KV key for a message-bound pending transaction.
@@ -1031,9 +1090,12 @@ async function handleMessage(
     // Build the Telegram reply from the single human-friendly LLM reply.
     // Tool results are intentionally NOT rendered again here — they were already
     // shown live in the progress message and are folded into response.reply.
+    // Collapse duplicate blocks that the model sometimes emits when the user
+    // repeats a request or the history contains the previous tool result.
+    const cleanedReply = response.reply ? collapseDuplicateBlocks(response.reply) : "";
     const replyParts: string[] = [];
-    if (response.reply) {
-      replyParts.push(formatForTelegram(stripToolPrefix(response.reply)));
+    if (cleanedReply) {
+      replyParts.push(formatForTelegram(stripToolPrefix(cleanedReply)));
     }
 
     // Handle transactions through the unified TransactionFlow engine.
@@ -1072,7 +1134,7 @@ async function handleMessage(
         // ⚡ Autonomous mode — execute immediately, no confirmation needed
         const tradeCount = txList.length > 1 ? `${txList.length} trades` : "trade";
         const statusParts = [
-          formatForTelegram(stripToolPrefix(response.reply)),
+          formatForTelegram(stripToolPrefix(cleanedReply)),
           `\n⚡ <b>Autonomous mode is ON — executing ${tradeCount} immediately.</b>`,
           `Use <code>/mode confirm</code> to require an Execute button before each trade.`,
           ...buildMetricsLines(),
@@ -1124,7 +1186,7 @@ async function handleMessage(
         const confirmIcon = hasWarning ? "⚠️" : "🔔";
         const execIcon = hasWarning ? "⚠️" : "✅";
         const confirmParts = [
-          formatForTelegram(stripToolPrefix(response.reply)),
+          formatForTelegram(stripToolPrefix(cleanedReply)),
           `\n${confirmIcon} <b>${tradeCount.charAt(0).toUpperCase() + tradeCount.slice(1)} ready${hasWarning ? " with warning" : ""}.</b>\nTap ${execIcon} ${execLabel} to confirm or ❌ Cancel.`,
           ...buildMetricsLines(),
           delegationWarning,
@@ -1168,29 +1230,22 @@ async function handleMessage(
       await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
     }
 
-    // Persist assistant turn — include tool results so the LLM has context on follow-ups.
-    // Tool results are normally ephemeral (not in ChatMessage history), so we inline a
-    // compact summary into the assistant message.  This avoids re-fetching balances,
-    // positions, or NAV data that was already retrieved in this turn.
+    // Persist assistant turn — keep the conversation history compact. Full tool
+    // results make the LLM echo itself (duplicate "✅ Cross-chain NAV sync ready"
+    // messages) and confuse follow-ups. We store a one-sentence summary plus the
+    // user's next actionable options.
     {
-      const toolSummary = (response.toolCalls ?? [])
-        .filter(tc => !tc.error && tc.result)
-        .map(tc => stripToolPrefix(tc.result!.slice(0, 500)))
-        .join("\n---\n");
-      // In confirm mode, make sure the saved history records that the transaction
-      // was prepared but NOT executed. Otherwise the LLM may see a "ready" message
-      // on a follow-up and hallucinate an execution result.
-      const pendingNote =
-        txList.length > 0 && !executedNow
-          ? "🔔 Transaction ready in Telegram — awaiting your confirmation (tap Execute). It has NOT been executed yet."
-          : "";
-      const assistantContent = [
-        pendingNote,
-        toolSummary,
-        response.reply,
-      ].filter(Boolean).join("\n\n");
+      const compactSummary = buildCompactTurnSummary(txList, response.toolCalls);
+      const assistantContent =
+        txList.length > 0 && executedNow
+          ? `✅ Executed: ${compactSummary}.`
+          : txList.length > 0 && !executedNow
+            ? `⏳ Prepared: ${compactSummary}. Awaiting user confirmation (tap Execute).`
+            : (response.toolCalls ?? []).some((tc) => tc.error)
+              ? `⚠️ ${compactSummary}. Ask the user what they want to do next.`
+              : (cleanedReply || response.reply || "");
       if (assistantContent.trim()) {
-        conv.messages.push({ role: "assistant", content: assistantContent });
+        conv.messages.push({ role: "assistant", content: assistantContent.slice(0, 1000) });
       }
     }
     await saveConversation(env.KV, userId, conv);

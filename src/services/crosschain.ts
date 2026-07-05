@@ -40,7 +40,7 @@ import {
 } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { ACROSS_SPOKE_POOL_ABI } from "../abi/aIntents.js";
-import { getRpcUrl } from "../config.js";
+import { getRpcUrl, getNativeTokenSymbol } from "../config.js";
 import {
   OpType,
   ACROSS_SPOKE_POOL,
@@ -51,7 +51,7 @@ import {
   type BridgeableToken,
   type BridgeableTokenType,
 } from "./crosschainConfig.js";
-import { getVaultTokenBalance, getNavData, getPoolData, getClient, getEffectivePoolState } from "./vault.js";
+import { getVaultTokenBalance, getClient, getEffectivePoolState } from "./vault.js";
 import type { EffectivePoolState } from "./vault.js";
 import { getDelegationConfig, getActiveChains } from "./delegation.js";
 import type { DelegationConfig } from "../types.js";
@@ -77,15 +77,6 @@ const DEFAULT_NAV_TOLERANCE_BPS = 100;
 
 /** Across suggested-fees API base URL */
 const ACROSS_API = "https://app.across.to/api/suggested-fees";
-
-/** Format a USD value expressed in cents as a decimal string. */
-function formatCents(cents: bigint): string {
-  const neg = cents < 0n;
-  const abs = neg ? -cents : cents;
-  const dollars = abs / 100n;
-  const rem = abs % 100n;
-  return `${neg ? "-" : ""}${dollars}.${rem.toString().padStart(2, "0")}`;
-}
 
 /**
  * Fallback sync amounts per token type (human-readable).
@@ -147,8 +138,10 @@ export interface ChainNavSnapshot {
   unitaryValue: bigint;
   /** Total pool value in base token units */
   totalValue: bigint;
-  /** Total pool token supply (18 decimals) */
+  /** Total pool token supply (in pool decimals) */
   totalSupply: bigint;
+  /** Effective supply = totalSupply + virtualSupply, computed from netTotalValue / unitaryValue */
+  effectiveSupply: bigint;
   /** Pool base token address on this chain */
   baseToken: Address;
   /** Pool base token symbol (ETH, WETH, POL, etc.) */
@@ -177,12 +170,15 @@ export interface AggregatedNav {
   chains: ChainNavSnapshot[];
   /** Chains where delegation is NOT active (user must set up) */
   missingDelegationChains: number[];
-  /** Per-token aggregate across all chains */
-  tokenTotals: Record<BridgeableTokenType, { total: string; chains: { chainId: number; amount: string }[] }>;
-  /** Cross-chain total NAV normalised to USD via CoinGecko live prices. */
+  /** Cross-chain total NAV in USD, computed from each chain's on-chain netTotalValue
+   *  and effectiveSupply (the same values used by the NAV sync tool). */
   globalNav: {
+    /** Total vault assets across all chains in USD. */
     totalUsd: string;
-    tokenUsd: Record<BridgeableTokenType, string>;
+    /** Global unitary NAV in USD per normalized pool token. */
+    unitaryUsd: string;
+    /** Per-chain breakdown (chainId -> USD NAV and USD unitary value). */
+    chainUsd: Record<number, { totalUsd: string; unitaryUsd: string }>;
   };
 }
 
@@ -252,69 +248,59 @@ export async function getAggregatedNav(
     ),
   );
 
-  // Calculate per-token totals across chains
-  // We normalise everything to the token's standard decimals (6 for USDC/USDT, 18 for WETH, 8 for WBTC)
-  // BSC amounts are already in 18 decimals in the balance but we normalise for display
-  const tokenTotals: AggregatedNav["tokenTotals"] = {} as AggregatedNav["tokenTotals"];
-  const tokenTotalRaw: Record<BridgeableTokenType, bigint> = {} as Record<BridgeableTokenType, bigint>;
-  const tokenTypes: BridgeableTokenType[] = ["USDC", "USDT", "WETH", "WBTC"];
-  for (const tt of tokenTypes) {
-    const chains: { chainId: number; amount: string }[] = [];
-    for (const snap of snapshots) {
-      if (snap.error) continue;
-      const bal = snap.tokenBalances.find((b) => b.token.type === tt);
-      if (bal && bal.balance > 0n) {
-        chains.push({ chainId: snap.chainId, amount: bal.balanceFormatted });
-      }
+  // Global NAV in USD using the same on-chain values as the NAV sync tool:
+  //   totalValue (netTotalValue) and effectiveSupply per chain.
+  // We convert each chain's total value to USD using its base-token price,
+  // normalize effective supplies to a common 18-decimal base, and compute a
+  // global unitary NAV (USD per normalized pool token). This is the supply-
+  // weighted average unitary value; it is the target all chains would converge
+  // to if fully synced.
+  const baseTokenSymbols = snapshots
+    .filter((s) => !s.error && s.effectiveSupply > 0n)
+    .map((s) => s.baseTokenSymbol);
+  const baseTokenPrices = await fetchCoinGeckoPricesUsd(baseTokenSymbols);
+
+  const NORMALIZED_DECIMALS = 18;
+  let totalAssetsUsd = 0;
+  let totalNormalizedSupply = 0n;
+  const chainUsd: AggregatedNav["globalNav"]["chainUsd"] = {};
+  for (const snap of snapshots) {
+    if (snap.error || snap.effectiveSupply === 0n) continue;
+    const price = baseTokenPrices[snap.baseTokenSymbol.toUpperCase()];
+    if (price == null) {
+      throw new Error(`Missing USD price for base token ${snap.baseTokenSymbol} on ${snap.chainName}`);
     }
-    // Sum using normalised decimals: for display, we use the canonical decimals
-    const canonicalDecimals = tt === "WETH" ? 18 : tt === "WBTC" ? 8 : 6;
-    let totalRaw = 0n;
-    for (const snap of snapshots) {
-      if (snap.error) continue;
-      const bal = snap.tokenBalances.find((b) => b.token.type === tt);
-      if (bal && bal.balance > 0n) {
-        // Normalise BSC 18-decimal USDC/USDT to 6 for aggregation
-        if (snap.chainId === 56 && (tt === "USDC" || tt === "USDT")) {
-          totalRaw += bal.balance / 1_000_000_000_000n;
-        } else {
-          totalRaw += bal.balance;
-        }
-      }
-    }
-    tokenTotalRaw[tt] = totalRaw;
-    tokenTotals[tt] = {
-      total: formatUnits(totalRaw, canonicalDecimals),
-      chains,
+    const totalValueFloat = Number(formatUnits(snap.totalValue, snap.baseTokenDecimals));
+    const chainUsdValue = totalValueFloat * price;
+    const decimalDiff = NORMALIZED_DECIMALS - snap.baseTokenDecimals;
+    const normalizedSupply = decimalDiff >= 0
+      ? snap.effectiveSupply * (10n ** BigInt(decimalDiff))
+      : snap.effectiveSupply / (10n ** BigInt(-decimalDiff));
+    const normalizedSupplyFloat = Number(formatUnits(normalizedSupply, NORMALIZED_DECIMALS));
+    const chainUnitaryUsd = normalizedSupplyFloat > 0 ? chainUsdValue / normalizedSupplyFloat : 0;
+    totalAssetsUsd += chainUsdValue;
+    totalNormalizedSupply += normalizedSupply;
+    chainUsd[snap.chainId] = {
+      totalUsd: chainUsdValue.toFixed(2),
+      unitaryUsd: chainUnitaryUsd.toFixed(6),
     };
   }
-
-  // Global NAV in USD using live CoinGecko prices (stablecoins = $1).
-  const prices = await Promise.all(tokenTypes.map(fetchTokenPriceUsd));
-  let totalUsdCents = 0n;
-  const tokenUsd: Record<BridgeableTokenType, string> = {} as Record<BridgeableTokenType, string>;
-  for (let i = 0; i < tokenTypes.length; i++) {
-    const tt = tokenTypes[i];
-    const raw = tokenTotalRaw[tt];
-    const canonicalDecimals = tt === "WETH" ? 18 : tt === "WBTC" ? 8 : 6;
-    const priceCents = BigInt(Math.round(prices[i] * 100));
-    const usdCents = (raw * priceCents) / (10n ** BigInt(canonicalDecimals));
-    totalUsdCents += usdCents;
-    tokenUsd[tt] = formatCents(usdCents);
-  }
+  const globalUnitaryUsd = totalNormalizedSupply > 0n
+    ? totalAssetsUsd / Number(formatUnits(totalNormalizedSupply, NORMALIZED_DECIMALS))
+    : 0;
 
   const missingDelegationChains = snapshots
-    .filter((s) => !s.delegationActive && !s.error && (s.totalValue > 0n || s.totalSupply > 0n))
+    .filter((s) => !s.delegationActive && !s.error && (s.totalValue > 0n || s.effectiveSupply > 0n))
     .map((s) => s.chainId);
 
   return {
     vaultAddress,
     chains: snapshots,
     missingDelegationChains,
-    tokenTotals,
     globalNav: {
-      totalUsd: formatCents(totalUsdCents),
-      tokenUsd,
+      totalUsd: totalAssetsUsd.toFixed(2),
+      unitaryUsd: globalUnitaryUsd.toFixed(6),
+      chainUsd,
     },
   };
 }
@@ -329,16 +315,19 @@ async function readChainSnapshot(
   delegationActive: boolean,
 ): Promise<ChainNavSnapshot> {
   const name = chainName(chainId);
+  const zeroAddr = "0x0000000000000000000000000000000000000000" as Address;
   try {
-    // Read pool data + NAV + total supply + all bridgeable token balances in parallel
+    // Read the effective pool state via updateUnitaryValue simulation (same method
+    // the NAV sync tool uses), the actual ERC-20 totalSupply, and all bridgeable
+    // token balances in parallel.
     const bridgeableTokens = CROSSCHAIN_TOKENS[chainId] || [];
+    const client = getClient(chainId, alchemyKey);
 
-    const [poolData, navData, totalSupplyRaw, ...balances] = await Promise.all([
-      getPoolData(chainId, vaultAddress, alchemyKey).catch(() => null),
-      getNavData(chainId, vaultAddress, alchemyKey).catch(() => null),
-      getClient(chainId, alchemyKey).readContract({
+    const [state, totalSupplyRaw, ...balances] = await Promise.all([
+      getEffectivePoolState(chainId, vaultAddress, alchemyKey).catch(() => null),
+      client.readContract({
         address: vaultAddress,
-        abi: [{ name: "totalSupply", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] }] as const,
+        abi: RIGOBLOCK_VAULT_ABI,
         functionName: "totalSupply",
       }).catch(() => 0n),
       ...bridgeableTokens.map((token) =>
@@ -347,7 +336,6 @@ async function readChainSnapshot(
       ),
     ]);
 
-    // Build token balances regardless of whether pool data loaded
     const tokenBalances: TokenBalance[] = bridgeableTokens.map((token, i) => {
       const bal = balances[i];
       return {
@@ -357,49 +345,31 @@ async function readChainSnapshot(
       };
     }).filter((b) => b.balance > 0n);
 
-    // If pool data unavailable (shouldn't happen with V4's getPool()), use
-    // individual calls for decimals and match base token from bridgeable tokens.
-    if (!poolData) {
-      let fallbackDecimals = 18;
-      try {
-        const dec = await getClient(chainId, alchemyKey).readContract({
-          address: vaultAddress,
-          abi: [{ name: "decimals", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] }] as const,
-          functionName: "decimals",
-        });
-        fallbackDecimals = Number(dec);
-      } catch { /* keep default 18 */ }
-
-      // Match by decimals against bridgeable tokens — prefer stablecoins
-      let fallbackSymbol = "UNKNOWN";
-      const matchingTokens = bridgeableTokens.filter((t) => t.decimals === fallbackDecimals);
-      if (matchingTokens.length > 0) {
-        fallbackSymbol = matchingTokens[0].symbol;
-      }
-
+    if (!state) {
       return {
         chainId,
         chainName: name,
-        unitaryValue: navData?.unitaryValue ?? 0n,
-        totalValue: navData?.totalValue ?? 0n,
+        unitaryValue: 0n,
+        totalValue: 0n,
         totalSupply: totalSupplyRaw as bigint,
-        baseToken: "0x0000000000000000000000000000000000000000" as Address,
-        baseTokenSymbol: (navData || tokenBalances.length > 0) ? fallbackSymbol : "N/A",
-        baseTokenDecimals: fallbackDecimals,
+        effectiveSupply: 0n,
+        baseToken: zeroAddr,
+        baseTokenSymbol: tokenBalances.length > 0 ? "UNKNOWN" : "N/A",
+        baseTokenDecimals: 18,
         tokenBalances,
         delegationActive,
       };
     }
 
-    // Determine base token symbol — different on each chain
-    let baseTokenSymbol = "ETH";
-    if (poolData.baseToken.toLowerCase() === "0x0000000000000000000000000000000000000000") {
-      const nativeSymbols: Record<number, string> = { 56: "BNB", 137: "POL" };
-      baseTokenSymbol = nativeSymbols[chainId] || "ETH";
+    // Determine base token symbol — different on each chain.
+    // Zero address means the chain's native token (ETH, BNB, POL, ...); otherwise
+    // look it up among the bridgeable tokens. Decimals come from on-chain pool data.
+    let baseTokenSymbol: string;
+    if (state.baseToken.toLowerCase() === zeroAddr) {
+      baseTokenSymbol = getNativeTokenSymbol(chainId);
     } else {
-      // Check if base token matches any bridgeable token
       const match = bridgeableTokens.find(
-        (t) => t.address.toLowerCase() === poolData.baseToken.toLowerCase(),
+        (t) => t.address.toLowerCase() === state.baseToken.toLowerCase(),
       );
       baseTokenSymbol = match?.symbol || "ERC20";
     }
@@ -407,12 +377,13 @@ async function readChainSnapshot(
     return {
       chainId,
       chainName: name,
-      unitaryValue: navData?.unitaryValue ?? 0n,
-      totalValue: navData?.totalValue ?? 0n,
+      unitaryValue: state.unitaryValue,
+      totalValue: state.netTotalValue,
       totalSupply: totalSupplyRaw as bigint,
-      baseToken: poolData.baseToken,
+      effectiveSupply: state.effectiveSupply,
+      baseToken: state.baseToken,
       baseTokenSymbol,
-      baseTokenDecimals: poolData.decimals,
+      baseTokenDecimals: state.decimals,
       tokenBalances,
       delegationActive,
     };
@@ -423,7 +394,8 @@ async function readChainSnapshot(
       unitaryValue: 0n,
       totalValue: 0n,
       totalSupply: 0n,
-      baseToken: "0x0000000000000000000000000000000000000000" as Address,
+      effectiveSupply: 0n,
+      baseToken: zeroAddr,
       baseTokenSymbol: "N/A",
       baseTokenDecimals: 18,
       tokenBalances: [],
@@ -617,29 +589,65 @@ const MAX_OVERHEAD_BPS = 50n;
 const COINGECKO_IDS: Record<string, string> = {
   WETH: "ethereum",
   WBTC: "bitcoin",
+  ETH: "ethereum",
+  BNB: "binancecoin",
+  POL: "polygon-ecosystem-token",
 };
+
+/**
+ * Batch-fetch live USD prices from CoinGecko for a set of symbols.
+ * Stablecoins return 1 without a network call.
+ * Throws on network failure or missing price so callers can decide
+ * whether to fail (NAV display) or fall back (bridge fee overhead).
+ */
+async function fetchCoinGeckoPricesUsd(symbols: string[]): Promise<Record<string, number>> {
+  const normalized = symbols.map((s) => s.toUpperCase());
+  const unique = [...new Set(normalized)];
+  const result: Record<string, number> = {};
+  const ids: string[] = [];
+
+  for (const sym of unique) {
+    if (sym === "USDC" || sym === "USDT") {
+      result[sym] = 1;
+    } else {
+      const id = COINGECKO_IDS[sym];
+      if (!id) throw new Error(`No CoinGecko price mapping for ${sym}`);
+      ids.push(id);
+    }
+  }
+
+  if (ids.length === 0) return result;
+
+  const resp = await fetch(
+    `https://api.coingecko.com/api/v3/simple/price?ids=${ids.join(",")}&vs_currencies=usd`,
+  );
+  if (!resp.ok) throw new Error(`CoinGecko HTTP ${resp.status}`);
+  const data = (await resp.json()) as Record<string, { usd?: number }>;
+
+  for (const sym of unique) {
+    const id = COINGECKO_IDS[sym];
+    if (!id) continue;
+    const price = data[id]?.usd;
+    if (!price || price <= 0) {
+      throw new Error(`No USD price returned by CoinGecko for ${sym} (${id})`);
+    }
+    result[sym] = price;
+  }
+
+  return result;
+}
 
 /**
  * Fetch live USD price for a bridgeable token type.
  * Stablecoins return 1 without a network call.
- * For WETH/WBTC, queries the CoinGecko Simple Price API (free, no key).
- * Falls back to a conservative floor if the API is unavailable.
+ * Falls back to a conservative floor if CoinGecko is unavailable — the
+ * fallback is intentional for bridge fee overhead estimation (gives the
+ * solver margin), NOT for NAV computation.
  */
 async function fetchTokenPriceUsd(tokenType: BridgeableTokenType): Promise<number> {
-  if (tokenType === "USDC" || tokenType === "USDT") return 1;
-
-  const id = COINGECKO_IDS[tokenType];
-  if (!id) return 1;
-
   try {
-    const resp = await fetch(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`,
-    );
-    if (!resp.ok) throw new Error(`CoinGecko HTTP ${resp.status}`);
-    const data = (await resp.json()) as Record<string, { usd?: number }>;
-    const price = data[id]?.usd;
-    if (price && price > 0) return price;
-    throw new Error("No price in response");
+    const prices = await fetchCoinGeckoPricesUsd([tokenType]);
+    return prices[tokenType.toUpperCase()];
   } catch {
     // Conservative floor: intentionally LOW so we deduct MORE tokens as
     // overhead, giving the solver better margin. Safe for fills but the
