@@ -544,16 +544,13 @@ async function handleChatResponse(data, options = {}) {
     const anyOperatorOnly = txList.some(tx => tx.operatorOnly);
     if (txList.length > 1 && executionMode === 'delegated' && !anyOperatorOnly) {
       // Multi-transaction delegated mode: show combined card
-      console.log('[tx-modal] Showing multi-tx delegated confirmation:', txList.length, 'transactions');
       showMultiDelegatedConfirmation(txList);
     } else if (txList.length > 1 && (executionMode !== 'delegated' || anyOperatorOnly)) {
       // Multi-transaction manual mode: show each as individual in-chat card
-      console.log('[tx-modal] Showing multi-tx manual cards:', txList.length, 'transactions');
       for (const tx of txList) {
         showManualTxCard(tx);
       }
     } else if (data.transaction) {
-      console.log('[tx-modal] Showing transaction modal:', data.transaction);
       if (executionMode === 'delegated' && !data.transaction.operatorOnly) {
         // In delegated mode: show in-chat confirmation instead of wallet modal
         showDelegatedConfirmation(data.transaction);
@@ -569,17 +566,7 @@ async function handleChatResponse(data, options = {}) {
       for (const r of data.executionResults) {
         showTxReceiptCard(r);
       }
-    } else if (!data.reply && !data.metadata) {
-      // Only warn when there's truly nothing useful in the response
-      console.log('[tx-modal] No transaction in response:', Object.keys(data));
     }
-  }
-
-  // Defensive: if the tool result looks like it should have a transaction but none was found,
-  // log details so we can diagnose why the modal/card didn't appear.
-  const hasToolTx = data.toolCalls?.some(tc => tc.result?.includes('ready') || tc.result?.includes('Execute'));
-  if (hasToolTx && txList.length === 0) {
-    console.warn('[tx-modal] Tool result suggests a transaction but txList is empty. data keys:', Object.keys(data), 'toolCalls:', data.toolCalls?.map(tc => tc.name));
   }
 }
 

@@ -393,3 +393,67 @@ on Arbitrum, Base, Optimism, etc.
 The `uniswapLP.ts` service maintains per-chain address maps for both
 `POOL_MANAGER` and `POSITION_MANAGER`. When adding new chain support, get the
 addresses from the official deployments page above.
+
+---
+
+## UI/UX CONSISTENCY
+
+The operator can interact with the service through the **web chat UI** and the **Telegram bot**. These are peer surfaces; keep them in sync when changing execution flows, confirmation messages, status updates, or safety explanations unless the change is explicitly scoped to one channel.
+
+| What changed | Web path | Telegram path |
+|--------------|----------|---------------|
+| Execution result formatting | `src/services/execution.ts` (`formatOutcomesMarkdown`) | `src/routes/telegram.ts` (`formatTelegramOutcomes`) |
+| Pending/stuck tx messaging | `src/services/execution.ts` + `src/routes/chat.ts` | `src/routes/telegram.ts` (`pollPendingTelegramTxs`) |
+| New tool or fast-path handler | `src/llm/tools.ts`, `src/llm/prompts.ts`, `src/llm/client.ts` | Telegram fast-path regex in `src/llm/client.ts` + HTML formatting |
+| Safety-setting confirmation | `src/llm/handlers/settings.ts` | Telegram command handler in `src/routes/telegram.ts` |
+| Execution mode (autonomous/confirm) | Web toggle → `POST /api/settings/exec-mode` (KV `operator-pref:{operator}:exec-mode`) | `/mode` command in `src/routes/telegram.ts` (same KV key) |
+
+### Pending sponsored transactions
+
+Sponsored transactions (Alchemy ERC-4337 UserOps) can return a pending status when `waitForCallsStatus()` times out. Both surfaces must:
+
+1. Surface the pending hash.
+2. Explain that it is a sponsored UserOp and may not appear in the public mempool until it lands.
+3. Provide a way to recheck status — background polling (Telegram) or by asking "is my transaction stuck?" (web chat and Telegram).
+
+The LLM always has the `check_pending_tx` tool, so it can answer any pending/stuck/missing-transaction question even when the fast-path regex is not triggered.
+
+---
+
+## OPERATIONS: CLOUDFLARE WAF & NEW ENDPOINTS
+
+A new x402-gated endpoint works locally (`wrangler dev`) but may be blocked by Cloudflare edge security once deployed. Verify and whitelist the path before Bazaar registration succeeds.
+
+### Symptoms of a blocked endpoint
+
+| Symptom | Likely cause |
+|---------|--------------|
+| `403 Forbidden` with Cloudflare HTML error page | Bot Fight Mode or a WAF rule blocked the request before it reached the Worker |
+| `400 Bad Request` from the Worker | The request reached the Worker but payload/params are invalid |
+| `ConnectTimeoutError` | Network-level block or origin unreachable |
+
+### Cloudflare dashboard checks
+
+1. **Bot Fight Mode** — `Security → Bots`. Disable it for `trader.rigoblock.com` or create a WAF exception for the new path.
+2. **WAF Custom Rules** — `Security → WAF → Custom rules`. Add an exception for the new endpoint path (e.g. `/api/quote/uniswap`).
+3. **Rate Limiting** — `Security → WAF → Rate limiting rules`. The Bazaar trigger fires 7 rapid requests; ensure it is not throttled.
+4. **Security Events** — `Security → Events`. Filter by the Ray ID from the error page to see exactly which rule triggered.
+
+### Registration script checklist
+
+Before running `npm run register:bazaar` after adding a new endpoint:
+
+- [ ] Deploy the Worker with the new route.
+- [ ] Verify the route returns `402 Payment Required` (not `403` or `5xx`) via curl:
+  ```bash
+  curl -I https://trader.rigoblock.com/api/your-new-endpoint
+  ```
+- [ ] If `403`, check Cloudflare Security Events for the Ray ID and adjust WAF/Bot rules.
+- [ ] Update `scripts/trigger-bazaar.ts` to include the new endpoint in the `endpoints` array.
+- [ ] Use real contract addresses (not symbols like `ETH`/`USDC`) for any route that forwards to upstream DEX APIs (0x, Uniswap).
+- [ ] Run the script and confirm `✅ … payment settled!` for the new endpoint.
+
+### Historical issues
+
+- **`POST /api/quote/uniswap`** — Blocked by Cloudflare with `403 Forbidden` (Bot Fight Mode). Required whitelisting `/api/quote/uniswap` in WAF rules.
+- **`GET /api/quote/0x`** — Returned `400` because the registration script passed `sellToken=ETH&buyToken=USDC` (symbols) instead of contract addresses. The 0x API validates addresses strictly.

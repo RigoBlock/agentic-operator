@@ -1,134 +1,40 @@
 # AGENTS.md — External Agent Integration Guide
 
 > How external AI agents interact with the Rigoblock Agentic Operator via x402.
-> This document covers the security model, access tiers, and what agents can
-> and cannot do.
 
 ---
 
 ## Overview
 
-The Rigoblock Agentic Operator exposes six x402-gated endpoints. Every operation is an atomic HTTP request.
+The service exposes x402-gated endpoints on `https://trader.rigoblock.com`. Every operation is an atomic HTTP request.
 
 | Endpoint | Method | Price | What it returns |
 |----------|--------|-------|-----------------|
-| `/api/quote` | GET | $0.0020 USDC | DEX price quote (no vault context needed) |
-| `/api/quote/uniswap` | POST | $0.0021 USDC | Uniswap Trading API quote with oracle enrichment |
-| `/api/quote/0x` | GET | $0.0022 USDC | 0x API quote with oracle enrichment |
-| `/api/oracle/refresh` | POST | $0.0023 USDC | Oracle price-feed refresh transaction builder |
-| `/api/tools` | GET | $0.0024 USDC | Tool catalog with JSON schemas for direct invocation |
-| `/api/tools?toolName={name}` | POST | $0.0025 USDC | Direct tool execution with structured arguments (no LLM overhead) |
-| `/api/chat` | POST | up to $0.10 USDC (billed by actual usage, typical $0.003–$0.015) | AI-powered DeFi response (swap calldata, positions, analysis) |
+| `/api/quote` | GET | $0.0020 USDC | DEX price quote |
+| `/api/quote/uniswap` | POST | $0.0021 USDC | Uniswap Trading API quote + oracle enrichment |
+| `/api/quote/0x` | GET | $0.0022 USDC | 0x API quote + oracle enrichment |
+| `/api/oracle/refresh` | POST | $0.0023 USDC | Oracle refresh transaction builder |
+| `/api/tools` | GET | $0.0024 USDC | Tool catalog with JSON schemas |
+| `/api/tools?toolName={name}` | POST | $0.0025 USDC | Direct tool execution |
+| `/api/chat` | POST | up to $0.10 USDC (billed by actual usage) | Natural-language DeFi response |
 
-Payments are in USDC on **Base mainnet** (`eip155:8453`) via the
-[x402 protocol](https://x402.org) (`upto` scheme for `/api/chat`, `exact` scheme for
-all `/api/quote*` endpoints). The CDP facilitator at `api.cdp.coinbase.com` handles verification
-and settlement. Callers authorise up to $0.10 for `/api/chat` but are only charged
-the actual inference cost — simple queries cost ~$0.003, complex multi-tool chains
-cost up to $0.015.
+Payments are in USDC on **Base mainnet** (`eip155:8453`) via the [x402 protocol](https://x402.org). `/api/chat` uses the `upto` scheme; all quote/tool endpoints use the `exact` scheme.
 
 ---
 
 ## Access Tiers
 
-### Tier 1: Anonymous (x402 payment only)
+### Tier 1 — x402 payment only
 
-**What:** Agent pays x402 fee. No operator credentials.
-**Gets:** Unsigned transaction data, price quotes, DeFi analysis.
-**Cannot:** Execute transactions on any vault.
+- Gets unsigned transaction data, quotes, balances, positions, analysis.
+- Cannot execute transactions on any vault.
 
-```
-GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base
-X-PAYMENT: <x402-payment-header>
+### Tier 2 — x402 payment + operator signature
 
-→ 200: { sell: "1 ETH", buy: "2079.54 USDC", price: "1 ETH = 2079.54 USDC", ... }
-```
+Required for delegated (auto-execute) mode.
 
-```
-POST /api/chat
-X-PAYMENT: <x402-payment-header>
-Content-Type: application/json
+Auth message to sign:
 
-{
-  "messages": [{"role": "user", "content": "swap 1 ETH for USDC on Base"}],
-  "vaultAddress": "0xYourVault",
-  "chainId": 8453
-}
-
-→ 200: {
-    "reply": "I'll prepare a swap of 1 ETH → USDC on Base via Uniswap...",
-    "transaction": {
-      "to": "0xYourVault",
-      "data": "0x...",           ← unsigned calldata
-      "value": "0x0",
-      "chainId": 8453,
-      "description": "Swap 1 ETH → 2,079.54 USDC via Uniswap"
-    }
-  }
-```
-
-The agent receives unsigned calldata. To execute it, the agent (or its operator)
-must sign and broadcast the transaction themselves. The calling agent's wallet is
-**never** used to operate the vault — the vault contract requires the transaction
-to come from its owner.
-
-**Use cases:**
-- Price discovery across 7 chains
-- Natural language → structured DeFi calldata
-- Portfolio analysis and position queries (read-only)
-- Strategy recommendations (analysis only)
-
-### Tier 2: Authenticated (x402 payment + operator signature)
-
-**What:** Agent pays x402 fee AND provides operator auth credentials.
-**Gets:** Everything in Tier 1, plus delegated (auto-execute) mode.
-**Can:** Trigger our agent wallet to execute trades on the authenticated vault.
-
-```
-POST /api/chat
-X-PAYMENT: <x402-payment-header>
-Content-Type: application/json
-
-{
-  "messages": [{"role": "user", "content": "swap 1 ETH for USDC on Base"}],
-  "vaultAddress": "0xYourVault",
-  "chainId": 8453,
-  "operatorAddress": "0xOperatorWallet",
-  "authSignature": "0x...",
-  "authTimestamp": 1741700000000,
-  "executionMode": "delegated",
-  "confirmExecution": true
-}
-
-→ 200: {
-    "reply": "Executed: swapped 1 ETH → 2,079.54 USDC",
-    "executionResult": {
-      "txHash": "0x...",
-      "confirmed": true,
-      "explorerUrl": "https://basescan.org/tx/0x..."
-    }
-  }
-```
-
-**The `confirmExecution` field:**
-When `confirmExecution` is `true`, the system executes transactions immediately
-and returns the result (tx hash, confirmation status, explorer URL). When omitted
-or `false`, the system returns unsigned transaction data for the caller to sign
-and broadcast.
-
-This enables **fully autonomous agent operation**: the calling agent sends
-`confirmExecution: true` and receives execution results — no human in the loop.
-The NAV shield, delegation checks, and 7-point validation still run on every
-transaction. See [Safety Guarantees](#safety-guarantees) below.
-
-**Requirements for Tier 2:**
-1. The `operatorAddress` must be the vault owner on at least one supported chain
-2. The `authSignature` must be a valid EIP-191 signature of the auth message,
-   signed by `operatorAddress`
-3. The vault must have active delegation to our agent wallet on the target chain
-4. The agent wallet must be authorized for the required function selector
-
-**Auth message format:**
 ```
 Welcome to Rigoblock Operator
 
@@ -137,224 +43,72 @@ Sign this message to verify your wallet and access your smart pool assistant.
 Timestamp: 1741700000000
 ```
 
-The `authTimestamp` value MUST be included in the signed message exactly as shown above. This cryptographically binds the signature to a specific point in time, preventing replay attacks. The signature is valid for 24 hours from `authTimestamp`.
+Requirements:
 
-**Legacy format:** The older static message format without the timestamp line is no longer accepted. External agents must include `authTimestamp` in the signed message exactly as shown above.
+1. `operatorAddress` must be the vault owner on at least one supported chain.
+2. `authSignature` is a valid EIP-191 signature of the message above, including the timestamp line.
+3. The vault has active on-chain delegation to the agent wallet for the required function selector.
+4. The signature is valid for 24 hours from `authTimestamp`.
 
----
+Set `executionMode: "delegated"` and `confirmExecution: true` to auto-execute. Delegated mode without `confirmExecution` returns unsigned calldata.
 
-## AI Model Selection
+Optional LLM overrides for `/api/chat`:
 
-The service uses **Workers AI (Kimi K2.7 Code)** by default — zero-config,
-no API key needed, included in the x402 price. Kimi K2.7 Code is a 1-trillion-parameter
-MoE coding/agentic model that natively handles both reasoning and tool calling in a single call,
-with a 262k token context window.
+| Field | Description |
+|-------|-------------|
+| `aiApiKey` | Provider API key (OpenRouter, Anthropic, OpenAI, etc.) |
+| `aiModel` | Model identifier, e.g. `"anthropic/claude-sonnet-4"` |
+| `aiBaseUrl` | Provider base URL, e.g. `"https://openrouter.ai/api/v1"` |
 
-Agents that need a specific model or provider can override inference by including
-these **optional** fields in the `/api/chat` request body. This is an advanced
-option — the default Kimi K2.7 Code model is recommended for most use cases and is
-what all x402 usage pricing is based on:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `aiApiKey` | string | API key for the LLM provider (OpenRouter, Anthropic, OpenAI, etc.) |
-| `aiModel` | string | Model identifier (e.g. `"anthropic/claude-sonnet-4"`, `"gpt-5-mini"`) |
-| `aiBaseUrl` | string | Provider base URL (e.g. `"https://openrouter.ai/api/v1"`) |
-
-**Resolution priority:**
-1. **Workers AI binding** — Kimi K2.7 Code (reasoning + native function calling, **default**)
-2. **User-provided key** (`aiApiKey` + `aiModel` + `aiBaseUrl`) — agent's own provider
-3. **Server OpenAI key** — server fallback
-
-The tool definitions, safety layers, and system prompt are the same regardless of
-which LLM processes the request.
-
----
-
-## Extensibility — Building on Top
-
-The `/api/chat` endpoint is an **atomic operations provider**. External developers
-can build their own agents, skills, or plugins that compose on top of it:
-
-- **Your agent calls our x402 API** for DeFi primitives (swaps, LP, bridges,
-  staking, positions, NAV queries)
-- **Your agent adds its own logic** — custom strategies, yield optimization,
-  risk models, portfolio rebalancing, cross-protocol workflows
-- **Your code runs on your infrastructure** — it never executes inside our
-  Cloudflare environment
-
-**Why this is safe:** Every operation that touches the vault — regardless of
-which agent originated it — passes through our full safety stack: NAV shield
-(10% max loss), delegation checks, selector whitelist, slippage protection.
-The vault contract enforces these constraints on-chain, independently of the
-calling agent's code.
-
-**Example — external yield optimizer:**
-```
-External Agent                    Rigoblock x402 API
-     │                                │
-     ├─ "get aggregated NAV" ────────►│ ← atomic read
-     │◄─ NAV per chain ──────────────┤
-     │                                │
-     │  [agent's own yield logic]     │
-     │  [decides: move USDC to Base]  │
-     │                                │
-     ├─ "bridge 5000 USDC to Base" ──►│ ← atomic action
-     │◄─ bridge tx ──────────────────┤
-     │                                │
-     ├─ "add 5000 USDC/ETH LP" ─────►│ ← atomic action
-     │◄─ LP tx ─────────────────────┤
-```
-
-Each call is atomic. The external agent owns the orchestration plan. Our API
-provides the safe DeFi execution layer.
-
----
-
-## Security Model
-
-### What the x402 payment wallet CAN do:
-- Pay for API access ($0.0020–$0.10 per call)
-- Receive unsigned transaction data
-- Query prices, positions, and vault info
-- Get natural language DeFi analysis
-
-### What the x402 payment wallet CANNOT do:
-- Execute transactions on any vault
-- Trigger delegated execution (even if the vault has delegation active)
-- Access operator-only endpoints without a valid operator signature
-- Bypass the NAV shield or any on-chain safety check
-
-### What the operator signature unlocks:
-- Delegated execution mode (our agent wallet executes on the vault)
-- Access to vault-specific operations that modify state
-- The operator signature proves: "I own this vault and authorize this action"
-
-### Why these are separate:
-The x402 payer and the operator are typically different wallets:
-- **x402 payer:** The agent's operational wallet (holds USDC on Base for API fees)
-- **Operator:** The vault owner's wallet (controls on-chain vault permissions)
-
-An agent builder might have one x402 payment wallet but interact with multiple
-vaults owned by different operators. The operator must independently authorize
-the agent by providing a signed auth credential.
+Resolution priority: Workers AI binding (default) → user-provided key → server OpenAI fallback.
 
 ---
 
 ## Safety Guarantees
 
-Every transaction that our agent wallet executes passes through these checks
-**before broadcast:**
+Every delegated transaction passes:
 
-### 1. Operator Authentication
-The caller must provide a valid signature proving they own the target vault.
-No signature, no execution. This prevents any agent from operating vaults
-they don't control.
+1. **Operator auth** — signature + on-chain ownership.
+2. **Delegation check** — active on-chain delegation for the exact selector.
+3. **7-point validation** — config enabled, target == vault, selector whitelisted, agent wallet matches, `eth_call` simulation succeeds, gas balance sufficient, gas within per-chain caps.
+4. **NAV shield** — simulates `multicall([tx, updateUnitaryValue])`; blocks if post-swap unit value drops > configured threshold (default 10%, operator-configurable 1%–100%).
+5. **Slippage protection** — default 1% (100 bps), clamped to 0.1%–5%.
+6. **Swap shield** — compares DEX quote vs BackgeoOracle 5-minute TWAP; blocks if divergence exceeds 5% (or operator's temporary tolerance).
 
-### 2. Delegation Verification
-The vault must have active on-chain delegation to our specific agent wallet
-for the required function selector. The vault owner controls which functions
-are delegated and can revoke at any time.
-
-### 3. Seven-Point Execution Validation
-1. Delegation config exists and is enabled in our KV store
-2. Transaction target is the vault address (prevents cross-contract attacks)
-3. Function selector is in the allowed set (whitelist, not blacklist)
-4. Agent wallet identity matches stored config
-5. Transaction simulation passes via `eth_call` (catches reverts pre-broadcast)
-6. Agent wallet has sufficient balance for gas
-7. Gas fees within hard caps per chain
-
-### 4. NAV Shield (Configurable Maximum Loss)
-Before every transaction broadcast, the system simulates the trade's impact
-on the vault's Net Asset Value per unit:
-
-- Atomically simulates: `multicall([swap, updateUnitaryValue])`
-- Compares post-swap NAV against the **higher of:** pre-swap NAV or 24-hour baseline
-- Default threshold: **10%** NAV drop per trade → **transaction BLOCKED**
-- Operator-configurable range: **1%–100%** (set via the web UI or Telegram; stored per operator in KV)
-- **Partial-recovery rule:** a trade that results in `post-swap unitaryValue >= pre-swap unitaryValue` is always allowed, even if the vault is still below the 24h baseline or the drop from baseline exceeds the normal threshold. Only trades that reduce the current unit price are blocked.
-- This check runs outside the agent's control surface — it cannot be disabled,
-  bypassed, or circumvented by any API caller. The agent is bound by whatever
-  threshold the operator has configured.
-
-### 5. Slippage Protection
-Default slippage tolerance: 1% (100 basis points), configurable by the operator
-(0.1%–5%). Combined with the NAV shield, this provides two layers of price
-protection.
-
-### 6. Swap Shield (Oracle Price Protection)
-Before every swap calldata is built, the system compares the DEX API quote
-against the on-chain BackgeoOracle TWAP price:
-
-- Uses the vault's `convertTokenAmount()` — a 5-minute TWAP oracle
-- If the DEX quote diverges >5% from the oracle price in either direction → **swap BLOCKED**
-  (same unified tolerance applies whether the quote is worse or better than oracle)
-- Catches bad routes, stale liquidity, excessive price impact, API compromise,
-  stale oracle conditions, and manipulated routes
-- Graceful degradation: when the oracle has no price feed, the swap proceeds
-  with a warning (does NOT block)
-- The operator can temporarily raise the tolerance up to 50% (10-minute TTL) for known high-impact trades instead of fully disabling the shield
-- The tolerance auto-resets to the default 5% after the timeout expires
-- Independent of the NAV shield — both run on every swap
-- **External agents (x402 callers) cannot modify safety settings.** Slippage, swap shield tolerance, and NAV shield threshold can only be changed by the operator via the web UI. Agents are bound by the operator's current settings but cannot alter them.
+External agents cannot change slippage, swap-shield tolerance, or NAV-shield threshold.
 
 ---
 
-## What Agents CANNOT Do (Even with Full Authentication)
-
-Even a fully authenticated agent with delegation access CANNOT:
+## What Agents Cannot Do
 
 | Action | Why not |
 |--------|---------|
-| Drain vault assets to external address | `withdraw` and `transferOwnership` selectors are never delegated |
-| Execute trades that lose > configured NAV threshold | NAV shield blocks pre-broadcast (default 10%, operator-configurable 1%–100%) |
-| Execute swaps with >5% oracle divergence | Swap Shield compares DEX quote vs TWAP oracle; this block does not apply if the operator has temporarily raised the tolerance above the current divergence |
-| Bypass slippage protection | Slippage is enforced in swap calldata building |
-| Call arbitrary contract functions | Selector whitelist — only approved vault functions |
-| Send transactions to non-vault contracts | Target address must equal vault address |
-| Spend more gas than the per-chain cap | Gas caps are hard-coded, not configurable |
-| Modify delegation settings | Only vault owner can call `updateDelegation` from their wallet |
+| Drain vault assets to external address | `withdraw` / `transferOwnership` are never delegated |
+| Lose more than the configured NAV threshold per trade | NAV shield blocks it |
+| Execute swaps with >5% oracle divergence | Swap shield blocks it (unless operator raised tolerance) |
+| Bypass slippage protection | Enforced in calldata building |
+| Call arbitrary contracts / functions | Target must be the vault; selector whitelist |
+| Spend more than per-chain gas caps | Hard-coded caps |
+| Modify delegation or safety settings | Only the vault owner can |
 
 ---
 
 ## Settlement Policy
 
-x402 settlement (USDC transfer) only occurs when the API returns a **2xx response:**
-
-| Response | Settlement | Reason |
-|----------|-----------|--------|
-| 200 OK | Settled | Agent received value — charge applies |
-| 400 Bad Request | NOT settled | Malformed request — agent not charged |
-| 401 Unauthorized | NOT settled | Auth failure — agent not charged |
-| 500 Server Error | NOT settled | Our fault — agent not charged |
-
-If settlement fails or is skipped, the CDP facilitator releases the held funds
-back to the paying wallet after `maxTimeoutSeconds` (300s).
-
-The `PAYMENT-RESPONSE` header on the response contains the settlement receipt
-(base64-encoded JSON) when settlement succeeds.
+Settlement (USDC transfer) only occurs on **2xx** responses. 400/401/500 are not settled. The `PAYMENT-RESPONSE` header contains the settlement receipt when settlement succeeds.
 
 ---
 
-## The `/api/quote` Endpoint
+## Endpoints
 
-Stateless price quotes. No vault context needed. No operator auth.
+### `GET /api/quote`
 
-```
-GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base
-```
+Stateless price quote.
 
-**Query parameters:**
+Query params: `sell`, `buy`, `amount`, `chain` (default `8453`).
 
-| Param | Required | Description |
-|-------|----------|-------------|
-| `sell` | Yes | Token to sell (symbol or contract address) |
-| `buy` | Yes | Token to buy (symbol or contract address) |
-| `amount` | Yes | Amount to sell (human-readable, e.g. "1" for 1 ETH) |
-| `chain` | No (default: 8453) | Chain name or ID: `base`, `arbitrum`, `8453`, `42161`, etc. |
+Response:
 
-**Response:**
 ```json
 {
   "sell": "1 ETH",
@@ -367,543 +121,73 @@ GET /api/quote?sell=ETH&buy=USDC&amount=1&chain=base
 }
 ```
 
----
+### `POST /api/quote/uniswap`
 
-## The `/api/quote/uniswap` Endpoint
+Forwards the request to the Uniswap Trading API `/quote` and appends:
 
-Full Uniswap Trading API quote with oracle spot-price enrichment. Returns the upstream Uniswap `/quote` response verbatim plus oracle metadata.
-
-```
-POST /api/quote/uniswap
-X-PAYMENT: <x402-payment-header>
-Content-Type: application/json
-
-{
-  "type": "EXACT_INPUT",
-  "amount": "1000000000000000000",
-  "tokenIn": "ETH",
-  "tokenOut": "USDC",
-  "tokenInChainId": 8453,
-  "tokenOutChainId": 8453
-}
-```
-
-**Request body:** Same as the [Uniswap Trading API `/quote`](https://docs.uniswap.org/api/trading/quote) endpoint. All standard parameters are forwarded.
-
-**Response:** Upstream Uniswap quote + oracle enrichment (three extra fields appended to the standard Uniswap response):
 ```json
 {
-  // ... full Uniswap Trading API quote response ...
   "priceFeedExists": true,
   "deltaBps": 12,
   "oracleAmount": "2079548076"
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `priceFeedExists` | Whether both tokens have an active BackgeoOracle feed |
-| `deltaBps` | Divergence between DEX quote and oracle spot price (positive = DEX worse) |
-| `oracleAmount` | Expected output from oracle spot price, in base units |
+### `GET /api/quote/0x`
 
----
+Forwards to the 0x Swap API `/swap/allowance-holder/quote` and appends the same three oracle fields.
 
-## The `/api/quote/0x` Endpoint
+Supports `sellAmount` (exact-input) and `buyAmount` (exact-output).
 
-Full 0x Swap API quote with oracle spot-price enrichment. Returns the upstream 0x `/swap/allowance-holder/quote` response verbatim plus oracle metadata.
+### `GET /api/tools`
 
-```
-GET /api/quote/0x?chainId=8453&sellToken=ETH&buyToken=USDC&sellAmount=1000000000000000000
-X-PAYMENT: <x402-payment-header>
-```
+Returns the tool catalog: name, description, JSON-Schema parameters, category, `requiresOperatorAuth`, `readOnly`.
 
-**Query parameters:** Same as the [0x API v2 `/swap/allowance-holder/quote`](https://0x.org/docs/api#tag/Swap/operation/swapAllowanceHolderQuote) endpoint, including native exact-output support via `buyAmount`. All standard parameters are forwarded.
+### `POST /api/tools?toolName={name}`
 
-- **Exact-input:** pass `sellAmount` (the amount to sell). Response includes `buyAmount`, `minBuyAmount`, `sellAmount`.
-- **Exact-output:** pass `buyAmount` (the amount to receive). Response includes `buyAmount`, `estimatedNetSellAmount`, `maxSellAmount`, and a `routes.refund` leg for surplus.
+Direct tool invocation. Body:
 
-**Response:** Upstream 0x quote + oracle enrichment (three extra fields appended to the standard 0x response):
 ```json
 {
-  // ... full 0x API quote response ...
-  "priceFeedExists": true,
-  "deltaBps": -8,
-  "oracleAmount": "2081500000"
-}
-```
-
----
-
-## The `/api/tools` Endpoint — Programmatic Tool Discovery
-
-For autonomous agents that need structured input/output without LLM overhead.
-
-### `GET /api/tools` — List all tools with schemas
-
-Returns a machine-readable catalog of every direct-invocation tool. Each entry
-includes the tool name, description, parameter schema (JSON-Schema), category,
-and access requirements.
-
-```
-GET /api/tools
-X-PAYMENT: <x402-payment-header>
-
-→ 200: {
-    "toolCount": 41,
-    "tools": [
-      {
-        "name": "get_swap_quote",
-        "description": "Get a price-only quote WITHOUT building a transaction...",
-        "category": "Spot Trading",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "tokenIn": { "type": "string", "description": "Token to sell" },
-            "tokenOut": { "type": "string", "description": "Token to buy" },
-            ...
-          },
-          "required": ["tokenIn", "tokenOut"]
-        },
-        "requiresOperatorAuth": false,
-        "readOnly": true
-      },
-      ...
-    ]
-  }
-```
-
-**Why this matters for autonomous agents:** Instead of guessing parameters or
-relying on natural language, an agent can call this endpoint once, cache the
-schemas, and then invoke specific tools directly via `POST /api/tools?toolName={toolName}`.
-
-**Price:** $0.0024 USDC per request (x402 exact scheme, eip155:8453). Tool discovery is x402-gated to prevent spam and align with the paid execution model.
-
-### `POST /api/tools?toolName={toolName}` — Direct tool invocation
-
-Execute any tool by name with a structured arguments object. No LLM processing.
-
-```
-POST /api/tools?toolName=build_vault_swap
-X-PAYMENT: <x402-payment-header>
-Content-Type: application/json
-
-{
-  "arguments": {
-    "tokenIn": "ETH",
-    "tokenOut": "USDC",
-    "amountIn": "1"
-  },
+  "arguments": { ... },
   "chainId": 8453,
-  "vaultAddress": "0xYourVault"
-}
-
-→ 200: {
-    "tool": "build_vault_swap",
-    "message": "Swap 1 ETH → 2079.54 USDC on Base via 0x.",
-    "transaction": {
-      "to": "0xYourVault",
-      "data": "0x...",
-      "value": "0x0",
-      "chainId": 8453,
-      "description": "Swap 1 ETH → 2079.54 USDC via 0x"
-    }
-  }
-```
-
-**Price:** $0.0025 per call (x402 exact scheme, eip155:8453)
-
-**Tool categories:** Spot Trading, Vault Info, GMX Perpetuals, Uniswap v4 LP,
-Cross-Chain, GRG Staking, Vault Management, Delegation, TWAP Orders, NAV Sync,
-Operator Settings, Oracle.
-
-**How autonomous agents should use this:**
-1. Call `GET /api/tools` ($0.0024) once to discover schemas
-2. Cache the catalog locally
-3. Call `POST /api/tools?toolName={toolName}` with structured arguments for each operation
-4. If the response contains `transaction`, sign and broadcast it (manual mode)
-5. For auto-execution, provide operator auth, set `executionMode: "delegated"`, AND set `confirmExecution: true`. Delegated mode alone returns unsigned calldata; auto-execution requires the explicit confirmation flag.
-
----
-
-## x402 Client Setup (TypeScript)
-
-```typescript
-import { createWalletClient, http } from "viem";
-import { base } from "viem/chains";
-import { privateKeyToAccount } from "viem/accounts";
-import { publicActions } from "viem";
-import { x402Client, x402HTTPClient } from "@x402/core/client";
-import { ExactEvmScheme, toClientEvmSigner } from "@x402/evm";
-
-// 1. Create a signer with USDC on Base (for x402 payments)
-const account = privateKeyToAccount(PRIVATE_KEY);
-const walletClient = createWalletClient({
-  account,
-  chain: base,
-  transport: http(),
-}).extend(publicActions);
-
-// IMPORTANT: pass account as first arg (has .address), walletClient as second
-const signer = toClientEvmSigner(account, walletClient);
-
-// 2. Register the EVM exact scheme for Base mainnet
-const client = new x402Client();
-client.register("eip155:8453", new ExactEvmScheme(signer));
-const httpClient = new x402HTTPClient(client);
-
-// 3. Make a paid request
-const res = await fetch("https://trader.rigoblock.com/api/quote?sell=ETH&buy=USDC&amount=1&chain=base");
-
-if (res.status === 402) {
-  const body = await res.json();
-  const paymentRequired = httpClient.getPaymentRequiredResponse(
-    (name) => res.headers.get(name),
-    body,
-  );
-  const paymentPayload = await httpClient.createPaymentPayload(paymentRequired);
-  const headers = httpClient.encodePaymentSignatureHeader(paymentPayload);
-
-  const paidRes = await fetch(
-    "https://trader.rigoblock.com/api/quote?sell=ETH&buy=USDC&amount=1&chain=base",
-    { headers },
-  );
-  console.log(await paidRes.json());
+  "vaultAddress": "0x...",
+  "operatorAddress": "0x...",
+  "authSignature": "0x...",
+  "authTimestamp": 1741700000000,
+  "executionMode": "delegated",
+  "confirmExecution": true
 }
 ```
+
+`executionMode: "delegated"` alone returns unsigned calldata. Add `confirmExecution: true` to auto-execute.
+
+### `POST /api/chat`
+
+Natural-language interface. Returns `reply`, optional `transaction`/`transactions`, and `executionResult`/`executionResults` when `confirmExecution: true` is used in delegated mode.
 
 ---
 
 ## Supported Chains
 
-| Chain | ID | Name | Short |
-|-------|----|------|-------|
-| Ethereum | 1 | Ethereum | `ethereum` |
-| Base | 8453 | Base | `base` |
-| Arbitrum | 42161 | Arbitrum | `arbitrum` |
-| Optimism | 10 | Optimism | `optimism` |
-| Polygon | 137 | Polygon | `polygon` |
-| BNB Chain | 56 | BNB Chain | `bsc` |
-| Unichain | 130 | Unichain | `unichain` |
+| Chain | ID | Short name |
+|-------|----|------------|
+| Ethereum | 1 | `ethereum` |
+| Base | 8453 | `base` |
+| Arbitrum | 42161 | `arbitrum` |
+| Optimism | 10 | `optimism` |
+| Polygon | 137 | `polygon` |
+| BNB Chain | 56 | `bsc` |
+| Unichain | 130 | `unichain` |
 
 ---
 
-## Composability Model — For Orchestrator Agents
+## Composability Model
 
-The `/api/chat` endpoint is an **atomic operations provider**. Each request
-accepts a single natural-language message, internally invokes zero or one tool,
-and returns a result (quote, unsigned transaction, analytics summary, etc.).
+`/api/chat` is an **atomic operations provider**. Each request handles one operation.
 
-### What the chat endpoint handles (one per request):
+**The chat endpoint handles one per request:** spot swaps, GMX perpetuals, Uniswap v4 LP, GRG staking, cross-chain bridge/transfer/sync, vault info, delegation setup/revoke/status, TWAP orders, strategies, chain switch.
 
-| Category | Operations |
-|----------|-----------|
-| **Spot swaps** | Build swap tx (Uniswap / 0x), get quote |
-| **GMX perpetuals** | Open, close, increase positions; get positions; cancel/update orders; claim funding fees; list markets |
-| **Uniswap v4 LP** | Add/remove liquidity, list positions, collect fees |
-| **GRG staking** | Stake, undelegate, unstake, claim rewards (via vault adapter); end epoch (via staking proxy — manual only) |
-| **Cross-chain bridge** | Transfer tokens (`crosschain_transfer`, OpType=Transfer), one-off NAV sync (`crosschain_sync`, OpType=Sync with optional explicit amount/token or deterministic equalization), scheduled NAV sync (`create_nav_sync`), get bridge quote, aggregated NAV, rebalance plan |
-| **Vault management** | Get info, check token balance, deploy pool, fund pool (mint) |
-| **Delegation** | Setup, revoke all, revoke specific selectors, check status, check pending transaction status |
-| **TWAP orders** | Create, cancel, list — scheduled slice execution with Swap Shield + NAV shield on every slice |
-| **Strategies** | Create (manual or autonomous), remove, list automated strategies |
-| **Chain** | Switch active chain |
+**It does NOT handle:** multi-step orchestration, historical data, APR/APY estimates, lending protocols, arbitrary on-chain reads, or token approvals (the vault adapter handles approvals internally).
 
-### What the chat endpoint does NOT do:
-
-- **Multi-step orchestration** — It won't plan a sequence of operations.
-  "Rebalance to Base then LP the USDC" is two operations; the caller must
-  decompose and sequence them.
-- **Historical data** — No trade history, past performance, or historical prices.
-  Source this externally (CoinGecko, DeFi Llama, etc.).
-- **Yield estimation** — No APR/APY calculations. The caller must gather
-  yield data from protocol-specific sources.
-- **Lending protocols** — No Aave, Compound, or other lending interaction.
-- **Arbitrary on-chain reads** — Only the views exposed by tools (NAV, balances,
-  positions, delegation status).
-- **Token approvals** — The vault adapter handles these internally.
-
-### How orchestrator agents should use this API:
-
-An orchestrator agent should:
-
-1. **Plan** — Use its own reasoning to decompose complex strategies into
-   atomic operations our API supports.
-2. **Query** — Call our API for read operations (quotes, balances, positions,
-   aggregated NAV) to gather decision-making data.
-3. **Execute** — Call our API for each action step (one chat message per action).
-4. **Handle results** — In manual mode, sign and broadcast the unsigned tx.
-   In delegated mode, check the execution result.
-5. **Iterate** — Check outcomes and decide the next step.
-
-**Example — Multi-step rebalance + stake:**
-```
-Agent: POST /api/chat "get aggregated NAV"
-  ← { reply: "NAV per chain...", ... }
-
-Agent: [decides: bridge USDC from Arbitrum to Ethereum]
-Agent: POST /api/chat "bridge 1000 USDC from Arbitrum to Ethereum"
-  ← { transaction: { ... }, reply: "Bridge ready..." }
-
-Agent: [signs/broadcasts, waits for bridge completion]
-
-Agent: POST /api/chat "swap 500 USDC for GRG on Ethereum"
-  ← { transaction: { ... }, reply: "Swap ready..." }
-
-Agent: [signs/broadcasts]
-
-Agent: POST /api/chat "stake 500 GRG"
-  ← { transaction: { ... }, reply: "Stake ready..." }
-```
-
-Each call is atomic. The orchestrator owns the plan.
-
----
-
-## Bazaar Discovery
-
-This service is registered in the [x402 Bazaar](https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources),
-Coinbase's discovery API for x402-enabled services. AI agents using the Bazaar
-can discover and call our endpoints automatically.
-
----
-
-## FAQ
-
-**Q: Does the x402 paying wallet need to be the vault operator?**
-No. The x402 payer and the vault operator are independent. The x402 payer pays
-for API access. The operator proves vault ownership via signature. They can be
-different wallets.
-
-**Q: Can an agent execute trades without the operator's private key?**
-No. Delegated execution requires a valid operator signature. Without it, the
-agent only gets unsigned transaction data (manual mode).
-
-**Q: What happens if an agent provides a wrong vault address?**
-In manual mode: they get calldata they can't execute (they don't own the vault).
-In authenticated mode: `verifyOperatorAuth` checks on-chain that the signer owns
-the vault — if they don't, the request is rejected with 403.
-
-**Q: Can an agent drain a vault through repeated small trades?**
-The NAV shield checks against a 24-hour baseline. Each trade is checked
-independently against the higher of the pre-swap NAV or the 24h baseline.
-A series of 1% losses would be individually allowed but would shift the
-baseline down over 24 hours. The 10% per-trade limit is the hard cap.
-
-**Q: What if the agent wallet private key is compromised?**
-The vault owner can revoke delegation at any time via `revokeAllDelegations()`.
-The agent wallet can only call whitelisted selectors on the vault — cannot
-withdraw funds or transfer ownership.
-
-**Q: Is fully autonomous execution safe?**
-Yes, when delegation is active. Every auto-executed transaction still passes
-through the full safety stack: operator authentication, delegation verification,
-7-point validation, NAV shield (10% max loss), and slippage protection. The
-vault contract enforces selector-level permissions on-chain. The operator can
-revoke delegation at any time to stop all autonomous execution instantly.
-
----
-
-## Autonomous Strategies
-
-Strategies are cron-triggered automated evaluations that run on a configurable
-interval (minimum 5 minutes). Each strategy stores a natural-language instruction
-that the LLM evaluates against live market data.
-
-### Two Modes
-
-| Mode | Behavior | Use case |
-|------|----------|----------|
-| **Manual** (default) | LLM analyzes, sends recommendation via Telegram. Operator confirms to execute. | Low-frequency, high-conviction trades |
-| **Autonomous** | LLM analyzes and executes immediately. Operator notified after execution. | Frequent rebalancing, time-sensitive hedging |
-
-### Why Autonomous Mode is Safe
-
-Autonomous strategies execute through the same safety stack as any delegated
-transaction:
-
-1. **NAV Shield** — every trade is simulated pre-broadcast; >10% NAV drop is blocked
-2. **Selector whitelist** — only approved vault functions can be called
-3. **Target enforcement** — transactions can only target the vault address
-4. **Slippage protection** — 1% default tolerance on all swaps
-5. **Auto-pause** — strategy pauses after 3 consecutive failures
-6. **Instant revocation** — operator can revoke delegation on-chain at any time
-
-The vault contract enforces these constraints independently of the agent. Even
-if the agent's LLM produces a harmful recommendation, the on-chain safety layers
-block it.
-
-### Context Continuity
-
-Each strategy run carries forward the previous recommendation (capped at 500
-characters) so the LLM can assess whether market conditions have changed since
-the last evaluation. This prevents stale recommendations and enables the agent
-to track evolving positions.
-
-### Creating an Autonomous Strategy
-
-Via the chat interface (browser or API):
-
-```
-"Create a 15-minute autonomous strategy to rebalance my ETH/USDC LP
- position when it drifts more than 2% from the target range"
-```
-
-The `autoExecute` parameter controls the mode:
-- `autoExecute: true` → autonomous (execute immediately)
-- `autoExecute: false` (default) → manual (notify and wait for confirmation)
-
----
-
-## TWAP Orders
-
-TWAP (Time-Weighted Average Price) orders split a large swap into N equal-sized
-slices executed at regular time intervals, reducing price impact on the DEX.
-Unlike LLM strategies, TWAP execution is **deterministic** — no LLM judgment
-at slice time, just mechanical execution of the pre-configured plan.
-
-### Safety Guarantees on Every TWAP Slice
-
-Every slice passes through the **full safety stack** — identical to manually
-triggered swaps:
-
-1. **Swap Shield** — compares DEX quote against on-chain BackgeoOracle TWAP price.
-   Blocks if DEX diverges >5% from oracle in either direction (or the operator's temporary tolerance if set).
-2. **NAV shield pre-check** — simulates post-swap NAV before returning calldata.
-   Blocks if NAV would drop >10%.
-3. **NAV shield at broadcast** (autonomous mode) — runs again before CDP signs.
-4. **Slippage protection** — 1% default, configurable by operator.
-5. **Auto-pause** — pauses after 3 consecutive failures.
-
-TWAP slices **cannot** bypass the shields even if the operator explicitly
-requests it. Each slice is treated as a fresh independent operation.
-
-### Managing TWAP Orders via Chat
-
-```
-# Create a sell-side TWAP
-"Sell 1 ETH in 5 slices of 0.2 ETH every 10 minutes on Base, auto-execute"
-
-# Create a buy-side TWAP
-"Buy 100 GRG with ETH, 20 per slice, every 5 minutes, dex 0x"
-
-# List all orders
-"List my TWAP orders"
-
-# Cancel a specific order
-"Cancel TWAP order 3"
-```
-
-For full technical specifications including data model, KV schema, execution
-context, and DEX integrator requirements, see
-[content/twap-orders.md](content/twap-orders.md).
-
----
-
-## Telegram Operator Commands
-
-Operators can manage safety settings directly from a paired Telegram account.
-These commands bypass the LLM and invoke the same verified-operator handlers as
-the web UI:
-
-| Command | Description |
-|---------|-------------|
-| `/slippage <0.5%>` | Set default slippage (0.1%–5%) |
-| `/swapshield <30%>` or `/swapshield reset` | Temporarily raise oracle-divergence tolerance up to 50% for 10 minutes, or reset to the default 5% |
-| `/navshield <15%>` or `/navshield reset` | Set the max NAV drop threshold (1%–100%), or reset to the default 10% |
-| `/mode [autonomous\|confirm]` | Toggle auto-execute vs. confirm-before-trade. Stored in a single operator-scoped KV key shared with the web UI. |
-
-These settings can only be changed by the vault operator (via the web UI or
-Telegram). External API callers and the LLM cannot modify them.
-
----
-
-## Parallel UI Updates: Web + Telegram
-
-The operator can interact with this service through two first-class channels:
-**the web chat UI** and **the Telegram bot**. These channels are not alternatives
-— they are peer surfaces that must stay in sync.
-
-### Rule: never update only one channel
-
-When adding or changing any user-facing execution flow, confirmation message,
-status update, error hint, or safety explanation, you **must** update both the
-web chat path and the Telegram path unless the change is explicitly scoped to
-a single channel.
-
-| What changed | Web path | Telegram path |
-|--------------|----------|---------------|
-| Execution result formatting | `src/services/execution.ts` (`formatOutcomesMarkdown`) | `src/routes/telegram.ts` (`formatTelegramOutcomes`) |
-| Pending/stuck tx messaging | `src/services/execution.ts` + `src/routes/chat.ts` | `src/routes/telegram.ts` (`pollPendingTelegramTxs`) |
-| New tool or fast-path handler | `src/llm/tools.ts`, `src/llm/prompts.ts`, `src/llm/client.ts` | Telegram fast-path regex in `src/llm/client.ts` + HTML formatting |
-| Safety-setting confirmation | `src/llm/handlers/settings.ts` | Telegram command handler in `src/routes/telegram.ts` |
-| Execution mode (autonomous/confirm) | Web toggle → `POST /api/settings/exec-mode` (KV key `operator-pref:{operator}:exec-mode`) | `/mode` command in `src/routes/telegram.ts` (same KV key) |
-
-### Pending sponsored transactions
-
-Sponsored transactions (Alchemy ERC-4337 UserOps) can return a pending status
-when `waitForCallsStatus()` times out, even though Alchemy is still processing
-the UserOp. Both surfaces must:
-
-1. **Surface the pending hash** so the user has a reference.
-2. **Explain that the hash is a sponsored UserOp** and may not be visible in the
-   public mempool until it lands.
-3. **Provide a way to check status again** — either through background polling
-   (Telegram) or by telling the user they can ask "is my transaction stuck?"
-   (web chat and Telegram).
-
-The LLM is always given the `check_pending_tx` tool, so it can answer any
-pending/stuck/missing-transaction question even when the fast-path regex is
-not triggered.
-
----
-
-## Operations: Cloudflare WAF & New Endpoints
-
-When adding a new x402-gated endpoint, the route will work locally (`wrangler dev`) but may be blocked by Cloudflare edge security rules once deployed. You **must** verify and potentially whitelist the new path before Bazaar registration will succeed.
-
-### Symptoms of a blocked endpoint
-
-| Symptom | Likely cause |
-|---------|--------------|
-| `403 Forbidden` with Cloudflare HTML error page | Bot Fight Mode or a WAF rule blocked the request before it reached the Worker |
-| `400 Bad Request` from the Worker (not Cloudflare) | The request reached the Worker but payload/params are invalid |
-| `ConnectTimeoutError` | Network-level block or the origin is unreachable |
-
-### What to check in the Cloudflare dashboard
-
-1. **Bot Fight Mode** — `Security → Bots`
-   - If enabled, Cloudflare may challenge/block non-browser POST requests.
-   - Either disable Bot Fight Mode for `trader.rigoblock.com` or create a **WAF exception** for the new path.
-
-2. **WAF Custom Rules** — `Security → WAF → Custom rules`
-   - Look for any rule that blocks requests based on path patterns, content-type, or body size.
-   - Add an exception for the new endpoint path (e.g. `/api/quote/uniswap`).
-
-3. **Rate Limiting** — `Security → WAF → Rate limiting rules`
-   - The Bazaar trigger script fires 7 requests in rapid succession.
-   - Ensure no rate-limit rule is throttling or blocking the client IP.
-
-4. **Security Events** — `Security → Events`
-   - Filter by the Ray ID from the error page (e.g. `a054f3700fd9bb0e`).
-   - This shows exactly which rule triggered the block.
-
-### Registration script checklist
-
-Before running `npm run register:bazaar` after adding a new endpoint:
-
-- [ ] Deploy the Worker with the new route
-- [ ] Verify the route returns `402 Payment Required` (not `403` or `5xx`) via curl:
-  ```bash
-  curl -I https://trader.rigoblock.com/api/your-new-endpoint
-  ```
-- [ ] If `403`, check Cloudflare Security Events for the Ray ID and adjust WAF/Bot rules
-- [ ] Update `scripts/trigger-bazaar.ts` to include the new endpoint in the `endpoints` array
-- [ ] Ensure the request payload uses real addresses (not symbols like `ETH`/`USDC`) for any route that forwards to upstream DEX APIs (0x, Uniswap)
-- [ ] Run the script and confirm `✅ … payment settled!` for the new endpoint
-
-### Historical issues
-
-- **`POST /api/quote/uniswap`** — Blocked by Cloudflare with `403 Forbidden` (Bot Fight Mode). Required whitelisting the `/api/quote/uniswap` path in WAF rules.
-- **`GET /api/quote/0x`** — Returned `400` because the registration script passed `sellToken=ETH&buyToken=USDC` (symbols) instead of actual contract addresses. The 0x API validates addresses strictly.
-
-
+Orchestrator agents should plan externally, query our API for reads, execute one step per call, and iterate.

@@ -25,10 +25,6 @@ function formatPct(value, fallback = '0') {
 function formatTxMetrics(tx) {
   if (!tx?.metrics) return '';
   const m = tx.metrics;
-  // Debug: log raw metrics so we can diagnose display vs backend discrepancies.
-  if (m.navShield || m.swapShield) {
-    console.log('[tx-metrics] raw metrics:', JSON.stringify(m));
-  }
   const parts = [];
   if (m.navShield?.navImpactPct != null) {
     // impactPct is signed: positive = NAV improved, negative = NAV dropped.
