@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { parseGwei, type PublicClient } from "viem";
-import { ExecutionError, estimateFees } from "../src/services/execution.js";
+import { ExecutionError, estimateFees, formatOutcomesMarkdown } from "../src/services/execution.js";
 import { handle_check_pending_tx } from "../src/llm/handlers/delegation.js";
 import type { Env, RequestContext } from "../src/types.js";
 
@@ -222,5 +222,55 @@ describe("handle_check_pending_tx", () => {
 
     expect(result.selfContained).toBe(true);
     expect(result.message).toContain("No pending transaction is recorded");
+  });
+});
+
+
+describe("formatOutcomesMarkdown", () => {
+  const baseTx = {
+    to: "0x1111111111111111111111111111111111111111" as `0x${string}`,
+    data: "0x" as `0x${string}`,
+    value: "0x0" as `0x${string}`,
+    chainId: 1,
+    gas: "0x0" as `0x${string}`,
+    description: "Test swap",
+  };
+
+  it("labels a pending UserOp hash as UserOp hash, not transaction hash", () => {
+    const userOpHash = "0xb31e63daa2c50ef6e0d99b21a0e18c6e2e1370264f9c77a192244621a2d20c18";
+    const summary = formatOutcomesMarkdown([{
+      tx: baseTx,
+      result: {
+        txHash: userOpHash,
+        chainId: 1,
+        confirmed: false,
+        reverted: false,
+        sponsored: true,
+        userOpHash,
+        gasCostEth: "0 (sponsored — status check timed out)",
+      },
+    }]);
+    expect(summary).toContain("UserOp hash (sponsored — not yet on-chain)");
+    expect(summary).toContain(userOpHash);
+    expect(summary).toContain("bundler UserOp identifier");
+  });
+
+  it("labels a pending sponsored EVM hash as sponsored transaction hash", () => {
+    const txHash = "0xcd725b84cd725b84cd725b84cd725b84cd725b84cd725b84cd725b84cd86d289";
+    const userOpHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const summary = formatOutcomesMarkdown([{
+      tx: baseTx,
+      result: {
+        txHash,
+        chainId: 1,
+        confirmed: false,
+        reverted: false,
+        sponsored: true,
+        userOpHash,
+        gasCostEth: "0 (sponsored)",
+      },
+    }]);
+    expect(summary).toContain("Sponsored transaction hash");
+    expect(summary).not.toContain("UserOp hash (sponsored — not yet on-chain)");
   });
 });

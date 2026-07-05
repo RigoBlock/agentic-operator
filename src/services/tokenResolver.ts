@@ -181,9 +181,6 @@ export async function resolveTokenBySymbol(
         .put(`${KV_PREFIX}${cacheKey}`, addr, { expirationTtl: KV_TTL_SECONDS })
         .catch(() => {});
     }
-    console.log(
-      `[tokenResolver] Resolved ${upper} on chain ${chainId} → ${addr} (${candidates[0].name})`,
-    );
     return addr;
   }
 

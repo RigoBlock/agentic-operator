@@ -5,6 +5,7 @@
 import {
   connectedAddress, authSignature, authTimestamp,
   executionMode, setExecutionMode,
+  autoExecuteMode, setAutoExecuteMode,
   delegationState, setDelegationState,
   vaultInput, CHAIN_NAMES, escapeHtml, apiHeaders,
   currentChainId, MAINNET_CHAINS_LIST, copyToClipboard,
@@ -379,24 +380,63 @@ export async function toggleSponsoredGas(checked) {
 }
 
 // Execution mode: autonomous (auto-execute) vs confirm (require button click)
-// Stored in localStorage per vault — used in sendMessage to pass confirmExecution flag
-export function toggleExecMode(checked) {
+// Stored in KV per operator and shared with Telegram.
+export async function toggleExecMode(checked) {
   const vault = vaultInput.value.trim();
-  if (!vault) return;
-  const key = `exec-mode:${vault.toLowerCase()}`;
-  localStorage.setItem(key, checked ? 'autonomous' : 'confirm');
-  const label = document.getElementById('chat-mode-label');
-  if (label) label.textContent = checked ? '⚡ Autonomous' : '🔔 Confirm trades';
-  window.appendMessage('system', checked
-    ? 'Switched to autonomous mode — trades execute immediately.'
-    : 'Switched to confirm mode — you\'ll review each trade before execution.');
+  if (!vault || !connectedAddress || !authSignature) return;
+  const mode = checked ? 'autonomous' : 'confirm';
+  try {
+    const res = await fetch('/api/settings/exec-mode', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        operatorAddress: connectedAddress,
+        vaultAddress: vault,
+        chainId: currentChainId,
+        authSignature,
+        authTimestamp,
+        mode,
+      }),
+    });
+    if (!res.ok) throw new Error('Failed to save');
+    setAutoExecuteMode(mode);
+    updateExecModeLabel(mode);
+    window.appendMessage('system', checked
+      ? 'Switched to autonomous mode — trades execute immediately.'
+      : 'Switched to confirm mode — you\'ll review each trade before execution.');
+  } catch (err) {
+    console.warn('[Delegation] Failed to update exec mode:', err);
+    window.appendMessage('system', `Failed to update execution mode: ${err.message}`);
+    updateExecModeLabel(autoExecuteMode);
+  }
 }
 
-export function loadExecMode() {
+export async function loadExecMode() {
   const vault = vaultInput.value.trim();
-  if (!vault) return;
-  const key = `exec-mode:${vault.toLowerCase()}`;
-  const mode = localStorage.getItem(key) || 'confirm';
+  if (!vault || !connectedAddress || !authSignature) {
+    updateExecModeLabel('confirm');
+    return;
+  }
+  try {
+    const params = new URLSearchParams({
+      operatorAddress: connectedAddress,
+      vaultAddress: vault,
+      chainId: String(currentChainId),
+      authSignature,
+      authTimestamp: String(authTimestamp),
+    });
+    const res = await fetch(`/api/settings/exec-mode?${params.toString()}`, { headers: apiHeaders() });
+    if (!res.ok) throw new Error('Failed to load');
+    const { mode } = await res.json();
+    setAutoExecuteMode(mode === 'autonomous' ? 'autonomous' : 'confirm');
+    updateExecModeLabel(autoExecuteMode);
+  } catch (err) {
+    console.warn('[Delegation] Failed to load exec mode:', err);
+    updateExecModeLabel('confirm');
+  }
+}
+
+function updateExecModeLabel(mode) {
   const cb = document.getElementById('chat-mode-checkbox');
   const label = document.getElementById('chat-mode-label');
   if (cb) cb.checked = mode === 'autonomous';

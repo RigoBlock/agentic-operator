@@ -38,6 +38,7 @@ import { recordGasSpend } from "../routes/gasPolicy.js";
 import { ALLOWED_VAULT_SELECTORS } from "../abi/rigoblockVault.js";
 import {
   executeSponsoredCalls,
+  getSponsoredCallsStatus,
   type WalletCall,
 } from "./bundler.js";
 import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
@@ -1134,18 +1135,32 @@ async function sponsoredAgentTransaction(
   }
 
   // Pending / status timeout — submission was accepted but we could not
-  // confirm the on-chain status in time. Return the callId so the UI can
-  // show "submitted" instead of leaving the user on "Executing trade…".
-  const pendingTxHash = receiptTxHash !== "0x" ? receiptTxHash : (result.callId as Hex);
+  // confirm the on-chain status in time. If we have an EVM receipt hash,
+  // return it; otherwise expose the callId (UserOp hash) as userOpHash so
+  // downstream formatters/status checks can label it correctly and poll
+  // wallet_getCallsStatus to map it to the eventual EVM txHash.
+  if (receiptTxHash !== "0x") {
+    return {
+      txHash: receiptTxHash,
+      chainId,
+      confirmed: false,
+      reverted: false,
+      explorerUrl,
+      sponsored: true,
+      userOpHash: result.callId as Hex,
+      gasCostEth: "0 (sponsored)",
+      resubmitAttempts: 0,
+    };
+  }
   return {
-    txHash: pendingTxHash,
+    txHash: result.callId as Hex,
     chainId,
     confirmed: false,
     reverted: false,
-    explorerUrl,
+    explorerUrl: undefined,
     sponsored: true,
     userOpHash: result.callId as Hex,
-    gasCostEth: receiptTxHash !== "0x" ? "0 (sponsored)" : "0 (sponsored — status check timed out)",
+    gasCostEth: "0 (sponsored — status check timed out)",
     resubmitAttempts: 0,
   };
 }
@@ -1317,6 +1332,11 @@ export async function checkPendingTxForVault(
 /**
  * Check the status of a pending transaction.
  * If a receipt is found, cleans up both the tx record and the per-vault index.
+ *
+ * For sponsored (UserOp) transactions, the stored `hash` may be the callId
+ * (UserOp hash) rather than the EVM transaction hash. In that case we call
+ * Alchemy's `wallet_getCallsStatus` to resolve it to a receipt before falling
+ * back to a normal eth_getTransactionReceipt.
  */
 export async function checkPendingTxStatus(
   env: Env,
@@ -1324,45 +1344,73 @@ export async function checkPendingTxStatus(
   chainId: number,
   vaultAddress?: string,
 ): Promise<ExecutionResult | null> {
-  const rpcUrl = getRpcUrl(chainId, env.ALCHEMY_API_KEY);
+  const alchemyKey = env.ALCHEMY_API_KEY;
+  const publicClient = getClient(chainId, alchemyKey);
 
-  if (!rpcUrl) {
-    throw new ExecutionError("RPC URL not available for chain " + chainId, "RPC_UNAVAILABLE");
-  }
-
-  const publicClient = getClient(chainId, env.ALCHEMY_API_KEY);
-
-  try {
-    const receipt = await publicClient.getTransactionReceipt({ hash: hash as Hex });
-    if (!receipt) return null;
-
+  // Helper to build an ExecutionResult from an EVM receipt and clean up KV.
+  const buildResult = async (receipt: TransactionReceipt, txHash: Hex): Promise<ExecutionResult> => {
     const explorerBase = EXPLORER_TX_URL[chainId];
     const gasUsed = receipt.gasUsed;
     const effectiveGasPrice = receipt.effectiveGasPrice;
     const cost = gasUsed * effectiveGasPrice;
 
     const result: ExecutionResult = {
-      txHash: hash as Hex,
+      txHash,
       chainId,
       confirmed: receipt.status === "success",
       reverted: receipt.status !== "success",
       blockNumber: Number(receipt.blockNumber),
-      explorerUrl: explorerBase ? `${explorerBase}${hash}` : undefined,
+      explorerUrl: explorerBase ? `${explorerBase}${txHash}` : undefined,
       gasUsed: gasUsed.toString(),
       effectiveGasPrice: effectiveGasPrice.toString(),
       gasCostEth: formatEther(cost),
       sponsored: false,
     };
 
-    // Clean up KV
+    // Clean up KV under both the UserOp hash (if that was the key) and the
+    // resolved EVM txHash.
     await env.KV.delete(`pending-tx:${hash}`);
+    if (txHash !== hash) {
+      await env.KV.delete(`pending-tx:${txHash}`);
+    }
     if (vaultAddress) {
       await env.KV.delete(getPendingTxIndexKey(vaultAddress, chainId));
     }
     return result;
+  };
+
+  // 1. Try normal EVM receipt lookup first.
+  try {
+    const receipt = await publicClient.getTransactionReceipt({ hash: hash as Hex });
+    if (receipt) {
+      return await buildResult(receipt, hash as Hex);
+    }
   } catch {
-    return null;
+    // not found on-chain yet — continue to UserOp resolution
   }
+
+  // 2. If no EVM receipt, the hash may be a sponsored UserOp callId. Query
+  //    Alchemy's wallet_getCallsStatus to map it to an EVM txHash, then fetch
+  //    the on-chain receipt for that txHash.
+  try {
+    const sponsoredStatus = await getSponsoredCallsStatus(hash, chainId, alchemyKey);
+    const resolvedHash = sponsoredStatus.receipts?.[0]?.transactionHash;
+    if (resolvedHash) {
+      const onChainReceipt = await publicClient.getTransactionReceipt({ hash: resolvedHash });
+      if (onChainReceipt) {
+        return await buildResult(onChainReceipt, resolvedHash);
+      }
+    }
+  } catch (err) {
+    // If wallet_getCallsStatus fails (e.g. hash is not a known callId), treat
+    // as still pending rather than throwing.
+    console.warn(
+      `[execution] UserOp status resolution failed for ${hash} on chain ${chainId}: ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  return null;
 }
 
 /**
@@ -1438,15 +1486,21 @@ export function formatOutcomesMarkdown(outcomes: TxExecOutcome[]): string {
       parts.push(`⚠️ ${desc} reverted on-chain${gasWasted}. [View failed tx](${link})`);
     } else if (result) {
       const isSponsoredTimeout = result.sponsored && result.gasCostEth?.includes("timed out");
-      const hashLabel = result.sponsored ? "Sponsored transaction hash" : "Transaction hash";
+      const isUserOpHash = result.sponsored && result.userOpHash && result.txHash === result.userOpHash;
+      const hashLabel = isUserOpHash
+        ? "UserOp hash (sponsored — not yet on-chain)"
+        : (result.sponsored ? "Sponsored transaction hash" : "Transaction hash");
       const pendingNote = isSponsoredTimeout
         ? " The status check timed out; the transaction may still confirm on-chain."
         : " Waiting for confirmation…";
       const checkHint = " Ask me for a status update anytime (e.g. \"is my transaction stuck?\").";
-      const sponsoredHint = result.sponsored
+      const sponsoredHint = result.sponsored && !isUserOpHash
         ? " This is a sponsored UserOp hash — it may not appear in the public mempool until it lands."
         : "";
-      parts.push(`⏳ ${desc} submitted.\n${hashLabel}: \`${result.txHash}\`${sponsoredHint}${pendingNote}${checkHint}`);
+      const userOpNote = isUserOpHash
+        ? "\nThis is the bundler UserOp identifier, not the on-chain transaction hash. The explorer link will appear once the bundle is included."
+        : "";
+      parts.push(`⏳ ${desc} submitted.\n${hashLabel}: \`${result.txHash}\`${sponsoredHint}${pendingNote}${userOpNote}${checkHint}`);
     } else if (error) {
       const fallbackHint = fallbackToManual
         ? " You can sign this transaction directly from your wallet."

@@ -97,7 +97,7 @@ export async function handle_get_swap_quote(
 
   if (dex === "0x" || dex === "zerox") {
     try {
-      const quote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress, ctx);
+      const quote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
       return { message: formatZeroXQuoteForDisplay(intent, quote), chainSwitch: chainSwitched };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -290,7 +290,7 @@ async function buildVaultSwapWith0x(
   chainName: string,
   fallbackNote?: string,
 ): Promise<ToolResult> {
-  const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress, ctx);
+  const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
 
   const assembly: SwapAssembly = {
     dexLabel: "0x Aggregator",

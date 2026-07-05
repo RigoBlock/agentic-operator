@@ -810,6 +810,7 @@ the web UI:
 | `/slippage <0.5%>` | Set default slippage (0.1%–5%) |
 | `/swapshield <30%>` or `/swapshield reset` | Temporarily raise oracle-divergence tolerance up to 50% for 10 minutes, or reset to the default 5% |
 | `/navshield <15%>` or `/navshield reset` | Set the max NAV drop threshold (1%–100%), or reset to the default 10% |
+| `/mode [autonomous\|confirm]` | Toggle auto-execute vs. confirm-before-trade. Stored in a single operator-scoped KV key shared with the web UI. |
 
 These settings can only be changed by the vault operator (via the web UI or
 Telegram). External API callers and the LLM cannot modify them.
@@ -835,6 +836,7 @@ a single channel.
 | Pending/stuck tx messaging | `src/services/execution.ts` + `src/routes/chat.ts` | `src/routes/telegram.ts` (`pollPendingTelegramTxs`) |
 | New tool or fast-path handler | `src/llm/tools.ts`, `src/llm/prompts.ts`, `src/llm/client.ts` | Telegram fast-path regex in `src/llm/client.ts` + HTML formatting |
 | Safety-setting confirmation | `src/llm/handlers/settings.ts` | Telegram command handler in `src/routes/telegram.ts` |
+| Execution mode (autonomous/confirm) | Web toggle → `POST /api/settings/exec-mode` (KV key `operator-pref:{operator}:exec-mode`) | `/mode` command in `src/routes/telegram.ts` (same KV key) |
 
 ### Pending sponsored transactions
 

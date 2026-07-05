@@ -209,6 +209,7 @@ export type StreamEvent =
   | { type: "tool_call"; name: string; arguments: Record<string, unknown> }
   | { type: "tool_result"; name: string; result: string; error?: boolean; metadata?: Record<string, unknown> }
   | { type: "transaction"; transaction: UnsignedTransaction }
+  | { type: "confirmation_required"; transactions: UnsignedTransaction[]; reply: string }
   | { type: "chain_switch"; chainId: number }
   | { type: "text"; content: string }
   | { type: "done"; response: ChatResponse };
@@ -310,8 +311,6 @@ export interface RequestContext {
    * gate vault-transaction tools: browser callers without auth are blocked (sign in),
    * while x402 agents without auth are allowed in manual mode (Tier 1 AGENTS.md). */
   isBrowserRequest: boolean;
-  /** True when the request comes from the Telegram bot. Used to tailor command guidance in errors. */
-  isTelegram?: boolean;
   /** Execution mode for this request */
   executionMode?: ExecutionMode;
   /** User-provided AI API key (overrides server OPENAI_API_KEY) */

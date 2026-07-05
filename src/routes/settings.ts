@@ -24,6 +24,10 @@ import {
   handle_set_nav_shield_threshold,
   handle_enable_nav_shield,
 } from "../llm/handlers/settings.js";
+import {
+  getExecutionModePreference,
+  setExecutionModePreference,
+} from "../services/transactionFlow.js";
 
 const settings = new Hono<{ Bindings: Env }>();
 
@@ -116,6 +120,46 @@ settings.post("/nav-shield", async (c) => {
       return c.json({ error: "Provide 'threshold' or 'reset: true'" }, 400);
     }
     return c.json({ ok: true, message: result.message });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return c.json({ error: err.message }, err.status as 401 | 403);
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: sanitizeError(msg) }, 400);
+  }
+});
+
+settings.get("/exec-mode", async (c) => {
+  try {
+    const q = c.req.query();
+    const body: SettingsBody = {
+      vaultAddress: q.vaultAddress || "",
+      chainId: Number(q.chainId) || 0,
+      operatorAddress: q.operatorAddress || "",
+      authSignature: q.authSignature || "",
+      authTimestamp: Number(q.authTimestamp) || 0,
+    };
+    await verifyOperatorAndBuildContext(c.env, body);
+    const mode = await getExecutionModePreference(c.env.KV, body.operatorAddress);
+    return c.json({ mode });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return c.json({ error: err.message }, err.status as 401 | 403);
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: sanitizeError(msg) }, 400);
+  }
+});
+
+settings.post("/exec-mode", async (c) => {
+  try {
+    const body = await c.req.json<SettingsBody & { mode: "autonomous" | "confirm" }>();
+    const ctx = await verifyOperatorAndBuildContext(c.env, body);
+    if (body.mode !== "autonomous" && body.mode !== "confirm") {
+      return c.json({ error: "mode must be 'autonomous' or 'confirm'" }, 400);
+    }
+    await setExecutionModePreference(c.env.KV, ctx.operatorAddress as string, body.mode);
+    return c.json({ ok: true, mode: body.mode });
   } catch (err) {
     if (err instanceof AuthError) {
       return c.json({ error: err.message }, err.status as 401 | 403);

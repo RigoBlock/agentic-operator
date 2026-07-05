@@ -533,7 +533,6 @@ export async function buildAddLiquidityTx(
     );
     if (match) {
       existingTokenId = BigInt(match.tokenId);
-      console.log(`[buildAddLiquidityTx] Reusing existing position #${match.tokenId} (same pool + tick range) — increasing instead of minting`);
     }
   } catch {
     // If position lookup fails, fall through to minting a new position

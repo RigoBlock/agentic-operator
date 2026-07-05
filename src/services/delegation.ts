@@ -82,7 +82,6 @@ export async function saveDelegationConfig(
     delegationConfigKey(config.vaultAddress),
     JSON.stringify(config),
   );
-  console.log(`[Delegation] Saved config for vault ${config.vaultAddress}`);
 }
 
 /**
@@ -234,10 +233,6 @@ export async function confirmDelegation(
   await saveDelegationConfig(env.KV, config);
   await markChainDelegated(env.KV, vaultAddress, chainId);
 
-  console.log(
-    `[Delegation] Confirmed on chain ${chainId} for vault ${vaultAddress} ` +
-    `(total chains: ${Object.keys(config.chains).length})`,
-  );
   return config;
 }
 
@@ -438,7 +433,6 @@ export async function revokeDelegation(
     config.chains = {};
     await kv.put(delegationConfigKey(vaultAddress), JSON.stringify(config));
   }
-  console.log(`[Delegation] Revoked delegation for vault ${vaultAddress} (all chains)`);
 }
 
 /**
@@ -462,8 +456,4 @@ export async function revokeDelegationOnChain(
   await unmarkChainDelegated(kv, vaultAddress, chainId).catch(() => {});
 
   await kv.put(delegationConfigKey(vaultAddress), JSON.stringify(config));
-  console.log(
-    `[Delegation] Revoked delegation on chain ${chainId} for vault ${vaultAddress} ` +
-    `(remaining: ${Object.keys(config.chains || {}).length} chains)`,
-  );
 }

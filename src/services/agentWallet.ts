@@ -125,10 +125,6 @@ export async function createAgentWallet(
     kv.put(`agent-reverse:${currentAddress.toLowerCase()}`, vaultAddress.toLowerCase()),
   ]);
 
-  console.log(
-    `[AgentWallet] ${walletChanged ? "Updated" : "Created"} CDP wallet ` +
-    `${currentAddress} for vault ${vaultAddress}`,
-  );
 
   return {
     ...info,
@@ -299,5 +295,4 @@ export async function deleteAgentWallet(
     deletions.push(kv.delete(`agent-reverse:${info.address.toLowerCase()}`));
   }
   await Promise.all(deletions);
-  console.log(`[AgentWallet] Deleted wallet for vault ${vaultAddress}`);
 }

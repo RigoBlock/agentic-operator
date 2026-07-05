@@ -255,11 +255,6 @@ export async function recordGasSpend(
     const nextNormalized = currentNormalized + normalized;
     await kv.put(spendKey, nextNormalized.toString(), { expirationTtl: 86400 });
 
-    console.log(
-      `[GasPolicy] Recorded gas spend for ${sender.slice(0, 10)}… (chain ${chainId}): ` +
-      `+$${parseFloat(formatUnits(normalized, SPENDING_DECIMALS)).toFixed(4)} ` +
-      `(day ${dayBucket}, total $${parseFloat(formatUnits(nextNormalized, SPENDING_DECIMALS)).toFixed(4)})`,
-    );
   } catch (err) {
     console.warn(
       `[GasPolicy] Failed to record gas spend: ${err instanceof Error ? err.message : String(err)}`,
@@ -276,7 +271,6 @@ gasPolicy.get("/", (c) =>
 gasPolicy.post("/", async (c) => {
   try {
     const rawBody = await c.req.text();
-    console.log(`[GasPolicy] Webhook received (${rawBody.length} bytes): ${rawBody.slice(0, 600)}`);
 
     let body: any;
     try {
@@ -307,14 +301,12 @@ gasPolicy.post("/", async (c) => {
       SPENDING_DECIMALS,
     );
     const gasLimitUsdDisplay = formatUnits(gasLimitUsdRaw, SPENDING_DECIMALS);
-    console.log(`[GasPolicy] sender=${sender} policyId=${policyId} chainId=${chainId} chainIdNumber=${chainIdNumber} limitUsd=${gasLimitUsdDisplay}`);
 
     // ── 1. Check if sender is a registered agent wallet ──
     const vaultAddress = await resolveAgentToVault(c.env.KV, sender);
 
     if (vaultAddress) {
       // ── Agent wallet path: full delegation checks ──
-      console.log(`[GasPolicy] sender maps to vault=${vaultAddress}`);
 
       // ── 2. Verify delegation is active ──
       const config = await getDelegationConfig(c.env.KV, vaultAddress);
@@ -337,14 +329,12 @@ gasPolicy.post("/", async (c) => {
         const innerTarget = tryExtractTarget(callData);
         if (innerTarget) {
           const isVault = innerTarget.toLowerCase() === vaultAddress.toLowerCase();
-          console.log(`[GasPolicy] Inner target=${innerTarget} isVault=${isVault}`);
           if (!isVault) {
             const reason = `Inner call target ${innerTarget} is not the delegated vault ${vaultAddress}`;
             console.warn(`[GasPolicy] ✗ REJECTED: ${reason}`);
             return c.json({ approved: false, reason }, 200);
           }
         } else {
-          console.log("[GasPolicy] Could not decode inner target — approving (on-chain caveats enforce)");
         }
       }
 
@@ -358,10 +348,6 @@ gasPolicy.post("/", async (c) => {
       }
 
       // ── 6. Approved (agent wallet) ──
-      console.log(
-        `[GasPolicy] ✓ APPROVED (agent): agent=${sender.slice(0, 10)}… vault=${vaultAddress.slice(0, 10)}… ` +
-        `chain=${chainId} policy=${policyId} spend=$${spendCheck.currentSpend?.toFixed(4)} limit=$${gasLimitUsdDisplay}`,
-      );
       return c.json({ approved: true }, 200);
     }
 
@@ -391,10 +377,6 @@ gasPolicy.post("/", async (c) => {
             return c.json({ approved: false, reason: spendCheck.reason }, 200);
           }
 
-          console.log(
-            `[GasPolicy] ✓ APPROVED (user): sender=${sender.slice(0, 10)}… ` +
-            `target vault=${innerTarget.slice(0, 10)}… chain=${chainId} spend=$${spendCheck.currentSpend?.toFixed(4)} limit=$${gasLimitUsdDisplay}`,
-          );
           return c.json({ approved: true }, 200);
         }
       }

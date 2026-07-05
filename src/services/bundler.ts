@@ -243,3 +243,70 @@ export async function executeSponsoredCalls(
     throw err;
   }
 }
+
+/**
+ * Query the status of a previously submitted sponsored call bundle.
+ * Returns the EVM receipts if the bundle has landed on-chain, or a pending
+ * status if it is still in the bundler mempool.
+ *
+ * This is used by the pending-transaction poller: when a sponsored tx times
+ * out before `waitForCallsStatus()` can return a receipt, we only have the
+ * callId (UserOp hash). Calling `wallet_getCallsStatus` lets us map that
+ * callId to the actual EVM transaction hash once it lands.
+ */
+export async function getSponsoredCallsStatus(
+  callId: string,
+  chainId: number,
+  alchemyKey: string,
+): Promise<SponsoredCallsResult> {
+  const alchemyNetworkUrl = `https://${getAlchemyNetworkSlug(chainId)}.g.alchemy.com/v2/${alchemyKey}`;
+
+  const response = await fetch(alchemyNetworkUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: "https://trader.rigoblock.com",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "wallet_getCallsStatus",
+      params: [{ id: callId }],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`wallet_getCallsStatus HTTP error: ${response.status}`);
+  }
+
+  const data = (await response.json()) as {
+    result?: {
+      id?: string;
+      status?: "success" | "failure" | "pending";
+      receipts?: Array<{
+        transactionHash: Hex;
+        blockHash: Hex;
+        blockNumber: bigint;
+        gasUsed: bigint;
+        status: "success" | "reverted";
+        logs: Array<{ address: Hex; data: Hex; topics: Hex[] }>;
+      }>;
+    };
+    error?: { message?: string; code?: number };
+  };
+
+  if (data.error) {
+    throw new Error(`wallet_getCallsStatus error: ${data.error.message || data.error.code}`);
+  }
+
+  const result = data.result;
+  if (!result) {
+    throw new Error("wallet_getCallsStatus returned empty result");
+  }
+
+  return {
+    callId: result.id || callId,
+    status: result.status,
+    receipts: result.receipts as SponsoredCallsResult["receipts"],
+  };
+}

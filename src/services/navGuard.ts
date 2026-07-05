@@ -109,7 +109,6 @@ export async function setNavShieldThreshold(
     );
   }
   await kv.put(`${NAV_SHIELD_PREFIX}${operatorAddress.toLowerCase()}`, String(pct));
-  console.log(`[NavShield] Threshold set to ${Number(pct)}% for ${operatorAddress}`);
 }
 
 /**
@@ -120,7 +119,6 @@ export async function clearNavShieldThreshold(
   operatorAddress: string,
 ): Promise<void> {
   await kv.delete(`${NAV_SHIELD_PREFIX}${operatorAddress.toLowerCase()}`);
-  console.log(`[NavShield] Threshold reset to default for ${operatorAddress}`);
 }
 
 /** Known on-chain custom error selectors for clear error reporting */
@@ -283,10 +281,6 @@ export async function checkNavImpact(
       unitaryValue: navResult.unitaryValue,
       timestamp: 0n, // updateUnitaryValue doesn't return timestamp
     };
-    console.log(
-      `[NavShield] Pre-swap NAV: unitaryValue=${preNav.unitaryValue} ` +
-      `totalValue=${preNav.totalValue} chain=${chainId}`,
-    );
   } catch (err) {
     // FAIL-CLOSED: If we can't read pre-swap NAV, we MUST block the transaction.
     // Allowing it would bypass the NAV shield entirely — leaving the vault unprotected.
@@ -305,7 +299,6 @@ export async function checkNavImpact(
 
   // If unitaryValue is 0, vault is empty — nothing to protect
   if (preNav.unitaryValue === 0n) {
-    console.log("[NavShield] unitaryValue=0 (empty vault) — allowing");
     return {
       allowed: true,
       verified: true,
@@ -370,10 +363,6 @@ export async function checkNavImpact(
       timestamp: 0n, // updateUnitaryValue doesn't return timestamp
     };
 
-    console.log(
-      `[NavShield] Post-swap NAV: unitaryValue=${postNav.unitaryValue} ` +
-      `totalValue=${postNav.totalValue}`,
-    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // FAIL-CLOSED: If we can't simulate the trade's NAV impact, we MUST block it.
@@ -432,10 +421,6 @@ export async function checkNavImpact(
     : 0n;
   const dropPct = Number(dropBps) / 100; // Convert basis points to percentage
 
-  console.log(
-    `[NavShield] NAV change: ${preNav.unitaryValue} → ${postNav.unitaryValue} ` +
-    `(${dropPct >= 0 ? "-" : "+"}${Math.abs(dropPct).toFixed(2)}%)`,
-  );
 
   // ── Step 4: Check against 24-hour baseline ──
   let baselineUnitaryValue: bigint | undefined;
@@ -444,14 +429,9 @@ export async function checkNavImpact(
       const baseline = await loadBaseline(kv, vaultAddress, chainId);
       if (baseline) {
         baselineUnitaryValue = BigInt(baseline.unitaryValue);
-        console.log(
-          `[NavShield] 24h baseline: unitaryValue=${baselineUnitaryValue} ` +
-          `(recorded ${Math.round((Date.now() - baseline.recordedAt) / 60000)}min ago)`,
-        );
       } else {
         // No baseline yet — store current as baseline
         await storeBaseline(kv, vaultAddress, chainId, preNav.unitaryValue);
-        console.log("[NavShield] No 24h baseline found — stored current NAV as baseline");
       }
     } catch (err) {
       console.warn("[NavShield] KV baseline error (ignoring):", err);
@@ -479,11 +459,6 @@ export async function checkNavImpact(
       : 0n;
     const improvementPct = Number(improvementBps) / 100;
 
-    console.log(
-      `[NavShield] ✓ ALLOWED: trade ${improvementPct > 0 ? "improves" : "holds"} NAV ` +
-      `${improvementPct > 0 ? `by ${improvementPct.toFixed(2)}% ` : ""}` +
-      `(pre=${preNav.unitaryValue} post=${postNav.unitaryValue})`,
-    );
 
     return {
       allowed: true,
@@ -547,9 +522,6 @@ export async function checkNavImpact(
     } catch { /* non-critical */ }
   }
 
-  console.log(
-    `[NavShield] ✓ ALLOWED: NAV drop ${dropFromRefPct.toFixed(2)}% within ${maxDrop}% limit`,
-  );
 
   return {
     allowed: true,

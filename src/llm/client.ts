@@ -335,7 +335,6 @@ async function callWorkersAI(
     while (true) {
       const { done, value } = await reader.read();
       if (!firstTokenLogged && (done || value)) {
-        console.log(`[LLM] first token after ${Date.now() - tFirstToken}ms (model=${model})`);
         firstTokenLogged = true;
       }
       if (done) break;
@@ -457,7 +456,6 @@ async function callWorkersAI(
         }))
         .filter(tc => tc.function.name.length > 0);
       if (assembled.length > 0) {
-        console.log(`[Workers AI streaming] Using ${assembled.length} native delta tool_call(s): ${assembled.map(t => t.function.name).join(', ')}`);
         hasToolCalls = true;
         toolCalls = assembled;
         textContent = null; // discard text — native tool_calls take precedence
@@ -506,7 +504,6 @@ async function callWorkersAI(
       }
 
       if (extractedFnName && extractedFnArgs) {
-        console.log(`[Workers AI streaming] Extracted text-embedded tool call: ${extractedFnName}`);
         hasToolCalls = true;
         toolCalls = [{ function: { name: extractedFnName, arguments: extractedFnArgs } }];
         textContent = null;
@@ -560,7 +557,6 @@ async function callWorkersAI(
     40_000,
     "Workers AI",
   )) as any;
-  console.log(`[LLM] non-streaming response in ${Date.now() - tNonStream}ms (model=${model})`);
 
   // Workers AI returns text in different fields depending on model:
   // - Legacy format: result.response (string)
@@ -592,7 +588,6 @@ async function callWorkersAI(
       const rawName = tc.function?.name || tc.name || "";
       const aliased = TOOL_NAME_ALIASES[rawName];
       if (aliased) {
-        console.log(`[Workers AI] Tool alias in structured call: "${rawName}" → "${aliased}"`);
         if (tc.function) tc.function.name = aliased;
         else tc.name = aliased;
       }
@@ -618,7 +613,6 @@ async function callWorkersAI(
     if (thinkMatch) {
       reasoning = thinkMatch[1].trim();
       textContent = textContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim() || null;
-      console.log(`[Workers AI] Extracted reasoning (${reasoning.length} chars)`);
     }
   }
   if (!reasoning && typeof rawReasoning === 'string' && rawReasoning.trim()) {
@@ -677,7 +671,6 @@ async function callWorkersAI(
     }
 
     if (extractedFnName && extractedFnArgs) {
-      console.log(`[Workers AI] Extracted text-embedded tool call: ${extractedFnName}`);
       hasToolCalls = true;
       toolCalls = [{ function: { name: extractedFnName, arguments: extractedFnArgs } }];
       textContent = null; // discard the text — the tool call replaces it
@@ -731,7 +724,6 @@ export async function processChat(
 ): Promise<ChatResponse> {
   const t0 = Date.now();
   onStreamEvent?.({ type: "status", message: "Analyzing request..." });
-  console.log(`[processChat] start vault=${ctx.vaultAddress} chain=${ctx.chainId}`);
 
   // ── LLM provider resolution ──
   // Priority: 1) User-provided key → 2) Workers AI binding (zero-config) → 3) Server OpenAI key
@@ -827,7 +819,6 @@ export async function processChat(
     ? [...filteredTools, ...getSkillTools()]
     : ALL_AGENT_TOOL_DEFINITIONS;
 
-  console.log(`[processChat] Detected domains: ${[...detectedDomains].join(", ")} (${TOOL_DEFINITIONS.length} tools, ${Math.round(systemPrompt.length / 4)} est. tokens) +${Date.now() - t0}ms`);
 
   const executionModeNote = ctx.executionMode === "delegated"
     ? "The operator has enabled DELEGATED mode. After you build a transaction, the agent wallet will execute it automatically once the operator confirms the trade details. The operator does NOT need to sign the transaction manually."
@@ -913,7 +904,6 @@ ${executionModeNote}${contextDocsBlock}`;
         if (resolved.id !== ctx.chainId) {
           const stripped = chainSuffixMatch[1].trim();
           if (stripped.length >= 3) {
-            console.log(`[LLM] Chain suffix detected: switching to chain ${resolved.id} (${resolved.name}), stripped command: "${stripped}"`);
             ctx.chainId = resolved.id;
             onStreamEvent?.({ type: "status", message: `Switched to ${resolved.name}` });
             effectiveMsg = stripped;
@@ -946,7 +936,6 @@ ${executionModeNote}${contextDocsBlock}`;
     tryFastPathStrategyQueries(effectiveMsg) ||
     tryFastPathPendingTx(effectiveMsg);
   if (immediateFastPath) {
-    console.log(`[LLM] Immediate fast-path (no LLM): ${immediateFastPath.name}(${JSON.stringify(immediateFastPath.args)})`);
     try {
       onStreamEvent?.({ type: "status", message: `Executing ${immediateFastPath.name}...` });
       const toolResult = await executeToolCall(env, ctx, immediateFastPath.name, immediateFastPath.args);
@@ -1001,7 +990,6 @@ ${executionModeNote}${contextDocsBlock}`;
       : [{ role: "system" as const, content: contextualPrompt }, ...msgs];
 
   // First LLM call
-  console.log(`[LLM] Calling ${llmModel} with ${fullMessages.length} messages, ${TOOL_DEFINITIONS.length} tools +${Date.now() - t0}ms`);
   // User-friendly model label for status messages
   const modelLabel = llmModel.includes('kimi') || llmModel.includes('moonshotai') ? 'Kimi K2.7 Code'
     : llmModel.split('/').pop() || llmModel;
@@ -1013,7 +1001,6 @@ ${executionModeNote}${contextDocsBlock}`;
     tools: TOOL_DEFINITIONS,
     tool_choice: "auto",
   });
-  console.log(`[LLM] Response in ${Date.now() - tLlmStart}ms: finish_reason=${response.choices[0]?.finish_reason}, tool_calls=${response.choices[0]?.message?.tool_calls?.length ?? 0}`);
   // Don't emit "Model responded" — the next meaningful event (reasoning, tool_call, text) replaces it
 
   const choice = response.choices[0];
@@ -1067,7 +1054,6 @@ ${executionModeNote}${contextDocsBlock}`;
         break;
       }
 
-      console.log(`[LLM] Autonomous round ${round}/${MAX_AUTONOMOUS_ROUNDS}: executing ${currentMessage.tool_calls.length} tool call(s)`);
       onStreamEvent?.({ type: "status", message: `Executing ${currentMessage.tool_calls.length} tool call(s)...` });
       const toolMessages: OpenAI.ChatCompletionMessageParam[] = [
         ...rollingMessages,
@@ -1082,7 +1068,6 @@ ${executionModeNote}${contextDocsBlock}`;
         } catch {
           args = {};
         }
-        console.log(`[LLM] Tool call: ${name}(${argsStr})`);
 
         // Emit stream event for tool call start
         onStreamEvent?.({ type: "tool_call", name, arguments: args });
@@ -1091,7 +1076,6 @@ ${executionModeNote}${contextDocsBlock}`;
         if (name === "get_swap_quote" || name === "build_vault_swap") {
           const lastUserMsg = recentMessages.filter(m => m.role === "user").pop()?.content || "";
           args = sanitizeSwapArgs(args, lastUserMsg);
-          console.log(`[LLM] Sanitized args: ${JSON.stringify(args)}`);
         }
 
         let result: string;
@@ -1101,7 +1085,6 @@ ${executionModeNote}${contextDocsBlock}`;
         try {
           toolResult = await executeToolCall(env, ctx, name, args);
           result = toolResult.message;
-          console.log(`[LLM] Tool ${name} succeeded, result length: ${result.length}`);
 
           if (toolResult.transaction) {
             // ── NAV shield pre-check (universal hook) ──
@@ -1230,7 +1213,6 @@ ${executionModeNote}${contextDocsBlock}`;
             /On-chain (?:revert|error)/i.test(result) ||
             /simulation failed/i.test(result);
           if (isTerminalError) {
-            console.log(`[LLM] Terminal swap error — returning directly instead of continuing orchestration`);
             toolMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
             return {
               reply: result.replace(/^Error: /, ""),
@@ -1255,7 +1237,6 @@ ${executionModeNote}${contextDocsBlock}`;
                 tool_call_id: toolCall.id,
                 content: result,
               });
-              console.log(`[LLM] Consecutive failure limit reached for tool '${name}'. Stopping orchestration loop.`);
               // Return with the error message visible to the user
               return {
                 reply: result.replace(/^Error: /, ""),
@@ -1290,7 +1271,6 @@ ${executionModeNote}${contextDocsBlock}`;
 
       // Actionable outcome available — return immediately.
       if (pendingTransactions.length > 0) {
-        console.log(`[processChat] Autonomous loop resolved with ${pendingTransactions.length} transaction(s)`);
         for (const tx of pendingTransactions) {
           onStreamEvent?.({ type: "transaction", transaction: tx });
         }
@@ -1312,7 +1292,6 @@ ${executionModeNote}${contextDocsBlock}`;
       }
 
       if (pendingSuggestions?.length) {
-        console.log("[processChat] Autonomous loop resolved with self-contained report + suggestions");
         const report = toolCallResults
           .filter(tc => !tc.error && tc.result)
           .map(tc => tc.result)
@@ -1330,7 +1309,6 @@ ${executionModeNote}${contextDocsBlock}`;
       }
 
       if (pendingSelfContained) {
-        console.log("[processChat] Autonomous loop resolved with self-contained report");
         const report = toolCallResults
           .filter(tc => !tc.error && tc.result)
           .map(tc => tc.result)
@@ -1347,7 +1325,6 @@ ${executionModeNote}${contextDocsBlock}`;
 
       // Continue planning with the fast model using accumulated tool results.
       rollingMessages = toolMessages;
-      console.log(`[LLM] Autonomous follow-up call round ${round}/${MAX_AUTONOMOUS_ROUNDS}`);
       onStreamEvent?.({ type: "status", message: `Planning next step (round ${round + 1})…` });
       const followUp = await callLLM({
         model: llmModel,
@@ -1490,7 +1467,6 @@ export async function estimateGas(
   // approvals, oracle reads). The on-chain estimate is already accurate for
   // the vault proxy overhead since we estimate from the actual sender.
   const buffered = estimated + (estimated * 20n) / 100n;
-  console.log(`[estimateGas] chain=${chainId} raw=${estimated} buffered=${buffered}`);
   return `0x${buffered.toString(16)}`;
 }
 
@@ -1619,9 +1595,7 @@ export async function preCheckNavImpact(
         Number(MAX_NAV_DROP_PCT),
         Math.max(1, Math.ceil(dropPctNum)),
       );
-      const navShieldGuidance = ctx.isTelegram
-        ? `use /navshield ${suggestedNavThreshold}% in Telegram`
-        : `raise the threshold to ${suggestedNavThreshold}% in Settings → NAV Shield`;
+      const navShieldGuidance = `raise the threshold to ${suggestedNavThreshold}% (Settings → NAV Shield, or Telegram /navshield)`;
       const reason =
         `Server-side NAV shield blocked this transaction: it would reduce the vault unit value by ${result.dropPct}% ` +
         `(max allowed: ${maxDrop}%). ${result.reason || ""}\n\n` +
@@ -1631,9 +1605,6 @@ export async function preCheckNavImpact(
     }
 
     if (result.verified) {
-      console.log(
-        `[NavShield pre-check] ✓ Passed: NAV drop ${result.dropPct}% / impact ${result.impactPct}% (chain ${tx.chainId})`,
-      );
       return {
         warning: '',
         metrics: {
@@ -1678,7 +1649,6 @@ export async function executeToolCall(
   // Resolve hallucinated tool names to canonical names
   const resolvedName = TOOL_NAME_ALIASES[name] || name;
   if (resolvedName !== name) {
-    console.log(`[LLM] Tool name alias: "${name}" → "${resolvedName}"`);
   }
 
   // Centralized auth gate for operator-verified tools.
@@ -1747,7 +1717,6 @@ export function resolveChainArg(chainArg: string): { id: number; name: string; s
     }
   }
   if (bestMatch) {
-    console.log(`[resolveChainArg] Fuzzy matched "${chainArg}" → ${bestMatch.name} (distance ${bestDist})`);
     return bestMatch;
   }
 
@@ -1867,7 +1836,6 @@ export async function runSwapShield(
     );
     if (tolerance !== null) {
       maxDivergencePct = tolerance;
-      console.log(`[SwapShield] Using operator tolerance override: ${tolerance}%`);
     }
   }
 
@@ -1949,10 +1917,7 @@ export async function runSwapShield(
       MAX_TEMP_DIVERGENCE_PCT,
       Math.max(1, Math.ceil(divergenceAbs)),
     );
-    const isTelegram = ctx.isTelegram === true;
-    const raiseToleranceLine = isTelegram
-      ? `use /swapshield ${suggestedTolerance}%`
-      : `raise it to ${suggestedTolerance}% in Settings → Swap Shield`;
+    const raiseToleranceLine = `raise it to ${suggestedTolerance}% (Settings → Swap Shield, or Telegram /swapshield)`;
     const explanation = isFavorable
       ? `This can indicate a stale oracle or a manipulated routing path producing an implausibly favorable quote.`
       : `This usually indicates significant price impact from the trade size.`;
@@ -2068,14 +2033,12 @@ function sanitizeSwapArgs(
       const currentAmountOut = corrected.amountOut as string | undefined;
 
       if (!currentAmountOut || Math.abs(parseFloat(currentAmountOut) - parseFloat(amount)) > parseFloat(amount) * 0.01) {
-        console.log(`[sanitize] Correcting buy amount: amountOut=${currentAmountOut} → ${amount} (user said "buy ${amount} ${token}")`);
         corrected.amountOut = amount;
       }
       delete corrected.amountIn; // buy = amountOut, never amountIn
 
       // Ensure tokenOut matches the token next to the number
       if (corrected.tokenOut && (corrected.tokenOut as string).toUpperCase() !== token) {
-        console.log(`[sanitize] Correcting tokenOut: ${corrected.tokenOut} → ${token}`);
         // Swap tokenIn/tokenOut if they're reversed
         if ((corrected.tokenIn as string)?.toUpperCase() === token) {
           const tmp = corrected.tokenIn;
@@ -2095,13 +2058,11 @@ function sanitizeSwapArgs(
 
       const currentAmountIn = corrected.amountIn as string | undefined;
       if (!currentAmountIn || Math.abs(parseFloat(currentAmountIn) - parseFloat(amount)) > parseFloat(amount) * 0.01) {
-        console.log(`[sanitize] Correcting sell amount: amountIn=${currentAmountIn} → ${amount}`);
         corrected.amountIn = amount;
       }
       delete corrected.amountOut; // sell/swap = amountIn, never amountOut
 
       if (corrected.tokenIn && (corrected.tokenIn as string).toUpperCase() !== token) {
-        console.log(`[sanitize] Correcting tokenIn: ${corrected.tokenIn} → ${token}`);
         if ((corrected.tokenOut as string)?.toUpperCase() === token) {
           const tmp = corrected.tokenOut;
           corrected.tokenOut = corrected.tokenIn;
@@ -2112,7 +2073,6 @@ function sanitizeSwapArgs(
       }
     }
   } else {
-    console.log(`[sanitize] Multi-swap detected — skipping amount/token correction, trusting LLM per-call args`);
   }
 
   // ── 3. Extract chain from user message (only for single-swap) ──
@@ -2123,7 +2083,6 @@ function sanitizeSwapArgs(
     for (const cn of chainNames) {
       if (msg.includes(`on ${cn}`) || msg.includes(`to ${cn}`)) {
         if (!corrected.chain) {
-          console.log(`[sanitize] Adding chain=${cn} from user message`);
           corrected.chain = cn;
         }
         break;
@@ -2142,7 +2101,6 @@ function sanitizeSwapArgs(
     const numMatch = msg.match(/([\d.,]+)/);
     if (numMatch) {
       corrected.amountOut = numMatch[1].replace(/,/g, "");
-      console.log(`[sanitize] Reset amountOut to ${corrected.amountOut} from user message`);
     }
   }
   if (amtIn > 0 && amtIn < 1e-9) {
@@ -2150,7 +2108,6 @@ function sanitizeSwapArgs(
     const numMatch = msg.match(/([\d.,]+)/);
     if (numMatch) {
       corrected.amountIn = numMatch[1].replace(/,/g, "");
-      console.log(`[sanitize] Reset amountIn to ${corrected.amountIn}`);
     }
   }
 

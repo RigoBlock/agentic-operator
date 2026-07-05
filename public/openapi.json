@@ -620,6 +620,95 @@
         }
       }
     },
+    "/api/settings/exec-mode": {
+      "get": {
+        "operationId": "getExecMode",
+        "summary": "Get execution mode preference",
+        "description": "Returns the operator's current auto-execute preference (autonomous or confirm). Shared between the web UI and Telegram.",
+        "tags": ["Operator Settings"],
+        "parameters": [
+          { "name": "vaultAddress", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "chainId", "in": "query", "required": true, "schema": { "type": "integer" } },
+          { "name": "operatorAddress", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "authSignature", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "authTimestamp", "in": "query", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current execution mode preference",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecModeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "operationId": "setExecMode",
+        "summary": "Set execution mode preference",
+        "description": "Sets whether the operator's trades execute immediately (autonomous) or require confirmation (confirm). Shared between the web UI and Telegram.",
+        "tags": ["Operator Settings"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecModeRequest"
+              },
+              "example": {
+                "vaultAddress": "0xYourVaultAddress",
+                "chainId": 8453,
+                "operatorAddress": "0xOperatorAddress",
+                "authSignature": "0x...",
+                "authTimestamp": 1741700000000,
+                "mode": "autonomous"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Execution mode preference updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecModeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
     "/api/tools": {
       "get": {
         "operationId": "listTools",
@@ -1920,6 +2009,49 @@
           "reset": {
             "type": "boolean",
             "description": "When true, reset the setting to its default value"
+          }
+        }
+      },
+      "ExecModeRequest": {
+        "type": "object",
+        "required": ["vaultAddress", "chainId", "operatorAddress", "authSignature", "authTimestamp", "mode"],
+        "properties": {
+          "vaultAddress": {
+            "type": "string",
+            "description": "Vault contract address"
+          },
+          "chainId": {
+            "type": "integer",
+            "description": "Chain ID where the vault exists"
+          },
+          "operatorAddress": {
+            "type": "string",
+            "description": "Vault owner address"
+          },
+          "authSignature": {
+            "type": "string",
+            "description": "EIP-191 signature of the auth message"
+          },
+          "authTimestamp": {
+            "type": "integer",
+            "description": "Timestamp included in the signed auth message"
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["autonomous", "confirm"],
+            "description": "Autonomous executes trades immediately; confirm requires an explicit approval"
+          }
+        }
+      },
+      "ExecModeResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["autonomous", "confirm"]
           }
         }
       },

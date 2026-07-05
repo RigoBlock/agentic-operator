@@ -215,7 +215,6 @@ export async function ensureWebhookRegistered(
   if (!storedUrl) return; // never set up — operator must generate a pairing code first
   try {
     await setWebhook(token, storedUrl, secret);
-    console.log(`[telegram] Webhook refreshed from cron: ${storedUrl}`);
   } catch (err) {
     console.warn(`[telegram] Cron webhook refresh failed: ${err}`);
   }

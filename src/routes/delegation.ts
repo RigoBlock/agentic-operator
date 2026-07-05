@@ -469,9 +469,7 @@ delegation.post("/execute", async (c) => {
       description: body.transaction.description || "",
     };
 
-    console.log(`[delegation/execute] Executing tx: to=${tx.to} chainId=${tx.chainId} selector=${tx.data.slice(0,10)} vault=${body.vaultAddress}`);
     const result = await executeViaDelegation(c.env, tx, body.vaultAddress, body.sponsoredGas);
-    console.log(`[delegation/execute] Success: txHash=${result.txHash} confirmed=${result.confirmed}`);
     return c.json({ executionResult: result });
   } catch (err) {
     if (err instanceof AuthError) {
@@ -675,9 +673,14 @@ delegation.post("/telegram-reset", async (c) => {
       `tg-user:${userId}`,
       `tg-conv:${userId}`,
       `tg-model:${userId}`,
-      `tg-pending-tx:${userId}`,
-      `tg-strategy-rec:${userId}`,
     ];
+    // Delete any message-bound or legacy pending-transaction keys
+    const pendingTxPrefix = `tg-pending-tx:${userId}:`;
+    const pendingList = await c.env.KV.list({ prefix: pendingTxPrefix });
+    for (const key of pendingList.keys) {
+      keysToDelete.push(key.name);
+    }
+    keysToDelete.push(`tg-pending-tx:${userId}`);
 
     if (user) {
       const operators = new Set(
@@ -690,6 +693,7 @@ delegation.post("/telegram-reset", async (c) => {
       }
       for (const op of operators) {
         keysToDelete.push(`tg-addr:${op}`);
+        keysToDelete.push(`operator-pref:${op}:exec-mode`);
       }
     }
 

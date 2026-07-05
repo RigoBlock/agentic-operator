@@ -26,6 +26,7 @@ export let strategyPollTimer = null; // strategy events polling interval
 export let lastEventTimestamp = 0;  // last seen strategy event timestamp
 export let multiStepActive = false; // true when agent response indicates a multi-step plan
 export let executionMode = 'manual'; // 'manual' | 'delegated'
+export let autoExecuteMode = 'confirm'; // 'autonomous' | 'confirm' — only relevant when executionMode === 'delegated'
 export let delegationState = null;   // cached delegation status from backend
 
 // Command history for up/down arrow navigation in chat input
@@ -53,6 +54,7 @@ export function setStrategyPollTimer(v) { strategyPollTimer = v; }
 export function setLastEventTimestamp(v) { lastEventTimestamp = v; }
 export function setMultiStepActive(v) { multiStepActive = v; }
 export function setExecutionMode(v) { executionMode = v; }
+export function setAutoExecuteMode(v) { autoExecuteMode = v; }
 export function setDelegationState(v) { delegationState = v; }
 
 // ── Constants ─────────────────────────────────────────────────────────

@@ -15,7 +15,7 @@
  */
 
 import type { Address, Hex } from "viem";
-import type { Env, SwapIntent, RequestContext } from "../types.js";
+import type { Env, SwapIntent } from "../types.js";
 import { resolveTokenAddress } from "../config.js";
 import { parseUnits, formatUnits } from "viem";
 import { getTokenDecimals } from "./vault.js";
@@ -99,9 +99,6 @@ async function fetchWithRetry(
       300 * Math.pow(2, attempt) + Math.random() * 100,
       1_500,
     );
-    console.log(
-      `[0x] Retry ${attempt + 1}/${maxRetries}, waiting ${Math.round(delay)}ms`,
-    );
     await new Promise((r) => setTimeout(r, delay));
   }
   throw new Error("Unreachable");
@@ -119,7 +116,6 @@ export async function getZeroXQuote(
   intent: SwapIntent,
   chainId: number,
   taker: string,
-  ctx?: Pick<RequestContext, "isTelegram">,
 ): Promise<ZeroXQuote> {
   // 0x API uses 0xEeee...EEeE for native ETH, not the zero address
   const NATIVE_ETH_0X = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
@@ -281,9 +277,7 @@ export async function getZeroXQuote(
     const desiredBuyRaw = parseUnits(intent.amountOut, decimalsOut);
     // Allow 1% downward deviation (surplus refunds can make it slightly higher)
     if (actualBuyRaw * 100n < desiredBuyRaw * 99n) {
-      const slippageGuidance = ctx?.isTelegram
-        ? "To raise slippage tolerance, use /slippage in Telegram."
-        : "To raise slippage tolerance, go to Settings → Slippage in the web app.";
+      const slippageGuidance = "To raise slippage tolerance, use Settings → Slippage or Telegram /slippage.";
       throw new Error(
         `0x quote output (${formatUnits(actualBuyRaw, decimalsOut)} ${intent.tokenOut}) ` +
         `is below the requested ${intent.amountOut} ${intent.tokenOut}. ` +

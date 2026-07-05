@@ -7,7 +7,7 @@ import {
   conversationHistory, setConversationHistory,
   currentChainId, connectedAddress, authSignature, authTimestamp,
   escapeHtml, copyToClipboard, apiHeaders,
-  setLastGmxPositions, executionMode, delegationState,
+  setLastGmxPositions, executionMode, delegationState, autoExecuteMode,
   setAuthSignature, setAuthTimestamp,
 } from "./state.js";
 
@@ -379,9 +379,10 @@ async function invokeDirectTool(toolInfo) {
     // auto-execute ONLY when in autonomous mode. In confirm-trades mode, the
     // user must review and approve each action before execution.
     const isDelegated = delegationState && (delegationState.enabled || delegationState.isActiveOnChain);
-    const isAutonomous = localStorage.getItem(`exec-mode:${vault.toLowerCase()}`) === 'autonomous';
+    const isAutonomous = autoExecuteMode === 'autonomous';
     if (executionMode === 'delegated' && isDelegated && isAutonomous) {
       body.executionMode = 'delegated';
+      body.confirmExecution = true;
     }
   }
 

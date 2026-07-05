@@ -212,10 +212,6 @@ export async function handle_refresh_oracle_feed(
         if (estimatedIn > 0n) {
           const buffered = (estimatedIn * 105n) / 100n;
           amountIn = roundAmount(formatUnits(buffered, 18));
-          console.log(
-            `[oracle] Estimated ${amountOut} ${tokenArg} → ${amountIn} ${nativeSymbol} ` +
-            `(via vault oracle, +5% buffer)`
-          );
         } else if (estimatedIn < 0n) {
           throw new Error(`Oracle returned a negative estimate for ${amountOut} ${tokenArg} — unexpected oracle condition.`);
         } else {
@@ -232,10 +228,6 @@ export async function handle_refresh_oracle_feed(
         if (estimatedIn > 0n) {
           const buffered = (estimatedIn * 105n) / 100n;
           amountIn = roundAmount(formatUnits(buffered, decimalsOut));
-          console.log(
-            `[oracle] Estimated ${amountOut} ${nativeSymbol} → ${amountIn} ${tokenArg} ` +
-            `(via vault oracle, +5% buffer)`
-          );
         } else if (estimatedIn < 0n) {
           throw new Error(`Oracle returned a negative estimate for ${amountOut} ${nativeSymbol} — unexpected oracle condition.`);
         } else {
@@ -455,9 +447,6 @@ export async function handle_refresh_oracle_feed(
       // Add 20% buffer for execution variance
       const gasWithBuffer = (estimatedGas * 120n) / 100n;
       result.transaction.gas = "0x" + gasWithBuffer.toString(16);
-      console.log(
-        `[oracle] EOA simulation passed. Gas estimate: ${estimatedGas} → buffered: ${gasWithBuffer}`
-      );
     } catch (simErr) {
       const rawReason = simErr instanceof Error ? simErr.message : String(simErr);
       const decoded = extractRevertReason(simErr);

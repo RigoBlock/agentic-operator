@@ -120,7 +120,6 @@ async function fetchWithRetry(
       }
     }
     const delay = Math.min(300 * Math.pow(2, attempt) + Math.random() * 100, 1_500);
-    console.log(`[gmx] Retry ${attempt + 1}/${maxRetries}, waiting ${Math.round(delay)}ms`);
     await new Promise((r) => setTimeout(r, delay));
   }
   throw new Error("Unreachable");

@@ -10,6 +10,7 @@ import {
   pendingTx, setPendingTx,
   connectedAddress, authSignature, authTimestamp, setAuthSignature, setAuthTimestamp,
   executionMode, setExecutionMode,
+  autoExecuteMode, setAutoExecuteMode,
   multiStepActive, setMultiStepActive,
   apiHeaders, escapeHtml, getExplorerUrl,
   CHAIN_NAMES, TESTNET_CHAINS_LIST,
@@ -156,12 +157,8 @@ async function sendMessage() {
     if (isOwner && authSignature) {
       chatBody.executionMode = executionMode;
       // In autonomous mode with delegation, pass confirmExecution for auto-execute
-      if (executionMode === 'delegated') {
-        const vault = vaultInput.value.trim();
-        const modeKey = `exec-mode:${vault.toLowerCase()}`;
-        if (localStorage.getItem(modeKey) === 'autonomous') {
-          chatBody.confirmExecution = true;
-        }
+      if (executionMode === 'delegated' && autoExecuteMode === 'autonomous') {
+        chatBody.confirmExecution = true;
       }
     }
 
@@ -234,6 +231,7 @@ async function sendMessage() {
       const decoder = new TextDecoder();
       let buffer = '';
       let finalResponse = null;
+      let confirmationShown = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -322,6 +320,17 @@ async function sendMessage() {
               updateTypingStatus('Agent thinking...');
             } else if (event.type === 'transaction') {
               updateTypingStatus('Transaction ready');
+            } else if (event.type === 'confirmation_required') {
+              const txs = event.transactions || [];
+              if (txs.length > 0 && !confirmationShown) {
+                confirmationShown = true;
+                updateTypingStatus('Confirmation required');
+                if (txs.length === 1) {
+                  showDelegatedConfirmation(txs[0]);
+                } else {
+                  showMultiDelegatedConfirmation(txs);
+                }
+              }
             } else if (event.type === 'done') {
               finalResponse = event.response;
             }
@@ -372,7 +381,7 @@ async function sendMessage() {
         }
         // Mark that stream already displayed errors — suppress duplicate toolCall rendering
         if (hasToolErrors) finalResponse._streamShowedErrors = true;
-        await handleChatResponse(finalResponse);
+        await handleChatResponse(finalResponse, { skipTransactions: confirmationShown });
       }
     } else {
       // Fallback: non-streaming JSON response
@@ -418,7 +427,7 @@ async function sendMessage() {
 }
 
 /** Handle the parsed API response — display tool results, reply, chain switch, transaction modal */
-async function handleChatResponse(data) {
+async function handleChatResponse(data, options = {}) {
   let modelTraceShown = false;
   const withModelTrace = (extras = {}) => {
     if (!modelTraceShown && data.modelsUsed?.length) {
@@ -525,43 +534,45 @@ async function handleChatResponse(data) {
   // Delegation status may have changed during chain switch or async operations.
   syncExecutionMode();
 
-  // Handle multiple transactions (multi-chain swaps)
-  const txList = data.transactions && data.transactions.length > 0
-    ? data.transactions
-    : data.transaction ? [data.transaction] : [];
+  if (!options.skipTransactions) {
+    // Handle multiple transactions (multi-chain swaps)
+    const txList = data.transactions && data.transactions.length > 0
+      ? data.transactions
+      : data.transaction ? [data.transaction] : [];
 
-  // operatorOnly transactions always go through standard wallet modal
-  const anyOperatorOnly = txList.some(tx => tx.operatorOnly);
-  if (txList.length > 1 && executionMode === 'delegated' && !anyOperatorOnly) {
-    // Multi-transaction delegated mode: show combined card
-    console.log('[tx-modal] Showing multi-tx delegated confirmation:', txList.length, 'transactions');
-    showMultiDelegatedConfirmation(txList);
-  } else if (txList.length > 1 && (executionMode !== 'delegated' || anyOperatorOnly)) {
-    // Multi-transaction manual mode: show each as individual in-chat card
-    console.log('[tx-modal] Showing multi-tx manual cards:', txList.length, 'transactions');
-    for (const tx of txList) {
-      showManualTxCard(tx);
+    // operatorOnly transactions always go through standard wallet modal
+    const anyOperatorOnly = txList.some(tx => tx.operatorOnly);
+    if (txList.length > 1 && executionMode === 'delegated' && !anyOperatorOnly) {
+      // Multi-transaction delegated mode: show combined card
+      console.log('[tx-modal] Showing multi-tx delegated confirmation:', txList.length, 'transactions');
+      showMultiDelegatedConfirmation(txList);
+    } else if (txList.length > 1 && (executionMode !== 'delegated' || anyOperatorOnly)) {
+      // Multi-transaction manual mode: show each as individual in-chat card
+      console.log('[tx-modal] Showing multi-tx manual cards:', txList.length, 'transactions');
+      for (const tx of txList) {
+        showManualTxCard(tx);
+      }
+    } else if (data.transaction) {
+      console.log('[tx-modal] Showing transaction modal:', data.transaction);
+      if (executionMode === 'delegated' && !data.transaction.operatorOnly) {
+        // In delegated mode: show in-chat confirmation instead of wallet modal
+        showDelegatedConfirmation(data.transaction);
+      } else {
+        showTransactionModal(data.transaction);
+      }
+    } else if (data.executionResult) {
+      // Agent already executed the transaction (delegated auto-execute fallback)
+      const r = data.executionResult;
+      showTxReceiptCard(r, data.transaction?.swapMeta);
+    } else if (data.executionResults && data.executionResults.length > 0) {
+      // Agent already executed multiple transactions
+      for (const r of data.executionResults) {
+        showTxReceiptCard(r);
+      }
+    } else if (!data.reply && !data.metadata) {
+      // Only warn when there's truly nothing useful in the response
+      console.log('[tx-modal] No transaction in response:', Object.keys(data));
     }
-  } else if (data.transaction) {
-    console.log('[tx-modal] Showing transaction modal:', data.transaction);
-    if (executionMode === 'delegated' && !data.transaction.operatorOnly) {
-      // In delegated mode: show in-chat confirmation instead of wallet modal
-      showDelegatedConfirmation(data.transaction);
-    } else {
-      showTransactionModal(data.transaction);
-    }
-  } else if (data.executionResult) {
-    // Agent already executed the transaction (delegated auto-execute fallback)
-    const r = data.executionResult;
-    showTxReceiptCard(r, data.transaction?.swapMeta);
-  } else if (data.executionResults && data.executionResults.length > 0) {
-    // Agent already executed multiple transactions
-    for (const r of data.executionResults) {
-      showTxReceiptCard(r);
-    }
-  } else if (!data.reply && !data.metadata) {
-    // Only warn when there's truly nothing useful in the response
-    console.log('[tx-modal] No transaction in response:', Object.keys(data));
   }
 
   // Defensive: if the tool result looks like it should have a transaction but none was found,

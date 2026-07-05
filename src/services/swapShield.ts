@@ -226,10 +226,6 @@ export async function checkSwapPrice(
       };
     }
 
-    console.log(
-      `[SwapShield] Oracle spot: ${amountInRaw} tokenIn → ${oracleAmountRaw} tokenOut ` +
-      `(chain=${chainId})`,
-    );
   } catch (convertErr) {
     const convertErrMsg = convertErr instanceof Error ? convertErr.message : String(convertErr);
     console.error(
@@ -285,13 +281,6 @@ export async function checkSwapPrice(
     : DEFAULT_MAX_DIVERGENCE_PCT;
   const maxDivergenceBps = BigInt(Math.round(normalizedMaxDivergencePct * 100));
 
-  console.log(
-    `[SwapShield] Comparison on ${getChainName(chainId)}: ` +
-    `oracle=${oracleAmountRaw} dexExpected=${dexExpectedOutRaw} ` +
-    `tokenIn=${normalizedIn} tokenOut=${normalizedOut} ` +
-    `divergence=${divergencePctDisplay}% ` +
-    `(tolerance=±${normalizedMaxDivergencePct}%)`,
-  );
 
   // ── Enforce threshold (cross-multiplication — no division, no truncation) ──
   // Equivalent to divergenceBps > maxDivergenceBps, but exact:
@@ -356,9 +345,6 @@ export async function checkSwapPrice(
     }
   }
 
-  console.log(
-    `[SwapShield] ✓ ALLOWED: divergence ${divergencePctDisplay}% within ±${normalizedMaxDivergencePct}% tolerance`,
-  );
 
   return {
     allowed: true,
@@ -406,9 +392,6 @@ export async function setSwapShieldTolerance(
   }
   const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}`;
   await kv.put(key, String(tolerancePct), { expirationTtl: SWAP_SHIELD_TOLERANCE_TTL });
-  console.log(
-    `[SwapShield] Tolerance set to ${tolerancePct}% for ${operatorAddress} (10 min TTL)`,
-  );
 }
 
 /**
@@ -420,9 +403,6 @@ export async function clearSwapShieldTolerance(
 ): Promise<void> {
   const key = `${SWAP_SHIELD_TOLERANCE_PREFIX}${operatorAddress.toLowerCase()}`;
   await kv.delete(key);
-  console.log(
-    `[SwapShield] Tolerance reset to default for ${operatorAddress}`,
-  );
 }
 
 // ── Slippage KV helpers ──────────────────────────────────────────────

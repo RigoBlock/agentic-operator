@@ -273,7 +273,6 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
   });
 
   if (deviant.length === 0) {
-    console.log(`[NavSync] config #${config.id}: no deviation > ${(thresholdPct * 100).toFixed(2)}% — no sync needed.`);
     return;
   }
 

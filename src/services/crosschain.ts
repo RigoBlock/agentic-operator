@@ -78,6 +78,15 @@ const DEFAULT_NAV_TOLERANCE_BPS = 100;
 /** Across suggested-fees API base URL */
 const ACROSS_API = "https://app.across.to/api/suggested-fees";
 
+/** Format a USD value expressed in cents as a decimal string. */
+function formatCents(cents: bigint): string {
+  const neg = cents < 0n;
+  const abs = neg ? -cents : cents;
+  const dollars = abs / 100n;
+  const rem = abs % 100n;
+  return `${neg ? "-" : ""}${dollars}.${rem.toString().padStart(2, "0")}`;
+}
+
 /**
  * Fallback sync amounts per token type (human-readable).
  * Used only when no amount is specified and equalization is not active.
@@ -170,6 +179,11 @@ export interface AggregatedNav {
   missingDelegationChains: number[];
   /** Per-token aggregate across all chains */
   tokenTotals: Record<BridgeableTokenType, { total: string; chains: { chainId: number; amount: string }[] }>;
+  /** Cross-chain total NAV normalised to USD via CoinGecko live prices. */
+  globalNav: {
+    totalUsd: string;
+    tokenUsd: Record<BridgeableTokenType, string>;
+  };
 }
 
 /** A single bridge operation recommended by the rebalancer */
@@ -242,6 +256,7 @@ export async function getAggregatedNav(
   // We normalise everything to the token's standard decimals (6 for USDC/USDT, 18 for WETH, 8 for WBTC)
   // BSC amounts are already in 18 decimals in the balance but we normalise for display
   const tokenTotals: AggregatedNav["tokenTotals"] = {} as AggregatedNav["tokenTotals"];
+  const tokenTotalRaw: Record<BridgeableTokenType, bigint> = {} as Record<BridgeableTokenType, bigint>;
   const tokenTypes: BridgeableTokenType[] = ["USDC", "USDT", "WETH", "WBTC"];
   for (const tt of tokenTypes) {
     const chains: { chainId: number; amount: string }[] = [];
@@ -267,10 +282,25 @@ export async function getAggregatedNav(
         }
       }
     }
+    tokenTotalRaw[tt] = totalRaw;
     tokenTotals[tt] = {
       total: formatUnits(totalRaw, canonicalDecimals),
       chains,
     };
+  }
+
+  // Global NAV in USD using live CoinGecko prices (stablecoins = $1).
+  const prices = await Promise.all(tokenTypes.map(fetchTokenPriceUsd));
+  let totalUsdCents = 0n;
+  const tokenUsd: Record<BridgeableTokenType, string> = {} as Record<BridgeableTokenType, string>;
+  for (let i = 0; i < tokenTypes.length; i++) {
+    const tt = tokenTypes[i];
+    const raw = tokenTotalRaw[tt];
+    const canonicalDecimals = tt === "WETH" ? 18 : tt === "WBTC" ? 8 : 6;
+    const priceCents = BigInt(Math.round(prices[i] * 100));
+    const usdCents = (raw * priceCents) / (10n ** BigInt(canonicalDecimals));
+    totalUsdCents += usdCents;
+    tokenUsd[tt] = formatCents(usdCents);
   }
 
   const missingDelegationChains = snapshots
@@ -282,6 +312,10 @@ export async function getAggregatedNav(
     chains: snapshots,
     missingDelegationChains,
     tokenTotals,
+    globalNav: {
+      totalUsd: formatCents(totalUsdCents),
+      tokenUsd,
+    },
   };
 }
 
@@ -1024,10 +1058,6 @@ export async function simulateDepositV3ForMessage(params: {
     const recipientAddr = ("0x" + recipientBytes32.slice(-40)) as Hex;
     const message = decoded[9] as Hex;
 
-    console.log(
-      `[Crosschain] Extracted depositV3 message: recipient=${recipientAddr}, ` +
-      `message length=${message.length} chars`,
-    );
 
     return { recipient: recipientAddr, message };
   } catch (err) {
@@ -1194,7 +1224,6 @@ export async function buildCrosschainTransfer(params: {
         sourceNativeAmount: useNative ? inputAmountRaw : undefined,
         shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
       });
-      console.log("[Crosschain] Re-quoted with simulated destination message");
     }
   }
 
@@ -1575,13 +1604,6 @@ export async function computeNavEqualization(params: {
     ? Number((higher - lower) * 10000n / higher)
     : 0;
 
-  console.log(
-    `[NAV equalization] ${chainName(srcChainId)} (dec=${srcState.decimals}) → ${chainName(dstChainId)} (dec=${dstState.decimals}) | ` +
-    `normDec=${normDec} | srcUV=${formatUnits(srcState.unitaryValue, srcState.decimals)} dstUV=${formatUnits(dstState.unitaryValue, dstState.decimals)} | ` +
-    `effectiveSupply: src=${formatUnits(srcState.effectiveSupply, srcState.decimals)} dst=${formatUnits(dstState.effectiveSupply, dstState.decimals)} | ` +
-    `divergence=${divergenceBps}bps | bridge=${formatUnits(bridgeAmountRaw, bridgeTokenDec)} ${bestToken.symbol} | ` +
-    `postDiv=${postDivergenceBps}bps${capped ? ` [${capReason}]` : ''}`,
-  );
 
   return {
     srcChainId,
@@ -1829,7 +1851,6 @@ export async function buildCrosschainSync(params: {
         sourceNativeAmount: useNative ? inputAmountRaw : undefined,
         shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
       });
-      console.log("[Crosschain] Re-quoted sync with simulated destination message");
     }
   }
 

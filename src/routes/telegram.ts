@@ -33,7 +33,12 @@ import {
 import { getDelegationConfig, getActiveChains } from "../services/delegation.js";
 import { getAgentWalletInfo } from "../services/agentWallet.js";
 import { getCurrentDayBucket, DEFAULT_GAS_SPENDING_LIMIT_USD, GAS_SPEND_KEY } from "./gasPolicy.js";
-import { executeTxList, formatOutcomesMarkdown, checkPendingTxStatus, type TxExecOutcome } from "../services/execution.js";
+import { executeTxList, checkPendingTxStatus, type TxExecOutcome } from "../services/execution.js";
+import {
+  runTransactionFlow,
+  getExecutionModePreference,
+  setExecutionModePreference,
+} from "../services/transactionFlow.js";
 import { initTokenResolver } from "../services/tokenResolver.js";
 import {
   sendMessage,
@@ -103,6 +108,48 @@ function formatTelegramTxMetrics(tx: UnsignedTransaction): string {
     lines.push(`🔮 Oracle divergence: ${formatTelegramPct(m.swapShield.divergencePct)}`);
   }
   return lines.length ? lines.join("\n") : "";
+}
+
+/** Build the KV key for a message-bound pending transaction.
+ *  Each confirm-mode message gets its own key so that tapping Execute on one
+ *  message can never act on a transaction prepared for a different message.
+ */
+export function pendingTxKey(userId: string | number, messageId: number): string {
+  return `tg-pending-tx:${userId}:${messageId}`;
+}
+
+/** Delete every pending-tx KV key for a user (including any legacy shared key)
+ *  and return the stored entries so their Telegram messages can be edited. */
+export async function deleteAllPendingTxKeys(kv: KVNamespace, userId: string | number): Promise<{ messageId?: number }[]> {
+  const prefix = `tg-pending-tx:${userId}:`;
+  const entries: { messageId?: number }[] = [];
+
+  // Message-bound keys
+  const list = await kv.list<{ messageId?: number }>({ prefix });
+  for (const key of list.keys) {
+    try {
+      const raw = await kv.get(key.name);
+      const parsed = raw ? (JSON.parse(raw) as { messageId?: number }) : { messageId: key.metadata?.messageId };
+      entries.push(parsed);
+    } catch {
+      entries.push({});
+    }
+    await kv.delete(key.name);
+  }
+
+  // Legacy shared key — kept during transition so old buttons become no-ops
+  try {
+    const raw = await kv.get(`tg-pending-tx:${userId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { messageId?: number };
+      entries.push(parsed);
+    }
+  } catch {
+    // ignore parse errors
+  }
+  await kv.delete(`tg-pending-tx:${userId}`);
+
+  return entries;
 }
 
 /**
@@ -237,7 +284,7 @@ telegram.post("/webhook", async (c) => {
       c.executionCtx.waitUntil(
         Promise.all([
           setWebhook(token, webhookUrl, expected)
-            .then(() => console.log("[telegram] Webhook re-registered after mismatch"))
+            .then(() => {})
             .catch(err => console.warn("[telegram] Webhook re-registration failed:", err)),
           c.env.KV.put(WEBHOOK_URL_KV_KEY, webhookUrl),
         ]),
@@ -349,7 +396,6 @@ telegram.post("/pair", async (c) => {
         const webhookUrl = `${new URL(c.req.url).origin}/api/telegram/webhook`;
         await setWebhook(c.env.TELEGRAM_BOT_TOKEN, webhookUrl, webhookSecret);
         await c.env.KV.put(WEBHOOK_URL_KV_KEY, webhookUrl);
-        console.log(`[telegram] Webhook registered on pair: ${webhookUrl}`);
       } catch (err) {
         // Don't fail the pairing — code is still valid even if webhook update fails
         console.warn(`[telegram] Webhook registration failed on pair: ${err}`);
@@ -541,13 +587,15 @@ async function handleMessage(
       }
 
       case "/mode": {
-        // Toggle between autonomous (auto-execute) and confirm (show Execute button) modes
-        const modeKey = `tg-execmode:${userId}`;
+        // Toggle between autonomous (auto-execute) and confirm (show Execute button) modes.
+        // The preference is stored in a unified KV key shared with the web UI.
+        const modeUser = await getTelegramUser(env.KV, userId);
+        const modeOperator = modeUser?.vaults[0]?.operatorAddress;
         const pick = args[0]?.toLowerCase();
         if (!pick) {
-          // Show current mode
-          const current = await env.KV.get(modeKey);
-          const mode = current === "confirm" ? "confirm" : "autonomous";
+          const mode = modeOperator
+            ? await getExecutionModePreference(env.KV, modeOperator)
+            : "confirm";
           await sendMessage(token, chatId,
             `Current mode: <b>${mode === "autonomous" ? "⚡ Autonomous" : "🔔 Confirm"}</b>\n\n` +
             `<code>/mode autonomous</code> — execute trades immediately (requires delegation)\n` +
@@ -555,11 +603,15 @@ async function handleMessage(
           );
           return;
         }
+        if (!modeOperator) {
+          await sendMessage(token, chatId, "No vault paired. Pair a vault first to set execution mode.");
+          return;
+        }
         if (pick === "autonomous" || pick === "auto") {
-          await env.KV.put(modeKey, "autonomous");
+          await setExecutionModePreference(env.KV, modeOperator, "autonomous");
           await sendMessage(token, chatId, "Switched to <b>⚡ Autonomous</b> — trades execute immediately when delegation is active.");
         } else if (pick === "confirm" || pick === "manual") {
-          await env.KV.put(modeKey, "confirm");
+          await setExecutionModePreference(env.KV, modeOperator, "confirm");
           await sendMessage(token, chatId, "Switched to <b>🔔 Confirm</b> — you'll see Execute/Cancel buttons before each trade.");
         } else {
           await sendMessage(token, chatId,
@@ -691,10 +743,9 @@ async function handleMessage(
           `tg-user:${userId}`,
           `tg-conv:${userId}`,
           `tg-model:${userId}`,
-          `tg-pending-tx:${userId}`,
-          `tg-strategy-rec:${userId}`,
         ];
-        // Also clean up reverse lookups for all linked operators
+        // Also clean up reverse lookups for all linked operators and the
+        // unified execution-mode preference keys shared with the web UI.
         if (userToReset) {
           const operators = new Set(
             userToReset.vaults
@@ -706,9 +757,13 @@ async function handleMessage(
           }
           for (const op of operators) {
             keysToDelete.push(`tg-addr:${op}`);
+            keysToDelete.push(`operator-pref:${op}:exec-mode`);
           }
         }
-        await Promise.all(keysToDelete.map(k => env.KV.delete(k)));
+        await Promise.all([
+          ...keysToDelete.map(k => env.KV.delete(k)),
+          deleteAllPendingTxKeys(env.KV, userId),
+        ]);
         await sendMessage(
           token,
           chatId,
@@ -848,42 +903,13 @@ async function handleMessage(
   // Append user message
   conv.messages.push({ role: "user", content: text });
 
-  // Check for pending strategy recommendation — inject context if user is replying to one
-  const recKey = `tg-strategy-rec:${userId}`;
-  const pendingRec = await env.KV.get(recKey);
-  if (pendingRec) {
-    const rec = JSON.parse(pendingRec) as {
-      strategyId: number;
-      instruction: string;
-      recommendation: string;
-    };
-    // Check if the user's message looks like they want to act on the recommendation
-    const actPatterns = /\b(act|execute|do it|go|yes|proceed|confirm|ok|sure|let'?s go|approved?)\b/i;
-    if (actPatterns.test(text)) {
-      // Inject the recommendation as prior context so the LLM knows what to execute
-      conv.messages.splice(conv.messages.length - 1, 0,
-        { role: "user", content: `[STRATEGY #${rec.strategyId}] ${rec.instruction}` },
-        { role: "assistant", content: rec.recommendation },
-      );
-      // Replace user's vague reply with a clear instruction
-      conv.messages[conv.messages.length - 1] = {
-        role: "user",
-        content: `Execute the strategy recommendation above. Build and execute the transactions.`,
-      };
-      await env.KV.delete(recKey);
-    }
-  }
-
   // Discard any stale pending transaction. If the user sends a new message
   // instead of tapping Execute/Cancel, the old quote is no longer relevant
   // (sponsored transactions are only valid for ~3 minutes anyway).
-  const txKey = `tg-pending-tx:${userId}`;
-  const pendingTxRaw = await env.KV.get(txKey);
   let staleTxNote: string | undefined;
-  if (pendingTxRaw) {
-    try {
-      const pendingTx = JSON.parse(pendingTxRaw) as { txs: unknown[]; createdAt: number; messageId?: number };
-      await env.KV.delete(txKey);
+  const stalePending = await deleteAllPendingTxKeys(env.KV, userId);
+  if (stalePending.length > 0) {
+    for (const pendingTx of stalePending) {
       if (pendingTx.messageId) {
         await editMessageText(
           token, chatId, pendingTx.messageId,
@@ -891,8 +917,6 @@ async function handleMessage(
           { replyMarkup: { inline_keyboard: [] } },
         ).catch(() => {});
       }
-    } catch {
-      await env.KV.delete(txKey);
     }
     staleTxNote = "The user's previous prepared transaction has been discarded because they sent a new request. Treat this as a fresh request.";
   }
@@ -913,10 +937,6 @@ async function handleMessage(
   // when the user taps Execute.
   const executionMode = "delegated";
 
-  // Load execution mode preference: "autonomous" = auto-execute, "confirm" (default) = show buttons
-  const execModePref = await env.KV.get(`tg-execmode:${userId}`);
-  const autoExecuteFromTelegram = execModePref === "autonomous";
-
   // Telegram users proved vault ownership at pairing time (EIP-191 signature +
   // on-chain owner check). operatorVerified: true grants the same access as a
   // browser session with a signed auth message.
@@ -926,7 +946,6 @@ async function handleMessage(
     operatorAddress: vault.operatorAddress || user.operatorAddress,
     operatorVerified: true,
     isBrowserRequest: false,
-    isTelegram: true,
     executionMode,
     aiModel: undefined,
     contextDocs: staleTxNote ? [staleTxNote] : undefined,
@@ -1017,11 +1036,25 @@ async function handleMessage(
       replyParts.push(formatForTelegram(stripToolPrefix(response.reply)));
     }
 
-    // Handle transactions
+    // Handle transactions through the unified TransactionFlow engine.
+    let executedNow = false;
     if (txList.length > 0) {
+      const operatorAddress = vault.operatorAddress || user.operatorAddress;
+      const mode = await getExecutionModePreference(env.KV, operatorAddress);
+
+      // Shared helper: build per-transaction safety metrics lines.
+      const buildMetricsLines = () => {
+        const lines: string[] = [];
+        for (let i = 0; i < txList.length; i++) {
+          const metrics = formatTelegramTxMetrics(txList[i]);
+          if (metrics) {
+            lines.push(txList.length > 1 ? `<b>Trade ${i + 1}</b>\n${metrics}` : metrics);
+          }
+        }
+        return lines;
+      };
+
       // Optional: warn if delegation is not active on a transaction's chain.
-      // The Execute button is still shown; the execution service will enforce
-      // on-chain delegation and return a clear error if it is missing.
       const delegConfig = await getDelegationConfig(env.KV, vault.address);
       const activeDelegChains = delegConfig ? getActiveChains(delegConfig) : [];
       const txChainIds = [...new Set(txList.map(tx => tx.chainId))];
@@ -1030,57 +1063,57 @@ async function handleMessage(
         .map(chainId => SUPPORTED_CHAINS.find(ch => ch.id === chainId)?.name
           || TESTNET_CHAINS.find(ch => ch.id === chainId)?.name
           || `Chain ${chainId}`);
+      const delegationWarning = missingChainNames.length > 0
+        ? `⚠️ Delegation is not active on ${missingChainNames.join(", ")}. ` +
+          `Tapping Execute may fail until you set it up at <a href="https://trader.rigoblock.com">trader.rigoblock.com</a>.`
+        : "";
 
-      if (missingChainNames.length > 0) {
-        replyParts.push(
-          `⚠️ Delegation is not active on ${missingChainNames.join(", ")}. ` +
-          `Tapping Execute may fail until you set it up at <a href="https://trader.rigoblock.com">trader.rigoblock.com</a>.`,
-        );
-      }
-
-      if (autoExecuteFromTelegram) {
+      if (mode === "autonomous") {
         // ⚡ Autonomous mode — execute immediately, no confirmation needed
         const tradeCount = txList.length > 1 ? `${txList.length} trades` : "trade";
-        replyParts.push(
+        const statusParts = [
+          formatForTelegram(stripToolPrefix(response.reply)),
           `\n⚡ <b>Autonomous mode is ON — executing ${tradeCount} immediately.</b>`,
           `Use <code>/mode confirm</code> to require an Execute button before each trade.`,
+          ...buildMetricsLines(),
+          delegationWarning,
+        ].filter(Boolean);
+        const statusText = statusParts.join("\n\n");
+        const truncated = statusText.length > 4000 ? statusText.slice(0, 3990) + "…" : statusText;
+        const statusMsg = await sendMessage(token, chatId, truncated);
+        const statusMsgId = statusMsg?.message_id;
+
+        const flowResult = await runTransactionFlow(
+          env,
+          operatorAddress,
+          vault.address,
+          txList,
+          response.reply,
+          {
+            requestConfirmation: async () => { /* autonomous path never calls this */ },
+            onProgress: async (event) => {
+              if (event.type === "start" && statusMsgId) {
+                await editMessageText(token, chatId, statusMsgId, truncated).catch(() => {});
+              }
+            },
+          },
+          "autonomous",
         );
 
-        // Surface NAV impact and oracle divergence before autonomous execution.
-        const metricsLines: string[] = [];
-        for (let i = 0; i < txList.length; i++) {
-          const tx = txList[i];
-          const metrics = formatTelegramTxMetrics(tx);
-          if (metrics) {
-            if (txList.length > 1) {
-              metricsLines.push(`<b>Trade ${i + 1}</b>\n${metrics}`);
-            } else {
-              metricsLines.push(metrics);
-            }
-          }
-        }
-        if (metricsLines.length > 0) {
-          replyParts.push(metricsLines.join("\n\n"));
-        }
-
-        const statusReply = replyParts.join("\n\n");
-        const truncated = statusReply.length > 4000 ? statusReply.slice(0, 3990) + "…" : statusReply;
-        const statusMsg = await sendMessage(token, chatId, truncated);
-
-        try {
-          const outcomes = await executeTxList(env, txList, vault.address);
-          const summary = formatOutcomesMarkdown(outcomes);
-          const resultText = `✅ <b>Executed:</b>\n${formatForTelegram(summary)}`;
-          if (statusMsg?.message_id) {
-            await editMessageText(token, chatId, statusMsg.message_id,
-              (truncated + "\n\n" + resultText).slice(0, 4000),
-            ).catch(() => {});
+        if (flowResult.kind === "executed") {
+          executedNow = true;
+          const outcomes = flowResult.outcomes!;
+          response.executionResults = outcomes
+            .map(o => o.result)
+            .filter((r): r is NonNullable<typeof r> => r != null);
+          response.executionResult = response.executionResults[0];
+          const summary = formatTelegramOutcomes(outcomes);
+          const finalText = (truncated + "\n\n" + `✅ <b>Executed:</b>\n${summary}`).slice(0, 4000);
+          if (statusMsgId) {
+            await editMessageText(token, chatId, statusMsgId, finalText).catch(() => {});
           } else {
-            await sendMessage(token, chatId, resultText);
+            await sendMessage(token, chatId, finalText);
           }
-        } catch (execErr) {
-          const errMsg = execErr instanceof Error ? execErr.message : "Execution failed";
-          await sendMessage(token, chatId, `⚠️ Execution error: ${escapeHtml(sanitizeError(errMsg).slice(0, 200))}`);
         }
       } else {
         // 🔔 Confirm mode (default) — show Execute/Cancel buttons for every ready tx
@@ -1090,25 +1123,14 @@ async function handleMessage(
         const hasWarning = hasSafetyWarning(replyText);
         const confirmIcon = hasWarning ? "⚠️" : "🔔";
         const execIcon = hasWarning ? "⚠️" : "✅";
-        replyParts.push(`\n${confirmIcon} <b>${tradeCount.charAt(0).toUpperCase() + tradeCount.slice(1)} ready${hasWarning ? " with warning" : ""}.</b>\nTap ${execIcon} ${execLabel} to confirm or ❌ Cancel.`);
-
-        // Surface NAV impact and oracle divergence so the operator can review before tapping Execute.
-        const metricsLines: string[] = [];
-        for (let i = 0; i < txList.length; i++) {
-          const tx = txList[i];
-          const metrics = formatTelegramTxMetrics(tx);
-          if (metrics) {
-            if (txList.length > 1) {
-              metricsLines.push(`<b>Trade ${i + 1}</b>\n${metrics}`);
-            } else {
-              metricsLines.push(metrics);
-            }
-          }
-        }
-        if (metricsLines.length > 0) {
-          replyParts.push(metricsLines.join("\n\n"));
-        }
-
+        const confirmParts = [
+          formatForTelegram(stripToolPrefix(response.reply)),
+          `\n${confirmIcon} <b>${tradeCount.charAt(0).toUpperCase() + tradeCount.slice(1)} ready${hasWarning ? " with warning" : ""}.</b>\nTap ${execIcon} ${execLabel} to confirm or ❌ Cancel.`,
+          ...buildMetricsLines(),
+          delegationWarning,
+        ].filter(Boolean);
+        const fullReply = confirmParts.join("\n\n");
+        const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
         const keyboard: TgInlineKeyboardMarkup = {
           inline_keyboard: [
             [
@@ -1117,17 +1139,14 @@ async function handleMessage(
             ],
           ],
         };
-
-        const fullReply = replyParts.join("\n\n") || "Ready.";
-        const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
         const sent = await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
+        const messageId = sent?.message_id;
+        if (messageId) {
+          await env.KV.put(pendingTxKey(userId, messageId), JSON.stringify({ txs: txList, createdAt: Date.now(), messageId }), {
+            expirationTtl: 120,
+          });
+        }
 
-        // Store all transactions with timestamp and the message id so we can
-        // invalidate the keyboard if the user sends a new request before acting.
-        const payload = { txs: txList, createdAt: Date.now(), messageId: sent?.message_id };
-        await env.KV.put(txKey, JSON.stringify(payload), {
-          expirationTtl: 120, // 2 min — swap quotes expire quickly
-        });
       }
     } else {
       const fullReply = replyParts.join("\n\n") || "Done.";
@@ -1158,7 +1177,15 @@ async function handleMessage(
         .filter(tc => !tc.error && tc.result)
         .map(tc => stripToolPrefix(tc.result!.slice(0, 500)))
         .join("\n---\n");
+      // In confirm mode, make sure the saved history records that the transaction
+      // was prepared but NOT executed. Otherwise the LLM may see a "ready" message
+      // on a follow-up and hallucinate an execution result.
+      const pendingNote =
+        txList.length > 0 && !executedNow
+          ? "🔔 Transaction ready in Telegram — awaiting your confirmation (tap Execute). It has NOT been executed yet."
+          : "";
       const assistantContent = [
+        pendingNote,
         toolSummary,
         response.reply,
       ].filter(Boolean).join("\n\n");
@@ -1245,7 +1272,6 @@ async function handleCallbackQuery(
       operatorAddress: vault.operatorAddress || user.operatorAddress,
       operatorVerified: true,
       isBrowserRequest: false,
-      isTelegram: true,
       executionMode: "delegated",
     };
 
@@ -1261,112 +1287,14 @@ async function handleCallbackQuery(
     return;
   }
 
-  // ── Strategy recommendation: act on it ──
-  if (data.startsWith("strategy-act:")) {
-    await answerCallbackQuery(token, query.id, "Processing…");
-
-    const recKey = `tg-strategy-rec:${userId}`;
-    const recRaw = await env.KV.get(recKey);
-    if (!recRaw) {
-      await editMessageText(token, chatId, messageId,
-        "⏰ This recommendation has expired. Wait for the next strategy check.");
-      return;
-    }
-    await env.KV.delete(recKey);
-
-    const rec = JSON.parse(recRaw) as {
-      strategyId: number;
-      instruction: string;
-      recommendation: string;
-      vaultAddress: string;
-      chainId: number;
-      operatorAddress: string;
-    };
-
-    // Update the message to show we're processing
-    await editMessageText(token, chatId, messageId,
-      `⏳ Executing strategy #${rec.strategyId} recommendation…`);
-
-    // Inject the recommendation as conversation context so the LLM knows what to do
-    const syntheticMessages: ChatMessage[] = [
-      {
-        role: "user",
-        content:
-          `[STRATEGY #${rec.strategyId}] ${rec.instruction}`,
-      },
-      {
-        role: "assistant",
-        content: rec.recommendation,
-      },
-      {
-        role: "user",
-        content: "Execute the recommendation above. Build and execute the transactions.",
-      },
-    ];
-
-    const ctx: RequestContext = {
-      vaultAddress: rec.vaultAddress as Address,
-      chainId: rec.chainId,
-      operatorAddress: (rec.operatorAddress) as Address,
-      operatorVerified: true,
-      isBrowserRequest: false,
-      isTelegram: true,
-      executionMode: "delegated",
-    };
-
-    try {
-      const response = await processChat(env, syntheticMessages, ctx);
-
-      const txList = response.transactions && response.transactions.length > 0
-        ? response.transactions
-        : response.transaction
-          ? [response.transaction]
-          : [];
-
-      if (txList.length > 0) {
-        // Execute immediately — user already clicked "Act on this"
-        const outcomes = await executeTxList(env, txList, rec.vaultAddress);
-        const resultText = formatTelegramOutcomes(outcomes);
-        const allSuccess = outcomes.every(o => o.result?.confirmed && !o.result?.reverted);
-        const icon = allSuccess ? "✅" : "⚠️";
-
-        // Include reasoning if available
-        const reasoningPrefix = response.reasoning
-          ? `💭 <blockquote>${escapeHtml(response.reasoning.slice(0, 500))}${response.reasoning.length > 500 ? "…" : ""}</blockquote>\n\n`
-          : "";
-        await editMessageText(token, chatId, messageId,
-          `${icon} Strategy #${rec.strategyId}\n\n${reasoningPrefix}${resultText}`);
-      } else {
-        // LLM didn't produce transactions — show its analysis
-        const reasoningPrefix = response.reasoning
-          ? `💭 <blockquote>${escapeHtml(response.reasoning.slice(0, 500))}${response.reasoning.length > 500 ? "…" : ""}</blockquote>\n\n`
-          : "";
-        const replyText = response.reply || "No action needed.";
-        await editMessageText(token, chatId, messageId,
-          `📋 Strategy #${rec.strategyId}\n\n${reasoningPrefix}${escapeHtml(replyText.slice(0, 3900))}`);
-      }
-    } catch (err) {
-      const safeMsg = sanitizeError(err instanceof Error ? err.message : String(err));
-      await editMessageText(token, chatId, messageId,
-        `⚠️ Strategy execution failed: ${escapeHtml(safeMsg.slice(0, 200))}`);
-    }
-    return;
-  }
-
-  // ── Strategy recommendation: skip ──
-  if (data.startsWith("strategy-skip:")) {
-    await answerCallbackQuery(token, query.id, "Skipped");
-    await env.KV.delete(`tg-strategy-rec:${userId}`);
-    await editMessageText(token, chatId, messageId,
-      "⏭️ Recommendation skipped.");
-    return;
-  }
-
   // ── Trade execution ──
   if (data.startsWith("exec:")) {
     await answerCallbackQuery(token, query.id, "Executing…");
 
-    const txKey = `tg-pending-tx:${userId}`;
+    // The pending transaction is bound to the message the user tapped. This
+    // prevents a stale shared KV entry from causing the wrong transaction to
+    // be executed when multiple confirm-mode messages exist.
+    const txKey = pendingTxKey(userId, messageId);
     const raw = await env.KV.get(txKey);
     if (!raw) {
       await editMessageText(token, chatId, messageId, "⏰ Trade expired. Please request a new quote.");
@@ -1375,6 +1303,11 @@ async function handleCallbackQuery(
 
     // Parse stored transactions — supports legacy (array/single tx) and new { txs, createdAt } format
     const parsed = JSON.parse(raw);
+    // Defense-in-depth: reject if the stored entry belongs to a different message.
+    if (parsed.messageId != null && parsed.messageId !== messageId) {
+      await editMessageText(token, chatId, messageId, "⏰ Trade expired. Please request a new quote.");
+      return;
+    }
     const rawTxs = parsed.txs ? parsed.txs : (Array.isArray(parsed) ? parsed : [parsed]);
     const storedAt: number | undefined = parsed.createdAt;
     const txList: UnsignedTransaction[] = (rawTxs as Record<string, unknown>[]).map(
@@ -1485,7 +1418,7 @@ async function handleCallbackQuery(
   // ── Trade cancellation ──
   if (data.startsWith("cancel:")) {
     await answerCallbackQuery(token, query.id, "Cancelled");
-    const txKey = `tg-pending-tx:${userId}`;
+    const txKey = pendingTxKey(userId, messageId);
     await env.KV.delete(txKey);
     await editMessageText(token, chatId, messageId, "Trade cancelled.");
 
@@ -1519,12 +1452,17 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
       const pendingNote = isSponsoredTimeout
         ? "\n(status check timed out; may still confirm)"
         : "";
-      const sponsoredHint = result.sponsored
+      const isUserOpHash = result.sponsored && result.userOpHash && result.txHash === result.userOpHash;
+      const hashLabel = isUserOpHash ? "UserOp hash" : "Hash";
+      const sponsoredHint = result.sponsored && !isUserOpHash
         ? "\n(sponsored UserOp — may not appear in the public mempool until it lands)"
+        : "";
+      const userOpNote = isUserOpHash
+        ? "\n(sponsored UserOp — not yet on-chain; the EVM tx hash will appear once it lands)"
         : "";
       lines.push(
         `⏳ ${escapeHtml(desc)} — submitted\n` +
-        `Hash: <code>${escapeHtml(result.txHash)}</code>${sponsoredHint}${pendingNote}\n` +
+        `${hashLabel}: <code>${escapeHtml(result.txHash)}</code>${sponsoredHint}${userOpNote}${pendingNote}\n` +
         `Reply with "status" or "is my transaction stuck?" for an update.`
       );
     } else if (error) {

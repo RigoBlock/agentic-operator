@@ -53,7 +53,6 @@ export interface TwapOrder {
   lastError?: string;
   completedAt?: number;
   totalBought: string;
-  autoExecute: boolean;
 }
 
 export interface TwapEvent {
@@ -228,10 +227,6 @@ const tools: SkillToolDefinition[] = [
             type: "string",
             description: "Chain name or ID. Uses current chain if omitted.",
           },
-          autoExecute: {
-            type: "boolean",
-            description: "When true (default), auto-executes. When false, notifies only.",
-          },
         },
         required: ["side", "sellToken", "buyToken", "totalAmount"],
       },
@@ -289,7 +284,6 @@ async function handleCreate(
   const intervalMinutes = Math.max(MIN_INTERVAL_MINUTES, Math.round(Number(args.intervalMinutes) || 5));
   const dex = (args.dex as string) || "0x";
   const chain = args.chain as string | undefined;
-  const autoExecute = args.autoExecute !== false;
 
   // Resolve the target chain early — needed for token resolution
   const targetChainId = chain ? (resolveChainId(chain) ?? ctx.chainId) : ctx.chainId;
@@ -351,7 +345,6 @@ async function handleCreate(
     sliceCount,
     intervalMinutes,
     dex,
-    autoExecute,
   });
 
   const totalDuration = sliceCount * intervalMinutes;
@@ -370,7 +363,6 @@ async function handleCreate(
       `• ${sliceCount} slices of ~${amountPerSlice} ${amountToken} every ${intervalMinutes}m\n` +
       `• Duration: ${durationStr}\n` +
       `• DEX: ${dex}\n` +
-      `• Mode: ${autoExecute ? "⚡ Auto-execute" : "🔔 Notify only"}\n` +
       `• First slice: next cron tick`,
     suggestions: ["List TWAP orders", "Cancel TWAP order"],
   };
@@ -486,11 +478,6 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
       const sliceNum = order.slicesExecuted + 1;
       const chainName = resolveChainName(order.chainId);
       const side = order.side || "sell";
-      const sliceToken = side === "buy" ? order.buyToken : order.sellToken;
-      console.log(
-        `[TWAP] Executing slice ${sliceNum}/${order.sliceCount} for order #${order.id}: ` +
-        `${side} ${order.sliceAmount} ${sliceToken} on ${chainName}`,
-      );
 
       // Track the built transaction outside try/catch so the catch block can
       // include tx details (to/value/data) in error logs for Tenderly debugging.
@@ -515,7 +502,7 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
           chainId: order.chainId,
           operatorAddress: order.operatorAddress as Address,
           isBrowserRequest: false,
-          executionMode: order.autoExecute ? "delegated" : "manual",
+          executionMode: "delegated",
         };
 
         const toolResult = await executeToolCall(env, ctx, "build_vault_swap", toolArgs);
@@ -527,8 +514,7 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
           throw new Error(toolResult.message || "No swap transaction produced");
         }
 
-        if (order.autoExecute) {
-          const outcomes = await executeTxList(env, txList, order.vaultAddress);
+        const outcomes = await executeTxList(env, txList, order.vaultAddress);
           const hasFailure = outcomes.some((o) => o.error || o.result?.reverted);
           if (hasFailure) {
             // Include tx details (from/to/value/data) in the error so the operator
@@ -592,28 +578,6 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
               await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
             }
           }
-        } else {
-          order.lastExecution = now;
-          order.slicesExecuted += 1;
-          changed = true;
-
-          if (order.slicesExecuted >= order.sliceCount) {
-            order.active = false;
-            order.completedAt = now;
-          }
-
-          if (env.TELEGRAM_BOT_TOKEN) {
-            const telegramUserId = await getTelegramUserIdByAddress(kv, order.operatorAddress);
-            if (telegramUserId) {
-              const text = [
-                `<b>🔔 TWAP #${order.id} — Slice ${sliceNum}/${order.sliceCount} ready</b>`,
-                `Swap ${order.sliceAmount} ${order.sellToken} → ${order.buyToken} on ${chainName}`,
-                `\nSign in the web app or set up delegation for auto-execution.`,
-              ].join("\n");
-              await sendMessage(env.TELEGRAM_BOT_TOKEN, telegramUserId, text);
-            }
-          }
-        }
       } catch (err) {
         order.lastExecution = now;
         order.consecutiveFailures += 1;

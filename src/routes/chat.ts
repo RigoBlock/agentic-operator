@@ -18,7 +18,8 @@ import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { SETTLEMENT_OVERRIDES_HEADER } from "@x402/core/server";
 
 import { sanitizeError } from "../config.js";
-import { executeTxList, formatOutcomesMarkdown, ExecutionError } from "../services/execution.js";
+import { formatOutcomesMarkdown, ExecutionError } from "../services/execution.js";
+import { runTransactionFlow, type ExecutionHooks, type ExecutionModePreference } from "../services/transactionFlow.js";
 import type { Address } from "viem";
 
 /**
@@ -107,7 +108,7 @@ chat.post("/", async (c) => {
     if (requestedMode === "delegated") {
       if (!operatorVerified) {
         // No auth = no delegation. This is a hard security boundary.
-        console.warn(`[chat] Delegated mode requested without operator auth — forced to manual`);
+        // Intentionally no console.warn in prod; the response makes the state clear.
       } else {
         // Operator verified — accept delegated mode.
         // Per-chain delegation check happens at execution time in /api/delegation/execute.
@@ -168,34 +169,52 @@ chat.post("/", async (c) => {
               send,      // onStreamEvent
             );
 
-            // Delegated auto-execution (same logic as non-streaming path)
-            if (executionMode === "delegated" && body.confirmExecution) {
+            // Delegated execution: use the unified TransactionFlow engine.
+            if (executionMode === "delegated") {
               const txList = response.transactions?.length
                 ? response.transactions
                 : response.transaction ? [response.transaction] : [];
               if (txList.length > 0) {
-                send({ type: "status", message: "Executing transactions..." });
-                const executableTxs = txList.filter(tx => !tx.operatorOnly);
-                const outcomes = executableTxs.length > 0
-                  ? await executeTxList(c.env, executableTxs, body.vaultAddress)
-                  : [];
-                const results = outcomes.filter(o => o.result).map(o => o.result!);
-                const hasFallback = outcomes.some(o => o.fallbackToManual);
-                if (results.length === 1) {
-                  response.executionResult = results[0];
-                  if (!hasFallback && !results[0].reverted) {
-                    response.transaction = undefined;
-                    response.transactions = undefined;
+                const flowResult = await runTransactionFlow(
+                  c.env,
+                  body.operatorAddress || "",
+                  body.vaultAddress || "",
+                  txList,
+                  response.reply,
+                  {
+                    requestConfirmation: async (txs, ctx) => {
+                      send({ type: "confirmation_required", transactions: txs, reply: ctx.reply });
+                    },
+                    onProgress: async (event) => {
+                      if (event.type === "start") {
+                        send({ type: "status", message: "Executing transactions..." });
+                      }
+                    },
+                  },
+                  body.confirmExecution ? "autonomous" : undefined,
+                );
+
+                if (flowResult.kind === "executed") {
+                  const outcomes = flowResult.outcomes!;
+                  const results = outcomes.filter(o => o.result).map(o => o.result!);
+                  const hasFallback = outcomes.some(o => o.fallbackToManual);
+                  if (results.length === 1) {
+                    response.executionResult = results[0];
+                    if (!hasFallback && !results[0].reverted) {
+                      response.transaction = undefined;
+                      response.transactions = undefined;
+                    }
+                  } else if (results.length > 1) {
+                    response.executionResults = results;
+                    const allSuccess = results.every(r => r.confirmed && !r.reverted);
+                    if (!hasFallback && allSuccess) {
+                      response.transaction = undefined;
+                      response.transactions = undefined;
+                    }
                   }
-                } else if (results.length > 1) {
-                  response.executionResults = results;
-                  const allSuccess = results.every(r => r.confirmed && !r.reverted);
-                  if (!hasFallback && allSuccess) {
-                    response.transaction = undefined;
-                    response.transactions = undefined;
-                  }
+                  response.reply = formatOutcomesMarkdown(outcomes);
                 }
-                response.reply = formatOutcomesMarkdown(outcomes);
+                // kind === "pending_confirmation": transactions remain in response.reply/transactions
               }
             }
 
@@ -223,12 +242,12 @@ chat.post("/", async (c) => {
     // ── Standard JSON response ──
     const response: ChatResponse = await processChat(c.env, messages, ctx);
 
-    // ── Delegated execution: auto-execute if confirmExecution is set ──
-    // Handles both single (response.transaction) and multi (response.transactions)
-    if (
-      executionMode === "delegated" &&
-      body.confirmExecution
-    ) {
+    // ── Delegated execution: use the unified TransactionFlow engine ──
+    // Handles both single (response.transaction) and multi (response.transactions).
+    // The operator's autonomous/confirm preference is read from a unified KV key
+    // shared with Telegram; `confirmExecution` in the body acts only as an explicit
+    // override for external API callers.
+    if (executionMode === "delegated") {
       const txList = response.transactions && response.transactions.length > 0
         ? response.transactions
         : response.transaction
@@ -236,30 +255,43 @@ chat.post("/", async (c) => {
           : [];
 
       if (txList.length > 0) {
-        // Filter out operatorOnly transactions — those must be signed by the vault owner
-        const executableTxs = txList.filter(tx => !tx.operatorOnly);
-        const outcomes = executableTxs.length > 0
-          ? await executeTxList(c.env, executableTxs, body.vaultAddress)
-          : [];
-        const results = outcomes.filter(o => o.result).map(o => o.result!);
-        const hasFallback = outcomes.some(o => o.fallbackToManual);
+        const flowResult = await runTransactionFlow(
+          c.env,
+          body.operatorAddress || "",
+          body.vaultAddress || "",
+          txList,
+          response.reply,
+          {
+            // Confirm mode for web JSON: nothing to render here; the pending
+            // transactions stay in the response and the frontend shows the UI.
+            requestConfirmation: async () => { /* no-op */ },
+          },
+          body.confirmExecution ? "autonomous" : undefined,
+        );
 
-        if (results.length === 1) {
-          response.executionResult = results[0];
-          if (!hasFallback && !results[0].reverted) {
-            response.transaction = undefined;
-            response.transactions = undefined;
+        if (flowResult.kind === "executed") {
+          const outcomes = flowResult.outcomes!;
+          const results = outcomes.filter(o => o.result).map(o => o.result!);
+          const hasFallback = outcomes.some(o => o.fallbackToManual);
+
+          if (results.length === 1) {
+            response.executionResult = results[0];
+            if (!hasFallback && !results[0].reverted) {
+              response.transaction = undefined;
+              response.transactions = undefined;
+            }
+          } else if (results.length > 1) {
+            response.executionResults = results;
+            const allSuccess = results.every(r => r.confirmed && !r.reverted);
+            if (!hasFallback && allSuccess) {
+              response.transaction = undefined;
+              response.transactions = undefined;
+            }
           }
-        } else if (results.length > 1) {
-          response.executionResults = results;
-          const allSuccess = results.every(r => r.confirmed && !r.reverted);
-          if (!hasFallback && allSuccess) {
-            response.transaction = undefined;
-            response.transactions = undefined;
-          }
+
+          response.reply = formatOutcomesMarkdown(outcomes);
         }
-
-        response.reply = formatOutcomesMarkdown(outcomes);
+        // kind === "pending_confirmation": transactions remain in response for the frontend
       }
     }
 

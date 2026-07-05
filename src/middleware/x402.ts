@@ -73,6 +73,7 @@ const PUBLIC_API_PREFIXES: ReadonlyArray<{ method: string; prefix: string }> = [
   { method: "POST", prefix: "/api/telegram/" },
   { method: "GET", prefix: "/api/telegram/" },
   { method: "POST", prefix: "/api/settings/" },
+  { method: "GET", prefix: "/api/settings/" },
 ];
 
 export function isPublicApiRoute(method: string, path: string): boolean {
@@ -897,7 +898,6 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
       for (const [k, v] of Object.entries(settleResult.headers)) {
         c.header(k, v);
       }
-      console.log(`[x402] Settlement succeeded, headers:`, Object.keys(settleResult.headers));
     } else {
       // Settlement failed — log but still return the successful response.
       // The agent got the data; settlement failure is between us and the facilitator.
