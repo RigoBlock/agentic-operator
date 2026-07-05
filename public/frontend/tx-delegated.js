@@ -16,7 +16,7 @@ import { fetchAgentBalance } from "./api.js";
 
 import { showTxReceiptCard, showManualTxCard, pollPendingTx, formatTxMetrics } from "./tx-receipt.js";
 
-function showDelegatedConfirmation(tx) {
+function showDelegatedConfirmation(tx, note) {
   const meta = tx.swapMeta;
 
   let tradeHtml;
@@ -40,6 +40,7 @@ function showDelegatedConfirmation(tx) {
     : (delegationState?.sponsoredGas !== false);
 
   const metricsHtml = formatTxMetrics(tx);
+  const noteHtml = note ? `<div class="tx-fallback-note">${escapeHtml(note)}</div>` : '';
 
   const div = document.createElement('div');
   div.className = 'msg assistant compact';
@@ -47,6 +48,7 @@ function showDelegatedConfirmation(tx) {
     <div class="delegated-confirm">
       ${tradeHtml}
       ${metricsHtml}
+      ${noteHtml}
       <div class="sponsor-tx-toggle" style="margin:8px 0;font-size:13px;color:var(--muted);">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
           <input type="checkbox" class="sponsor-tx-checkbox" ${defaultSponsored ? 'checked' : ''} />
@@ -64,6 +66,7 @@ function showDelegatedConfirmation(tx) {
   div._pendingTx = tx;
   chatEl.appendChild(div);
   chatEl.scrollTop = chatEl.scrollHeight;
+  return div;
 }
 
 /** Confirm delegated execution — call direct execute endpoint (no LLM re-processing) */
@@ -174,19 +177,28 @@ async function confirmDelegatedExecution(btn) {
     const data = await res.json();
     if (data.executionResult) {
       const r = data.executionResult;
-      statusEl.textContent = r.confirmed
-        ? `✅ Confirmed in block ${r.blockNumber || '?'}`
-        : r.reverted
-          ? '❌ Reverted on-chain'
-          : `⏳ Submitted: ${(r.txHash || '').slice(0,10)}…`;
       buttons.forEach(b => b.style.display = 'none');
 
-      // Show compact receipt with trade details
-      showTxReceiptCard(r, tx.swapMeta);
+      // Keep the confirmation card and turn it into a compact receipt.
+      const hash = r.txHash || '';
+      const shortHash = hash ? `${hash.slice(0, 10)}…${hash.slice(-6)}` : '';
+      const safeUrl = r.explorerUrl && /^https:\/\//i.test(r.explorerUrl) ? r.explorerUrl : null;
+      const explorerLink = safeUrl && shortHash
+        ? `<a href="${safeUrl}" target="_blank" rel="noopener">${shortHash} ↗</a>`
+        : shortHash;
+      const statusText = r.confirmed
+        ? '✅ Confirmed'
+        : r.reverted
+          ? '❌ Reverted'
+          : '⏳ Submitted';
+      const tradeText = tx.swapMeta
+        ? `${escapeHtml(tx.swapMeta.sellAmount)} ${escapeHtml(tx.swapMeta.sellToken)} → ${escapeHtml(tx.swapMeta.buyAmount)} ${escapeHtml(tx.swapMeta.buyToken)}`
+        : escapeHtml(tx.description || 'Transaction');
+      statusEl.innerHTML = `<div class="receipt-status-line"><span class="receipt-status-text">${statusText}</span><span class="receipt-trade-text">${tradeText}</span>${explorerLink ? `<span class="receipt-explorer">${explorerLink}</span>` : ''}</div>`;
 
-      // If not yet final, poll for confirmation
+      // If not yet final, poll for confirmation and update this same status line.
       if (!r.confirmed && !r.reverted) {
-        pollPendingTx(r, tx.swapMeta);
+        pollPendingTx(r, tx.swapMeta, statusEl);
       } else if (r.confirmed) {
         // Auto-progress to next strategy step.
         // NOTE: for non-swap txs (bridges, delegation, etc.), pass null rather than
@@ -222,7 +234,7 @@ function rejectDelegatedExecution(btn) {
    ================================================================ */
 
 /** Show a combined card for multiple transactions in delegated mode */
-function showMultiDelegatedConfirmation(txList) {
+function showMultiDelegatedConfirmation(txList, note) {
   let tradesHtml = '';
   for (let i = 0; i < txList.length; i++) {
     const tx = txList[i];
@@ -247,12 +259,15 @@ function showMultiDelegatedConfirmation(txList) {
     }
   }
 
+  const noteHtml = note ? `<div class="tx-fallback-note">${escapeHtml(note)}</div>` : '';
+
   const div = document.createElement('div');
   div.className = 'msg assistant compact';
   div.innerHTML = `
     <div class="delegated-confirm multi-tx">
       <div class="multi-tx-header">${txList.length} transactions to execute</div>
       ${tradesHtml}
+      ${noteHtml}
       <div class="confirm-actions">
         <button class="btn-agent-exec approve" onclick="confirmMultiDelegatedExecution(this)">Execute All</button>
         <button class="btn-agent-exec reject" onclick="rejectDelegatedExecution(this)">Cancel</button>
@@ -264,6 +279,7 @@ function showMultiDelegatedConfirmation(txList) {
   div._pendingTxList = txList;
   chatEl.appendChild(div);
   chatEl.scrollTop = chatEl.scrollHeight;
+  return div;
 }
 
 /** Execute multiple transactions sequentially */

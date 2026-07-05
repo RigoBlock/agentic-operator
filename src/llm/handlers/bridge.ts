@@ -389,6 +389,18 @@ export async function handle_get_aggregated_nav(
     totalLines.push(`  ${tokenType}: ${data.total}`);
   }
 
+  // Global NAV in USD
+  const globalLines: string[] = [];
+  if (nav.globalNav.totalUsd && nav.globalNav.totalUsd !== "0.00") {
+    globalLines.push(`**Total NAV: $${nav.globalNav.totalUsd}**`);
+    const tokenParts = Object.entries(nav.globalNav.tokenUsd)
+      .filter(([, usd]) => usd && usd !== "0.00")
+      .map(([token, usd]) => `${token}: $${usd}`);
+    if (tokenParts.length > 0) {
+      globalLines.push(tokenParts.join(" · "));
+    }
+  }
+
   // Missing delegation
   const missingNames = nav.missingDelegationChains.map(
     (id) => crosschainChainName(id),
@@ -396,6 +408,8 @@ export async function handle_get_aggregated_nav(
 
   const message = [
     `📊 **Aggregated NAV — ${ctx.vaultAddress}**`,
+    "",
+    globalLines.length > 0 ? globalLines.join("\n") : "",
     "",
     chainLines.length > 0 ? chainLines.join("\n\n") : "  No vault data found on any chain.",
     "",

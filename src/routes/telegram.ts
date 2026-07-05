@@ -33,7 +33,7 @@ import {
 import { getDelegationConfig, getActiveChains } from "../services/delegation.js";
 import { getAgentWalletInfo } from "../services/agentWallet.js";
 import { getCurrentDayBucket, DEFAULT_GAS_SPENDING_LIMIT_USD, GAS_SPEND_KEY } from "./gasPolicy.js";
-import { executeTxList, checkPendingTxStatus, type TxExecOutcome } from "../services/execution.js";
+import { executeTxList, checkPendingTxStatus, ExecutionError, type TxExecOutcome } from "../services/execution.js";
 import {
   runTransactionFlow,
   getExecutionModePreference,
@@ -1339,77 +1339,89 @@ async function handleCallbackQuery(
 
     // Keep the user informed during long mainnet sponsorship polling. For a
     // single transaction, update the elapsed time every 5 seconds.
-    const executionStart = Date.now();
     let progressTimer: ReturnType<typeof setInterval> | undefined;
-    if (txList.length === 1) {
-      progressTimer = setInterval(() => {
-        const elapsedSec = Math.round((Date.now() - executionStart) / 1000);
-        editMessageText(
-          token, chatId, messageId,
-          `⏳ Executing trade… (${elapsedSec}s)`,
-        ).catch(() => {});
-      }, 5_000);
-    }
-
-    const outcomes = await executeTxList(env, txList, vaultAddress, async (idx, total, soFar) => {
-      if (total > 1) {
-        const done = soFar.length > 0 ? "\n\n" + formatTelegramOutcomes(soFar) : "";
-        await editMessageText(
-          token, chatId, messageId,
-          `⏳ Executing trade ${idx + 1} of ${total}…${done}`,
-        ).catch(() => {});
+    try {
+      const executionStart = Date.now();
+      if (txList.length === 1) {
+        progressTimer = setInterval(() => {
+          const elapsedSec = Math.round((Date.now() - executionStart) / 1000);
+          editMessageText(
+            token, chatId, messageId,
+            `⏳ Executing trade… (${elapsedSec}s)`,
+          ).catch(() => {});
+        }, 5_000);
       }
-    });
 
-    if (progressTimer) clearInterval(progressTimer);
+      const outcomes = await executeTxList(env, txList, vaultAddress, async (idx, total, soFar) => {
+        if (total > 1) {
+          const done = soFar.length > 0 ? "\n\n" + formatTelegramOutcomes(soFar) : "";
+          await editMessageText(
+            token, chatId, messageId,
+            `⏳ Executing trade ${idx + 1} of ${total}…${done}`,
+          ).catch(() => {});
+        }
+      });
 
-    // Separate outcomes into final states vs. still-pending (e.g., sponsored
-    // mainnet tx whose status check timed out before on-chain confirmation).
-    const pendingOutcomes = outcomes.filter(o => o.result && !o.result.confirmed && !o.result.reverted);
-    const finalOutcomes = outcomes.filter(o => !pendingOutcomes.includes(o));
+      // Separate outcomes into final states vs. still-pending (e.g., sponsored
+      // mainnet tx whose status check timed out before on-chain confirmation).
+      const pendingOutcomes = outcomes.filter(o => o.result && !o.result.confirmed && !o.result.reverted);
+      const finalOutcomes = outcomes.filter(o => !pendingOutcomes.includes(o));
 
-    const hasErrors = finalOutcomes.some(o => o.error || o.result?.reverted);
-    const allFinalSuccess = finalOutcomes.every(o => o.result?.confirmed && !o.result?.reverted) && finalOutcomes.length > 0;
+      const hasErrors = finalOutcomes.some(o => o.error || o.result?.reverted);
+      const allFinalSuccess = finalOutcomes.every(o => o.result?.confirmed && !o.result?.reverted) && finalOutcomes.length > 0;
 
-    // Detect stale swap quote failures: simulation failed on a swap that sat too long
-    const hasSimFailure = outcomes.some(o => o.error?.includes("simulation failed") || o.error?.includes("would revert"));
-    let staleHint = "";
-    if (hasSimFailure && hasSwaps) {
-      staleHint = isLikelyStale
-        ? "\n\n💡 The swap quote likely expired before execution. Swap quotes are valid for ~2 minutes. Please request the swap again for a fresh quote."
-        : "\n\n💡 The swap may have reverted due to an expired quote or changed market conditions. Please request the swap again for a fresh quote.";
-    }
+      // Detect stale swap quote failures: simulation failed on a swap that sat too long
+      const hasSimFailure = outcomes.some(o => o.error?.includes("simulation failed") || o.error?.includes("would revert"));
+      let staleHint = "";
+      if (hasSimFailure && hasSwaps) {
+        staleHint = isLikelyStale
+          ? "\n\n💡 The swap quote likely expired before execution. Swap quotes are valid for ~2 minutes. Please request the swap again for a fresh quote."
+          : "\n\n💡 The swap may have reverted due to an expired quote or changed market conditions. Please request the swap again for a fresh quote.";
+      }
 
-    // Build the summary we have so far.
-    const resultLines = formatTelegramOutcomes([...finalOutcomes, ...pendingOutcomes]);
-    const header = allFinalSuccess && !hasErrors && pendingOutcomes.length === 0
-      ? (txList.length > 1 ? `✅ <b>All ${txList.length} trades confirmed</b>` : "✅ <b>Trade confirmed</b>")
-      : hasErrors
-        ? "⚠️ <b>Some trades failed</b>"
-        : (txList.length > 1 ? `⏳ <b>${txList.length} trades submitted</b>` : "⏳ <b>Trade submitted</b>");
-    const finalMsg = `${header}\n\n${resultLines}${staleHint}`;
-    const truncated = finalMsg.length > 4000 ? finalMsg.slice(0, 3990) + "…" : finalMsg;
-    await editMessageText(token, chatId, messageId, truncated);
-
-    // Update conversation context so the next user message doesn't see a stale
-    // "Trade ready" prompt.
-    await updatePendingAssistantMessage(
-      env.KV,
-      userId,
-      allFinalSuccess && pendingOutcomes.length === 0
-        ? (txList.length > 1 ? `All ${txList.length} trades confirmed.` : "Trade confirmed.")
+      // Build the summary we have so far.
+      const resultLines = formatTelegramOutcomes([...finalOutcomes, ...pendingOutcomes]);
+      const header = allFinalSuccess && !hasErrors && pendingOutcomes.length === 0
+        ? (txList.length > 1 ? `✅ <b>All ${txList.length} trades confirmed</b>` : "✅ <b>Trade confirmed</b>")
         : hasErrors
-          ? "Some trades failed."
-          : "Trade submitted — waiting for on-chain confirmation.",
-    );
+          ? "⚠️ <b>Some trades failed</b>"
+          : (txList.length > 1 ? `⏳ <b>${txList.length} trades submitted</b>` : "⏳ <b>Trade submitted</b>");
+      const finalMsg = `${header}\n\n${resultLines}${staleHint}`;
+      const truncated = finalMsg.length > 4000 ? finalMsg.slice(0, 3990) + "…" : finalMsg;
+      await editMessageText(token, chatId, messageId, truncated);
 
-    // For pending sponsored transactions, keep polling in the background and
-    // update the Telegram message once they land. This handles the common case
-    // where Alchemy's waitForCallsStatus times out before mainnet confirmation.
-    if (pendingOutcomes.length > 0) {
-      pollPendingTelegramTxs(env, token, chatId, messageId, pendingOutcomes, userId, staleHint).catch(err =>
-        console.error("[telegram] Background pending-tx polling failed:", err),
+      // Update conversation context so the next user message doesn't see a stale
+      // "Trade ready" prompt.
+      await updatePendingAssistantMessage(
+        env.KV,
+        userId,
+        allFinalSuccess && pendingOutcomes.length === 0
+          ? (txList.length > 1 ? `All ${txList.length} trades confirmed.` : "Trade confirmed.")
+          : hasErrors
+            ? "Some trades failed."
+            : "Trade submitted — waiting for on-chain confirmation.",
       );
+
+      // For pending sponsored transactions, keep polling in the background and
+      // update the Telegram message once they land. This handles the common case
+      // where Alchemy's waitForCallsStatus times out before mainnet confirmation.
+      if (pendingOutcomes.length > 0) {
+        pollPendingTelegramTxs(env, token, chatId, messageId, pendingOutcomes, userId, staleHint).catch(err =>
+          console.error("[telegram] Background pending-tx polling failed:", err),
+        );
+      }
+    } catch (execErr) {
+      console.error("[telegram] executeTxList error:", execErr);
+      const rawMsg = execErr instanceof Error ? execErr.message : String(execErr);
+      const safeMsg = sanitizeError(rawMsg);
+      const fallbackToManual = execErr instanceof ExecutionError ? execErr.fallbackToManual : false;
+      const display = fallbackToManual
+        ? `⚠️ <b>Automatic execution failed</b>\n\n${escapeHtml(safeMsg.slice(0, 400))}\n\nOpen <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to sign this transaction from your wallet, or fund the agent wallet with native currency so future trades execute automatically.`
+        : `⚠️ <b>Trade failed</b>\n\n${escapeHtml(safeMsg.slice(0, 300))}`;
+      await editMessageText(token, chatId, messageId, display).catch(() => {});
+      await updatePendingAssistantMessage(env.KV, userId, "Trade execution failed.");
+    } finally {
+      if (progressTimer) clearInterval(progressTimer);
     }
 
     return;

@@ -502,7 +502,9 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "crosschain_transfer",
       description:
-        "Bridge tokens from the vault on one chain to the same vault on a destination chain. " +
+        "Build a cross-chain bridge transaction in ONE step. Call this DIRECTLY when the user wants " +
+        "to bridge/transfer/move a specific amount of a token between named chains. Fetches the quote " +
+        "and prepares the transaction in a single call — do NOT call get_crosschain_quote first. " +
         "Uses the Across Protocol via the AIntents adapter. " +
         "Supported tokens: USDC, USDT, WETH, WBTC (not all tokens on all chains). " +
         "Supported chains: Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Unichain. " +

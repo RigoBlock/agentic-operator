@@ -15,7 +15,7 @@ import { openWalletPicker, signAuthMessage, authKey } from "./wallet.js";
 
 import { showTransactionModal } from "./tx-modal.js";
 
-function makeReasoningBlock(text, startOpen = true) {
+function makeReasoningBlock(text, startOpen = false) {
   const block = document.createElement('div');
   block.className = 'reasoning-block';
   const toggle = document.createElement('button');
@@ -65,7 +65,7 @@ function appendMessage(role, content, extras, isRestore) {
     div.appendChild(tc);
   }
   if (extras?.reasoning) {
-    div.appendChild(makeReasoningBlock(extras.reasoning, true));
+    div.appendChild(makeReasoningBlock(extras.reasoning));
   }
   if (extras?.toolResult) {
     const tr = document.createElement('div');

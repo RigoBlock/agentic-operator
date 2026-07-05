@@ -279,7 +279,6 @@ async function revokeDelegation() {
         }],
       });
       const revokeGas = '0x' + Math.ceil(parseInt(revokeEstimate, 16) * 1.2).toString(16);
-      console.log('[Delegation] Revocation estimated gas:', parseInt(revokeEstimate, 16), '→ with buffer:', parseInt(revokeGas, 16));
 
       const txHash = await activeProvider.request({
         method: 'eth_sendTransaction',

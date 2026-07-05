@@ -195,14 +195,9 @@ function showTxReceiptCard(r, swapMeta) {
     headerHtml = `<div class="receipt-header"><span class="receipt-status">${statusIcon}</span><span class="receipt-trade">${label}</span></div>`;
   }
 
-  const detailParts = [];
-  if (r.gasCostEth) detailParts.push(`Gas: ${parseFloat(r.gasCostEth).toFixed(6)} ETH`);
-  if (r.blockNumber) detailParts.push(`Block ${r.blockNumber.toLocaleString()}`);
-  detailParts.push(explorerLink);
-
   const div = document.createElement('div');
   div.className = 'msg system';
-  div.innerHTML = `<div class="tx-receipt-card ${cardClass}">${headerHtml}<div class="receipt-details">${detailParts.join(' · ')}</div></div>`;
+  div.innerHTML = `<div class="tx-receipt-card ${cardClass}">${headerHtml}<div class="receipt-details">${explorerLink}</div></div>`;
   div._txResult = r;
   div._swapMeta = swapMeta;
   chatEl.appendChild(div);
@@ -213,8 +208,9 @@ function showTxReceiptCard(r, swapMeta) {
 /**
  * Poll the backend for a pending tx until it's confirmed or times out.
  * Uses faster polling for L2 chains with sub-second block times.
+ * If `statusEl` is provided, updates that element instead of appending a new card.
  */
-async function pollPendingTx(r, swapMeta) {
+async function pollPendingTx(r, swapMeta, statusEl) {
   const hash = r.txHash;
   if (!hash || hash === '0x') return;
 
@@ -224,11 +220,29 @@ async function pollPendingTx(r, swapMeta) {
   const maxAttempts = fastChains.has(r.chainId) ? 15 : 20;
   let attempts = 0;
 
+  const safeUrl = r.explorerUrl && /^https:\/\//i.test(r.explorerUrl) ? r.explorerUrl : null;
+  const shortHash = hash ? `${hash.slice(0,10)}…${hash.slice(-6)}` : '';
+  const explorerLink = safeUrl && shortHash
+    ? `<a href="${safeUrl}" target="_blank" rel="noopener">${shortHash} ↗</a>`
+    : shortHash;
+
+  const renderStatus = (confirmed, reverted) => {
+    const statusText = confirmed ? '✅ Confirmed' : (reverted ? '❌ Reverted' : '⏳ Submitted');
+    const tradeText = swapMeta
+      ? `${escapeHtml(swapMeta.sellAmount)} ${escapeHtml(swapMeta.sellToken)} → ${escapeHtml(swapMeta.buyAmount)} ${escapeHtml(swapMeta.buyToken)}`
+      : (swapMeta === undefined ? 'Transaction' : escapeHtml(swapMeta.description || 'Transaction'));
+    return `<div class="receipt-status-line"><span class="receipt-status-text">${statusText}</span><span class="receipt-trade-text">${tradeText}</span>${explorerLink ? `<span class="receipt-explorer">${explorerLink}</span>` : ''}</div>`;
+  };
+
   const pollInterval = setInterval(async () => {
     attempts++;
     if (attempts > maxAttempts) {
       clearInterval(pollInterval);
-      appendMessage('system', `Transaction still pending after ${maxAttempts * intervalMs / 1000}s. Check explorer for status.`);
+      if (statusEl) {
+        statusEl.innerHTML = renderStatus(false, false) + ' <span style="color:var(--warn)">(still pending — check explorer)</span>';
+      } else {
+        appendMessage('system', `Transaction still pending after ${maxAttempts * intervalMs / 1000}s. Check explorer for status.`);
+      }
       return;
     }
 
@@ -241,15 +255,19 @@ async function pollPendingTx(r, swapMeta) {
 
       if (data.status === 'confirmed' || data.status === 'failed') {
         clearInterval(pollInterval);
-        if (data.status === 'confirmed') {
+        const confirmed = data.status === 'confirmed';
+        if (statusEl) {
+          statusEl.innerHTML = renderStatus(confirmed, !confirmed);
+        } else if (confirmed) {
           showTxReceiptCard({ ...r, ...data, confirmed: true }, swapMeta);
-          // Auto-progress to next strategy step
+        } else {
+          showTxReceiptCard({ ...r, ...data, reverted: true }, swapMeta);
+        }
+        if (confirmed) {
           const desc = swapMeta
             ? `${swapMeta.sellAmount} ${swapMeta.sellToken} → ${swapMeta.buyAmount} ${swapMeta.buyToken}`
             : 'transaction';
           setTimeout(() => window.autoProgressAfterTx(desc), 2000);
-        } else {
-          showTxReceiptCard({ ...r, ...data, reverted: true }, swapMeta);
         }
         fetchAgentBalance(vaultInput.value.trim());
       }

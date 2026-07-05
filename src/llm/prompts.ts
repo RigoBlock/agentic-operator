@@ -364,6 +364,7 @@ INTENT ROUTING — CHOOSE THE RIGHT TOOL:
 - "sync NAV from X to Y" / "sync between X and Y" → crosschain_sync. If no amount is given, the tool uses a small fallback amount to propagate NAV state.
 - "equalise NAV between X and Y" / "match unitary prices" → crosschain_sync with equalizeNav=true (do NOT pass amount/token).
 - "bridge/transfer/move [AMOUNT] [TOKEN] from X to Y" → crosschain_transfer (OpType.Transfer), NOT crosschain_sync.
+- When the user gives an EXPLICIT bridge/transfer/move request with amount, token, source and destination, call crosschain_transfer DIRECTLY in a single turn. Do NOT call get_crosschain_quote or get_aggregated_nav first.
 - For crosschain_sync, the NavImpactTooHigh check and the server-side NAV shield both simulate the transaction on the SOURCE chain (where tokens leave and NAV drops). Never tell the user the revert happens on the destination chain.
 - "bridge ETH from X to Y" is a cross-chain bridge, NOT a swap. Set token="WETH", useNativeEth=true.
 - For crosschain_sync WETH→ETH (receive native ETH on destination), set token="WETH" and shouldUnwrapOnDestination=true.

@@ -153,7 +153,7 @@
 
     /* ── Tx receipt card (in-chat) ──────────────────────── */
     .tx-receipt-card {
-      padding: 16px 19px; border-radius: 10px; font-size: 19px;
+      padding: 10px 13px; border-radius: 8px; font-size: 14px;
       white-space: normal;
     }
     .tx-receipt-card.success {
@@ -166,19 +166,42 @@
       background: rgba(248,81,73,0.06); border: 1px solid rgba(248,81,73,0.2);
     }
     .tx-receipt-card .receipt-header {
-      display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 21px;
+      display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 15px;
     }
-    .tx-receipt-card .receipt-status { font-size: 22px; }
+    .tx-receipt-card .receipt-status { font-size: 16px; }
     .tx-receipt-card .receipt-trade { color: var(--text); }
-    .tx-receipt-card .receipt-price { font-size: 18px; color: var(--muted); margin: 3px 0 0 0; }
+    .tx-receipt-card .receipt-price { font-size: 13px; color: var(--muted); margin: 2px 0 0 0; }
     .tx-receipt-card .receipt-details {
-      font-size: 18px; color: var(--muted); margin-top: 3px;
+      font-size: 12px; color: var(--muted); margin-top: 2px;
       font-family: 'SF Mono', 'Fira Code', monospace;
     }
     .tx-receipt-card .receipt-details a {
       color: var(--accent); text-decoration: none;
     }
     .tx-receipt-card .receipt-details a:hover { text-decoration: underline; }
+
+    /* Inline status line used when a confirmation card becomes a receipt */
+    .receipt-status-line {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px;
+      font-size: 13px; margin-top: 8px; padding-top: 8px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+    .receipt-status-line .receipt-status-text { font-weight: 600; }
+    .receipt-status-line .receipt-trade-text { color: var(--text); }
+    .receipt-status-line .receipt-explorer {
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px;
+    }
+    .receipt-status-line .receipt-explorer a {
+      color: var(--accent); text-decoration: none;
+    }
+    .receipt-status-line .receipt-explorer a:hover { text-decoration: underline; }
+
+    /* Small routing fallback note inside a transaction card */
+    .tx-fallback-note {
+      font-size: 12px; color: var(--warn); margin: 4px 0 8px;
+      padding: 6px 9px; background: rgba(210,153,34,0.08);
+      border: 1px solid rgba(210,153,34,0.18); border-radius: 6px;
+    }
     /* ── Delegation setup modal ─────────────────────────── */
     .delegation-step { margin-bottom: 22px; }
     .delegation-step h4 {
@@ -240,6 +263,9 @@
     .delegated-confirm .exec-status {
       font-size: 13px; margin-top: 6px; white-space: normal;
       word-break: break-word; overflow-wrap: anywhere;
+    }
+    .delegated-confirm .exec-status .receipt-status-line {
+      margin-top: 0; padding-top: 0; border-top: none;
     }
     .tx-metrics {
       font-size: 12px; color: var(--muted); margin: 4px 0 8px;

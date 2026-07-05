@@ -271,7 +271,7 @@ export async function getSponsoredCallsStatus(
       jsonrpc: "2.0",
       id: 1,
       method: "wallet_getCallsStatus",
-      params: [{ id: callId }],
+      params: [callId],
     }),
   });
 

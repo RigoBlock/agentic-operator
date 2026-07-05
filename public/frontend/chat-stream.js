@@ -40,7 +40,7 @@ import {
   showDelegatedConfirmation, showMultiDelegatedConfirmation,
 } from "./tx-delegated.js";
 
-import { showManualTxCard, showTxReceiptCard } from "./tx-receipt.js";
+import { showManualTxCard, showTxReceiptCard, pollPendingTx } from "./tx-receipt.js";
 
 function autoProgressAfterTx(description) {
   // Only auto-progress when we're in a multi-step flow
@@ -340,16 +340,27 @@ async function sendMessage() {
 
       // Persist reasoning/thinking/errors from typingEl into the chat
       // BEFORE removing typingEl — otherwise all visible agent output is destroyed.
-      const persistBlocks = typingEl.querySelectorAll('.reasoning-block, .plan-block, .tool-error-block');
+      let blocksToPersist = Array.from(typingEl.querySelectorAll('.reasoning-block, .plan-block, .tool-error-block'));
+      // When a transaction card is about to be rendered, drop plan blocks that just
+      // echo the transaction summary (e.g. "✅ Bridge ready..."). Those would duplicate
+      // the dedicated card. Keep genuine reasoning traces and errors.
+      if (confirmationShown) {
+        blocksToPersist = blocksToPersist.filter(block => {
+          if (!block.classList.contains('plan-block')) return true;
+          const text = (block.querySelector('.reasoning-content')?.textContent || '').toLowerCase();
+          return !(/^(✅|bridge ready|swap ready|nav sync ready|transaction ready)/i.test(text) ||
+            (text.includes('ready') && text.includes('→')));
+        });
+      }
       const hasToolErrors = typingEl.querySelectorAll('.tool-error-block').length > 0;
-      const hasPlanBlocks = typingEl.querySelectorAll('.plan-block').length > 0;
-      if (persistBlocks.length > 0) {
+      const hasPlanBlocks = blocksToPersist.some(b => b.classList.contains('plan-block'));
+      if (blocksToPersist.length > 0) {
         const thinkingMsg = document.createElement('div');
         thinkingMsg.className = 'msg assistant thinking-trace';
         const thinkingContent = document.createElement('div');
         thinkingContent.className = 'msg-content';
         thinkingContent.style.cssText = 'opacity:0.85;font-size:0.9em;';
-        for (const block of persistBlocks) {
+        for (const block of blocksToPersist) {
           if (block.classList.contains('reasoning-block')) {
             // Rebuild with live event listeners — cloneNode(true) copies DOM but not onclick.
             const text = block.querySelector('.reasoning-content')?.textContent || block.textContent || '';
@@ -365,7 +376,7 @@ async function sendMessage() {
       typingEl.remove();
       if (finalResponse) {
         // Skip reasoning in handleChatResponse — we already persisted it from the stream
-        if (persistBlocks.length > 0) delete finalResponse.reasoning;
+        if (blocksToPersist.length > 0) delete finalResponse.reasoning;
         // When stream already showed error/plan blocks, suppress duplicate display
         // of the reply text if it matches content we already persisted.
         if ((hasToolErrors || hasPlanBlocks) && finalResponse.reply) {
@@ -427,6 +438,21 @@ async function sendMessage() {
 }
 
 /** Handle the parsed API response — display tool results, reply, chain switch, transaction modal */
+function extractFallbackNote(text) {
+  if (!text) return null;
+  // Extract fallback routing notes like "0x could not route ETH → GRG; routed via Uniswap instead."
+  const fallback = text.match(/0x\s+could\s+not\s+route[^.;]*(?:;|\.\s*)(?:\s*routed\s+via\s+[^.]+|showing\s+[^.]+)\./i);
+  if (fallback) return fallback[0].trim();
+  return null;
+}
+
+function extractMetaNote(text) {
+  if (!text) return null;
+  const meta = text.match(/Fast-path execution:[^.]+\./i);
+  if (meta) return meta[0].trim();
+  return null;
+}
+
 async function handleChatResponse(data, options = {}) {
   let modelTraceShown = false;
   const withModelTrace = (extras = {}) => {
@@ -437,16 +463,20 @@ async function handleChatResponse(data, options = {}) {
     return extras;
   };
 
-  // Show reasoning trace (collapsible)
+  const hasTx = !!(data.transaction || (data.transactions && data.transactions.length > 0));
+  const fallbackNote = hasTx
+    ? (extractFallbackNote(data.reply) || data.toolCalls?.map(tc => extractFallbackNote(tc.result)).find(Boolean))
+    : null;
+  const metaNote = hasTx ? extractMetaNote(data.reply) : null;
+
+  // Show reasoning trace (collapsed by default)
   if (data.reasoning) {
     appendMessage('assistant', '', withModelTrace({ reasoning: data.reasoning }));
   }
 
-  // Show tool results but skip the verbose tool call name/args when a transaction is present.
-  // When reply is empty (e.g. autonomous execution), the else-if block below renders tool
-  // results as the main message — don't duplicate them here.
-  if (data.toolCalls?.length > 0 && !data._streamShowedErrors && data.reply) {
-    // Normalize whitespace for comparison: collapse multiple spaces/newlines and trim.
+  // When a transaction card is shown, the assistant reply and tool results duplicate
+  // the same details. Suppress the verbose text and only surface routing fallbacks.
+  if (!hasTx && data.toolCalls?.length > 0 && !data._streamShowedErrors && data.reply) {
     const normalize = (s) => (s || '').replace(/\s+/g, ' ').trim();
     const suppressEcho = !!(
       data.toolCalls.length === 1 &&
@@ -456,7 +486,6 @@ async function handleChatResponse(data, options = {}) {
 
     for (const tc of data.toolCalls) {
       if (suppressEcho) continue;
-      // Only show the result, not the tool call name/args — the result already describes the swap
       if (tc.result || tc.error) {
         const toolExtras = withModelTrace({
           toolResult: tc.result,
@@ -468,33 +497,46 @@ async function handleChatResponse(data, options = {}) {
   }
 
   if (data.reply) {
-    const extras = withModelTrace({ suggestions: data.suggestions });
-    if (data.metadata?.gmxPositions) {
-      extras.gmxPositions = data.metadata.gmxPositions;
-    }
-    appendMessage('assistant', data.reply, extras);
-    // Store tool results inline so the LLM has full context.
-    // IMPORTANT: Do NOT use any bracket/prefix format that looks like a tool call —
-    // gpt-4.1-nano reproduced such patterns as text instead of calling actual tools.
-    let historyContent = data.reply;
-    if (data.toolCalls?.length > 0) {
-      const resultsText = data.toolCalls
-        .filter(tc => !tc.error && tc.result)
-        .map(tc => tc.result)
-        .join('\n');
-      if (resultsText) {
-        historyContent = resultsText + '\n\n' + data.reply;
+    if (hasTx) {
+      // Keep routing/meta notes out of the main chat; they are rendered inline on the card.
+      let historyContent = data.reply;
+      if (data.toolCalls?.length > 0) {
+        const resultsText = data.toolCalls
+          .filter(tc => !tc.error && tc.result)
+          .map(tc => tc.result)
+          .join('\n');
+        if (resultsText) {
+          historyContent = resultsText + '\n\n' + data.reply;
+        }
       }
-    }
-    conversationHistory.push({ role: 'assistant', content: historyContent });
-    persistChat();
+      conversationHistory.push({ role: 'assistant', content: historyContent });
+      persistChat();
 
-    // Detect multi-step plans: auto-progress only fires when the agent
-    // signals it has more steps to do (e.g. "Step 1 of 3", "next I'll").
-    const stepPattern = /step\s+\d+\s*(of|\/)\s*\d+|next\s+(step|i['']ll|we['']ll)|after\s+this|then\s+(i['']ll|we['']ll)|following\s+step|first,?\s+.*then/i;
-    setMultiStepActive(stepPattern.test(data.reply));
-  } else if (data.toolCalls?.length > 0) {
-    // Reply is empty — still show tool results in the UI and push to history
+      const stepPattern = /step\s+\d+\s*(of|\/)\s*\d+|next\s+(step|i['']ll|we['']ll)|after\s+this|then\s+(i['']ll|we['']ll)|following\s+step|first,?\s+.*then/i;
+      setMultiStepActive(stepPattern.test(data.reply));
+    } else {
+      const extras = withModelTrace({ suggestions: data.suggestions });
+      if (data.metadata?.gmxPositions) {
+        extras.gmxPositions = data.metadata.gmxPositions;
+      }
+      appendMessage('assistant', data.reply, extras);
+      let historyContent = data.reply;
+      if (data.toolCalls?.length > 0) {
+        const resultsText = data.toolCalls
+          .filter(tc => !tc.error && tc.result)
+          .map(tc => tc.result)
+          .join('\n');
+        if (resultsText) {
+          historyContent = resultsText + '\n\n' + data.reply;
+        }
+      }
+      conversationHistory.push({ role: 'assistant', content: historyContent });
+      persistChat();
+
+      const stepPattern = /step\s+\d+\s*(of|\/)\s*\d+|next\s+(step|i['']ll|we['']ll)|after\s+this|then\s+(i['']ll|we['']ll)|following\s+step|first,?\s+.*then/i;
+      setMultiStepActive(stepPattern.test(data.reply));
+    }
+  } else if (!hasTx && data.toolCalls?.length > 0) {
     const resultsText = data.toolCalls
       .filter(tc => !tc.error && tc.result)
       .map(tc => tc.result)
@@ -543,29 +585,39 @@ async function handleChatResponse(data, options = {}) {
     // operatorOnly transactions always go through standard wallet modal
     const anyOperatorOnly = txList.some(tx => tx.operatorOnly);
     if (txList.length > 1 && executionMode === 'delegated' && !anyOperatorOnly) {
-      // Multi-transaction delegated mode: show combined card
-      showMultiDelegatedConfirmation(txList);
+      showMultiDelegatedConfirmation(txList, fallbackNote);
     } else if (txList.length > 1 && (executionMode !== 'delegated' || anyOperatorOnly)) {
-      // Multi-transaction manual mode: show each as individual in-chat card
       for (const tx of txList) {
         showManualTxCard(tx);
       }
     } else if (data.transaction) {
       if (executionMode === 'delegated' && !data.transaction.operatorOnly) {
         // In delegated mode: show in-chat confirmation instead of wallet modal
-        showDelegatedConfirmation(data.transaction);
+        showDelegatedConfirmation(data.transaction, fallbackNote);
       } else {
         showTransactionModal(data.transaction);
       }
     } else if (data.executionResult) {
       // Agent already executed the transaction (delegated auto-execute fallback)
       const r = data.executionResult;
-      showTxReceiptCard(r, data.transaction?.swapMeta);
+      const receiptEl = showTxReceiptCard(r, data.transaction?.swapMeta);
+      if (!r.confirmed && !r.reverted && receiptEl) {
+        pollPendingTx(r, data.transaction?.swapMeta, receiptEl.querySelector('.receipt-details'));
+      }
     } else if (data.executionResults && data.executionResults.length > 0) {
-      // Agent already executed multiple transactions
       for (const r of data.executionResults) {
         showTxReceiptCard(r);
       }
+    }
+
+    // Optional routing/meta notes that don't belong in the main chat stream.
+    if (metaNote) {
+      appendMessage('system', metaNote);
+    }
+
+    // Suggestions still appear below the transaction card when relevant.
+    if (data.suggestions?.length) {
+      appendMessage('assistant', '', withModelTrace({ suggestions: data.suggestions }));
     }
   }
 }

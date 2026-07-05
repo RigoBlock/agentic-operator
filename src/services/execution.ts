@@ -203,13 +203,13 @@ const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }>
 const BASE_FEE_MULTIPLIER = 150n; // 150% = 1.5x (divided by 100)
 
 /** Maximum number of resubmission attempts */
-const MAX_RESUBMIT_ATTEMPTS = 2;
+const MAX_RESUBMIT_ATTEMPTS = 1;
 
 /** Fee bump percentage for resubmission (10% = minimum for most clients) */
 const RESUBMIT_FEE_BUMP_PCT = 15n; // 15% bump
 
 /** Timeout for waiting for a tx receipt (ms) */
-const TX_CONFIRM_TIMEOUT_MS = 30_000;
+const TX_CONFIRM_TIMEOUT_MS = 15_000;
 
 /** Fast-confirming chains (L2s, BSC) with sub-second block times */
 const FAST_CHAIN_IDS = new Set([10, 42161, 8453, 130, 56, 84532]);
