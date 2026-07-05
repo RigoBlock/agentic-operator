@@ -172,11 +172,11 @@ tools.post("/", async (c) => {
     const canonicalName = TOOL_NAME_ALIASES[toolName] ?? toolName;
     const result = await executeToolCall(c.env, ctx, toolName, body.arguments);
 
-    // ── Delegated execution: auto-execute in delegated mode ──
-    // Unlike /api/chat, direct tool callers explicitly choose the tool and
-    // parameters — no LLM-generated ambiguity to review. So delegated mode
-    // alone is sufficient; confirmExecution is optional (ignored here).
-    if (executionMode === "delegated" && result.transaction) {
+    // ── Delegated execution: auto-execute only when confirmExecution is set ──
+    // Mirrors /api/chat behaviour: delegated mode alone returns unsigned calldata.
+    // Auto-execution requires an explicit confirmExecution=true so the caller has
+    // reviewed the parameters and chosen to broadcast.
+    if (executionMode === "delegated" && body.confirmExecution && result.transaction) {
       const txList = result.transaction ? [result.transaction] : [];
       const executableTxs = txList.filter(tx => !tx.operatorOnly);
       const outcomes = executableTxs.length > 0

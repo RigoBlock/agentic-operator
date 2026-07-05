@@ -17,6 +17,7 @@ import {
 import {
   friendlyError, estimateGas, resolveChainArg, resolveChainName, txActionLine,
 } from "../client.js";
+import { decodeRevertData } from "../../services/errorDecoder.js";
 
 export async function handle_crosschain_transfer(
   env: Env,
@@ -117,6 +118,12 @@ export async function handle_crosschain_sync(
   const destChainArg = args.destinationChain as string;
   const navToleranceBps = args.navToleranceBps as number | undefined;
   const equalizeNav = args.equalizeNav as boolean | undefined;
+  const useNativeEth = args.useNativeEth === true || args.useNativeEth === "true";
+  // Default: same token on both sides (ETH→ETH when useNativeEth, WETH→WETH otherwise).
+  // LLM overrides explicitly for cross-form requests: ETH→WETH (false) or WETH→ETH (true).
+  const shouldUnwrapOnDestination = args.shouldUnwrapOnDestination !== undefined
+    ? (args.shouldUnwrapOnDestination === true || args.shouldUnwrapOnDestination === "true")
+    : useNativeEth;
 
   // When equalizeNav=true, IGNORE LLM-provided amount and token.
   // These are computed DETERMINISTICALLY by the equalization algorithm.
@@ -147,6 +154,8 @@ export async function handle_crosschain_sync(
     amount,
     navToleranceBps,
     equalizeNav,
+    useNativeEth,
+    shouldUnwrapOnDestination,
     alchemyKey: env.ALCHEMY_API_KEY,
     operatorAddress: ctx.operatorAddress,
   });
@@ -164,14 +173,22 @@ export async function handle_crosschain_sync(
 
   // Build context summary BEFORE estimateGas — so we can include it in errors.
   const eq = result.navEqualization;
-  const navEqContext = eq
+  const navImpact = result.navImpact;
+  const navContext = eq
     ? [
         `NAV equalization${eq.directionAutoSwapped ? ' (direction auto-corrected)' : ''}:`,
         `  ${effectiveSrcName} NAV: ${eq.srcNavFormatted} | ${effectiveDstName} NAV: ${eq.dstNavFormatted}`,
         `  Divergence: ${(eq.divergenceBps / 100).toFixed(2)}% → ~${(eq.postDivergenceBps / 100).toFixed(2)}% after sync`,
         ...(eq.capped ? [`  ⚠ ${eq.capReason}`] : []),
       ].join('\n')
-    : '';
+    : (navImpact && navImpact.preUnitaryValue !== "0"
+      ? [
+          `Projected source-chain NAV impact:`,
+          `  Pre-sync unitary value: ${navImpact.preUnitaryValue}`,
+          `  Post-sync unitary value: ${navImpact.postUnitaryValue}`,
+          `  Impact: ${Number(navImpact.impactPct).toFixed(2)}% (negative = NAV drop)`,
+        ].join('\n')
+      : '');
 
   let syncGas: string;
   try {
@@ -206,7 +223,8 @@ export async function handle_crosschain_sync(
         e = e.cause;
       }
       if (revertData) {
-        revertReason = friendlyError(`execution reverted: ${revertData}`);
+        const decoded = decodeRevertData(revertData);
+        revertReason = decoded || friendlyError(`execution reverted: ${revertData}`);
       } else if (bestMessage) {
         revertReason = friendlyError(sanitizeError(bestMessage));
       } else {
@@ -216,8 +234,9 @@ export async function handle_crosschain_sync(
       revertReason = friendlyError(sanitizeError(String(err)));
     }
 
+    const isNavImpact = /NavImpactTooHigh/i.test(revertReason);
     const errorLines = [
-      `❌ NAV sync failed — transaction would revert on-chain`,
+      `❌ NAV sync failed — transaction would revert on-chain on ${effectiveSrcName}`,
       ``,
       `Proposed action:`,
       `  Route: ${effectiveSrcName} → ${effectiveDstName}`,
@@ -225,10 +244,24 @@ export async function handle_crosschain_sync(
       `  Amount: ${result.quote.inputAmount} ${result.quote.inputToken.symbol}`,
       `  Bridge fee: ${result.quote.feePct}`,
     ];
-    if (navEqContext) {
-      errorLines.push(``, navEqContext);
+    if (navContext) {
+      errorLines.push(``, navContext);
     }
     errorLines.push(``, `Revert reason: ${revertReason}`);
+    if (isNavImpact) {
+      errorLines.push(
+        ``,
+        `Why this happens for NAV sync:`,
+        `  A sync moves tokens to the destination chain but does NOT burn virtual supply on the source chain (${effectiveSrcName}). ` +
+        `That makes the source-chain unit price drop. The on-chain contract rejects the transaction on ${effectiveSrcName} when that drop exceeds navToleranceBps.`,
+        ``,
+        `What you can do:`,
+        `  1. Sync a smaller amount (e.g., 0.1 WETH instead of ${result.quote.inputAmount}).`,
+        `  2. Pass a higher navToleranceBps (e.g. 500-1000 = 5-10%) if you want to allow a larger source-chain NAV drop for this sync.`,
+        `  3. Use a plain bridge (crosschain_transfer) if you just want to move the tokens — transfers update virtual supply and avoid this limit.`,
+        `  4. If the server-side NAV shield is also blocking, raise the per-trade threshold via Settings → NAV Shield or Telegram /navshield.`,
+      );
+    }
     throw new Error(errorLines.join('\n'));
   }
 
@@ -252,7 +285,7 @@ export async function handle_crosschain_sync(
     `NAV tolerance: ${toleranceDisplay}`,
     `Bridge fee: ${result.quote.feePct}`,
     `Estimated time: ${result.quote.estimatedTime}`,
-    ...(navEqContext ? ['', navEqContext] : []),
+    ...(navContext ? ['', navContext] : []),
     ...(txActionLine(ctx) ? ["", txActionLine(ctx)] : []),
   ].join("\n");
 

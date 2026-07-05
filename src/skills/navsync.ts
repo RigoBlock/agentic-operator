@@ -403,10 +403,10 @@ const navSyncTools: SkillToolDefinition[] = [
 // ── System prompt ─────────────────────────────────────────────────────
 
 const navSyncSystemPrompt = `NAV SYNC AUTOMATION:
-- create_nav_sync schedules periodic cross-chain NAV synchronisation (default: every 30 min, threshold 2%).
+- create_nav_sync schedules PERIODIC cross-chain NAV synchronisation (default: every 30 min, threshold 2%). Use ONLY when the operator asks to automate, schedule, or run repeatedly.
 - list_nav_syncs shows active configs.
 - cancel_nav_sync stops a config.
-- For one-off manual syncs, use crosschain_sync directly.`;
+- For a SINGLE immediate sync — including explicit amount/token syncs or deterministic NAV equalization — use the crosschain_sync tool directly, NOT create_nav_sync.`;
 
 // ── Skill export ──────────────────────────────────────────────────────
 

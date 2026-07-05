@@ -127,7 +127,7 @@ export async function handle_set_swap_shield_tolerance(
   );
   return {
     message:
-      `⚠️ Swap Shield tolerance temporarily set to ${pct}% for 10 minutes. ` +
+      `✅ Swap Shield tolerance temporarily set to ${pct}% for 10 minutes. ` +
       `Swaps will be allowed if the DEX quote diverges up to ${pct}% from the oracle price. ` +
       `The shield will reset to the default 5% automatically.\n\n` +
       `The NAV shield still protects against catastrophic trades.`,

@@ -521,7 +521,7 @@ Operator Settings, Oracle.
 2. Cache the catalog locally
 3. Call `POST /api/tools?toolName={toolName}` with structured arguments for each operation
 4. If the response contains `transaction`, sign and broadcast it (manual mode)
-5. For auto-execution, provide operator auth and set `executionMode: "delegated"`
+5. For auto-execution, provide operator auth, set `executionMode: "delegated"`, AND set `confirmExecution: true`. Delegated mode alone returns unsigned calldata; auto-execution requires the explicit confirmation flag.
 
 ---
 
@@ -601,7 +601,7 @@ and returns a result (quote, unsigned transaction, analytics summary, etc.).
 | **GMX perpetuals** | Open, close, increase positions; get positions; cancel/update orders; claim funding fees; list markets |
 | **Uniswap v4 LP** | Add/remove liquidity, list positions, collect fees |
 | **GRG staking** | Stake, undelegate, unstake, claim rewards (via vault adapter); end epoch (via staking proxy — manual only) |
-| **Cross-chain bridge** | Transfer tokens (Across Protocol), sync NAV, get bridge quote, aggregated NAV, rebalance plan |
+| **Cross-chain bridge** | Transfer tokens (`crosschain_transfer`, OpType=Transfer), one-off NAV sync (`crosschain_sync`, OpType=Sync with optional explicit amount/token or deterministic equalization), scheduled NAV sync (`create_nav_sync`), get bridge quote, aggregated NAV, rebalance plan |
 | **Vault management** | Get info, check token balance, deploy pool, fund pool (mint) |
 | **Delegation** | Setup, revoke all, revoke specific selectors, check status, check pending transaction status |
 | **TWAP orders** | Create, cancel, list — scheduled slice execution with Swap Shield + NAV shield on every slice |

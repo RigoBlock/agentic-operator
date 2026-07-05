@@ -63,6 +63,14 @@ const COMMON_ERRORS = [
   { name: "OnlyOwner", type: "error", inputs: [] },
   { name: "NotDelegated", type: "error", inputs: [{ name: "delegated", type: "address" }, { name: "selector", type: "bytes4" }] },
   { name: "InvalidAmount", type: "error", inputs: [] },
+
+  // Rigoblock cross-chain (AIntents / NavImpactLib)
+  { name: "NavImpactTooHigh", type: "error", inputs: [] },
+  { name: "EffectiveSupplyTooLow", type: "error", inputs: [] },
+  { name: "SameChainTransfer", type: "error", inputs: [] },
+  { name: "InvalidQuoteTimestamp", type: "error", inputs: [] },
+  { name: "OutputAmountTooLow", type: "error", inputs: [] },
+  { name: "OutputAmountTooHigh", type: "error", inputs: [] },
 ];
 
 const PANIC_CODES: Record<number, string> = {
@@ -97,6 +105,26 @@ function formatDecodedError(name: string, args: unknown): string {
   if (name === "ActionNotAllowed") {
     const sel = String(record.actionSelector ?? record["0"] ?? "0x");
     return `0x Settler action ${sel} is not allowed by Rigoblock's A0xRouter on this chain. Try the same swap via Uniswap or on another chain.`;
+  }
+  if (name === "NavImpactTooHigh") {
+    return "NavImpactTooHigh — this operation would move too much value out of the vault in one transaction. " +
+      "For NAV sync this happens on the SOURCE chain because tokens leave but virtual supply is not reduced, so the source-chain unit price drops. " +
+      "Try a smaller amount, pass a higher navToleranceBps on the sync, or use crosschain_transfer instead of sync.";
+  }
+  if (name === "EffectiveSupplyTooLow") {
+    return "EffectiveSupplyTooLow — the vault's effective supply would fall below the on-chain minimum. Bridge a smaller amount.";
+  }
+  if (name === "SameChainTransfer") {
+    return "SameChainTransfer — source and destination resolved to the same chain. Check the chain arguments.";
+  }
+  if (name === "InvalidQuoteTimestamp") {
+    return "InvalidQuoteTimestamp — the bridge quote expired before submission. Retry to get a fresh quote.";
+  }
+  if (name === "OutputAmountTooLow") {
+    return "OutputAmountTooLow — the bridge output is below the minimum required by the solver. Try a larger amount or a different route.";
+  }
+  if (name === "OutputAmountTooHigh") {
+    return "OutputAmountTooHigh — the bridge output exceeds what the solver can cover.";
   }
 
   const argEntries = Object.entries(record).map(([k, v]) => `${k}=${String(v)}`);

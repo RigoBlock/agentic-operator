@@ -37,4 +37,24 @@ describe("detectDomains", () => {
     expect(domains.has("swap")).toBe(true);
     expect(domains.has("gmx")).toBe(true);
   });
+
+  it("classifies plain 'sync' requests as bridge domain", () => {
+    const domains = detectDomains([{ role: "user", content: "sync 100 USDC from Base to Arbitrum" }]);
+    expect(domains.has("bridge")).toBe(true);
+    expect(domains.has("swap")).toBe(false);
+  });
+
+  it("classifies 'NAV sync' and 'sync nav' requests as bridge domain", () => {
+    const syncNav = detectDomains([{ role: "user", content: "sync nav from Arbitrum to Ethereum" }]);
+    expect(syncNav.has("bridge")).toBe(true);
+
+    const navSync = detectDomains([{ role: "user", content: "NAV sync from Base to Optimism" }]);
+    expect(navSync.has("bridge")).toBe(true);
+  });
+
+  it("classifies crosschain transfer requests as bridge domain", () => {
+    const domains = detectDomains([{ role: "user", content: "bridge 3 WETH from Arbitrum to Ethereum" }]);
+    expect(domains.has("bridge")).toBe(true);
+    expect(domains.has("swap")).toBe(false);
+  });
 });

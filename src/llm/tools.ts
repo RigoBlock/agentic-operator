@@ -554,16 +554,22 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "crosschain_sync",
       description:
-        "Synchronise NAV data from one chain to a destination chain via Across Protocol. " +
-        "Sends a token amount carrying the sync message — the on-chain AIntents adapter " +
-        "validates NAV impact on the destination. " +
+        "ONE-OFF cross-chain NAV synchronisation via Across Protocol. Use this for a single " +
+        "sync operation, NOT for recurring automation (use create_nav_sync for scheduling). " +
+        "The bridged tokens carry a sync message (opType=Sync) — the vault moves tokens to the " +
+        "destination chain but does NOT burn/mint virtual supply; instead it propagates NAV state. " +
+        "Use when the user says 'sync', 'NAV sync', or wants to move tokens cross-chain while " +
+        "preserving supply and updating NAV. " +
+        "Supports explicit amount/token OR deterministic equalization. " +
+        "Supports WETH↔ETH forms via useNativeEth and shouldUnwrapOnDestination. " +
         "When equalizeNav=true: the tool DETERMINISTICALLY computes direction, token, and amount. " +
         "It reads getPoolTokens() on both chains, normalizes unitaryValue accounting for decimal " +
         "differences (e.g. USDT is 6-dec on Arbitrum but 18-dec on BSC), applies a closed-form " +
         "formula to find the exact bridge amount that equalizes NAV, and simulates post-bridge " +
         "NAV to verify convergence. Do NOT pass amount or token when equalizeNav=true — they " +
         "are ignored in favor of the deterministic calculation. " +
-        "When equalizeNav=false (default): performs a minimal sync to propagate NAV state.",
+        "When equalizeNav is false or omitted: use the operator-specified amount and token. " +
+        "If amount/token are omitted, the tool falls back to a small default amount to propagate NAV state.",
       parameters: {
         type: "object",
         properties: {
@@ -577,15 +583,20 @@ export const TOOL_DEFINITIONS = [
           },
           token: {
             type: "string",
-            description: "Token for sync message (USDC, USDT, WETH, WBTC). IGNORED when equalizeNav=true — auto-selected.",
+            description: "Token to bridge for the sync message (USDC, USDT, WETH, WBTC). Required when equalizeNav is false/omitted and the user names a token; IGNORED when equalizeNav=true.",
           },
           amount: {
             type: "string",
-            description: "Explicit amount to bridge. IGNORED when equalizeNav=true — computed by closed-form formula.",
+            description: "Explicit amount to bridge (human-readable). Use this when the operator specifies an amount for the sync. IGNORED when equalizeNav=true — computed by closed-form formula.",
           },
           navToleranceBps: {
             type: "number",
-            description: "NAV tolerance in basis points (default: 100 = 1%). Higher values allow more NAV divergence on destination.",
+            description:
+              "On-chain NAV impact tolerance for the sync, in basis points (default: 100 = 1%). " +
+              "This is encoded into the depositV3 SourceMessageParams and checked by the AIntents contract on the SOURCE chain: " +
+              "because a sync moves tokens out without burning virtual supply, the source-chain unit price drops, and the contract rejects the tx if the drop exceeds this tolerance. " +
+              "Raise this (e.g. to 500-1000 bps = 5-10%) if the sync amount is large relative to vault NAV. " +
+              "This is INDEPENDENT of the server-side NAV shield threshold controlled via /navshield or Settings → NAV Shield.",
           },
           equalizeNav: {
             type: "boolean",
@@ -595,7 +606,20 @@ export const TOOL_DEFINITIONS = [
               "formula, and shows pre/post NAV simulation. Direction, token, and amount are ALL " +
               "auto-determined — do NOT set them. " +
               "Use when user says 'equalise NAV', 'match unitary prices', 'same price on both chains', " +
-              "'calculate the amount for sync', or 'crosschain sync'.",
+              "or 'calculate the amount for sync'.",
+          },
+          useNativeEth: {
+            type: "boolean",
+            description:
+              "If true AND token is WETH, the vault wraps native ETH→WETH automatically via sourceNativeAmount. " +
+              "Use when the vault holds native ETH but not WETH. Default: false.",
+          },
+          shouldUnwrapOnDestination: {
+            type: "boolean",
+            description:
+              "Controls destination token form for ETH/WETH syncs. OMIT for same-token default (ETH→ETH, WETH→WETH). " +
+              "Set true when the user explicitly wants native ETH on destination with WETH on source (e.g. 'sync WETH to ETH'). " +
+              "Set false when the user explicitly wants WETH on destination with ETH on source (e.g. 'sync ETH to WETH').",
           },
         },
         required: ["destinationChain"],

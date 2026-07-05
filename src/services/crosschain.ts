@@ -32,6 +32,7 @@ import {
   encodeAbiParameters,
   parseAbiParameters,
   decodeAbiParameters,
+  decodeFunctionResult,
   formatUnits,
   parseUnits,
   type Address,
@@ -1272,6 +1273,96 @@ export interface NavEqualizationResult {
 }
 
 /**
+ * Project the NAV impact of a single explicit-amount sync on the source chain.
+ *
+ * Simulates multicall([depositV3, updateUnitaryValue]) on the source chain to
+ * obtain the post-sync unitary value. Returns pre/post values and the signed
+ * impact percentage (negative = NAV dropped).
+ */
+export async function projectSyncNavImpact(params: {
+  vaultAddress: Address;
+  srcChainId: number;
+  depositV3Calldata: Hex;
+  operatorAddress?: Address;
+  alchemyKey?: string;
+}): Promise<{
+  preUnitaryValue: string;
+  postUnitaryValue: string;
+  impactPct: string;
+} | undefined> {
+  const publicClient = getClient(params.srcChainId, params.alchemyKey);
+  const sender = params.operatorAddress ?? params.vaultAddress;
+
+  // Pre-sync NAV
+  let preNav: bigint;
+  try {
+    const preCall = await publicClient.call({
+      to: params.vaultAddress,
+      data: encodeFunctionData({
+        abi: RIGOBLOCK_VAULT_ABI,
+        functionName: "updateUnitaryValue",
+      }),
+    });
+    if (!preCall.data) return undefined;
+    const preResult = decodeFunctionResult({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "updateUnitaryValue",
+      data: preCall.data,
+    }) as { unitaryValue: bigint; netTotalValue: bigint; netTotalLiabilities: bigint };
+    preNav = preResult.unitaryValue;
+  } catch {
+    return undefined;
+  }
+
+  if (preNav === 0n) {
+    return {
+      preUnitaryValue: "0",
+      postUnitaryValue: "0",
+      impactPct: "0",
+    };
+  }
+
+  // Post-sync NAV via multicall([depositV3, updateUnitaryValue])
+  try {
+    const navCalldata = encodeFunctionData({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "updateUnitaryValue",
+    });
+    const multicallData = encodeFunctionData({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "multicall",
+      args: [[params.depositV3Calldata, navCalldata]],
+    });
+    const postCall = await publicClient.call({
+      account: sender,
+      to: params.vaultAddress,
+      data: multicallData,
+      value: 0n,
+    });
+    if (!postCall.data) return undefined;
+    const postResults = decodeFunctionResult({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "multicall",
+      data: postCall.data,
+    }) as readonly Hex[];
+    const postNavResult = decodeFunctionResult({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "updateUnitaryValue",
+      data: postResults[1],
+    }) as { unitaryValue: bigint; netTotalValue: bigint; netTotalLiabilities: bigint };
+    const postNav = postNavResult.unitaryValue;
+    const impactBps = ((postNav - preNav) * 10000n) / preNav;
+    return {
+      preUnitaryValue: preNav.toString(),
+      postUnitaryValue: postNav.toString(),
+      impactPct: (Number(impactBps) / 100).toFixed(4),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Compute the exact bridge amount to equalize NAV across two chains.
  *
  * This is a PURE DETERMINISTIC computation — no LLM interpretation.
@@ -1536,6 +1627,8 @@ export async function buildCrosschainSync(params: {
   amount?: string;        // auto-calculates if omitted
   navToleranceBps?: number;
   equalizeNav?: boolean;
+  useNativeEth?: boolean; // true = vault wraps native ETH→WETH via sourceNativeAmount
+  shouldUnwrapOnDestination?: boolean;
   alchemyKey?: string;
   /** Operator address for depositV3 simulation (extracts destination message) */
   operatorAddress?: Address;
@@ -1544,6 +1637,11 @@ export async function buildCrosschainSync(params: {
   calldata: Hex;
   description: string;
   navEqualization?: NavEqualizationResult;
+  navImpact?: {
+    preUnitaryValue: string;
+    postUnitaryValue: string;
+    impactPct: string;
+  };
 }> {
   if (params.srcChainId === params.dstChainId) {
     throw new Error("Cross-chain sync requires different source and destination chains.");
@@ -1589,10 +1687,15 @@ export async function buildCrosschainSync(params: {
 
     for (const token of srcTokens) {
       if (!dstTokens.has(token.type)) continue;
+      // When useNativeEth is requested, only WETH can source from native ETH.
+      if (params.useNativeEth && token.type !== "WETH") continue;
+      const balanceAddress = params.useNativeEth && token.type === "WETH"
+        ? "0x0000000000000000000000000000000000000000"
+        : token.address;
       const { balance } = await getVaultTokenBalance(
         srcChainId,
         params.vaultAddress,
-        token.address,
+        balanceAddress as Address,
         params.alchemyKey,
       );
       if (balance > 0n) {
@@ -1620,19 +1723,40 @@ export async function buildCrosschainSync(params: {
     throw new Error(`${tokenSymbol} is not bridgeable on chain ${srcChainId}.`);
   }
 
-  const { balance } = await getVaultTokenBalance(
-    srcChainId,
-    params.vaultAddress,
-    inputToken.address,
-    params.alchemyKey,
-  );
+  // When useNativeEth is set (only valid for WETH), check native ETH balance
+  // instead of WETH balance — the vault will wrap ETH→WETH automatically
+  // via the sourceNativeAmount field in SourceMessageParams.
+  const useNative = params.useNativeEth && inputToken.type === "WETH";
+
   const inputAmountRaw = parseUnits(amount, inputToken.decimals);
-  if (balance < inputAmountRaw) {
-    const available = formatUnits(balance, inputToken.decimals);
-    throw new Error(
-      `Insufficient ${inputToken.symbol} balance on ${chainName(srcChainId)} for sync. ` +
-      `Available: ${available}, needed: ${amount}.`,
+  if (useNative) {
+    const { balance: ethBalance } = await getVaultTokenBalance(
+      srcChainId,
+      params.vaultAddress,
+      "0x0000000000000000000000000000000000000000" as Address,
+      params.alchemyKey,
     );
+    if (ethBalance < inputAmountRaw) {
+      const available = formatUnits(ethBalance, 18);
+      throw new Error(
+        `Insufficient native ETH balance in vault on ${chainName(srcChainId)} for sync. ` +
+        `Available: ${available}, requested: ${amount}.`,
+      );
+    }
+  } else {
+    const { balance } = await getVaultTokenBalance(
+      srcChainId,
+      params.vaultAddress,
+      inputToken.address,
+      params.alchemyKey,
+    );
+    if (balance < inputAmountRaw) {
+      const available = formatUnits(balance, inputToken.decimals);
+      throw new Error(
+        `Insufficient ${inputToken.symbol} balance on ${chainName(srcChainId)} for sync. ` +
+        `Available: ${available}, needed: ${amount}.`,
+      );
+    }
   }
 
   // Get Across quote (shared with transfer — same getCrosschainQuote + fee logic)
@@ -1668,6 +1792,8 @@ export async function buildCrosschainSync(params: {
     exclusivityDeadline: quote.fee.exclusivityDeadline,
     opType: OpType.Sync,
     navToleranceBps: toleranceBps,
+    sourceNativeAmount: useNative ? inputAmountRaw : undefined,
+    shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
   });
 
   // Phase 2: Simulate depositV3 to extract the expanded destination message,
@@ -1700,6 +1826,8 @@ export async function buildCrosschainSync(params: {
         exclusivityDeadline: quote.fee.exclusivityDeadline,
         opType: OpType.Sync,
         navToleranceBps: toleranceBps,
+        sourceNativeAmount: useNative ? inputAmountRaw : undefined,
+        shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
       });
       console.log("[Crosschain] Re-quoted sync with simulated destination message");
     }
@@ -1726,7 +1854,23 @@ export async function buildCrosschainSync(params: {
       ` (tolerance: ${(toleranceBps / 100).toFixed(2)}%, fee: ${quote.feePct})`;
   }
 
-  return { quote, calldata, description, navEqualization };
+  // Project source-chain NAV impact for explicit-amount syncs so the operator
+  // can see why a sync might hit NavImpactTooHigh or the server-side NAV shield.
+  const navImpact = !navEqualization
+    ? await projectSyncNavImpact({
+        vaultAddress: params.vaultAddress,
+        srcChainId,
+        depositV3Calldata: calldata,
+        operatorAddress: params.operatorAddress,
+        alchemyKey: params.alchemyKey,
+      })
+    : undefined;
+
+  if (navImpact && navImpact.preUnitaryValue !== "0") {
+    description += ` | Projected ${srcName} NAV impact: ${Number(navImpact.impactPct).toFixed(2)}%`;
+  }
+
+  return { quote, calldata, description, navEqualization, navImpact };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────

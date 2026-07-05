@@ -83,6 +83,13 @@ function formatTelegramPct(value: unknown): string {
   return `${formatted}%`;
 }
 
+/** Detect whether a reply contains a non-blocking safety warning that should
+ *  change the confirmation header from "Trade ready" to "Trade ready with warning".
+ */
+function hasSafetyWarning(reply: string): boolean {
+  return /⚠️\s*Swap Shield|⚠️\s*NAV|⚠️\s*Simulation warning|not oracle-verified/i.test(reply);
+}
+
 /** Format per-transaction safety metrics for Telegram confirmation messages. */
 function formatTelegramTxMetrics(tx: UnsignedTransaction): string {
   if (!tx.metrics) return "";
@@ -967,8 +974,10 @@ async function handleMessage(
             void updateProgress().catch(() => {});
             break;
           case "tool_result": {
-            const prefix = event.error ? "⚠️ " : "✅ ";
-            const firstLine = stripToolPrefix(event.result.split("\n")[0]).slice(0, 200);
+            const resultText = stripToolPrefix(event.result);
+            const hasWarning = !event.error && hasSafetyWarning(resultText);
+            const prefix = event.error ? "⚠️ " : (hasWarning ? "⚠️ " : "✅ ");
+            const firstLine = resultText.split("\n")[0].slice(0, 200);
             progressLines.push(`${prefix}${escapeHtml(firstLine)}`);
             void updateProgress().catch(() => {});
             break;
@@ -1032,7 +1041,10 @@ async function handleMessage(
       if (autoExecuteFromTelegram) {
         // ⚡ Autonomous mode — execute immediately, no confirmation needed
         const tradeCount = txList.length > 1 ? `${txList.length} trades` : "trade";
-        replyParts.push(`\n⚡ <b>Executing ${tradeCount}…</b>`);
+        replyParts.push(
+          `\n⚡ <b>Autonomous mode is ON — executing ${tradeCount} immediately.</b>`,
+          `Use <code>/mode confirm</code> to require an Execute button before each trade.`,
+        );
 
         // Surface NAV impact and oracle divergence before autonomous execution.
         const metricsLines: string[] = [];
@@ -1074,7 +1086,11 @@ async function handleMessage(
         // 🔔 Confirm mode (default) — show Execute/Cancel buttons for every ready tx
         const tradeCount = txList.length > 1 ? `${txList.length} trades` : "trade";
         const execLabel = txList.length > 1 ? "Execute All" : "Execute";
-        replyParts.push(`\n🔔 <b>${tradeCount.charAt(0).toUpperCase() + tradeCount.slice(1)} ready.</b>\nTap ✅ ${execLabel} to confirm or ❌ Cancel.`);
+        const replyText = response.reply ?? "";
+        const hasWarning = hasSafetyWarning(replyText);
+        const confirmIcon = hasWarning ? "⚠️" : "🔔";
+        const execIcon = hasWarning ? "⚠️" : "✅";
+        replyParts.push(`\n${confirmIcon} <b>${tradeCount.charAt(0).toUpperCase() + tradeCount.slice(1)} ready${hasWarning ? " with warning" : ""}.</b>\nTap ${execIcon} ${execLabel} to confirm or ❌ Cancel.`);
 
         // Surface NAV impact and oracle divergence so the operator can review before tapping Execute.
         const metricsLines: string[] = [];
@@ -1096,7 +1112,7 @@ async function handleMessage(
         const keyboard: TgInlineKeyboardMarkup = {
           inline_keyboard: [
             [
-              { text: `✅ ${execLabel}`, callback_data: `exec:${userId}` },
+              { text: `${execIcon} ${execLabel}`, callback_data: `exec:${userId}` },
               { text: "❌ Cancel", callback_data: `cancel:${userId}` },
             ],
           ],

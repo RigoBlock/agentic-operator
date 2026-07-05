@@ -43,6 +43,7 @@ const POOL_ERROR_SELECTORS: Record<string, string> = {
   "0x0f6e887f": "EffectiveSupplyTooLow — a prior bridge left the source pool below minimum operating supply. The pool cannot send more assets until supply is replenished on that chain.",
   "0x162e92dd": "SameChainTransfer — the source and destination chain resolved to the same chain. This usually means the NAV equalization auto-corrected the direction incorrectly.",
   "0xec8f2f9a": "TransferFromRecipientNotSettler — the 0x Settler contract rejected this swap because the vault is not recognized as a valid recipient. This token pair may not be supported via 0x for vault swaps. Try using Uniswap instead (omit 'using 0x').",
+  "0x3471741b": "NavImpactTooHigh — this operation would move too much value out of the vault in one transaction. For NAV sync, this happens on the SOURCE chain because tokens leave but virtual supply is not reduced, so the source-chain unit price drops. Try a smaller amount, pass a higher navToleranceBps on the sync, or use crosschain_transfer instead of sync.",
 };
 
 /**
@@ -83,6 +84,7 @@ export const TOOL_NAME_ALIASES: Record<string, string> = {
   build_lp_remove: "remove_liquidity",
   init_pool: "initialize_pool",
   bridge_tokens: "crosschain_transfer",
+  sync_tokens: "crosschain_sync",
   stake_grg: "grg_stake",
   equalize_nav: "crosschain_sync",
 };
@@ -1621,8 +1623,9 @@ export async function preCheckNavImpact(
         ? `use /navshield ${suggestedNavThreshold}% in Telegram`
         : `raise the threshold to ${suggestedNavThreshold}% in Settings → NAV Shield`;
       const reason =
-        `NAV shield blocked: this trade would reduce vault unit value by ${result.dropPct}% ` +
+        `Server-side NAV shield blocked this transaction: it would reduce the vault unit value by ${result.dropPct}% ` +
         `(max allowed: ${maxDrop}%). ${result.reason || ""}\n\n` +
+        `This is independent of the on-chain NavImpactTooHigh check. ` +
         `To allow a larger loss per trade, ${navShieldGuidance}.`;
       throw new Error(reason.trim());
     }

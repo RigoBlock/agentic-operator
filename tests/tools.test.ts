@@ -5,6 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { TOOL_DEFINITIONS } from "../src/llm/tools.js";
 import { CORE_PROMPT, DOMAIN_PROMPTS } from "../src/llm/prompts.js";
+import { TOOL_NAME_ALIASES } from "../src/llm/client.js";
 
 // Tool names that MUST exist (security-relevant)
 const REQUIRED_TOOLS = [
@@ -93,6 +94,12 @@ describe("TOOL_DEFINITIONS", () => {
     // This number should be updated when tools are added/removed
     // Prevents accidental removal of tools
     expect(TOOL_DEFINITIONS).toHaveLength(REQUIRED_TOOLS.length);
+  });
+
+  it("maps cross-chain aliases to the correct canonical tools", () => {
+    expect(TOOL_NAME_ALIASES.bridge_tokens).toBe("crosschain_transfer");
+    expect(TOOL_NAME_ALIASES.sync_tokens).toBe("crosschain_sync");
+    expect(TOOL_NAME_ALIASES.equalize_nav).toBe("crosschain_sync");
   });
 });
 

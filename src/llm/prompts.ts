@@ -54,8 +54,9 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
     domains.add("lp");
   }
 
-  // Cross-chain bridge
-  if (/\b(bridge|cross.?chain|transfer.*to|move.*to|across|sync.*nav|rebalance|consolidate|aggregated?\s*nav|multichain|multi.chain)\b/.test(lastUserMsg)) {
+  // Cross-chain bridge — include plain "sync" so any NAV-sync / sync request
+  // exposes the bridge tool set (crosschain_sync, crosschain_transfer, etc.).
+  if (/\b(bridge|cross.?chain|transfer.*to|move.*to|across|sync|rebalance|consolidate|aggregated?\s*nav|multichain|multi.chain)\b/.test(lastUserMsg)) {
     domains.add("bridge");
   }
 
@@ -349,23 +350,35 @@ ANTI-HALLUCINATION — LP:
 - STRICT DOMAIN SEPARATION: LP tools for LP, GMX tools for perps. Never mix.`,
 
   bridge: `CROSS-CHAIN (AINTENTS + ACROSS PROTOCOL):
-- crosschain_transfer: bridge tokens between chains. For WETH bridges with native ETH, set useNativeEth=true.
-- crosschain_sync: synchronise NAV across chains (sends small amount with sync message).
+- crosschain_transfer: token bridge between chains (opType=Transfer). Use for "bridge", "transfer", or "move" requests where the operator wants to relocate tokens and update virtual supply.
+- crosschain_sync: one-off NAV synchronisation between chains (opType=Sync). Use for any request containing the word "sync". It moves tokens but preserves virtual supply and propagates NAV state. Supports explicit amount/token OR deterministic NAV equalization. The on-chain NavImpactTooHigh check runs on the SOURCE chain because tokens leave but virtual supply does not, so source-chain unit price drops.
+- create_nav_sync: RECURRING scheduled NAV sync (cron-based). Use ONLY when the operator asks to automate/sync periodically/schedule. For a single immediate sync, use crosschain_sync.
 - get_crosschain_quote: show bridge fees without executing.
 - get_aggregated_nav: see vault's NAV and token balances on ALL chains. Shows delegation status per chain.
 - get_rebalance_plan: compute optimal bridge operations to consolidate tokens.
 - verify_bridge_arrival: check if bridged tokens arrived.
 
+INTENT ROUTING — CHOOSE THE RIGHT TOOL:
+- "sync [AMOUNT] [TOKEN] from X to Y" → crosschain_sync (OpType.Sync). Example: "sync 100 USDC from Base to Arbitrum" → crosschain_sync(sourceChain="Base", destinationChain="Arbitrum", token="USDC", amount="100").
+- "sync NAV from X to Y" / "sync between X and Y" → crosschain_sync. If no amount is given, the tool uses a small fallback amount to propagate NAV state.
+- "equalise NAV between X and Y" / "match unitary prices" → crosschain_sync with equalizeNav=true (do NOT pass amount/token).
+- "bridge/transfer/move [AMOUNT] [TOKEN] from X to Y" → crosschain_transfer (OpType.Transfer), NOT crosschain_sync.
+- For crosschain_sync, the NavImpactTooHigh check and the server-side NAV shield both simulate the transaction on the SOURCE chain (where tokens leave and NAV drops). Never tell the user the revert happens on the destination chain.
 - "bridge ETH from X to Y" is a cross-chain bridge, NOT a swap. Set token="WETH", useNativeEth=true.
-- "sync NAV from X to Y" is crosschain_sync (NAV/message sync), NOT crosschain_transfer.
-- "transfer/bridge TOKEN from X to Y" is crosschain_transfer (token bridge), NOT crosschain_sync.
+- For crosschain_sync WETH→ETH (receive native ETH on destination), set token="WETH" and shouldUnwrapOnDestination=true.
+- For crosschain_sync ETH→WETH (spend native ETH on source, receive WETH on destination), set token="WETH", useNativeEth=true, shouldUnwrapOnDestination=false.
 - Never use placeholders like "first chain" or "second chain" in tool args.
   Always pass real chain names/IDs (e.g., "Arbitrum" -> "Base", or "42161" -> "8453").
-- If the user asks "sync between X and Y", run one direction first (X -> Y), then propose/prepare Y -> X if requested.
+- If the user asks "sync between X and Y" without specifying amount/token, run one direction first (X -> Y), then propose/prepare Y -> X if requested.
 - Bridgeable tokens: USDC, USDT, WETH, WBTC. Not all available on all chains.
 - Supported chains: Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Unichain.
 - Bridge fees: 0.01%-0.5%, max 2%. Fill time: 2s-10min.
 - Requires depositV3 selector delegated for delegated execution.
+
+EXPLICIT-AMOUNT SYNC:
+When the operator provides an amount and/or token for a sync (e.g. "sync 50 USDC from Arbitrum to Base"),
+ALWAYS use crosschain_sync with the given amount and token. Do NOT redirect to crosschain_transfer.
+Only specify token/amount when the operator explicitly provides them; otherwise let the tool auto-select.
 
 NAV EQUALIZATION — SINGLE TOOL CALL (DO NOT calculate manually):
 When the user asks to "equalise NAV", "match unitary prices", "make the price the same on both chains",
@@ -381,7 +394,7 @@ in any order — the service auto-detects and corrects the direction silently.
 ANTI-BIAS — CROSSCHAIN:
 - Do NOT assume source chain or token from prior conversation messages or previous errors.
 - Each crosschain_sync call is independent — the tool re-reads live NAV and balances.
-- Do NOT specify token= unless the user EXPLICITLY names a specific token to use.
+- Do NOT specify token= or amount= unless the user EXPLICITLY names them.
 - If a previous sync attempt failed with one token, the tool automatically tries others.
 - NEVER reason about which token to use — the tool iterates all bridgeable tokens internally.
 
