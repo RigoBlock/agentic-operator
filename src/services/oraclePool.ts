@@ -44,6 +44,8 @@ import {
 } from "viem";
 import { getClient, getTokenDecimals } from "./vault.js";
 import { resolveTokenAddress, TOKEN_MAP, NATIVE_TOKEN, getNativeTokenSymbol } from "../config.js";
+import { getOracleSpotTick } from "./oraclePrice.js";
+import { TickMath } from "@uniswap/v3-sdk";
 
 // ── BackgeoOracle contract addresses per chain ─────────────────────────
 // Source: https://github.com/RigoBlock/v3-contracts/blob/development/src/utils/constants.ts
@@ -299,6 +301,29 @@ export async function buildOraclePoolSwapTx(
     );
   }
 
+  // Read current oracle pool price for display via the BackgeoOracle observe() function.
+  // Price is currency1/currency0 = token/native. We format both directions.
+  let priceLine = "";
+  try {
+    const tick = await getOracleSpotTick(chainId, tokenAddr, alchemyKey);
+    if (Number.isFinite(tick)) {
+      // price = 1.0001^tick. Compute via sqrtRatio to reuse Uniswap math and avoid precision loss.
+      const sqrtRatio = TickMath.getSqrtRatioAtTick(Math.round(tick));
+      const sqrtPriceX96 = BigInt(sqrtRatio.toString());
+      const priceNum = sqrtPriceX96 * sqrtPriceX96;
+      const priceDenom = 2n ** 192n;
+      const price = Number(priceNum) / Number(priceDenom);
+      if (price > 0 && Number.isFinite(price)) {
+        const tokenPerNative = price;
+        const nativePerToken = 1 / price;
+        const outSymbol = token.toUpperCase();
+        priceLine = `Pool price: 1 ${nativeSymbol} = ${tokenPerNative.toPrecision(6)} ${outSymbol}  (1 ${outSymbol} = ${nativePerToken.toPrecision(6)} ${nativeSymbol})`;
+      }
+    }
+  } catch {
+    // Non-fatal: price display is optional.
+  }
+
   // Parse input amount (native token for buy, ERC-20 token for sell)
   const isBuy = direction === "buy";
   let amountInWei: bigint;
@@ -413,9 +438,10 @@ export async function buildOraclePoolSwapTx(
       `🔄 Oracle Refresh Ready (Vault)`,
       `Direction: ${isBuy ? `${nativeSymbol} → ${tokenSymbol}` : `${tokenSymbol} → ${nativeSymbol}`}`,
       `Amount: ${amountIn} ${isBuy ? nativeSymbol : tokenSymbol}`,
+      priceLine,
       ``,
       `Executes through the vault adapter — eligible for delegation.`,
-    ].join("\n");
+    ].filter(Boolean).join("\n");
 
     return {
       transaction: {
@@ -449,9 +475,10 @@ export async function buildOraclePoolSwapTx(
     `🔄 Oracle Refresh Ready`,
     `Direction: ${isBuy ? `${nativeSymbol} → ${tokenSymbol}` : `${tokenSymbol} → ${nativeSymbol}`}`,
     `Amount: ${amountIn} ${isBuy ? nativeSymbol : tokenSymbol}`,
+    priceLine,
     ``,
     `⚠️ Sign with your operator wallet — sent directly to the Universal Router.`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   return {
     transaction: {

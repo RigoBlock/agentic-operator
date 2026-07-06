@@ -213,7 +213,10 @@ export async function handle_refresh_oracle_feed(
     }
     try {
       const tokenAddr = await resolveTokenAddress(ctx.chainId, tokenArg);
-      const decimalsOut = await getTokenDecimals(ctx.chainId, tokenAddr, env.ALCHEMY_API_KEY);
+      const tokenDecimals = await getTokenDecimals(ctx.chainId, tokenAddr, env.ALCHEMY_API_KEY);
+      // For buy direction the desired output is the ERC-20 token; for sell direction
+      // the desired output is the native token (always 18 decimals).
+      const decimalsOut = direction === "buy" ? tokenDecimals : 18;
       const desiredOutRaw = parseUnits(amountOut, decimalsOut);
       if (desiredOutRaw <= 0n) {
         throw new Error(
@@ -251,7 +254,8 @@ export async function handle_refresh_oracle_feed(
         }) as bigint;
         if (estimatedIn > 0n) {
           const buffered = (estimatedIn * 105n) / 100n;
-          amountIn = roundAmount(formatUnits(buffered, decimalsOut));
+          // estimatedIn is in token decimals (the input token), not native decimals.
+          amountIn = roundAmount(formatUnits(buffered, tokenDecimals));
         } else if (estimatedIn < 0n) {
           throw new Error(`Oracle returned a negative estimate for ${amountOut} ${nativeSymbol} — unexpected oracle condition.`);
         } else {

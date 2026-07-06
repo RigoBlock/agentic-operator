@@ -220,27 +220,35 @@ export const DOMAIN_PROMPTS: Record<DomainKey, string> = {
 
 BACKGEOORACLE AND ORACLE POOL SWAPS:
 The BackgeoOracle is a Uniswap V4 hook. Every ERC-20 token has an oracle-specific V4 pool:
-  PoolKey = { currency0=ETH(address(0)), currency1=<token>, fee=0, tickSpacing=32767, hooks=oracle_address }
+  PoolKey = { currency0=NATIVE(address(0)), currency1=<ERC-20>, fee=0, tickSpacing=32767, hooks=oracle_address }
 The hook address is part of the pool key — NOT a separate routing parameter.
 Swapping on this oracle pool triggers the afterSwap hook and records a new TWAP price observation.
-This IS a real Uniswap V4 pool you can swap on via the Universal Router. The calldata is
-already built correctly in the refresh_oracle_feed tool: it encodes the full pool key (including
-hooks=oracle_address) inside the V4 SWAP_EXACT_IN_SINGLE params.
+The refresh_oracle_feed tool builds the exact V4 SWAP_EXACT_IN_SINGLE calldata for this pool;
+it does NOT use 0x, Uniswap API, or any external aggregator. Only this tool routes through the oracle hook.
 
-USE refresh_oracle_feed when the user:
-- Says "swap X ETH for TOKEN using BackgeoOracle" / "using the oracle hook" / "on the oracle pool"
-- Says "refresh oracle", "fix oracle feed", "update TWAP", "oracle divergence"
-- The Swap Shield blocks a vault swap with favorable-divergence (stale oracle signal)
+USE refresh_oracle_feed when the user mentions ANY of:
+- "sync grg price feed", "refresh oracle", "update TWAP", "fix oracle", "oracle divergence"
+- "swap on BackgeoOracle", "swap on oracle pool", "swap via oracle hook"
+- Swap Shield blocked a vault swap due to stale oracle price
 
-REQUIRED ARGS: token (the ERC-20, e.g. "USDC"), amount (from user message, e.g. "0.001").
-DIRECTION is from the NATIVE token's point of view:
-  - direction="buy" (default): spend native token (ETH/POL/BNB) → receive ERC-20 token.
-    Use this when the user says they are SELLING/BUYING WITH the native token, e.g. "sell 10 POL for GRG", "buy GRG with 0.01 POL", "spend 0.01 POL on oracle pool".
-  - direction="sell": spend ERC-20 token → receive native token.
-    Use this when the user says they are SELLING the ERC-20, e.g. "sell 10 GRG for POL", "sell GRG on oracle pool".
-If amount is not in the message, ask: "How much would you like to swap on the oracle pool?"
+REQUIRED ARGS:
+- token: the ERC-20 whose feed is stale (e.g. "GRG", "USDC"). NEVER pass ETH/POL/BNB as token.
+- direction: relative to the ERC-20 token.
+    "buy"  = BUY the ERC-20, paying native (POL/ETH/BNB).
+    "sell" = SELL the ERC-20, receiving native (POL/ETH/BNB).
+- amount: exact INPUT amount. For "buy": native amount. For "sell": ERC-20 amount.
+
+MAPPING USER INTENT — CRITICAL:
+- "sync grg price feed by buying 1 POL" / "receive 1 POL" / "buy 1 POL" → user receives POL = SELL GRG.
+  With vault: direction="sell", amountOut="1" (estimates GRG input). Without vault: ask "How much GRG should I sell?".
+- "sync grg price feed by selling 1 POL" / "spend 1 POL" / "pay 1 POL" / "buy GRG with 1 POL" → user pays POL = BUY GRG.
+  direction="buy", amount="1".
+- "sell 10 GRG" / "sell GRG for POL" → direction="sell", amount="10".
+- "buy GRG with 0.01 POL" → direction="buy", amount="0.01".
+
+If neither amount nor amountOut is in the message, ask: "How much would you like to swap on the oracle pool?"
 NEVER say this is impossible. The encoding is done — just call the tool.
-The returned transaction goes to the Universal Router (operator's personal wallet), NOT the vault.
+The EOA-path transaction goes to the Universal Router (operator's personal wallet), NOT the vault.
 The check is two-sided with a unified tolerance:
 - If the DEX quote diverges more than 5% from the oracle price in EITHER direction
   (worse OR better), the swap is BLOCKED.

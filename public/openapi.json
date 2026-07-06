@@ -1162,7 +1162,7 @@
                   },
                   "amount": {
                     "type": "string",
-                    "description": "Amount to swap"
+                    "description": "Exact INPUT amount. For 'buy': native token amount (e.g. '1' POL). For 'sell': ERC-20 token amount (e.g. '10' GRG). Defaults to '0.001'."
                   },
                   "direction": {
                     "type": "string",
@@ -1170,7 +1170,7 @@
                       "buy",
                       "sell"
                     ],
-                    "description": "Swap direction"
+                    "description": "'buy' = buy the ERC-20 token, paying native. 'sell' = sell the ERC-20 token, receiving native."
                   },
                   "chainId": {
                     "type": "integer",

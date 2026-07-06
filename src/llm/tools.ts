@@ -1251,14 +1251,13 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "refresh_oracle_feed",
       description:
-        "Swap on the BackgeoOracle's dedicated Uniswap V4 oracle pool to create a fresh price observation. " +
-        "Use this tool in TWO situations: " +
-        "(1) User explicitly asks to swap on/via/through/using the BackgeoOracle or oracle pool " +
-        "(e.g., 'swap 0.001 POL for GRG using BackgeoOracle', 'swap on oracle pool', " +
-        "'swap ETH for GRG via oracle'); " +
-        "(2) Swap Shield is blocking a vault swap due to oracle price divergence and user wants to " +
-        "fix the root cause rather than disabling the shield. " +
-        "Supports both directions: buying (native token → ERC-20) and selling (ERC-20 → native token). " +
+        "Swap on the BackgeoOracle's dedicated Uniswap V4 oracle pool to refresh a stale TWAP price feed. " +
+        "This is the ONLY tool that routes through the BackgeoOracle hook. " +
+        "Use this tool whenever the user asks to: sync/refresh/update a price feed or TWAP, " +
+        "fix oracle divergence, swap on the oracle pool / via BackgeoOracle, or anything similar. " +
+        "Examples: 'sync grg price feed on polygon', 'refresh oracle for GRG', 'swap on BackgeoOracle', " +
+        "'fix oracle divergence'. " +
+        "The swap is ALWAYS exact-input on the V4 oracle pool (no external 0x/Uniswap API is used). " +
         "When a vault is connected, the vault path is used by default so the swap happens from the vault " +
         "and supports delegation / NAV shield. The EOA path (operator personal wallet) is used only when " +
         "explicitly requested or no vault is connected.",
@@ -1275,27 +1274,29 @@ export const TOOL_DEFINITIONS = [
             type: "string",
             enum: ["buy", "sell"],
             description:
-              "Swap direction from the NATIVE token's point of view. " +
-              "'buy' (default) = spend native token (ETH/POL/BNB) to receive the ERC-20. " +
-              "'sell' = spend the ERC-20 to receive native token. " +
-              "Infer from what the user is SPENDING, not what they receive. " +
-              "Examples: 'buy GRG with 0.01 POL' or 'spend 0.01 POL for GRG' → buy. " +
-              "'sell GRG for POL' or 'sell 10 GRG' → sell. " +
-              "CRITICAL: 'sell 10 POL' means the user is spending POL (native), so use direction='buy' with amount='10'."
+              "Swap direction relative to the ERC-20 'token'. " +
+              "'buy' (default) = BUY the ERC-20 token, paying the chain's native token (ETH/POL/BNB). " +
+              "'sell' = SELL the ERC-20 token, receiving the chain's native token. " +
+              "The swap is exact-input, so 'amount' is always the amount of the INPUT token. " +
+              "Examples: 'buy GRG with 0.01 POL' / 'spend 0.01 POL for GRG' / 'sell 1 POL' (pay 1 POL) → direction='buy', amount='0.01' or '1'. " +
+              "'sell 10 GRG' / 'buy 1 POL' (receive 1 POL) / 'receive 1 POL for GRG' → direction='sell'. " +
+              "When the user expresses the desired NATIVE output (e.g. 'buy/receive 1 POL'), use amountOut='1' instead of amount (vault only)."
           },
           amount: {
             type: "string",
             description:
-              "Amount to swap. For 'buy' direction: amount of the chain's native token to spend (e.g., '0.001', '10'). " +
-              "For 'sell' direction: amount of the ERC-20 token (the 'token' parameter) to sell (e.g., '0.001', '10'). " +
+              "Exact INPUT amount. For direction='buy': amount of native token to spend (POL/ETH/BNB). " +
+              "For direction='sell': amount of the ERC-20 'token' to sell. " +
               "Larger amounts move the oracle pool price more aggressively and converge TWAP faster. " +
               "Defaults to 0.001 for both directions (small enough to be safe for every token)."
           },
           amountOut: {
             type: "string",
             description:
-              "[Buy direction only] Sizing hint for the desired token output (e.g., '2' for ~2 GRG). " +
-              "If provided instead of amount, the system estimates the required native token input using the vault's on-chain oracle. " +
+              "Desired approximate OUTPUT amount, used instead of amount when the user states what they want to RECEIVE. " +
+              "For direction='buy': amountOut is the ERC-20 token to receive (e.g., '5' for ~5 GRG). " +
+              "For direction='sell': amountOut is the native token to receive (e.g., '1' for ~1 POL). " +
+              "If provided, the system estimates the required input using the vault's on-chain oracle. " +
               "The actual received amount may differ — the swap is exact-input with no on-chain min-out bound. " +
               "Requires an active vault session.",
           },

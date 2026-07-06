@@ -6,8 +6,8 @@
  * Body (JSON):
  *   token        string   — ERC-20 symbol or address whose oracle feed is stale (e.g. "GRG", "USDC").
  *                           The native token (ETH/POL/BNB) cannot be used here; it is always currency0 in the oracle pool.
- *   amount       string|number — Amount to swap (human-readable). Default is "0.001" for both directions (small enough to not matter financially, large enough to create a price observation).
- *   direction    string   — "buy" (native → token, default) or "sell" (token → native).
+ *   amount       string|number — Exact INPUT amount (human-readable). Default is "0.001". For "buy": native token amount. For "sell": ERC-20 token amount.
+ *   direction    string   — "buy" (buy the ERC-20, paying native; default) or "sell" (sell the ERC-20, receiving native).
  *   chainId      number   — Chain where the oracle pool lives
  *   vaultAddress string   — Optional. If provided, routes through the vault adapter (value=0, supports delegation).
  *                           Omit for EOA path (direct to Universal Router).
