@@ -79,6 +79,11 @@ function stripToolPrefix(text: string): string {
   return text.replace(/^\[[A-Za-z0-9_-]+\]:\s*/, "");
 }
 
+/** Strip the @botName suffix Telegram appends to commands in group chats. */
+function normalizeCommand(cmd: string): string {
+  return cmd.split("@")[0].toLowerCase();
+}
+
 /** Format a numeric percentage string for Telegram display. */
 function formatTelegramPct(value: unknown): string {
   const num = Number(value);
@@ -565,7 +570,7 @@ async function handleMessage(
   // ── Command routing ──
   if (text.startsWith("/")) {
     const [cmd, ...args] = text.split(/\s+/);
-    const command = cmd.toLowerCase();
+    const command = normalizeCommand(cmd);
 
     switch (command) {
       case "/start": {
@@ -767,7 +772,7 @@ async function handleMessage(
             const value = args.join(" ").trim().toLowerCase();
             if (!value) {
               await sendMessage(token, chatId,
-                "Usage: <code>/navshield 15%</code> or <code>/navshield reset</code>\nValid range: 1% – 100%.");
+                "Usage: <code>/navshield 15%</code> or <code>/navshield reset</code>\nValid range: 1% – 100%. The override lasts 10 minutes.");
               return;
             }
             if (value === "reset") {
@@ -1393,17 +1398,18 @@ async function handleCallbackQuery(
     const vaultAddress = txList[0].to;
 
     // Keep the user informed during long mainnet sponsorship polling. For a
-    // single transaction, update the elapsed time every 5 seconds.
+    // single transaction, update the elapsed time every 5 seconds. After 30s
+    // switch to a calmer message so the counter does not look like a hang.
     let progressTimer: ReturnType<typeof setInterval> | undefined;
     try {
       const executionStart = Date.now();
       if (txList.length === 1) {
         progressTimer = setInterval(() => {
           const elapsedSec = Math.round((Date.now() - executionStart) / 1000);
-          editMessageText(
-            token, chatId, messageId,
-            `⏳ Executing trade… (${elapsedSec}s)`,
-          ).catch(() => {});
+          const text = elapsedSec > 30
+            ? `⏳ Trade is still being processed. Sponsored transactions on Ethereum can take a minute to land. I'll update you once it completes.`
+            : `⏳ Executing trade… (${elapsedSec}s)`;
+          editMessageText(token, chatId, messageId, text).catch(() => {});
         }, 5_000);
       }
 
@@ -1666,7 +1672,7 @@ async function sendHelpMessage(token: string, chatId: number): Promise<void> {
     "/addpool &lt;0xAddr&gt; — add vault by address",
     "/slippage &lt;0.5%&gt; — set default slippage",
     "/swapshield &lt;30%&gt; | reset — temporary oracle-divergence tolerance",
-    "/navshield &lt;15%&gt; | reset — max NAV drop threshold",
+    "/navshield &lt;15%&gt; | reset — temporary max NAV drop threshold (10 min)",
     "/mode [autonomous|confirm] — toggle auto-execute or confirm",
     "/clear — reset conversation",
     "/unpair &lt;addr&gt; — unlink a vault",

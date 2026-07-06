@@ -233,6 +233,11 @@ USE refresh_oracle_feed when the user:
 - The Swap Shield blocks a vault swap with favorable-divergence (stale oracle signal)
 
 REQUIRED ARGS: token (the ERC-20, e.g. "USDC"), amount (from user message, e.g. "0.001").
+DIRECTION is from the NATIVE token's point of view:
+  - direction="buy" (default): spend native token (ETH/POL/BNB) → receive ERC-20 token.
+    Use this when the user says they are SELLING/BUYING WITH the native token, e.g. "sell 10 POL for GRG", "buy GRG with 0.01 POL", "spend 0.01 POL on oracle pool".
+  - direction="sell": spend ERC-20 token → receive native token.
+    Use this when the user says they are SELLING the ERC-20, e.g. "sell 10 GRG for POL", "sell GRG on oracle pool".
 If amount is not in the message, ask: "How much would you like to swap on the oracle pool?"
 NEVER say this is impossible. The encoding is done — just call the tool.
 The returned transaction goes to the Universal Router (operator's personal wallet), NOT the vault.
@@ -245,7 +250,7 @@ The check is two-sided with a unified tolerance:
   1. Using a TWAP order to split the trade into smaller slices
   2. Reducing the trade amount
   3. The operator can temporarily raise the tolerance (up to 50% for 10 minutes) from the web UI or via Telegram /swapshield — you cannot change it.
-- The NAV shield (default 10% max loss, configurable 1%–100%) still runs independently of Swap Shield settings.
+- The NAV shield (default 10% max loss, temporarily configurable 1%–100% for 10 minutes) still runs independently of Swap Shield settings.
 
 SLIPPAGE:
 - Default: 1% (100 bps). Configurable by the operator in the web UI or via Telegram /slippage — you cannot change it.

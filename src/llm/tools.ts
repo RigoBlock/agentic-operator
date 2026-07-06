@@ -564,10 +564,11 @@ export const TOOL_DEFINITIONS = [
         "preserving supply and updating NAV. " +
         "Supports explicit amount/token OR deterministic equalization. " +
         "Supports WETH↔ETH forms via useNativeEth and shouldUnwrapOnDestination. " +
-        "DETERMINISTIC EQUALIZATION (amount OMITTED): the tool reads getPoolTokens() on both " +
-        "chains, normalizes unitaryValue accounting for decimal differences (e.g. USDT is 6-dec " +
-        "on Arbitrum but 18-dec on BSC), applies a closed-form formula to find the exact bridge " +
-        "amount that equalizes NAV, and simulates post-bridge NAV to verify convergence. " +
+        "DETERMINISTIC EQUALIZATION (amount OMITTED): the tool simulates updateUnitaryValue() on both " +
+        "chains to read live NAV, normalizes unitaryValue " +
+        "accounting for decimal differences (e.g. USDT is 6-dec on Arbitrum but 18-dec on BSC), " +
+        "applies a closed-form formula to find the exact bridge amount that equalizes NAV, and " +
+        "simulates post-bridge NAV to verify convergence. " +
         "Direction, token, and amount are auto-determined. An optional token can be provided as " +
         "a preference. The LLM must NEVER guess an amount. " +
         "EXPLICIT AMOUNT (amount PROVIDED): bridges exactly the operator-specified amount. " +
@@ -1220,9 +1221,9 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "set_nav_shield_threshold",
       description:
-        "Set the NAV Shield maximum allowed loss threshold (1%–100%). " +
+        "Temporarily set the NAV Shield maximum allowed loss threshold (1%–100%) for 10 minutes. " +
         "The default is 10%. Trades that would reduce the vault's unit price by more than " +
-        "this threshold are blocked. This is a persistent per-operator setting.",
+        "this threshold are blocked. The override auto-resets to the default after 10 minutes.",
       parameters: {
         type: "object",
         properties: {
@@ -1274,14 +1275,19 @@ export const TOOL_DEFINITIONS = [
             type: "string",
             enum: ["buy", "sell"],
             description:
-              "Swap direction: 'buy' means native token → ERC-20 (default). 'sell' means ERC-20 → native token. " +
-              "Infer from user phrasing: 'buy GRG' → buy, 'sell GRG' → sell.",
+              "Swap direction from the NATIVE token's point of view. " +
+              "'buy' (default) = spend native token (ETH/POL/BNB) to receive the ERC-20. " +
+              "'sell' = spend the ERC-20 to receive native token. " +
+              "Infer from what the user is SPENDING, not what they receive. " +
+              "Examples: 'buy GRG with 0.01 POL' or 'spend 0.01 POL for GRG' → buy. " +
+              "'sell GRG for POL' or 'sell 10 GRG' → sell. " +
+              "CRITICAL: 'sell 10 POL' means the user is spending POL (native), so use direction='buy' with amount='10'."
           },
           amount: {
             type: "string",
             description:
-              "Amount to swap. For 'buy' direction: amount of the chain's native token to spend (e.g., '0.001', '0.01'). " +
-              "For 'sell' direction: amount of the ERC-20 token to sell (e.g., '0.001', '0.01'). " +
+              "Amount to swap. For 'buy' direction: amount of the chain's native token to spend (e.g., '0.001', '10'). " +
+              "For 'sell' direction: amount of the ERC-20 token (the 'token' parameter) to sell (e.g., '0.001', '10'). " +
               "Larger amounts move the oracle pool price more aggressively and converge TWAP faster. " +
               "Defaults to 0.001 for both directions (small enough to be safe for every token)."
           },

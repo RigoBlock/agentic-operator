@@ -10,7 +10,7 @@ import type { Env, RequestContext } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import { estimateGas } from "../client.js";
 import { getTokenDecimals, getClient } from "../../services/vault.js";
-import { resolveTokenAddress, resolveChainId, getNativeTokenSymbol } from "../../config.js";
+import { resolveTokenAddress, resolveChainId, resolveChainName, getNativeTokenSymbol } from "../../config.js";
 import { parseUnits, formatUnits, encodeFunctionData, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import { buildOraclePoolSwapTx, UNIVERSAL_ROUTER } from "../../services/oraclePool.js";
@@ -106,6 +106,19 @@ function extractRevertReason(err: unknown): string {
   return msg.slice(0, 300);
 }
 
+/** Returns true if `token` is a native-token symbol, wrapped-native shorthand, or the zero/sentinel address. */
+function isNativeTokenSymbolOrAddress(chainId: number, token: string): boolean {
+  const normalized = token.trim().toUpperCase();
+  const nativeSymbol = getNativeTokenSymbol(chainId).toUpperCase();
+  if (normalized === nativeSymbol) return true;
+  if (normalized === `W${nativeSymbol}`) return true;
+  // Polygon-specific legacy symbols.
+  if (nativeSymbol === "POL" && (normalized === "MATIC" || normalized === "WMATIC")) return true;
+  if (normalized === "0X0000000000000000000000000000000000000000") return true;
+  if (normalized === "0XEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE") return true;
+  return false;
+}
+
 export async function handle_refresh_oracle_feed(
   env: Env,
   ctx: RequestContext,
@@ -162,6 +175,17 @@ export async function handle_refresh_oracle_feed(
   }
 
   const nativeSymbol = getNativeTokenSymbol(ctx.chainId);
+
+  // Guard: the oracle pool is always native-token (currency0) vs ERC-20 (currency1).
+  // Reject attempts to pass the native token as the `token` argument so the LLM/user
+  // must explicitly name the ERC-20 whose feed needs refreshing.
+  if (isNativeTokenSymbolOrAddress(ctx.chainId, tokenArg)) {
+    throw new Error(
+      `${tokenArg.toUpperCase()} is the native token on ${resolveChainName(ctx.chainId)} and cannot be used as the oracle-pool token. ` +
+      `The BackgeoOracle pool always pairs the native token (currency0) with an ERC-20. ` +
+      `Please specify the ERC-20 token whose price feed is stale (e.g., 'GRG', 'USDC').`
+    );
+  }
 
   // Coerce to decimal string; toDecimalString() uses toFixed(18) for numbers
   // to avoid scientific notation (e.g. 0.0000001 → "1e-7") that parseUnits rejects.

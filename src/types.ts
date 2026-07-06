@@ -298,6 +298,8 @@ export interface ExecutionResult {
   userOpHash?: Hex;
   /** Number of fee-bump resubmission attempts (0 = first try succeeded) */
   resubmitAttempts?: number;
+  /** If sponsorship was attempted and failed, but the tx still succeeded via direct agent broadcast, the reason sponsorship failed. */
+  sponsoredFallbackReason?: string;
 }
 
 // ── Request context (per-request, not env) ────────────────────────────

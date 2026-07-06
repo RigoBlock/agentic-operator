@@ -231,41 +231,6 @@ export async function getVaultTokenBalance(
 }
 
 /**
- * Batch-read ERC-20 balances for multiple tokens in a single multicall.
- * Returns a map of tokenAddress → balance. Native ETH is NOT supported here
- * (use getVaultTokenBalance for ETH, or include WETH in the token list).
- *
- * This uses viem's multicall — a single RPC round-trip for N tokens instead
- * of N parallel eth_calls.
- */
-export async function getVaultTokenBalancesBatch(
-  chainId: number,
-  vaultAddress: Address,
-  tokenAddresses: Address[],
-  alchemyKey?: string,
-): Promise<Map<string, bigint>> {
-  const client = getClient(chainId, alchemyKey);
-  const contracts = tokenAddresses.map((address) => ({
-    address,
-    abi: ERC20_ABI,
-    functionName: "balanceOf" as const,
-    args: [vaultAddress] as const,
-  }));
-
-  const results = await client.multicall({ contracts });
-  const map = new Map<string, bigint>();
-  for (let i = 0; i < tokenAddresses.length; i++) {
-    const result = results[i];
-    if (result.status === "success") {
-      map.set(tokenAddresses[i].toLowerCase(), result.result as bigint);
-    } else {
-      map.set(tokenAddresses[i].toLowerCase(), 0n);
-    }
-  }
-  return map;
-}
-
-/**
  * Encode a call to vault.execute(commands, inputs, deadline).
  *
  * This is the Uniswap Universal Router `execute` function that the
@@ -280,20 +245,6 @@ export function encodeVaultExecute(
     abi: RIGOBLOCK_VAULT_ABI,
     functionName: "execute",
     args: [commands, inputs, deadline],
-  });
-}
-
-/**
- * Encode a call to vault.execute(commands, inputs) — no deadline.
- */
-export function encodeVaultExecuteNoDeadline(
-  commands: Hex,
-  inputs: Hex[],
-): Hex {
-  return encodeFunctionData({
-    abi: RIGOBLOCK_VAULT_ABI,
-    functionName: "execute",
-    args: [commands, inputs],
   });
 }
 
@@ -432,50 +383,6 @@ export async function getNavData(
   };
 }
 
-/** Pool tokens data from getPoolTokens() + getPool() */
-export interface PoolTokensData {
-  /** NAV per pool token (in pool.decimals scale) */
-  unitaryValue: bigint;
-  /** Total pool token supply (in pool.decimals scale) */
-  totalSupply: bigint;
-  /** Pool decimals (= base token decimals on the creation chain) */
-  decimals: number;
-  /** Pool base token address */
-  baseToken: Address;
-}
-
-/**
- * Read pool token data: unitaryValue, totalSupply, decimals, and baseToken.
- * Uses getPoolTokens() for NAV data and getPool() for decimals/base token.
- *
- * IMPORTANT: pool.decimals may differ between chains for the same vault because
- * the base token (e.g. USDT) has different decimals on different chains
- * (6 on Arbitrum, 18 on BSC). Always use the per-chain decimals when comparing
- * or normalizing unitaryValue across chains.
- */
-export async function getPoolTokensData(
-  chainId: number,
-  vaultAddress: Address,
-  alchemyKey?: string,
-): Promise<PoolTokensData> {
-  const client = getClient(chainId, alchemyKey);
-  const [poolTokens, poolData] = await Promise.all([
-    client.readContract({
-      address: vaultAddress,
-      abi: RIGOBLOCK_VAULT_ABI,
-      functionName: "getPoolTokens",
-    }),
-    getPoolData(chainId, vaultAddress, alchemyKey),
-  ]);
-  const pt = poolTokens as { unitaryValue: bigint; totalSupply: bigint };
-  return {
-    unitaryValue: pt.unitaryValue,
-    totalSupply: pt.totalSupply,
-    decimals: poolData.decimals,
-    baseToken: poolData.baseToken,
-  };
-}
-
 /** Effective pool state from updateUnitaryValue() simulation */
 export interface EffectivePoolState {
   /** NAV per pool token (live computation — accounts for virtual supply) */
@@ -493,12 +400,10 @@ export interface EffectivePoolState {
 /**
  * Read effective pool state via updateUnitaryValue() simulation.
  *
- * Unlike getPoolTokens() which returns totalSupply (can be 0 when all supply
- * is from crosschain transfers), this computes the EFFECTIVE supply that
- * includes virtual supply. Critical for NAV equalization across chains.
- *
- * updateUnitaryValue() is a write function called via eth_call (no state change).
- * It recomputes the live NAV accounting for all token positions and virtual
+ * updateUnitaryValue() recomputes the live NAV accounting for all token
+ * positions, liabilities, and virtual supply from crosschain transfers. We call
+ * it via eth_call (no state change) and derive effective supply as
+ * netTotalValue / unitaryValue, which captures both minted supply and virtual
  * supply. The function is permissionless — any address can call it.
  */
 export async function getEffectivePoolState(

@@ -63,21 +63,22 @@ function getAlchemyChain(chainId: number): Chain {
 
 /**
  * Per-chain timeout for `wallet_getCallsStatus` polling.
- * Mainnet can take up to ~1 minute during congestion. L2s should land in
- * seconds, so we fail fast and surface the callId instead of burning most of
- * the 3-minute Alchemy Policy Expiry waiting for a stuck status response.
+ * Fail fast and surface the callId so the caller can show a pending state
+ * and poll in the background. This avoids burning the 3-minute Alchemy Policy
+ * Expiry in a single synchronous request and lets Telegram/web fall back to
+ * background polling quickly.
  */
 const WAIT_FOR_CALLS_STATUS_TIMEOUT_MS: Record<number, number> = {
-  1: 60_000,        // Ethereum mainnet
-  11155111: 60_000, // Sepolia
+  1: 30_000,        // Ethereum mainnet
+  11155111: 30_000, // Sepolia
   // L2s / sidechains — fail fast if status cannot be retrieved
-  10: 20_000,       // Optimism
-  56: 20_000,       // BNB Chain
-  130: 20_000,      // Unichain
-  137: 20_000,      // Polygon
-  8453: 20_000,     // Base
-  42161: 20_000,    // Arbitrum
-  84532: 20_000,    // Base Sepolia
+  10: 15_000,       // Optimism
+  56: 15_000,       // BNB Chain
+  130: 15_000,      // Unichain
+  137: 15_000,      // Polygon
+  8453: 15_000,     // Base
+  42161: 15_000,    // Arbitrum
+  84532: 15_000,    // Base Sepolia
 };
 
 function getWaitForCallsStatusTimeout(chainId: number): number {
@@ -103,6 +104,30 @@ export interface SponsoredCallsResult {
     status: "success" | "reverted";
     logs: Array<{ address: Hex; data: Hex; topics: Hex[] }>;
   }>;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Validate and normalize a callId returned by Alchemy's sendPreparedCalls.
+ * ERC-4337 UserOp hashes are 32 bytes (64 hex chars + 0x). Some Alchemy
+ * responses return a 64-byte identifier; we keep the raw value for status
+ * checks but log unexpected formats so operators can report them.
+ */
+function normalizeCallId(raw: unknown): { callId: string; warnings: string[] } {
+  const warnings: string[] = [];
+  if (typeof raw !== "string") {
+    warnings.push(`sendPreparedCalls returned non-string id: ${typeof raw}`);
+    return { callId: String(raw), warnings };
+  }
+  const callId = raw.toLowerCase().startsWith("0x") ? raw.toLowerCase() : `0x${raw.toLowerCase()}`;
+  const hexLen = callId.length - 2;
+  if (!/^0x[0-9a-f]+$/.test(callId)) {
+    warnings.push(`sendPreparedCalls returned non-hex id: ${raw.slice(0, 100)}`);
+  } else if (hexLen !== 64) {
+    warnings.push(`sendPreparedCalls returned unexpected callId length: ${hexLen} hex chars (expected 64): ${callId.slice(0, 20)}…${callId.slice(-8)}`);
+  }
+  return { callId, warnings };
 }
 
 // ── Execute Sponsored Calls ──────────────────────────────────────────
@@ -189,10 +214,13 @@ export async function executeSponsoredCalls(
     const signedCalls = await client.signPreparedCalls(preparedCalls);
 
     // ── Step 5: Send the prepared calls ──
-    const result = await client.sendPreparedCalls(signedCalls);
+    const sendResult = await client.sendPreparedCalls(signedCalls);
 
-    const callId = result.id;
-    if (!callId) {
+    const { callId, warnings } = normalizeCallId(sendResult.id);
+    for (const warning of warnings) {
+      console.warn(`[bundler] ${warning}`);
+    }
+    if (!callId || callId === "0x") {
       throw new Error("sendPreparedCalls did not return a call ID");
     }
 

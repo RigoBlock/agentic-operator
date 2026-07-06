@@ -4,7 +4,8 @@
  * POST /api/oracle/refresh
  *
  * Body (JSON):
- *   token        string   — ERC-20 symbol or address whose oracle feed is stale (e.g. "GRG", "USDC")
+ *   token        string   — ERC-20 symbol or address whose oracle feed is stale (e.g. "GRG", "USDC").
+ *                           The native token (ETH/POL/BNB) cannot be used here; it is always currency0 in the oracle pool.
  *   amount       string|number — Amount to swap (human-readable). Default is "0.001" for both directions (small enough to not matter financially, large enough to create a price observation).
  *   direction    string   — "buy" (native → token, default) or "sell" (token → native).
  *   chainId      number   — Chain where the oracle pool lives

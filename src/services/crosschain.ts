@@ -1869,7 +1869,8 @@ export async function buildCrosschainSync(params: {
 
   // ── Deterministic NAV equalization (amount omitted) ──
   // computeNavEqualization() handles everything:
-  //   - Reads getPoolTokens() + getPool() on both chains for correct per-chain decimals
+  //   - Simulates updateUnitaryValue() on both chains for live NAV
+  //   - Reads getPool() for correct per-chain decimals
   //   - Normalizes to common decimal base (handles 6 vs 18 dec differences)
   //   - Auto-corrects direction (bridges FROM higher-NAV chain)
   //   - Closed-form formula: exact bridge amount for price convergence

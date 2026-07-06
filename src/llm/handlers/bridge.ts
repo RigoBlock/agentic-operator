@@ -8,6 +8,7 @@
 
 import type { Env, RequestContext, UnsignedTransaction } from "../../types.js";
 import type { ToolResult } from "../client.js";
+import { formatUnits } from "viem";
 import { sanitizeError } from "../../config.js";
 import { type Address, type Hex } from "viem";
 import {
@@ -375,8 +376,9 @@ export async function handle_get_aggregated_nav(
     const divisor = 10 ** snap.baseTokenDecimals;
     const priceBaseStr = (Number(snap.unitaryValue) / divisor).toFixed(6);
     const supplyStr = (Number(snap.effectiveSupply) / divisor).toFixed(4);
+    const totalUsdcStr = parseFloat(formatUnits(snap.totalUsdcNormalized, 6)).toFixed(2);
     messageLines.push(
-      `  ${snap.chainName}: base=${snap.baseTokenSymbol} | price=${priceBaseStr} ${snap.baseTokenSymbol} | supply=${supplyStr}`,
+      `  ${snap.chainName}: base=${snap.baseTokenSymbol} | price=${priceBaseStr} ${snap.baseTokenSymbol} | supply=${supplyStr} | value=${totalUsdcStr} USDC`,
     );
   }
 

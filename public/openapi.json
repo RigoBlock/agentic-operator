@@ -1141,7 +1141,7 @@
       "post": {
         "operationId": "refreshOracle",
         "summary": "BackgeoOracle pool refresh",
-        "description": "Builds an unsigned swap transaction that updates the on-chain oracle price feed for a given token. Supports EOA and vault paths.\n\n**Price:** $0.0023 USDC per request (x402 exact scheme, eip155:8453)",
+        "description": "Builds an unsigned exact-input swap transaction that updates the on-chain BackgeoOracle price feed for a given ERC-20 token. The oracle pool always pairs the native token (ETH/POL/BNB) as currency0 with the specified ERC-20 as currency1. Supports EOA and vault paths.\n\n**Price:** $0.0023 USDC per request (x402 exact scheme, eip155:8453)",
         "tags": [
           "Oracle"
         ],
@@ -1158,7 +1158,7 @@
                 "properties": {
                   "token": {
                     "type": "string",
-                    "description": "Token symbol or address"
+                    "description": "ERC-20 token symbol or address whose oracle feed is stale (e.g. 'GRG', 'USDC'). The native token (ETH/POL/BNB) cannot be used here; it is always currency0 in the oracle pool."
                   },
                   "amount": {
                     "type": "string",

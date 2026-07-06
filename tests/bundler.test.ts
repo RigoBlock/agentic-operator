@@ -50,6 +50,8 @@ const CALL: import("../src/services/bundler.js").WalletCall = {
   value: "0x0" as Hex,
 };
 
+const MOCK_CALL_ID = "0x9991089191de07f4d5d16967279af8c3e67eab9ed1d9213bf7392eff342ed923";
+
 function makeMockClient(overrides: {
   prepareCalls?: () => Promise<unknown>;
   signPreparedCalls?: () => Promise<unknown>;
@@ -59,7 +61,7 @@ function makeMockClient(overrides: {
   return {
     prepareCalls: overrides.prepareCalls || vi.fn().mockResolvedValue({ prepared: true }),
     signPreparedCalls: overrides.signPreparedCalls || vi.fn().mockResolvedValue({ signed: true }),
-    sendPreparedCalls: overrides.sendPreparedCalls || vi.fn().mockResolvedValue({ id: "0xcallid" }),
+    sendPreparedCalls: overrides.sendPreparedCalls || vi.fn().mockResolvedValue({ id: MOCK_CALL_ID }),
     waitForCallsStatus: overrides.waitForCallsStatus || vi.fn().mockResolvedValue({ status: "success", receipts: [] }),
   };
 }
@@ -97,21 +99,20 @@ describe("executeSponsoredCalls chain-specific routing", () => {
 
 describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
   it("returns a pending result when waitForCallsStatus times out", async () => {
-    const callId = "0xabcd1234";
     const timeoutError = Object.assign(new Error("Timed out while waiting for call bundle"), {
       name: "WaitForCallsStatusTimeoutError",
     });
 
     mockCreateSmartWalletClient.mockReturnValue(
       makeMockClient({
-        sendPreparedCalls: vi.fn().mockResolvedValue({ id: callId }),
+        sendPreparedCalls: vi.fn().mockResolvedValue({ id: MOCK_CALL_ID }),
         waitForCallsStatus: vi.fn().mockRejectedValue(timeoutError),
       }),
     );
 
     const result = await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "test-key", "policy-id", [CALL]);
 
-    expect(result.callId).toBe(callId);
+    expect(result.callId).toBe(MOCK_CALL_ID);
     expect(result.status).toBe("pending");
     expect(result.receipts).toBeUndefined();
   });
@@ -121,7 +122,7 @@ describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
 
     mockCreateSmartWalletClient.mockReturnValue(
       makeMockClient({
-        sendPreparedCalls: vi.fn().mockResolvedValue({ id: "0xcallid" }),
+        sendPreparedCalls: vi.fn().mockResolvedValue({ id: MOCK_CALL_ID }),
         waitForCallsStatus: vi.fn().mockRejectedValue(otherError),
       }),
     );
@@ -131,25 +132,40 @@ describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
     ).rejects.toThrow("Some bundler error");
   });
 
-  it("uses a 60s timeout on Ethereum mainnet", async () => {
+  it("uses a 30s timeout on Ethereum mainnet", async () => {
     const waitForCallsStatus = vi.fn().mockResolvedValue({ status: "success", receipts: [] });
     mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ waitForCallsStatus }));
 
     await executeSponsoredCalls(AGENT_ACCOUNT, 1, "test-key", "policy-id", [CALL]);
 
     expect(waitForCallsStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ pollingInterval: 4_000, timeout: 60_000 }),
+      expect.objectContaining({ pollingInterval: 4_000, timeout: 30_000 }),
     );
   });
 
-  it("uses a 20s timeout on L2s", async () => {
+  it("uses a 15s timeout on L2s", async () => {
     const waitForCallsStatus = vi.fn().mockResolvedValue({ status: "success", receipts: [] });
     mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ waitForCallsStatus }));
 
     await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "test-key", "policy-id", [CALL]);
 
     expect(waitForCallsStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ pollingInterval: 4_000, timeout: 20_000 }),
+      expect.objectContaining({ pollingInterval: 4_000, timeout: 15_000 }),
     );
+  });
+
+  it("logs a warning when sendPreparedCalls returns a non-standard callId length", async () => {
+    const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const longCallId = `0x${"0".repeat(63)}a${MOCK_CALL_ID.slice(2)}`;
+    mockCreateSmartWalletClient.mockReturnValue(
+      makeMockClient({ sendPreparedCalls: vi.fn().mockResolvedValue({ id: longCallId }) }),
+    );
+
+    await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "test-key", "policy-id", [CALL]);
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("unexpected callId length"),
+    );
+    consoleSpy.mockRestore();
   });
 });

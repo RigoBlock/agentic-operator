@@ -71,7 +71,7 @@ Every delegated transaction passes:
 1. **Operator auth** — signature + on-chain ownership.
 2. **Delegation check** — active on-chain delegation for the exact selector.
 3. **7-point validation** — config enabled, target == vault, selector whitelisted, agent wallet matches, `eth_call` simulation succeeds, gas balance sufficient, gas within per-chain caps.
-4. **NAV shield** — simulates `multicall([tx, updateUnitaryValue])`; blocks if post-swap unit value drops > configured threshold (default 10%, operator-configurable 1%–100%).
+4. **NAV shield** — simulates `multicall([tx, updateUnitaryValue])`; blocks if post-swap unit value drops > configured threshold (default 10%, temporarily configurable 1%–100% for 10 minutes).
 5. **Slippage protection** — default 1% (100 bps), clamped to 0.1%–5%.
 6. **Swap shield** — compares DEX quote vs BackgeoOracle 5-minute TWAP; blocks if divergence exceeds 5% (or operator's temporary tolerance).
 

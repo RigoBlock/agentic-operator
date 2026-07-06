@@ -560,6 +560,19 @@ export async function executeViaDelegation(
             tx.chainId,
             env.ALCHEMY_API_KEY,
           );
+          // Sponsorship failed but direct broadcast succeeded. Surface the original
+          // sponsored failure reason to the caller/LLM so it knows why sponsorship
+          // is not being used and can decide whether to disable it.
+          const fallbackReasonText = sponsoredDetails
+            ? sanitizeError(String(sponsoredDetails))
+            : (sponsoredReason && !sponsoredDetails?.includes(String(sponsoredReason))
+                ? sanitizeError(String(sponsoredReason))
+                : sanitizeError(sponsoredMsg));
+          const codeSuffix = sponsoredCode ? ` [${sponsoredCode}]` : "";
+          result.sponsoredFallbackReason = (
+            `Sponsored execution failed${codeSuffix}: ${fallbackReasonText}. ` +
+            `Fell back to direct agent-wallet broadcast.`
+          );
         } catch (directErr) {
           // Both sponsored and direct failed. Build a user-facing message that explains
           // exactly what happened and gives the user three clear choices:
@@ -1392,22 +1405,31 @@ export async function checkPendingTxStatus(
   // 2. If no EVM receipt, the hash may be a sponsored UserOp callId. Query
   //    Alchemy's wallet_getCallsStatus to map it to an EVM txHash, then fetch
   //    the on-chain receipt for that txHash.
-  try {
-    const sponsoredStatus = await getSponsoredCallsStatus(hash, chainId, alchemyKey);
-    const resolvedHash = sponsoredStatus.receipts?.[0]?.transactionHash;
-    if (resolvedHash) {
-      const onChainReceipt = await publicClient.getTransactionReceipt({ hash: resolvedHash });
-      if (onChainReceipt) {
-        return await buildResult(onChainReceipt, resolvedHash);
+  const candidateHashes = [hash];
+  // Some bundlers return a 64-byte identifier where only the last 32 bytes
+  // are the actual UserOp hash. Try both the full value and its suffix.
+  if (hash.startsWith("0x") && hash.length - 2 === 128) {
+    candidateHashes.push(`0x${hash.slice(-64)}`);
+  }
+
+  for (const candidate of candidateHashes) {
+    try {
+      const sponsoredStatus = await getSponsoredCallsStatus(candidate, chainId, alchemyKey);
+      const resolvedHash = sponsoredStatus.receipts?.[0]?.transactionHash;
+      if (resolvedHash) {
+        const onChainReceipt = await publicClient.getTransactionReceipt({ hash: resolvedHash });
+        if (onChainReceipt) {
+          return await buildResult(onChainReceipt, resolvedHash);
+        }
       }
+    } catch (err) {
+      // If wallet_getCallsStatus fails (e.g. hash is not a known callId), treat
+      // as still pending rather than throwing. Log the failure for debugging.
+      console.warn(
+        `[execution] UserOp status resolution failed for ${candidate} on chain ${chainId}: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-  } catch (err) {
-    // If wallet_getCallsStatus fails (e.g. hash is not a known callId), treat
-    // as still pending rather than throwing.
-    console.warn(
-      `[execution] UserOp status resolution failed for ${hash} on chain ${chainId}: ` +
-      `${err instanceof Error ? err.message : String(err)}`,
-    );
   }
 
   return null;
@@ -1479,12 +1501,18 @@ export function formatOutcomesMarkdown(outcomes: TxExecOutcome[]): string {
     if (result?.confirmed) {
       const gasInfo = result.gasCostEth ? ` Gas: ${result.gasCostEth} ETH.` : "";
       const link = result.explorerUrl || result.txHash;
-      parts.push(`✅ ${desc} confirmed in block ${result.blockNumber || "?"}.${gasInfo} [View](${link})`);
+      const fallbackNote = result.sponsoredFallbackReason
+        ? `\n\nℹ️ ${result.sponsoredFallbackReason}`
+        : "";
+      parts.push(`✅ ${desc} confirmed in block ${result.blockNumber || "?"}.${gasInfo} [View](${link})${fallbackNote}`);
     } else if (result?.reverted) {
       const gasWasted = result.gasCostEth ? ` (gas spent: ${result.gasCostEth} ETH)` : "";
       const link = result.explorerUrl || result.txHash;
       parts.push(`⚠️ ${desc} reverted on-chain${gasWasted}. [View failed tx](${link})`);
     } else if (result) {
+      const fallbackNote = result.sponsoredFallbackReason
+        ? `\n\nℹ️ ${result.sponsoredFallbackReason}`
+        : "";
       const isSponsoredTimeout = result.sponsored && result.gasCostEth?.includes("timed out");
       const isUserOpHash = result.sponsored && result.userOpHash && result.txHash === result.userOpHash;
       const hashLabel = isUserOpHash
@@ -1500,7 +1528,7 @@ export function formatOutcomesMarkdown(outcomes: TxExecOutcome[]): string {
       const userOpNote = isUserOpHash
         ? "\nThis is the bundler UserOp identifier, not the on-chain transaction hash. The explorer link will appear once the bundle is included."
         : "";
-      parts.push(`⏳ ${desc} submitted.\n${hashLabel}: \`${result.txHash}\`${sponsoredHint}${pendingNote}${userOpNote}${checkHint}`);
+      parts.push(`⏳ ${desc} submitted.\n${hashLabel}: \`${result.txHash}\`${sponsoredHint}${pendingNote}${userOpNote}${checkHint}${fallbackNote}`);
     } else if (error) {
       const fallbackHint = fallbackToManual
         ? " You can sign this transaction directly from your wallet."

@@ -56,6 +56,15 @@ describe("NAV Shield — threshold storage", () => {
     expect(threshold).toBe(25n);
   });
 
+  it("stores threshold with a 10-minute TTL", async () => {
+    await setNavShieldThreshold(kv, OPERATOR, 25n);
+    expect(kv.put).toHaveBeenCalledWith(
+      expect.stringContaining("nav-shield-pct:"),
+      "25",
+      { expirationTtl: 600 },
+    );
+  });
+
   it("clears threshold back to null", async () => {
     await setNavShieldThreshold(kv, OPERATOR, 25n);
     expect(await getNavShieldThreshold(kv, OPERATOR)).toBe(25n);
@@ -138,13 +147,15 @@ describe("Settings — operator-only restriction", () => {
     const ctx = makeCtx({ isBrowserRequest: true });
     const result = await handle_set_nav_shield_threshold(env, ctx, { threshold: "25" }, "set_nav_shield_threshold");
     expect(result.message).toContain("25%");
+    expect(result.message).toContain("10 minutes");
   });
 
   it("returns a friendly NAV shield confirmation message", async () => {
     const env = makeEnv(kv);
     const ctx = makeCtx({ isBrowserRequest: true });
     const result = await handle_set_nav_shield_threshold(env, ctx, { threshold: "15%" }, "set_nav_shield_threshold");
-    expect(result.message).toContain("NAV Shield set to 15%");
+    expect(result.message).toContain("NAV Shield temporarily set to 15%");
+    expect(result.message).toContain("10 minutes");
     expect(result.message).toContain("all your vaults on every chain");
     expect(result.message).not.toContain("per-operator");
     expect(result.message).not.toContain("across all chains");

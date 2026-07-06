@@ -79,6 +79,14 @@ export const MAX_NAV_DROP_PCT = 100n;
 const NAV_SHIELD_PREFIX = "nav-shield-pct:";
 
 /**
+ * Temporary threshold TTL: 10 minutes.
+ * Like the swap-shield tolerance override, a raised NAV shield threshold is
+ * intentionally short-lived so a forgotten override cannot leave vaults
+ * under-protected.
+ */
+const NAV_SHIELD_TTL = 600;
+
+/**
  * Get the operator's stored NAV shield threshold from KV.
  * Returns null if not set (caller should use DEFAULT_MAX_NAV_DROP_PCT).
  */
@@ -95,7 +103,8 @@ export async function getNavShieldThreshold(
 }
 
 /**
- * Store the operator's NAV shield threshold in KV (persistent).
+ * Temporarily set a higher NAV shield threshold (10-minute TTL).
+ * The threshold automatically resets to the default after TTL expiry.
  */
 export async function setNavShieldThreshold(
   kv: KVNamespace,
@@ -108,7 +117,11 @@ export async function setNavShieldThreshold(
       `Received: ${Number(pct)}%`,
     );
   }
-  await kv.put(`${NAV_SHIELD_PREFIX}${operatorAddress.toLowerCase()}`, String(pct));
+  await kv.put(
+    `${NAV_SHIELD_PREFIX}${operatorAddress.toLowerCase()}`,
+    String(pct),
+    { expirationTtl: NAV_SHIELD_TTL },
+  );
 }
 
 /**

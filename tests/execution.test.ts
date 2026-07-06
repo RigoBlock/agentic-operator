@@ -273,4 +273,41 @@ describe("formatOutcomesMarkdown", () => {
     expect(summary).toContain("Sponsored transaction hash");
     expect(summary).not.toContain("UserOp hash (sponsored — not yet on-chain)");
   });
+
+  it("surfaces sponsoredFallbackReason on a confirmed direct-broadcast result", () => {
+    const txHash = "0xcd725b84cd725b84cd725b84cd725b84cd725b84cd725b84cd725b84cd86d289";
+    const summary = formatOutcomesMarkdown([{
+      tx: baseTx,
+      result: {
+        txHash,
+        chainId: 1,
+        confirmed: true,
+        blockNumber: 12345,
+        gasCostEth: "0.0001",
+        sponsored: false,
+        sponsoredFallbackReason: "Sponsored execution failed: paymaster spending limit reached. Fell back to direct agent-wallet broadcast.",
+      },
+    }]);
+    expect(summary).toContain("✅ Test swap confirmed");
+    expect(summary).toContain("Sponsored execution failed");
+    expect(summary).toContain("Fell back to direct agent-wallet broadcast");
+  });
+
+  it("surfaces sponsoredFallbackReason on a pending direct-broadcast result", () => {
+    const txHash = "0xcd725b84cd725b84cd725b84cd725b84cd725b84cd725b84cd725b84cd86d289";
+    const summary = formatOutcomesMarkdown([{
+      tx: baseTx,
+      result: {
+        txHash,
+        chainId: 1,
+        confirmed: false,
+        reverted: false,
+        sponsored: false,
+        sponsoredFallbackReason: "Sponsored execution failed: bundler fee too low. Fell back to direct agent-wallet broadcast.",
+      },
+    }]);
+    expect(summary).toContain("Transaction hash");
+    expect(summary).toContain("Sponsored execution failed");
+    expect(summary).toContain("Fell back to direct agent-wallet broadcast");
+  });
 });
