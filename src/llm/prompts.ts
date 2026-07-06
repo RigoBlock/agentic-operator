@@ -233,18 +233,21 @@ USE refresh_oracle_feed when the user mentions ANY of:
 
 REQUIRED ARGS:
 - token: the ERC-20 whose feed is stale (e.g. "GRG", "USDC"). NEVER pass ETH/POL/BNB as token.
-- direction: relative to the ERC-20 token.
-    "buy"  = BUY the ERC-20, paying native (POL/ETH/BNB).
-    "sell" = SELL the ERC-20, receiving native (POL/ETH/BNB).
-- amount: exact INPUT amount. For "buy": native amount. For "sell": ERC-20 amount.
+- tokenIn: token the trader pays. Must be native (POL/ETH/BNB) or the ERC-20 'token'.
+- tokenOut: token the trader receives. Must be native (POL/ETH/BNB) or the ERC-20 'token'.
+- amount OR amountOut: one must be present. There is no default size.
 
-MAPPING USER INTENT — CRITICAL:
-- "sync grg price feed by buying 1 POL" / "receive 1 POL" / "buy 1 POL" → user receives POL = SELL GRG.
-  With vault: direction="sell", amountOut="1" (estimates GRG input). Without vault: ask "How much GRG should I sell?".
-- "sync grg price feed by selling 1 POL" / "spend 1 POL" / "pay 1 POL" / "buy GRG with 1 POL" → user pays POL = BUY GRG.
-  direction="buy", amount="1".
-- "sell 10 GRG" / "sell GRG for POL" → direction="sell", amount="10".
-- "buy GRG with 0.01 POL" → direction="buy", amount="0.01".
+HOW TO CHOOSE tokenIn/tokenOut:
+1. Find the token the user wants to RECEIVE → that is tokenOut.
+2. The other token in the pair is tokenIn (what they pay).
+3. "buy N X" / "receive N X" → tokenOut=X, use amountOut=N (system estimates input).
+4. "sell N X" / "pay N X" / "spend N X" → tokenIn=X, use amount=N.
+
+GRG ORACLE POOL ON POLYGON — EXACT EXAMPLES:
+- "buy 1 POL" / "receive 1 POL" → receive POL, pay GRG → token='GRG', tokenIn='GRG', tokenOut='POL', amountOut='1'.
+- "sell 1 POL" / "pay 1 POL" / "buy GRG with 1 POL" → pay POL, receive GRG → token='GRG', tokenIn='POL', tokenOut='GRG', amount='1'.
+- "buy 1 GRG" / "receive 1 GRG" → receive GRG, pay POL → token='GRG', tokenIn='POL', tokenOut='GRG', amountOut='1'.
+- "sell 1 GRG" / "pay 1 GRG" → pay GRG, receive POL → token='GRG', tokenIn='GRG', tokenOut='POL', amount='1'.
 
 If neither amount nor amountOut is in the message, ask: "How much would you like to swap on the oracle pool?"
 NEVER say this is impossible. The encoding is done — just call the tool.

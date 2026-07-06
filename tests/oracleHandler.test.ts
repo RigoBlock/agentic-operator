@@ -61,7 +61,7 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       handle_refresh_oracle_feed(
         mockEnv(),
         mockCtx(137),
-        { token: "POL", direction: "sell", amount: "10" },
+        { token: "POL", tokenIn: "POL", tokenOut: "GRG", amount: "10" },
         "refresh_oracle_feed",
       ),
     ).rejects.toThrow(/POL is the native token/);
@@ -73,7 +73,7 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       handle_refresh_oracle_feed(
         mockEnv(),
         mockCtx(137),
-        { token: "MATIC", direction: "buy", amount: "0.01" },
+        { token: "MATIC", tokenIn: "GRG", tokenOut: "MATIC", amount: "0.01" },
         "refresh_oracle_feed",
       ),
     ).rejects.toThrow(/MATIC is the native token/);
@@ -85,7 +85,7 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       handle_refresh_oracle_feed(
         mockEnv(),
         mockCtx(137),
-        { token: "WPOL", direction: "buy", amount: "0.01" },
+        { token: "WPOL", tokenIn: "WPOL", tokenOut: "GRG", amount: "0.01" },
         "refresh_oracle_feed",
       ),
     ).rejects.toThrow(/WPOL is the native token/);
@@ -97,7 +97,7 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       handle_refresh_oracle_feed(
         mockEnv(),
         mockCtx(8453),
-        { token: "ETH", direction: "sell", amount: "0.01" },
+        { token: "ETH", tokenIn: "GRG", tokenOut: "ETH", amount: "0.01" },
         "refresh_oracle_feed",
       ),
     ).rejects.toThrow(/ETH is the native token/);
@@ -109,7 +109,7 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       handle_refresh_oracle_feed(
         mockEnv(),
         mockCtx(8453),
-        { token: "0x0000000000000000000000000000000000000000", direction: "buy", amount: "0.01" },
+        { token: "0x0000000000000000000000000000000000000000", tokenIn: "ETH", tokenOut: "GRG", amount: "0.01" },
         "refresh_oracle_feed",
       ),
     ).rejects.toThrow(/native token/);
@@ -129,7 +129,7 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
     const result = await handle_refresh_oracle_feed(
       mockEnv(),
       mockCtx(137, vaultAddress),
-      { token: "GRG", direction: "sell", amount: "10", viaVault: true },
+      { token: "GRG", tokenIn: "GRG", tokenOut: "POL", amount: "10", viaVault: true },
       "refresh_oracle_feed",
     );
 
@@ -142,6 +142,74 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       "sell",
     );
     expect(result.message).toBe("ok");
+  });
+
+  it("derives direction from tokenIn/tokenOut (native in)", async () => {
+    mockBuildTx.mockResolvedValueOnce({
+      transaction: { to: "0xRouter", data: "0xabc", value: "0x0", gas: "0x5208" },
+      poolInfo: { currency1: "0x333", tokenSymbol: "GRG" },
+      amountInWei: 1000000000000000000n,
+      tokenDecimals: 18,
+      message: "ok",
+    });
+
+    const vaultAddress = "0x2222222222222222222222222222222222222222";
+    await handle_refresh_oracle_feed(
+      mockEnv(),
+      mockCtx(137, vaultAddress),
+      { token: "GRG", tokenIn: "POL", tokenOut: "GRG", amount: "1", viaVault: true },
+      "refresh_oracle_feed",
+    );
+
+    // tokenIn=POL (native), tokenOut=GRG → buy GRG with 1 POL.
+    expect(mockBuildTx).toHaveBeenCalledWith(
+      "GRG",
+      "1",
+      137,
+      "test-alchemy",
+      vaultAddress,
+      "buy",
+    );
+  });
+
+  it("derives direction from tokenIn/tokenOut (native out)", async () => {
+    mockBuildTx.mockResolvedValueOnce({
+      transaction: { to: "0xRouter", data: "0xabc", value: "0x0", gas: "0x5208" },
+      poolInfo: { currency1: "0x333", tokenSymbol: "GRG" },
+      amountInWei: 10000000000000000000n,
+      tokenDecimals: 18,
+      message: "ok",
+    });
+
+    const vaultAddress = "0x2222222222222222222222222222222222222222";
+    await handle_refresh_oracle_feed(
+      mockEnv(),
+      mockCtx(137, vaultAddress),
+      { token: "GRG", tokenIn: "GRG", tokenOut: "POL", amount: "10", viaVault: true },
+      "refresh_oracle_feed",
+    );
+
+    // tokenIn=GRG, tokenOut=POL → sell 10 GRG.
+    expect(mockBuildTx).toHaveBeenCalledWith(
+      "GRG",
+      "10",
+      137,
+      "test-alchemy",
+      vaultAddress,
+      "sell",
+    );
+  });
+
+  it("rejects when neither amount nor amountOut is provided", async () => {
+    await expect(
+      handle_refresh_oracle_feed(
+        mockEnv(),
+        mockCtx(137, "0x2222222222222222222222222222222222222222"),
+        { token: "GRG", tokenIn: "GRG", tokenOut: "POL", viaVault: true },
+        "refresh_oracle_feed",
+      ),
+    ).rejects.toThrow(/oracle pool swap size cannot be defaulted/);
+    expect(mockBuildTx).not.toHaveBeenCalled();
   });
 
   it("estimates token input from native amountOut on sell direction", async () => {
@@ -163,7 +231,7 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
     await handle_refresh_oracle_feed(
       mockEnv(),
       mockCtx(137, vaultAddress),
-      { token: "GRG", direction: "sell", amountOut: "1", viaVault: true },
+      { token: "GRG", tokenIn: "GRG", tokenOut: "POL", amountOut: "1", viaVault: true },
       "refresh_oracle_feed",
     );
 
@@ -176,5 +244,35 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       vaultAddress,
       "sell",
     );
+  });
+
+  it("infers Polygon from POL in tokenOut when current context chain is Base", async () => {
+    mockBuildTx.mockResolvedValueOnce({
+      transaction: { to: "0xRouter", data: "0xabc", value: "0x0", gas: "0x5208" },
+      poolInfo: { currency1: "0x333", tokenSymbol: "GRG" },
+      amountInWei: 1000000000000000000n,
+      tokenDecimals: 18,
+      message: "ok",
+    });
+
+    const vaultAddress = "0x2222222222222222222222222222222222222222";
+    const ctx = mockCtx(8453, vaultAddress);
+    await handle_refresh_oracle_feed(
+      mockEnv(),
+      ctx,
+      { token: "GRG", tokenIn: "GRG", tokenOut: "POL", amount: "1", viaVault: true },
+      "refresh_oracle_feed",
+    );
+
+    // Even though the incoming context was Base, POL uniquely maps to Polygon.
+    expect(mockBuildTx).toHaveBeenCalledWith(
+      "GRG",
+      "1",
+      137,
+      "test-alchemy",
+      vaultAddress,
+      "sell",
+    );
+    expect(ctx.chainId).toBe(137);
   });
 });

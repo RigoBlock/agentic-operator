@@ -10,7 +10,7 @@ import type { Env, RequestContext } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import { estimateGas } from "../client.js";
 import { getTokenDecimals, getClient } from "../../services/vault.js";
-import { resolveTokenAddress, resolveChainId, resolveChainName, getNativeTokenSymbol } from "../../config.js";
+import { resolveTokenAddress, resolveChainId, resolveChainName, getNativeTokenSymbol, NATIVE_TOKEN } from "../../config.js";
 import { parseUnits, formatUnits, encodeFunctionData, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import { buildOraclePoolSwapTx, UNIVERSAL_ROUTER } from "../../services/oraclePool.js";
@@ -119,6 +119,59 @@ function isNativeTokenSymbolOrAddress(chainId: number, token: string): boolean {
   return false;
 }
 
+/**
+ * Try to infer the chain from a native-token symbol appearing in tokenIn/tokenOut.
+ * Only returns a chain when the symbol maps to a single chain (e.g. POL→137, BNB→56)
+ * so we don't guess among ETH chains.
+ */
+function inferChainFromNativeTokens(tokenIn: string, tokenOut: string): number | undefined {
+  const normalizeNativeSymbol = (s: string): string => {
+    const n = s.trim().toUpperCase();
+    if (n === "MATIC" || n === "WMATIC") return "POL";
+    if (n.startsWith("W")) return n.slice(1);
+    return n;
+  };
+
+  const nativeToChains: Record<string, number[]> = {};
+  for (const [chainIdStr, symbol] of Object.entries(NATIVE_TOKEN)) {
+    const sym = symbol.toUpperCase();
+    if (!nativeToChains[sym]) nativeToChains[sym] = [];
+    nativeToChains[sym].push(Number(chainIdStr));
+  }
+
+  for (const raw of [tokenIn, tokenOut]) {
+    const sym = normalizeNativeSymbol(raw);
+    const chains = nativeToChains[sym];
+    if (chains && chains.length === 1) return chains[0];
+  }
+  return undefined;
+}
+
+/**
+ * Derive the swap direction from tokenIn/tokenOut.
+ * The oracle pool is always native/ERC20. tokenIn/tokenOut must be one native and one ERC-20.
+ * Returns 'buy' if native is paid (native → token), 'sell' if ERC-20 is paid (token → native).
+ */
+export function deriveDirection(
+  chainId: number,
+  tokenArg: string,
+  tokenIn: string,
+  tokenOut: string,
+): "buy" | "sell" {
+  const inIsNative = isNativeTokenSymbolOrAddress(chainId, tokenIn);
+  const outIsNative = isNativeTokenSymbolOrAddress(chainId, tokenOut);
+  const inIsToken = tokenIn.trim().toUpperCase() === tokenArg.trim().toUpperCase();
+  const outIsToken = tokenOut.trim().toUpperCase() === tokenArg.trim().toUpperCase();
+
+  if (inIsNative && outIsToken) return "buy";
+  if (inIsToken && outIsNative) return "sell";
+
+  throw new Error(
+    `tokenIn/tokenOut must be one native token (${getNativeTokenSymbol(chainId)}) and one ERC-20 ('${tokenArg}'). ` +
+    `Got tokenIn='${tokenIn}', tokenOut='${tokenOut}'.`
+  );
+}
+
 export async function handle_refresh_oracle_feed(
   env: Env,
   ctx: RequestContext,
@@ -134,7 +187,41 @@ export async function handle_refresh_oracle_feed(
     throw new Error("'token' is required. Specify the token symbol whose oracle feed is stale (e.g., 'GRG', 'USDC').");
   }
 
-  const direction = (args.direction as string)?.toLowerCase() === "sell" ? "sell" : "buy";
+  // Guard: the oracle pool is always native-token (currency0) vs ERC-20 (currency1).
+  // Reject attempts to pass the native token as the `token` argument so the LLM/user
+  // must explicitly name the ERC-20 whose feed needs refreshing.
+  if (isNativeTokenSymbolOrAddress(ctx.chainId, tokenArg)) {
+    throw new Error(
+      `${tokenArg.toUpperCase()} is the native token on ${resolveChainName(ctx.chainId)} and cannot be used as the oracle-pool token. ` +
+      `The BackgeoOracle pool always pairs the native token (currency0) with an ERC-20. ` +
+      `Please specify the ERC-20 token whose price feed is stale (e.g., 'GRG', 'USDC').`
+    );
+  }
+
+  // Tracks whether we had to auto-switch chains so the caller can persist it.
+  let oracleChainSwitched: number | undefined;
+
+  const tokenInArg = args.tokenIn as string | undefined;
+  const tokenOutArg = args.tokenOut as string | undefined;
+  if (!tokenInArg || !tokenOutArg) {
+    throw new Error("tokenIn and tokenOut are required. Specify what the trader pays and receives (e.g., tokenIn='GRG', tokenOut='POL').");
+  }
+
+  // If the LLM omitted the chain arg or the chain-suffix parser missed it, try to
+  // recover from the native-token symbol in tokenIn/tokenOut. Only do this for
+  // symbols that map to a single chain (POL, BNB) to avoid guessing among ETH chains.
+  const currentNative = getNativeTokenSymbol(ctx.chainId).toUpperCase();
+  const inLooksNative = isNativeTokenSymbolOrAddress(ctx.chainId, tokenInArg);
+  const outLooksNative = isNativeTokenSymbolOrAddress(ctx.chainId, tokenOutArg);
+  if (!inLooksNative && !outLooksNative) {
+    const inferred = inferChainFromNativeTokens(tokenInArg, tokenOutArg);
+    if (inferred && inferred !== ctx.chainId) {
+      ctx.chainId = inferred;
+      oracleChainSwitched = inferred;
+    }
+  }
+
+  const direction = deriveDirection(ctx.chainId, tokenArg, tokenInArg, tokenOutArg);
 
   // Vault-dependent options (viaVault, amountOut) require ctx.vaultAddress to be on
   // the active chain. Check this BEFORE mutating ctx.chainId to avoid leaving context
@@ -164,8 +251,7 @@ export async function handle_refresh_oracle_feed(
     viaVault = !!hasVault;
   }
 
-  // Auto-switch chain if provided.
-  let oracleChainSwitched: number | undefined;
+  // Auto-switch chain if explicitly provided.
   if (args.chain) {
     const requestedChain = resolveChainId(args.chain as string);
     if (requestedChain !== ctx.chainId) {
@@ -175,17 +261,6 @@ export async function handle_refresh_oracle_feed(
   }
 
   const nativeSymbol = getNativeTokenSymbol(ctx.chainId);
-
-  // Guard: the oracle pool is always native-token (currency0) vs ERC-20 (currency1).
-  // Reject attempts to pass the native token as the `token` argument so the LLM/user
-  // must explicitly name the ERC-20 whose feed needs refreshing.
-  if (isNativeTokenSymbolOrAddress(ctx.chainId, tokenArg)) {
-    throw new Error(
-      `${tokenArg.toUpperCase()} is the native token on ${resolveChainName(ctx.chainId)} and cannot be used as the oracle-pool token. ` +
-      `The BackgeoOracle pool always pairs the native token (currency0) with an ERC-20. ` +
-      `Please specify the ERC-20 token whose price feed is stale (e.g., 'GRG', 'USDC').`
-    );
-  }
 
   // Coerce to decimal string; toDecimalString() uses toFixed(18) for numbers
   // to avoid scientific notation (e.g. 0.0000001 → "1e-7") that parseUnits rejects.
@@ -274,12 +349,13 @@ export async function handle_refresh_oracle_feed(
     }
   }
 
-  // Default amount: 0.001 units is small enough to be financially insignificant for
-  // every token (0.001 ETH ≈ $2–6, 0.001 WBTC ≈ $100, 0.001 USDC ≈ $0.001), while
-  // being non-zero — which is the only requirement for creating a BackgeoOracle
-  // price observation (the tick is recorded at swap time regardless of size).
+  // One of amount or amountOut must be provided. There is no safe default: a swap
+  // with an unspecified size is undefined behaviour and should not be submitted.
   if (!amountIn) {
-    amountIn = "0.001";
+    throw new Error(
+      `Provide either amount (exact input in ${tokenInArg} units) or amountOut (desired output in ${tokenOutArg} units). ` +
+      `The oracle pool swap size cannot be defaulted.`
+    );
   }
 
   // Treat zero address as "no vault" (frontend uses it as a placeholder before connecting).

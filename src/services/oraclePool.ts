@@ -201,8 +201,7 @@ export interface OraclePoolSwapResult {
  *
  * @param token - Token symbol or address whose oracle feed is stale (e.g., "GRG").
  * @param amountIn - Amount to swap. For "buy" direction: chain's native token amount.
- *   For "sell" direction: ERC-20 token amount. Default is "0.001" for both directions
- *   (small enough to be safe for every token, non-zero enough to create a price observation).
+ *   For "sell" direction: ERC-20 token amount. Must be provided by the caller; there is no default.
  * @param chainId - Chain where the oracle is stale.
  * @param alchemyKey - Alchemy API key for RPC calls.
  * @param vaultAddress - Optional vault address. If provided, the transaction targets

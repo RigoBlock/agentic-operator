@@ -15,7 +15,7 @@ import { getSkillTools, getSkillSystemPrompt } from "../skills/index.js";
 
 // Merge skill tools into the LLM-facing definitions (skill tools are always available for dispatch)
 const ALL_AGENT_TOOL_DEFINITIONS = [...AGENT_TOOL_DEFINITIONS, ...getSkillTools()];
-import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
+import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, getNativeTokenSymbol } from "../config.js";
 import { AuthError } from "../services/auth.js";
 import { formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
@@ -887,30 +887,40 @@ ${executionModeNote}${contextDocsBlock}`;
   const fastPathReasoning =
     "Fast-path execution: matched a deterministic command pattern and executed the corresponding tool directly for low latency. No generative planning step was used in this turn.";
 
-  // ── Chain-suffix pre-processing ──
+  // ── Chain pre-processing ──
   // Users often say "disable swap shield on polygon" or "sync nav on base".
-  // Strip the "on/in/for <chain>" suffix, switch the context chain first, then
-  // run the rest of the command through the normal fast-path parsers.
-  // This works for ALL fast-path commands without per-parser changes.
+  // Detect the chain anywhere in the message (not only at the end), switch the
+  // context chain first, then strip the chain phrase and run the rest through
+  // the normal parsers. This works for ALL commands without per-parser changes.
   let effectiveMsg = lastUserMsg;
   {
-    const chainSuffixMatch = lastUserMsg.match(
-      /^(.+?)\s+(?:on|in|for|via|using)\s+([a-z0-9 ]+)$/i,
-    );
-    if (chainSuffixMatch) {
-      const potentialChain = chainSuffixMatch[2].trim();
-      try {
-        const resolved = resolveChainArg(potentialChain);
-        if (resolved.id !== ctx.chainId) {
-          const stripped = chainSuffixMatch[1].trim();
-          if (stripped.length >= 3) {
-            ctx.chainId = resolved.id;
-            onStreamEvent?.({ type: "status", message: `Switched to ${resolved.name}` });
-            effectiveMsg = stripped;
+    const allChains = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS];
+    const prepositions = ["on", "in", "for", "via", "using"];
+    // Longest names first so "bnb chain" wins over "bnb".
+    const sortedChains = allChains.slice().sort((a, b) => b.name.length - a.name.length);
+    for (const c of sortedChains) {
+      const names = new Set([c.name, c.shortName].filter(Boolean));
+      for (const name of names) {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const pattern = new RegExp(
+          `\\b(${prepositions.join("|")})\\s+${escaped}\\b`,
+          "i",
+        );
+        const match = effectiveMsg.match(pattern);
+        if (match) {
+          if (c.id !== ctx.chainId) {
+            ctx.chainId = c.id;
+            onStreamEvent?.({ type: "status", message: `Switched to ${c.name}` });
           }
+          effectiveMsg = (
+            effectiveMsg.slice(0, match.index) +
+            " " +
+            effectiveMsg.slice(match.index! + match[0].length)
+          )
+            .replace(/\s+/g, " ")
+            .trim();
+          break;
         }
-      } catch {
-        // Not a valid chain name — ignore and keep the original message
       }
     }
   }
@@ -924,7 +934,9 @@ ${executionModeNote}${contextDocsBlock}`;
   // Cross-chain operations need LLM reasoning to show the user what was computed
   // (NAV data, direction, token, amount) and explain errors. Speed is not the
   // priority — correctness and transparency are.
+  const oracleFastPath = tryFastPathOracleRefresh(effectiveMsg, ctx.chainId);
   const immediateFastPath =
+    oracleFastPath ||
     tryFastPathChainSwitch(effectiveMsg) ||
     tryFastPathSwap(effectiveMsg) ||
     tryFastPathSwapShieldToggle(effectiveMsg) ||
@@ -1929,8 +1941,8 @@ export async function runSwapShield(
       : `3. **Raise tolerance** — requires operator authentication; sign in as the vault owner first, ` +
         `then ${raiseToleranceLine} (max ${MAX_TEMP_DIVERGENCE_PCT}%).\n`;
     const refreshOracleOption = isFavorable
-      ? `4. **Refresh oracle feed** — say "refresh oracle feed for ${sellSymbol} with 0.001 ETH" to ` +
-        `swap a tiny amount of ETH on the BackgeoOracle pool from your operator wallet, creating a ` +
+      ? `4. **Refresh oracle feed** — say "refresh oracle feed for ${sellSymbol} with 0.001 ETH" (or any exact amount) to ` +
+        `swap on the BackgeoOracle pool from your operator wallet, creating a ` +
         `new price observation. The TWAP will converge toward market price over ~5 minutes.\n`
       : "";
     const options = isFavorable
@@ -2332,6 +2344,68 @@ function tryFastPathCapabilityQuestion(msg: string): string | null {
 
   if (/\bsync\b/.test(m) && /\bnav\b/.test(m)) {
     return "Yes. I can prepare NAV sync transactions between chains. NAV sync and token transfer are different operations: sync uses crosschain sync, while bridge/transfer moves tokens. For two chains, I can prepare one direction first (e.g. Arbitrum -> Base) and then the reverse direction if requested.";
+  }
+
+  return null;
+}
+
+// ── Fast-path: Oracle pool refresh ───────────────────────────────────
+
+/**
+ * Detect simple BackgeoOracle refresh commands and set tokenIn/tokenOut
+ * deterministically. This bypasses the LLM so ambiguous phrases like
+ * "buying 8 POL" cannot be mapped to the wrong direction.
+ *
+ * Examples:
+ *   "sync grg price feed by buying 8 pol"  → tokenIn=GRG, tokenOut=POL, amountOut=8
+ *   "sync grg price feed by selling 8 pol" → tokenIn=POL, tokenOut=GRG, amount=8
+ *   "sync grg price feed by buying 8 grg"  → tokenIn=POL, tokenOut=GRG, amountOut=8
+ *   "sync grg price feed by selling 8 grg" → tokenIn=GRG, tokenOut=POL, amount=8
+ */
+export function tryFastPathOracleRefresh(msg: string, chainId: number): FastPathResult | null {
+  const lower = msg.toLowerCase();
+
+  // Detect the ERC-20 whose feed is being refreshed.
+  let token: string | undefined;
+  const m1 = msg.match(/sync\s+(\w+)\s+price feed/i);
+  const m2 = msg.match(/(?:refresh|update|fix)\s+(?:oracle|price feed|twap|divergence)\s+(?:for\s+)?(\w+)/i);
+  const m3 = msg.match(/(?:oracle|price feed|twap)\s+(?:for\s+)?(\w+)/i);
+  token = (m1?.[1] || m2?.[1] || m3?.[1])?.toUpperCase();
+  if (!token) return null;
+
+  const nativeSymbol = getNativeTokenSymbol(chainId).toUpperCase();
+  const isNative = (sym: string) => {
+    const s = sym.toUpperCase();
+    return s === nativeSymbol || s === `W${nativeSymbol}` || (nativeSymbol === "POL" && (s === "MATIC" || s === "WMATIC"));
+  };
+
+  // "buy/receive/get N X" → user receives N of X.
+  const buyMatch = msg.match(/(?:buy(?:ing)?|receiv(?:e|ing)|get(?:ting)?)\s+(\d+(?:\.\d+)?)\s+(\w+)/i);
+  if (buyMatch) {
+    const amount = buyMatch[1];
+    const amountToken = buyMatch[2].toUpperCase();
+    if (!isNative(amountToken) && amountToken !== token) return null;
+    const tokenOut = amountToken;
+    const tokenIn = amountToken === token ? nativeSymbol : token;
+    return {
+      name: "refresh_oracle_feed",
+      args: { token, tokenIn, tokenOut, amountOut: amount },
+    };
+  }
+
+  // "sell/pay/spend/with N X" → user pays N of X.
+  const sellMatch = msg.match(/(?:sell(?:ing)?|pay(?:ing)?|spend(?:ing)?)\s+(\d+(?:\.\d+)?)\s+(\w+)/i)
+    || msg.match(/(?:with|using)\s+(\d+(?:\.\d+)?)\s+(\w+)/i);
+  if (sellMatch) {
+    const amount = sellMatch[1];
+    const amountToken = sellMatch[2].toUpperCase();
+    if (!isNative(amountToken) && amountToken !== token) return null;
+    const tokenIn = amountToken;
+    const tokenOut = amountToken === token ? nativeSymbol : token;
+    return {
+      name: "refresh_oracle_feed",
+      args: { token, tokenIn, tokenOut, amount: amount },
+    };
   }
 
   return null;

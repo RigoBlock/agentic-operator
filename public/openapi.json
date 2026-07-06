@@ -1153,6 +1153,8 @@
                 "type": "object",
                 "required": [
                   "token",
+                  "tokenIn",
+                  "tokenOut",
                   "chainId"
                 ],
                 "properties": {
@@ -1160,17 +1162,17 @@
                     "type": "string",
                     "description": "ERC-20 token symbol or address whose oracle feed is stale (e.g. 'GRG', 'USDC'). The native token (ETH/POL/BNB) cannot be used here; it is always currency0 in the oracle pool."
                   },
+                  "tokenIn": {
+                    "type": "string",
+                    "description": "Token the trader pays. Must be the chain's native token (ETH/POL/BNB) or the ERC-20 'token'."
+                  },
+                  "tokenOut": {
+                    "type": "string",
+                    "description": "Token the trader receives. Must be the chain's native token (ETH/POL/BNB) or the ERC-20 'token'."
+                  },
                   "amount": {
                     "type": "string",
-                    "description": "Exact INPUT amount. For 'buy': native token amount (e.g. '1' POL). For 'sell': ERC-20 token amount (e.g. '10' GRG). Defaults to '0.001'."
-                  },
-                  "direction": {
-                    "type": "string",
-                    "enum": [
-                      "buy",
-                      "sell"
-                    ],
-                    "description": "'buy' = buy the ERC-20 token, paying native. 'sell' = sell the ERC-20 token, receiving native."
+                    "description": "Exact INPUT amount in tokenIn units. Defaults to '0.001'."
                   },
                   "chainId": {
                     "type": "integer",

@@ -6,8 +6,9 @@
  * Body (JSON):
  *   token        string   — ERC-20 symbol or address whose oracle feed is stale (e.g. "GRG", "USDC").
  *                           The native token (ETH/POL/BNB) cannot be used here; it is always currency0 in the oracle pool.
- *   amount       string|number — Exact INPUT amount (human-readable). Default is "0.001". For "buy": native token amount. For "sell": ERC-20 token amount.
- *   direction    string   — "buy" (buy the ERC-20, paying native; default) or "sell" (sell the ERC-20, receiving native).
+ *   tokenIn      string   — Token the trader pays. Must be native (ETH/POL/BNB) or the ERC-20 'token'.
+ *   tokenOut     string   — Token the trader receives. Must be native (ETH/POL/BNB) or the ERC-20 'token'.
+ *   amount       string|number — Required. Exact INPUT amount in tokenIn units (e.g. "0.001").
  *   chainId      number   — Chain where the oracle pool lives
  *   vaultAddress string   — Optional. If provided, routes through the vault adapter (value=0, supports delegation).
  *                           Omit for EOA path (direct to Universal Router).
@@ -23,7 +24,8 @@ import { Hono } from "hono";
 import { parseUnits, isAddress, type Address } from "viem";
 import type { Env, AppVariables } from "../types.js";
 import { buildOraclePoolSwapTx } from "../services/oraclePool.js";
-import { sanitizeError, resolveChainId } from "../config.js";
+import { sanitizeError, resolveChainId, getNativeTokenSymbol } from "../config.js";
+import { deriveDirection } from "../llm/handlers/oracle.js";
 
 export const oracle = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
@@ -41,19 +43,11 @@ oracle.post("/refresh", async (c) => {
   }
 
   const token = typeof body.token === "string" ? body.token.trim() : "";
+  const tokenIn = typeof body.tokenIn === "string" ? body.tokenIn.trim() : undefined;
+  const tokenOut = typeof body.tokenOut === "string" ? body.tokenOut.trim() : undefined;
   // Accept numeric amountEth (e.g. 0.001 from JSON) by coercing to string.
   // Use toFixed(18) for numbers instead of String() to avoid scientific-notation
   // output (e.g. String(0.0000001) → "1e-7") which parseUnits rejects.
-  const rawDirection =
-    body.direction === undefined
-      ? "buy"
-      : typeof body.direction === "string"
-        ? body.direction.trim().toLowerCase()
-        : null;
-  if (rawDirection !== "buy" && rawDirection !== "sell") {
-    return c.json({ error: "direction must be 'buy' or 'sell'" }, 400);
-  }
-  const direction = rawDirection as "buy" | "sell";
   let amount =
     typeof body.amount === "string"
       ? body.amount.trim()
@@ -93,12 +87,27 @@ oracle.post("/refresh", async (c) => {
     );
   }
 
-  // Default amount: 0.001 units is small enough to be financially insignificant for
-  // every token (0.001 ETH ≈ $2–6, 0.001 WBTC ≈ $100, 0.001 USDC ≈ $0.001), while
-  // being non-zero — which is the only requirement for creating a BackgeoOracle
-  // price observation (the tick is recorded at swap time regardless of size).
+  // Derive swap direction from tokenIn/tokenOut.
+  let direction: "buy" | "sell";
+  try {
+    if (!tokenIn || !tokenOut) {
+      throw new Error("tokenIn and tokenOut are required.");
+    }
+    direction = deriveDirection(chainId, token, tokenIn, tokenOut);
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : "Invalid tokenIn/tokenOut" },
+      400,
+    );
+  }
+
+  // amount is required. There is no safe default for a swap: an unspecified size
+  // is undefined behaviour and must not be submitted.
   if (!amount) {
-    amount = "0.001";
+    return c.json(
+      { error: "Missing required field: amount (exact input in tokenIn units, e.g. '0.001')." },
+      400,
+    );
   }
 
   // Validate amount: parseFloat accepts "0.01abc" → 0.01 and "1e-3" → 0.001,

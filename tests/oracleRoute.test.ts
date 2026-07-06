@@ -90,20 +90,47 @@ describe("POST /api/oracle/refresh", () => {
     expect(json.error).toContain("chainId");
   });
 
-  it("returns 400 for invalid direction", async () => {
+  it("ignores legacy direction when tokenIn/tokenOut are provided", async () => {
+    const app = createApp();
+    mockBuildTx.mockResolvedValueOnce({
+      transaction: { to: "0xRouter", data: "0xabc", value: "0x0" },
+      poolInfo: { tokenSymbol: "GRG" },
+    });
+
+    const res = await app.request(
+      "/api/oracle/refresh",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-test-x402-paid": "true" },
+        body: JSON.stringify({ token: "GRG", chainId: 8453, direction: "swap", tokenIn: "ETH", tokenOut: "GRG", amount: "0.001" }),
+      },
+      mockEnv(),
+    );
+    expect(res.status).toBe(200);
+    expect(mockBuildTx).toHaveBeenCalledWith(
+      "GRG",
+      "0.001",
+      8453,
+      "test-alchemy-key",
+      undefined,
+      "buy",
+    );
+  });
+
+  it("returns 400 for invalid tokenIn/tokenOut pair", async () => {
     const app = createApp();
     const res = await app.request(
       "/api/oracle/refresh",
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-test-x402-paid": "true" },
-        body: JSON.stringify({ token: "GRG", chainId: 8453, direction: "swap" }),
+        body: JSON.stringify({ token: "GRG", chainId: 8453, tokenIn: "GRG", tokenOut: "USDC" }),
       },
       mockEnv(),
     );
     expect(res.status).toBe(400);
     const json = (await res.json()) as any;
-    expect(json.error).toContain("direction must be 'buy' or 'sell'");
+    expect(json.error).toContain("native token");
   });
 
   it("returns 400 for non-positive amount", async () => {
@@ -113,7 +140,7 @@ describe("POST /api/oracle/refresh", () => {
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-test-x402-paid": "true" },
-        body: JSON.stringify({ token: "GRG", chainId: 8453, amount: "-1" }),
+        body: JSON.stringify({ token: "GRG", chainId: 8453, tokenIn: "GRG", tokenOut: "ETH", amount: "-1" }),
       },
       mockEnv(),
     );
@@ -129,7 +156,7 @@ describe("POST /api/oracle/refresh", () => {
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-test-x402-paid": "true" },
-        body: JSON.stringify({ token: "GRG", chainId: 8453, amount: "1e-7" }),
+        body: JSON.stringify({ token: "GRG", chainId: 8453, tokenIn: "GRG", tokenOut: "ETH", amount: "1e-7" }),
       },
       mockEnv(),
     );
@@ -145,7 +172,7 @@ describe("POST /api/oracle/refresh", () => {
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-test-x402-paid": "true" },
-        body: JSON.stringify({ token: "GRG", chainId: 8453, vaultAddress: "0x123" }),
+        body: JSON.stringify({ token: "GRG", chainId: 8453, tokenIn: "GRG", tokenOut: "ETH", amount: "1", vaultAddress: "0x123" }),
       },
       mockEnv(),
     );
@@ -166,7 +193,7 @@ describe("POST /api/oracle/refresh", () => {
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-test-x402-paid": "true" },
-        body: JSON.stringify({ token: "GRG", chainId: 8453, direction: "sell", amount: "1.5" }),
+        body: JSON.stringify({ token: "GRG", chainId: 8453, tokenIn: "GRG", tokenOut: "ETH", amount: "1.5" }),
       },
       mockEnv(),
     );
@@ -182,61 +209,41 @@ describe("POST /api/oracle/refresh", () => {
     );
   });
 
-  it("defaults amount to 0.001 for buy direction when omitted", async () => {
+  it("returns 400 when amount is omitted", async () => {
     const app = createApp();
-    mockBuildTx.mockResolvedValueOnce({
-      transaction: { to: "0xRouter", data: "0xabc", value: "0x0" },
-      poolInfo: { tokenSymbol: "GRG" },
-    });
 
     const res = await app.request(
       "/api/oracle/refresh",
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-test-x402-paid": "true" },
-        body: JSON.stringify({ token: "GRG", chainId: 8453, direction: "buy" }),
+        body: JSON.stringify({ token: "GRG", chainId: 8453, tokenIn: "ETH", tokenOut: "GRG" }),
       },
       mockEnv(),
     );
 
-    expect(res.status).toBe(200);
-    expect(mockBuildTx).toHaveBeenCalledWith(
-      "GRG",
-      "0.001",
-      8453,
-      "test-alchemy-key",
-      undefined,
-      "buy",
-    );
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as any;
+    expect(json.error).toContain("amount");
+    expect(mockBuildTx).not.toHaveBeenCalled();
   });
 
-  it("defaults amount to 0.001 for sell direction when omitted (not 1)", async () => {
+  it("returns 400 when amount is omitted for sell direction", async () => {
     const app = createApp();
-    mockBuildTx.mockResolvedValueOnce({
-      transaction: { to: "0xRouter", data: "0xabc", value: "0x0" },
-      poolInfo: { tokenSymbol: "GRG" },
-    });
 
     const res = await app.request(
       "/api/oracle/refresh",
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-test-x402-paid": "true" },
-        body: JSON.stringify({ token: "GRG", chainId: 8453, direction: "sell" }),
+        body: JSON.stringify({ token: "GRG", chainId: 8453, tokenIn: "GRG", tokenOut: "ETH" }),
       },
       mockEnv(),
     );
 
-    expect(res.status).toBe(200);
-    // The old default was "1" which is dangerous (1 WBTC = $100k+). The new
-    // default is "0.001" — small enough to be safe for every token.
-    expect(mockBuildTx).toHaveBeenCalledWith(
-      "GRG",
-      "0.001",
-      8453,
-      "test-alchemy-key",
-      undefined,
-      "sell",
-    );
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as any;
+    expect(json.error).toContain("amount");
+    expect(mockBuildTx).not.toHaveBeenCalled();
   });
 });

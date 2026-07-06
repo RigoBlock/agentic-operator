@@ -400,8 +400,10 @@ export const PROTECTED_ROUTES: RoutesConfig = {
             type: "http",
             method: "POST",
             queryParams: {
-              token: "ERC-20 token symbol or address whose oracle feed is stale (e.g. 'GRG', 'USDC')",
-              amountEth: "Amount of ETH to swap (e.g. '0.001'). Larger converges TWAP faster.",
+              token: "ERC-20 token symbol or address whose oracle feed is stale (e.g. 'GRG', 'USDC'). Never the native token.",
+              tokenIn: "Token the trader pays: the chain's native token (ETH/POL/BNB) or the ERC-20 'token'.",
+              tokenOut: "Token the trader receives: the chain's native token (ETH/POL/BNB) or the ERC-20 'token'.",
+              amount: "Exact INPUT amount in tokenIn units (e.g. '0.001'). Required; no default.",
               chainId: "EVM chain ID where the oracle pool lives (e.g. 42161, 8453)",
             },
           },
@@ -414,7 +416,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
                 value: "0x38d7ea4c68000",
                 chainId: 42161,
                 gas: "0x61a80",
-                description: "Oracle pool refresh: swap 0.001 ETH → GRG on BackgeoOracle V4 pool",
+                description: "Oracle pool refresh: swap ETH → GRG on BackgeoOracle V4 pool",
               },
               poolInfo: {
                 oracle: "0x3043e182047F8696dFE483535785ed1C3681baC4",

@@ -127,7 +127,7 @@ export const TOOL_DEFINITIONS = [
             description: "Token symbol or address",
           },
         },
-        required: ["token"],
+        required: ["token", "tokenIn", "tokenOut"],
       },
     },
   },
@@ -1260,7 +1260,22 @@ export const TOOL_DEFINITIONS = [
         "The swap is ALWAYS exact-input on the V4 oracle pool (no external 0x/Uniswap API is used). " +
         "When a vault is connected, the vault path is used by default so the swap happens from the vault " +
         "and supports delegation / NAV shield. The EOA path (operator personal wallet) is used only when " +
-        "explicitly requested or no vault is connected.",
+        "explicitly requested or no vault is connected.\n\n" +
+        "HOW TO SPECIFY THE SWAP:\n" +
+        "The oracle pool is always NATIVE (POL/ETH/BNB) / ERC-20 (the 'token' argument). " +
+        "Use tokenIn (what the trader pays) and tokenOut (what the trader receives). " +
+        "One of tokenIn/tokenOut MUST be the native token, the other MUST be the ERC-20 'token'.\n\n" +
+        "DECISION TREE:\n" +
+        "1. The token the user wants to RECEIVE is tokenOut.\n" +
+        "2. The other token in the pair is tokenIn (what they pay).\n" +
+        "3. 'buy N X' / 'receive N X' → tokenOut=X, use amountOut=N.\n" +
+        "4. 'sell N X' / 'pay N X' / 'spend N X' → tokenIn=X, use amount=N.\n\n" +
+        "EXACT PHRASES FOR THE GRG/POL POOL ON POLYGON:\n" +
+        "- 'buy 1 POL' / 'receive 1 POL' → receive POL, pay GRG → token='GRG', tokenIn='GRG', tokenOut='POL', amountOut='1'\n" +
+        "- 'sell 1 POL' / 'pay 1 POL' / 'buy GRG with 1 POL' → pay POL, receive GRG → token='GRG', tokenIn='POL', tokenOut='GRG', amount='1'\n" +
+        "- 'buy 1 GRG' / 'receive 1 GRG' → receive GRG, pay POL → token='GRG', tokenIn='POL', tokenOut='GRG', amountOut='1'\n" +
+        "- 'sell 1 GRG' / 'pay 1 GRG' → pay GRG, receive POL → token='GRG', tokenIn='GRG', tokenOut='POL', amount='1'"
+      ,
       parameters: {
         type: "object",
         properties: {
@@ -1270,33 +1285,31 @@ export const TOOL_DEFINITIONS = [
               "The ERC-20 token whose oracle feed is stale — symbol (e.g., 'GRG', 'USDC') or " +
               "contract address. The native token (ETH/POL/BNB) cannot be specified (it is always currency0).",
           },
-          direction: {
+          tokenIn: {
             type: "string",
-            enum: ["buy", "sell"],
             description:
-              "Swap direction relative to the ERC-20 'token'. " +
-              "'buy' (default) = BUY the ERC-20 token, paying the chain's native token (ETH/POL/BNB). " +
-              "'sell' = SELL the ERC-20 token, receiving the chain's native token. " +
-              "The swap is exact-input, so 'amount' is always the amount of the INPUT token. " +
-              "Examples: 'buy GRG with 0.01 POL' / 'spend 0.01 POL for GRG' / 'sell 1 POL' (pay 1 POL) → direction='buy', amount='0.01' or '1'. " +
-              "'sell 10 GRG' / 'buy 1 POL' (receive 1 POL) / 'receive 1 POL for GRG' → direction='sell'. " +
-              "When the user expresses the desired NATIVE output (e.g. 'buy/receive 1 POL'), use amountOut='1' instead of amount (vault only)."
+              "Token the trader is paying into the swap. Must be either the chain's native token (POL/ETH/BNB) or the ERC-20 'token'. " +
+              "Use this together with tokenOut to unambiguously specify direction."
+          },
+          tokenOut: {
+            type: "string",
+            description:
+              "Token the trader is receiving from the swap. Must be either the chain's native token (POL/ETH/BNB) or the ERC-20 'token'. " +
+              "Use this together with tokenIn to unambiguously specify direction."
           },
           amount: {
             type: "string",
             description:
-              "Exact INPUT amount. For direction='buy': amount of native token to spend (POL/ETH/BNB). " +
-              "For direction='sell': amount of the ERC-20 'token' to sell. " +
+              "Exact INPUT amount in tokenIn units. For tokenIn=native: native amount (e.g. '1' POL). " +
+              "For tokenIn=ERC20: ERC-20 amount (e.g. '10' GRG). " +
               "Larger amounts move the oracle pool price more aggressively and converge TWAP faster. " +
-              "Defaults to 0.001 for both directions (small enough to be safe for every token)."
+              "Either amount or amountOut must be provided; there is no default."
           },
           amountOut: {
             type: "string",
             description:
-              "Desired approximate OUTPUT amount, used instead of amount when the user states what they want to RECEIVE. " +
-              "For direction='buy': amountOut is the ERC-20 token to receive (e.g., '5' for ~5 GRG). " +
-              "For direction='sell': amountOut is the native token to receive (e.g., '1' for ~1 POL). " +
-              "If provided, the system estimates the required input using the vault's on-chain oracle. " +
+              "Desired approximate OUTPUT amount in tokenOut units, used instead of amount when the user states what they want to RECEIVE. " +
+              "If provided, the system estimates the required tokenIn amount using the vault's on-chain oracle. " +
               "The actual received amount may differ — the swap is exact-input with no on-chain min-out bound. " +
               "Requires an active vault session.",
           },
@@ -1314,7 +1327,7 @@ export const TOOL_DEFINITIONS = [
               "Must match the chain where the oracle feed is stale.",
           },
         },
-        required: ["token"],
+        required: ["token", "tokenIn", "tokenOut"],
       },
     },
   },
