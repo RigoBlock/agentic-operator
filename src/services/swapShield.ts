@@ -1,7 +1,7 @@
 import { type Address } from "viem";
 import {
-  convertTokenAmountViaOracle,
-  hasPriceFeedForPair,
+  getOracleQuoteData,
+  NoOraclePriceFeedError,
   normalizeTokenAddress,
 } from "./oraclePrice.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "../config.js";
@@ -67,6 +67,62 @@ export interface SwapShieldResult {
 }
 
 // ── Public API ───────────────────────────────────────────────────────
+
+/**
+ * Pure oracle metrics for a DEX quote (no blocking).
+ *
+ * Used by the quote endpoints to append `priceFeedExists`, `deltaBps`, and
+ * `oracleAmount` without running the Swap Shield enforcement logic.
+ */
+export interface OracleSwapMetrics {
+  priceFeedExists: boolean;
+  oracleAmount: string;
+  deltaBps: number;
+}
+
+/**
+ * Fetch oracle metrics for a DEX quote in a single batched RPC round-trip.
+ *
+ * Returns zeros when no feed exists, the tokens are the same (wrap/unwrap),
+ * or the oracle call fails — quote endpoints should degrade gracefully.
+ */
+export async function getOracleSwapMetrics(
+  chainId: number,
+  tokenIn: Address,
+  tokenOut: Address,
+  amountInRaw: bigint,
+  dexExpectedOutRaw: bigint,
+  alchemyKey: string,
+): Promise<OracleSwapMetrics> {
+  const zero = { priceFeedExists: false, oracleAmount: "0", deltaBps: 0 };
+
+  if (amountInRaw <= 0n || dexExpectedOutRaw < 0n) return zero;
+
+  const normalizedIn = normalizeTokenAddress(tokenIn, chainId);
+  const normalizedOut = normalizeTokenAddress(tokenOut, chainId);
+  if (normalizedIn.toLowerCase() === normalizedOut.toLowerCase()) return zero;
+
+  try {
+    const { priceFeedExists, oracleAmount } = await getOracleQuoteData(
+      chainId,
+      tokenIn,
+      amountInRaw,
+      tokenOut,
+      alchemyKey,
+    );
+    if (!priceFeedExists || oracleAmount === 0n) {
+      return { priceFeedExists, oracleAmount: "0", deltaBps: 0 };
+    }
+    const deltaBps = Number(((oracleAmount - dexExpectedOutRaw) * 10000n) / oracleAmount);
+    return { priceFeedExists: true, oracleAmount: oracleAmount.toString(), deltaBps };
+  } catch (err) {
+    console.warn(
+      `[getOracleSwapMetrics] failed on chain ${chainId}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return zero;
+  }
+}
 
 /**
  * Check if a swap quote from a DEX API diverges from the on-chain oracle spot price.
@@ -158,15 +214,68 @@ export async function checkSwapPrice(
     };
   }
 
-  // ── Check price feed availability ──
+  // ── Fetch oracle metrics in one batched round-trip ──
   let priceFeedExists: boolean;
-  if (precomputedPriceFeedExists !== undefined) {
+  let oracleAmountRaw: bigint;
+  if (precomputedPriceFeedExists !== undefined && precomputedOracleAmount !== undefined) {
     priceFeedExists = precomputedPriceFeedExists;
+    oracleAmountRaw = precomputedOracleAmount;
   } else {
     try {
-      priceFeedExists = await hasPriceFeedForPair(chainId, normalizedIn, normalizedOut, alchemyKey);
-    } catch {
-      priceFeedExists = false;
+      const result = await getOracleQuoteData(
+        chainId,
+        normalizedIn,
+        amountInRaw,
+        normalizedOut,
+        alchemyKey,
+      );
+      priceFeedExists = result.priceFeedExists;
+      oracleAmountRaw = result.oracleAmount;
+
+      // A negative oracle amount for a positive input is invalid — fail closed.
+      if (oracleAmountRaw < 0n) {
+        console.error(
+          `[SwapShield] Oracle conversion returned a negative amount (${oracleAmountRaw}) ` +
+          `for positive input ${amountInRaw} on chain ${chainId} — treating as ORACLE_ERROR`,
+        );
+        return {
+          allowed: true,
+          verified: false,
+          oracleAmount: "0",
+          dexAmount: dexExpectedOutRaw.toString(),
+          divergencePct: "0",
+          deltaBps: 0,
+          priceFeedExists: true,
+          code: "ORACLE_ERROR",
+          reason:
+            `Oracle returned an invalid (negative) amount on chain ${chainId}. ` +
+            `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
+        };
+      }
+    } catch (err) {
+      if (err instanceof NoOraclePriceFeedError) {
+        priceFeedExists = false;
+        oracleAmountRaw = 0n;
+      } else {
+        const convertErrMsg = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[SwapShield] Oracle conversion failed on chain ${chainId}: ` +
+          convertErrMsg.slice(0, 200),
+        );
+        return {
+          allowed: true,
+          verified: false,
+          oracleAmount: "0",
+          dexAmount: dexExpectedOutRaw.toString(),
+          divergencePct: "0",
+          deltaBps: 0,
+          priceFeedExists: true,
+          code: "ORACLE_ERROR",
+          reason:
+            `Oracle check failed on chain ${chainId}. ` +
+            `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
+        };
+      }
     }
   }
 
@@ -187,65 +296,6 @@ export async function checkSwapPrice(
         `Oracle price feed not available for this token pair on chain ${chainId}. ` +
         `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
     };
-  }
-
-  // ── Call convertTokenAmount via direct oracle spot price ──
-  let oracleAmountRaw: bigint;
-  if (precomputedOracleAmount !== undefined) {
-    oracleAmountRaw = precomputedOracleAmount;
-  } else {
-    try {
-      oracleAmountRaw = await convertTokenAmountViaOracle(
-        chainId,
-        normalizedIn,
-        amountInRaw,
-        normalizedOut,
-        alchemyKey,
-      );
-
-    // convertTokenAmountViaOracle returns a bigint, but for a positive input amount the
-    // output should always be non-negative. A negative return indicates an
-    // unexpected condition — fail CLOSED to ORACLE_ERROR.
-    if (oracleAmountRaw < 0n) {
-      console.error(
-        `[SwapShield] Oracle conversion returned a negative amount (${oracleAmountRaw}) ` +
-        `for positive input ${amountInRaw} on chain ${chainId} — treating as ORACLE_ERROR`,
-      );
-      return {
-        allowed: true,
-        verified: false,
-        oracleAmount: "0",
-        dexAmount: dexExpectedOutRaw.toString(),
-        divergencePct: "0",
-        deltaBps: 0,
-        priceFeedExists: true,
-        code: "ORACLE_ERROR",
-        reason:
-          `Oracle returned an invalid (negative) amount on chain ${chainId}. ` +
-          `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
-      };
-    }
-
-  } catch (convertErr) {
-    const convertErrMsg = convertErr instanceof Error ? convertErr.message : String(convertErr);
-    console.error(
-      `[SwapShield] Oracle conversion failed on chain ${chainId}: ` +
-      convertErrMsg.slice(0, 200),
-    );
-    return {
-      allowed: true,
-      verified: false,
-      oracleAmount: "0",
-      dexAmount: dexExpectedOutRaw.toString(),
-      divergencePct: "0",
-      deltaBps: 0,
-      priceFeedExists: true,
-      code: "ORACLE_ERROR",
-      reason:
-        `Oracle check failed on chain ${chainId}. ` +
-        `Swap Shield cannot verify this quote — proceeding without oracle protection.`,
-    };
-  }
   }
 
   // Oracle returned 0 — can't compare meaningfully

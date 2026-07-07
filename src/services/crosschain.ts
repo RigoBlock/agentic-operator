@@ -74,6 +74,7 @@ import type { EffectivePoolState } from "./vault.js";
 import { getClient } from "./rpcClient.js";
 import { convertTokenAmountViaOracle } from "./oraclePrice.js";
 import { getDelegationConfig, getActiveChains } from "./delegation.js";
+import { mapWithConcurrency, mapWithConcurrencySettled } from "./concurrency.js";
 import type { DelegationConfig } from "../types.js";
 
 // ── Constants
@@ -253,12 +254,12 @@ export async function getAggregatedNav(
   }
   const activeChains = delegationConfig ? new Set(getActiveChains(delegationConfig)) : new Set<number>();
 
-  // Read NAV + balances on all chains in parallel
+  // Read NAV + balances across chains with bounded concurrency to avoid
+  // spiking Alchemy compute-unit throughput.
   const chainIds = Object.keys(CROSSCHAIN_TOKENS).map(Number);
-  const snapshots = await Promise.all(
-    chainIds.map((chainId) =>
-      readChainSnapshot(vaultAddress, chainId, alchemyKey, activeChains.has(chainId)),
-    ),
+  const snapshots = await mapWithConcurrency(
+    chainIds,
+    (chainId) => readChainSnapshot(vaultAddress, chainId, alchemyKey, activeChains.has(chainId)),
   );
 
   // Any active chain that failed oracle pricing makes the global NAV unreliable.
@@ -666,23 +667,25 @@ export async function buildRebalancePlan(params: {
     }
   }
 
-  // Fetch fee estimates for all operations in parallel
-  const feePromises = operations.map(async (op) => {
-    try {
-      const quote = await getCrosschainQuote(
-        op.srcChainId,
-        op.dstChainId,
-        op.tokenType,
-        op.amount,
-      );
-      op.estimatedFeePct = quote.feePct;
-      op.estimatedTime = quote.estimatedTime;
-    } catch {
-      op.estimatedFeePct = "N/A";
-      op.estimatedTime = "N/A";
-    }
-  });
-  await Promise.all(feePromises);
+  // Fetch fee estimates with bounded concurrency to avoid a burst of Across API calls.
+  await mapWithConcurrency(
+    operations,
+    async (op) => {
+      try {
+        const quote = await getCrosschainQuote(
+          op.srcChainId,
+          op.dstChainId,
+          op.tokenType,
+          op.amount,
+        );
+        op.estimatedFeePct = quote.feePct;
+        op.estimatedTime = quote.estimatedTime;
+      } catch {
+        op.estimatedFeePct = "N/A";
+        op.estimatedTime = "N/A";
+      }
+    },
+  );
 
   // Build summary
   const totalOps = operations.length;

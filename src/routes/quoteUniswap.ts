@@ -19,7 +19,7 @@
 import { Hono } from "hono";
 import type { Env, AppVariables } from "../types.js";
 import type { Address } from "viem";
-import { enrichQuoteWithOracle } from "../services/quoteEnrichment.js";
+import { getOracleSwapMetrics } from "../services/swapShield.js";
 import { sanitizeError } from "../config.js";
 
 const TRADING_API_URL = "https://trade-api.gateway.uniswap.org/v1";
@@ -104,12 +104,12 @@ quoteUniswap.post("/", async (c) => {
       const output = (quoteObj.output as Record<string, string>) || {};
       const dexExpectedOut = output.amount || "0";
 
-      enrichment = await enrichQuoteWithOracle(
+      enrichment = await getOracleSwapMetrics(
         chainId,
         tokenIn,
         tokenOut,
-        amountIn,
-        dexExpectedOut,
+        BigInt(amountIn),
+        BigInt(dexExpectedOut),
         c.env.ALCHEMY_API_KEY,
       );
     }

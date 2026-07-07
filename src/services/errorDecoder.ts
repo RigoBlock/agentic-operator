@@ -152,8 +152,64 @@ export function decodeRevertData(data: string): string | null {
 
 /**
  * Pull a revert-data hex string out of a potentially verbose error message.
+ *
+ * Only matches hex strings that are explicitly labelled as revert data, e.g.
+ *   "revert data: 0x08c379a0..."
+ *   "revert reason: 0x08c379a0..."
+ *   "execution reverted: 0x08c379a0..."
+ *
+ * This avoids mistaking the original transaction calldata (which viem prints in
+ * "Raw Call Arguments: data: 0x...") for a revert reason.
  */
 export function extractRevertData(raw: string): string | null {
-  const match = raw.match(/(?:revert data:|0x)[\s]*?(0x[0-9a-fA-F]{8,})/i);
-  return match ? match[1].toLowerCase() : null;
+  const matches = raw.matchAll(
+    /(?:revert data:|revert reason:|execution reverted:)\s*(0x[0-9a-fA-F]{8,})/gi,
+  );
+  for (const match of matches) {
+    const hex = match[1];
+    // Exclude Ethereum addresses (42 chars) — we want revert payloads, not addresses.
+    if (hex.length !== 42) return hex.toLowerCase();
+  }
+  return null;
+}
+
+/**
+ * Walk a viem / RPC error object and extract any raw revert-data payload.
+ * RPC providers put the revert hex in different places (data, error.data,
+ * cause.data, details string, etc.), so we check all of them.
+ */
+export function getRevertDataFromError(err: unknown): string | null {
+  if (!err || typeof err !== "object") return null;
+
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+
+    const candidates = [
+      record.data,
+      (record.error as Record<string, unknown> | undefined)?.data,
+      (record.cause as Record<string, unknown> | undefined)?.data,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && /^0x[0-9a-fA-F]{8,}$/.test(candidate)) {
+        return candidate.toLowerCase();
+      }
+    }
+
+    // Some providers embed the revert data inside the message/details string.
+    for (const key of ["message", "details", "shortMessage"]) {
+      const val = record[key];
+      if (typeof val === "string") {
+        const extracted = extractRevertData(val);
+        if (extracted) return extracted;
+      }
+    }
+
+    current = record.cause ?? record.error;
+  }
+
+  return null;
 }

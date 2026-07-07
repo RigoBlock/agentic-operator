@@ -19,7 +19,7 @@
 import { Hono } from "hono";
 import type { Env, AppVariables } from "../types.js";
 import type { Address } from "viem";
-import { enrichQuoteWithOracle } from "../services/quoteEnrichment.js";
+import { getOracleSwapMetrics } from "../services/swapShield.js";
 import { sanitizeError } from "../config.js";
 
 const ZEROX_API_URL = "https://api.0x.org";
@@ -81,12 +81,12 @@ quote0x.get("/", async (c) => {
       : String(data.estimatedNetSellAmount || data.maxSellAmount || data.sellAmount || "0");
     const dexExpectedOut = String(data.buyAmount || "0");
     try {
-      enrichment = await enrichQuoteWithOracle(
+      enrichment = await getOracleSwapMetrics(
         chainId,
         tokenIn,
         tokenOut,
-        amountIn,
-        dexExpectedOut,
+        BigInt(amountIn),
+        BigInt(dexExpectedOut),
         c.env.ALCHEMY_API_KEY,
       );
     } catch {

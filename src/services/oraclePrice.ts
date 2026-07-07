@@ -30,6 +30,14 @@ const Q96 = 2n ** 96n;
 const MAX_TICK_SPACING = 32767;
 const ORACLE_POOL_FEE = 0;
 
+/** Thrown when the BackgeoOracle pool exists but has no observations (cardinality = 0). */
+export class NoOraclePriceFeedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NoOraclePriceFeedError";
+  }
+}
+
 /** TTL for the in-memory oracle spot-tick cache (ms). Keep this short so the
  *  spot price updates with new blocks/transactions, but long enough to collapse
  *  genuinely redundant RPC calls fired in the same burst (e.g., Alchemy invoking
@@ -63,6 +71,41 @@ function jsbiToBigInt(x: JSBI): bigint {
 function getSqrtPriceAtTick(tick: number): bigint {
   const jsbiResult = TickMath.getSqrtRatioAtTick(tick);
   return jsbiToBigInt(jsbiResult);
+}
+
+/** Convert an amount using two oracle spot ticks and the EOracle formula.
+ *  `tokenIn` and `tokenOut` must already be normalized (ETH = zero address).
+ */
+function convertAmountWithTicks(
+  amount: bigint,
+  tokenInTick: number,
+  tokenOutTick: number,
+  tokenIn: Address,
+  tokenOut: Address,
+  chainId: number,
+): bigint {
+  let conversionTick: number;
+  if (tokenIn === ETH_ADDRESS) {
+    conversionTick = tokenOutTick;
+  } else if (tokenOut === ETH_ADDRESS) {
+    conversionTick = -tokenInTick;
+  } else {
+    conversionTick = tokenOutTick - tokenInTick;
+  }
+
+  // TickMath.MIN_TICK = -887272, TickMath.MAX_TICK = 887272
+  if (conversionTick < -887272 || conversionTick > 887272) {
+    throw new Error(
+      `Oracle conversion tick out of bounds (${conversionTick}) for ${tokenIn} → ${tokenOut} on chain ${chainId}`
+    );
+  }
+
+  const sqrtPriceX96 = getSqrtPriceAtTick(conversionTick);
+  const priceX192 = sqrtPriceX96 * sqrtPriceX96;
+  const absAmount = amount < 0n ? -amount : amount;
+  const converted = (absAmount * priceX192) / (Q96 * Q96);
+
+  return amount < 0n ? -converted : converted;
 }
 
 /** Normalize a token address to the form the oracle expects:
@@ -299,32 +342,127 @@ export async function convertTokenAmountViaOracle(
     alchemyKey,
   );
 
-  // Compute conversion tick exactly as EOracle does:
-  // ETH → token:   tick = targetTick
-  // token → ETH:   tick = -tokenTick
-  // tokenA → tokenB: tick = targetTick - tokenTick
-  let conversionTick: number;
-  if (normalizedToken === ETH_ADDRESS) {
-    conversionTick = targetTick;
-  } else if (normalizedTarget === ETH_ADDRESS) {
-    conversionTick = -tokenTick;
-  } else {
-    conversionTick = targetTick - tokenTick;
+  return convertAmountWithTicks(
+    amount,
+    tokenTick,
+    targetTick,
+    normalizedToken,
+    normalizedTarget,
+    chainId,
+  );
+}
+
+/**
+ * Fetch oracle price-feed status and converted amount in a single RPC round-trip.
+ *
+ * Combines the cardinality check (getState) and spot-tick read (observe) for each
+ * non-ETH token into one viem multicall. This collapses the two separate oracle
+ * round-trips that `enrichQuoteWithOracle` used to make into one.
+ *
+ * @returns `{ priceFeedExists: true, oracleAmount }` when both tokens have feeds.
+ * @throws When the oracle is not deployed, a required feed is missing, or observe reverts.
+ */
+export async function getOracleQuoteData(
+  chainId: number,
+  tokenIn: Address,
+  amountIn: bigint,
+  tokenOut: Address,
+  alchemyKey: string,
+): Promise<{ priceFeedExists: boolean; oracleAmount: bigint }> {
+  if (amountIn === 0n) {
+    return { priceFeedExists: false, oracleAmount: 0n };
   }
 
-  // TickMath.MIN_TICK = -887272, TickMath.MAX_TICK = 887272
-  if (conversionTick < -887272 || conversionTick > 887272) {
-    throw new Error(
-      `Oracle conversion tick out of bounds (${conversionTick}) for ${token} → ${targetToken} on chain ${chainId}`
+  const oracle = BACKGEO_ORACLE[chainId];
+  if (!oracle) {
+    throw new Error(`BackgeoOracle not deployed on chain ${chainId}`);
+  }
+
+  const normalizedIn = normalizeTokenAddress(tokenIn, chainId);
+  const normalizedOut = normalizeTokenAddress(tokenOut, chainId);
+
+  if (normalizedIn.toLowerCase() === normalizedOut.toLowerCase()) {
+    return { priceFeedExists: true, oracleAmount: amountIn };
+  }
+
+  const tokenSet = new Set<Address>();
+  if (normalizedIn !== ETH_ADDRESS) tokenSet.add(normalizedIn);
+  if (normalizedOut !== ETH_ADDRESS) tokenSet.add(normalizedOut);
+  const tokens = Array.from(tokenSet);
+
+  // Both inputs normalized to ETH — should have been caught above, but handle safely.
+  if (tokens.length === 0) {
+    return { priceFeedExists: true, oracleAmount: amountIn };
+  }
+
+  const client = getClient(chainId, alchemyKey);
+  const SECONDS_AGOS = [0, 1] as const;
+
+  const contracts = tokens.flatMap((token) => [
+    {
+      address: oracle,
+      abi: BACKGEO_ORACLE_ABI,
+      functionName: "getState" as const,
+      args: [buildOraclePoolKey(chainId, token)] as const,
+    },
+    {
+      address: oracle,
+      abi: BACKGEO_ORACLE_ABI,
+      functionName: "observe" as const,
+      args: [buildOraclePoolKey(chainId, token), SECONDS_AGOS] as const,
+    },
+  ]);
+
+  const results = await client.multicall({
+    allowFailure: true,
+    contracts,
+  });
+
+  const tickByToken = new Map<string, number>();
+  const now = Date.now();
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const stateResult = results[i * 2];
+    const observeResult = results[i * 2 + 1];
+
+    if (stateResult.status !== "success") {
+      throw new Error(`Oracle getState failed for ${token} on chain ${chainId}`);
+    }
+    const state = stateResult.result as { index: number; cardinality: number; cardinalityNext: number };
+    if (state.cardinality <= 0) {
+      throw new NoOraclePriceFeedError(`No oracle price feed for ${token} on chain ${chainId}`);
+    }
+
+    if (observeResult.status !== "success") {
+      throw new Error(`Oracle observe failed for ${token} on chain ${chainId}`);
+    }
+
+    const tick = observeResultToTick(
+      observeResult.result as unknown as [bigint[], bigint[]],
+      SECONDS_AGOS,
     );
+    const lower = token.toLowerCase();
+    tickByToken.set(lower, tick);
+    tickCache.set(getTickCacheKey(chainId, token, oracle), {
+      tick,
+      expiresAt: now + TICK_CACHE_TTL_MS,
+    });
   }
 
-  const sqrtPriceX96 = getSqrtPriceAtTick(conversionTick);
-  const priceX192 = sqrtPriceX96 * sqrtPriceX96;
-  const absAmount = amount < 0n ? -amount : amount;
-  const converted = (absAmount * priceX192) / (Q96 * Q96);
+  const tokenInTick = normalizedIn === ETH_ADDRESS ? 0 : tickByToken.get(normalizedIn.toLowerCase())!;
+  const tokenOutTick = normalizedOut === ETH_ADDRESS ? 0 : tickByToken.get(normalizedOut.toLowerCase())!;
 
-  return amount < 0n ? -converted : converted;
+  const oracleAmount = convertAmountWithTicks(
+    amountIn,
+    tokenInTick,
+    tokenOutTick,
+    normalizedIn,
+    normalizedOut,
+    chainId,
+  );
+
+  return { priceFeedExists: true, oracleAmount };
 }
 
 /**

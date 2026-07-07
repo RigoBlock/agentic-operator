@@ -14,12 +14,12 @@ const {
   mockGetUniswapSwapCalldata,
   mockGetVaultTokenBalance,
   mockEncodeVaultExecute,
-  mockEnrichQuoteWithOracle,
   mockResolveSlippage,
   mockRunSwapShield,
   mockTxActionLine,
   mockSwitchChainIfNeeded,
   mockResolveChainName,
+  mockRpcCall,
   mockResolveTokenAddress,
   mockGetWrappedNativeAddress,
   mockGetNativeTokenSymbol,
@@ -31,12 +31,12 @@ const {
   mockGetUniswapSwapCalldata: vi.fn(),
   mockGetVaultTokenBalance: vi.fn(),
   mockEncodeVaultExecute: vi.fn(),
-  mockEnrichQuoteWithOracle: vi.fn(),
   mockResolveSlippage: vi.fn().mockResolvedValue(100),
   mockRunSwapShield: vi.fn().mockResolvedValue({}),
   mockTxActionLine: vi.fn().mockReturnValue(""),
   mockSwitchChainIfNeeded: vi.fn().mockReturnValue(undefined),
   mockResolveChainName: vi.fn().mockReturnValue("Polygon"),
+  mockRpcCall: vi.fn(),
   mockResolveTokenAddress: vi.fn().mockImplementation(async (_chainId: number, symbol: string) => {
     const map: Record<string, string> = {
       POL: "0x0000000000000000000000000000000000000000",
@@ -66,10 +66,6 @@ vi.mock("../src/services/vault.js", () => ({
   getTokenDecimals: vi.fn().mockResolvedValue(18),
 }));
 
-vi.mock("../src/services/quoteEnrichment.js", () => ({
-  enrichQuoteWithOracle: mockEnrichQuoteWithOracle,
-}));
-
 vi.mock("../src/llm/client.js", () => ({
   resolveSlippage: mockResolveSlippage,
   runSwapShield: mockRunSwapShield,
@@ -82,6 +78,10 @@ vi.mock("../src/config.js", () => ({
   resolveTokenAddress: mockResolveTokenAddress,
   getWrappedNativeAddress: mockGetWrappedNativeAddress,
   getNativeTokenSymbol: mockGetNativeTokenSymbol,
+}));
+
+vi.mock("../src/services/rpcClient.js", () => ({
+  getClient: () => ({ call: mockRpcCall }),
 }));
 
 import {
@@ -209,8 +209,8 @@ describe("handle_build_vault_swap", () => {
     vi.clearAllMocks();
     mockGetVaultTokenBalance.mockResolvedValue({ balance: BigInt("100000000000000000000"), decimals: 18, symbol: "POL" });
     mockEncodeVaultExecute.mockReturnValue("0xencoded" as Hex);
-    mockEnrichQuoteWithOracle.mockResolvedValue({ priceFeedExists: true, oracleAmount: "0" });
     mockGetUniswapSwapCalldata.mockResolvedValue(makeUniswapSwapTx());
+    mockRpcCall.mockResolvedValue(undefined);
   });
 
   it("falls back to Uniswap when 0x reports no liquidity", async () => {
@@ -244,6 +244,25 @@ describe("handle_build_vault_swap", () => {
     ).rejects.toThrow("Swap Shield blocked this trade");
 
     expect(mockGetUniswapQuote).not.toHaveBeenCalled();
+  });
+
+  it("falls back to Uniswap when the vault's A0xRouter rejects the settler action", async () => {
+    mockGetZeroXQuote.mockResolvedValue(makeZeroXQuoteExactOutput());
+    mockRpcCall.mockRejectedValue(
+      new Error("0x Settler action 0x131ad428 is not allowed by Rigoblock's A0xRouter on this chain. Try the same swap via Uniswap or on another chain."),
+    );
+    mockGetUniswapQuote.mockResolvedValue(makeUniswapQuote());
+
+    const result = await handle_build_vault_swap(makeEnv(), makeCtx({ chainId: 42161 }), {
+      tokenIn: "ETH",
+      tokenOut: "GRG",
+      amountOut: "2.5",
+    }, "build_vault_swap");
+
+    expect(mockRpcCall).toHaveBeenCalledTimes(1);
+    expect(mockGetUniswapQuote).toHaveBeenCalledTimes(1);
+    expect(result.message).toContain("0x could not route");
+    expect(result.transaction?.swapMeta?.dex).toBe("Uniswap");
   });
 
   it("returns a transaction for exact-output native 0x swaps using the raw 0x calldata", async () => {

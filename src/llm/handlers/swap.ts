@@ -17,11 +17,13 @@ import { getZeroXQuote, formatZeroXQuoteForDisplay, type ZeroXQuote } from "../.
 import { getVaultTokenBalance, encodeVaultExecute } from "../../services/vault.js";
 import { resolveTokenAddress, getWrappedNativeAddress, getNativeTokenSymbol } from "../../config.js";
 import { encodeFunctionData, decodeFunctionData, parseUnits, formatUnits } from "viem";
+import { getClient } from "../../services/rpcClient.js";
+import { getRevertDataFromError, decodeRevertData } from "../../services/errorDecoder.js";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import {
   resolveChainName, resolveSlippage, runSwapShield, switchChainIfNeeded, txActionLine,
 } from "../client.js";
-import { enrichQuoteWithOracle } from "../../services/quoteEnrichment.js";
+
 
 const AUNISWAP_ABI = [
   { name: "wrapETH",     type: "function", stateMutability: "nonpayable", inputs: [{ name: "value",         type: "uint256" }], outputs: [] },
@@ -48,6 +50,44 @@ function isZeroXFatalError(message: string): boolean {
   );
 }
 
+/**
+ * Simulate a 0x vault swap as the operator before returning it to the caller.
+ *
+ * The 0x API quote may embed a settler action that Rigoblock's A0xRouter adapter
+ * does not allow on the target chain. That revert only surfaces when the swap is
+ * simulated through the vault. By catching it here we trigger the Uniswap fallback
+ * inside `handle_build_vault_swap` instead of returning a revert to the user.
+ */
+async function simulate0xVaultSwap(
+  env: Env,
+  ctx: RequestContext,
+  assembly: SwapAssembly,
+): Promise<void> {
+  if (!ctx.operatorAddress || ctx.operatorAddress.toLowerCase() === "0x0000000000000000000000000000000000000000") {
+    return;
+  }
+
+  const client = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
+  const txValue = BigInt(assembly.value || "0x0");
+
+  try {
+    await client.call({
+      account: ctx.operatorAddress as Address,
+      to: ctx.vaultAddress as Address,
+      data: assembly.calldata,
+      value: txValue,
+    });
+  } catch (err) {
+    const revertData = getRevertDataFromError(err);
+    const decoded = revertData ? decodeRevertData(revertData) : null;
+    const msg = decoded || (err instanceof Error ? err.message : String(err));
+    if (isZeroXFatalError(msg)) {
+      throw new Error(msg);
+    }
+    // Non-fatal reverts are left for the unified finalization path to surface.
+  }
+}
+
 /** Format a raw wei amount to a human-readable decimal string (6 places). */
 function formatRawAmount(amount: string, decimals: number): string {
   const value = BigInt(amount);
@@ -69,6 +109,8 @@ interface SwapAssembly {
   /** Slippage-adjusted worst-case sell amount for exact-output balance checks. */
   maxSellAmount?: string;
   calldata: Hex;
+  /** Native ETH value attached to the vault call (e.g. for 0x native sells). */
+  value?: string;
   fallbackNote?: string;
 }
 
@@ -182,24 +224,13 @@ async function assembleSwapTransaction(
     }
   }
 
-  // ── Oracle enrichment (deduplicates RPC calls for Swap Shield) ──
-  const oracleEnrichment = await enrichQuoteWithOracle(
-    ctx.chainId,
-    assembly.sellToken,
-    assembly.buyToken,
-    assembly.sellAmount,
-    assembly.buyAmount,
-    env.ALCHEMY_API_KEY,
-  );
-
-  // ── Swap Shield — oracle price check ──
+  // ── Swap Shield — oracle price check (one batched oracle round-trip) ──
   const shield = await runSwapShield(
     env, ctx, intent,
     assembly.sellAmount, assembly.decimalsIn,
     assembly.buyAmount,
     assembly.sellToken,
     assembly.buyToken,
-    oracleEnrichment,
   );
 
   // ── Formatting ──
@@ -288,8 +319,14 @@ async function buildVaultSwapWith0x(
     decimalsOut: zxQuote.decimalsOut,
     maxSellAmount: zxQuote.maxSellAmount,
     calldata: zxQuote.transaction.data,
+    value: zxQuote.transaction.value || "0x0",
     fallbackNote,
   };
+
+  // Fail fast if the vault's A0xRouter adapter rejects this settler action.
+  // This lets `handle_build_vault_swap` fall back to Uniswap before the user
+  // sees a revert during gas estimation.
+  await simulate0xVaultSwap(env, ctx, assembly);
 
   return assembleSwapTransaction(env, ctx, intent, chainSwitched, chainName, assembly);
 }

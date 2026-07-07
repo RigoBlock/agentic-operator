@@ -533,6 +533,10 @@ telegram.get("/debug", async (c) => {
 async function handleUpdate(env: Env, token: string, update: TgUpdate): Promise<void> {
   try {
     if (update.callback_query) {
+      // If the callback starts a background pending-tx poller, await it here so
+      // the outer executionCtx.waitUntil keeps the Worker alive until the poller
+      // finishes (up to its 3-minute cap). Without this, the fire-and-forget
+      // poller may be terminated as soon as the webhook returns 200 OK.
       await handleCallbackQuery(env, token, update.callback_query);
       return;
     }
@@ -1406,6 +1410,7 @@ async function handleCallbackQuery(
     // single transaction, update the elapsed time every 5 seconds. After 30s
     // switch to a calmer message so the counter does not look like a hang.
     let progressTimer: ReturnType<typeof setInterval> | undefined;
+    let pendingPoller: Promise<void> | undefined;
     try {
       const executionStart = Date.now();
       if (txList.length === 1) {
@@ -1471,8 +1476,10 @@ async function handleCallbackQuery(
       // For pending sponsored transactions, keep polling in the background and
       // update the Telegram message once they land. This handles the common case
       // where Alchemy's waitForCallsStatus times out before mainnet confirmation.
+      // We return this promise so handleUpdate can await it inside the webhook's
+      // executionCtx.waitUntil, keeping the Worker alive for the full poll window.
       if (pendingOutcomes.length > 0) {
-        pollPendingTelegramTxs(env, token, chatId, messageId, pendingOutcomes, userId, staleHint).catch(err =>
+        pendingPoller = pollPendingTelegramTxs(env, token, chatId, messageId, pendingOutcomes, userId, staleHint).catch(err =>
           console.error("[telegram] Background pending-tx polling failed:", err),
         );
       }
@@ -1490,7 +1497,7 @@ async function handleCallbackQuery(
       if (progressTimer) clearInterval(progressTimer);
     }
 
-    return;
+    return pendingPoller;
   }
 
   // ── Trade cancellation ──

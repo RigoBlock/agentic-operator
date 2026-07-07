@@ -30,7 +30,7 @@ import {
   checkSwapPrice,
 } from "../services/swapShield.js";
 import { TOOL_HANDLER_REGISTRY } from "./handlers/index.js";
-import { decodeRevertData, extractRevertData } from "../services/errorDecoder.js";
+import { decodeRevertData, extractRevertData, getRevertDataFromError } from "../services/errorDecoder.js";
 import { finalizeToolTransaction } from "../services/execution.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
@@ -1135,40 +1135,32 @@ ${executionModeNote}${contextDocsBlock}`;
           //   EstimateGasExecutionError → CallExecutionError → ExecutionRevertedError → RpcRequestError
           // Revert data lives on ExecutionRevertedError.data OR RpcRequestError.error.data
           // (NOT necessarily top-level e.data on RpcRequestError).
-          // Strategy: walk the chain, grab hex data from any level, keep the FIRST
-          // meaningful message (higher in the chain = more context, not less).
+          // Strategy: walk the chain, grab hex data from any level, decode it, and
+          // fall back to the first meaningful message if no revert payload exists.
           let rawMsg: string;
           if (err instanceof Error) {
-            let revertData: string | undefined;
-            let bestMessage: string | undefined;
-            const GENERIC_MSG = /RPC Request failed|unknown reason/i;
-            let e: any = err;
-            while (e) {
-              // Check both e.data and e.error?.data for hex revert payload
-              const hexData =
-                (typeof e.data === 'string' && e.data.startsWith('0x') && e.data.length > 2) ? e.data
-                : (typeof e.error?.data === 'string' && e.error.data.startsWith('0x') && e.error.data.length > 2) ? e.error.data
-                : undefined;
-              if (hexData) {
-                revertData = hexData;
-                break;
-              }
-              // Keep the FIRST meaningful message — shallow errors have more context
-              if (!bestMessage) {
-                if (e.shortMessage && !GENERIC_MSG.test(e.shortMessage)) {
-                  bestMessage = e.shortMessage;
-                } else if (e.details && !GENERIC_MSG.test(e.details)) {
-                  bestMessage = e.details;
-                }
-              }
-              e = e.cause;
-            }
+            const revertData = getRevertDataFromError(err);
             if (revertData) {
-              rawMsg = `execution reverted: ${revertData}`;
-            } else if (bestMessage) {
-              rawMsg = bestMessage;
+              const decoded = decodeRevertData(revertData);
+              rawMsg = decoded
+                ? `execution reverted: ${decoded}`
+                : `execution reverted: ${revertData}`;
             } else {
-              rawMsg = err.message;
+              let bestMessage: string | undefined;
+              const GENERIC_MSG = /RPC Request failed|unknown reason/i;
+              let e: any = err;
+              while (e) {
+                // Keep the FIRST meaningful message — shallow errors have more context
+                if (!bestMessage) {
+                  if (e.shortMessage && !GENERIC_MSG.test(e.shortMessage)) {
+                    bestMessage = e.shortMessage;
+                  } else if (e.details && !GENERIC_MSG.test(e.details)) {
+                    bestMessage = e.details;
+                  }
+                }
+                e = e.cause;
+              }
+              rawMsg = bestMessage || err.message;
             }
             // For swap tools, append what was being attempted so the user can diagnose
             if ((name === 'build_vault_swap' || name === 'get_swap_quote') && args) {
@@ -1618,7 +1610,6 @@ export async function runSwapShield(
   buyAmountRaw: string,
   resolvedTokenIn?: Address,
   resolvedTokenOut?: Address,
-  oracleEnrichment?: { priceFeedExists: boolean; oracleAmount: string },
 ): Promise<{ warning?: string; metrics?: SwapShieldMetrics }> {
   // Check temporary tolerance override
   let maxDivergencePct: number | undefined;
@@ -1674,8 +1665,6 @@ export async function runSwapShield(
     intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
     env.ALCHEMY_API_KEY,
     maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT,
-    oracleEnrichment?.priceFeedExists,
-    oracleEnrichment?.oracleAmount ? BigInt(oracleEnrichment.oracleAmount) : undefined,
   );
 
   const metrics: SwapShieldMetrics = {

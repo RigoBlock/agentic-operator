@@ -13,14 +13,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Address } from "viem";
 
 // ── Mock oraclePrice.ts before importing swapShield ──
-const { mockConvertTokenAmount, mockHasPriceFeed } = vi.hoisted(() => ({
-  mockConvertTokenAmount: vi.fn(),
-  mockHasPriceFeed: vi.fn(),
+const { mockGetOracleQuoteData } = vi.hoisted(() => ({
+  mockGetOracleQuoteData: vi.fn(),
 }));
 
 vi.mock("../src/services/oraclePrice.js", () => ({
-  convertTokenAmountViaOracle: mockConvertTokenAmount,
-  hasPriceFeedForPair: mockHasPriceFeed,
+  getOracleQuoteData: mockGetOracleQuoteData,
+  NoOraclePriceFeedError: class extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "NoOraclePriceFeedError";
+    }
+  },
   normalizeTokenAddress: (token: Address, chainId: number) => {
     const ETH_ADDRESS = "0x0000000000000000000000000000000000000000";
     const lower = token.toLowerCase();
@@ -84,15 +88,13 @@ const ALCHEMY_KEY = "test-key";
 
 describe("Swap Shield — checkSwapPrice", () => {
   beforeEach(() => {
-    mockConvertTokenAmount.mockReset();
-    mockHasPriceFeed.mockReset();
+    mockGetOracleQuoteData.mockReset();
   });
 
   it("allows swaps within 5% divergence", async () => {
     // Oracle says 1000 tokenOut, DEX gives 960
     // Divergence = (1000 - 960) / 1000 = 4%
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockResolvedValue(1000n * 10n ** 18n);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: true, oracleAmount: 1000n * 10n ** 18n });
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -112,8 +114,7 @@ describe("Swap Shield — checkSwapPrice", () => {
   it("blocks swaps exceeding 5% divergence", async () => {
     // Oracle says 1000, DEX gives 800
     // Divergence = (1000 - 800) / 1000 = 20%
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockResolvedValue(1000n * 10n ** 18n);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: true, oracleAmount: 1000n * 10n ** 18n });
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -135,8 +136,7 @@ describe("Swap Shield — checkSwapPrice", () => {
 
   it("allows swaps where DEX gives moderately MORE than oracle (favorable)", async () => {
     // Oracle says 1000, DEX gives 1050 (5% favorable — within 10% limit)
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockResolvedValue(1000n * 10n ** 18n);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: true, oracleAmount: 1000n * 10n ** 18n });
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -154,8 +154,7 @@ describe("Swap Shield — checkSwapPrice", () => {
 
   it("blocks swaps where DEX gives suspiciously MORE than oracle (>10% favorable)", async () => {
     // Oracle says 1000, DEX gives 1200 (20% favorable — stale oracle / manipulated route)
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockResolvedValue(1000n * 10n ** 18n);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: true, oracleAmount: 1000n * 10n ** 18n });
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -173,8 +172,7 @@ describe("Swap Shield — checkSwapPrice", () => {
 
   it("uses expected DEX output directly for divergence", async () => {
     // Oracle = 1000, DEX quote = 970 → divergence = 3%
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockResolvedValue(1000n);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: true, oracleAmount: 1000n });
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -191,7 +189,7 @@ describe("Swap Shield — checkSwapPrice", () => {
   });
 
   it("gracefully handles missing price feed (hasPriceFeed returns false)", async () => {
-    mockHasPriceFeed.mockResolvedValue(false);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: false, oracleAmount: 0n });
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -205,12 +203,10 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.verified).toBe(false);
     expect(result.code).toBe("NO_PRICE_FEED");
     expect(result.priceFeedExists).toBe(false);
-    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
   });
 
-  it("classifies ORACLE_ERROR when hasPriceFeed returns true but convertTokenAmount still reverts", async () => {
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockRejectedValue(new Error("execution reverted"));
+  it("classifies ORACLE_ERROR when oracle conversion reverts", async () => {
+    mockGetOracleQuoteData.mockRejectedValue(new Error("execution reverted"));
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -226,8 +222,8 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.priceFeedExists).toBe(true);
   });
 
-  it("classifies ORACLE_ERROR when hasPriceFeed also throws", async () => {
-    mockHasPriceFeed.mockRejectedValue(new Error("execution reverted"));
+  it("classifies ORACLE_ERROR when oracle lookup reverts", async () => {
+    mockGetOracleQuoteData.mockRejectedValue(new Error("execution reverted"));
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -239,8 +235,8 @@ describe("Swap Shield — checkSwapPrice", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
-    expect(result.code).toBe("NO_PRICE_FEED");
-    expect(result.priceFeedExists).toBe(false);
+    expect(result.code).toBe("ORACLE_ERROR");
+    expect(result.priceFeedExists).toBe(true);
   });
 
   it("blocks invalid quote when expected output is zero for non-zero input", async () => {
@@ -256,8 +252,7 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.verified).toBe(false);
     expect(result.code).toBe("INVALID_QUOTE");
     expect(result.reason).toContain("expected output is zero");
-    expect(mockHasPriceFeed).not.toHaveBeenCalled();
-    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
+    expect(mockGetOracleQuoteData).not.toHaveBeenCalled();
   });
 
   it("rejects negative DEX expected output as INVALID_QUOTE without hitting the oracle", async () => {
@@ -272,8 +267,7 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(false);
     expect(result.verified).toBe(false);
     expect(result.code).toBe("INVALID_QUOTE");
-    expect(mockHasPriceFeed).not.toHaveBeenCalled();
-    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
+    expect(mockGetOracleQuoteData).not.toHaveBeenCalled();
   });
 
   it("rejects negative input amount as INVALID_QUOTE without hitting the oracle", async () => {
@@ -288,16 +282,14 @@ describe("Swap Shield — checkSwapPrice", () => {
     expect(result.allowed).toBe(false);
     expect(result.verified).toBe(false);
     expect(result.code).toBe("INVALID_QUOTE");
-    expect(mockHasPriceFeed).not.toHaveBeenCalled();
-    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
+    expect(mockGetOracleQuoteData).not.toHaveBeenCalled();
   });
 
   it("treats negative oracle return as ORACLE_ERROR (fail closed, no sign flip)", async () => {
     // If convertTokenAmount somehow returns a negative int256 for a positive
     // input, we must NOT silently flip the sign — doing so could bypass the
     // divergence threshold. Degrade gracefully to ORACLE_ERROR instead.
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockResolvedValue(-1000n * 10n ** 18n);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: true, oracleAmount: -1000n * 10n ** 18n });
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -316,8 +308,7 @@ describe("Swap Shield — checkSwapPrice", () => {
   it("emits consistent negative divergencePct for favorable block (no double sign)", async () => {
     // Oracle 1000, DEX 1200 → 20% favorable, blocked.
     // divergencePct must be "-20.00" — never "--20.00".
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockResolvedValue(1000n * 10n ** 18n);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: true, oracleAmount: 1000n * 10n ** 18n });
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -342,13 +333,11 @@ describe("Swap Shield — checkSwapPrice", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
-    expect(mockHasPriceFeed).not.toHaveBeenCalled();
-    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
+    expect(mockGetOracleQuoteData).not.toHaveBeenCalled();
   });
 
   it("skips check when oracle returns zero", async () => {
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockResolvedValue(0n);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: true, oracleAmount: 0n });
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
@@ -366,8 +355,7 @@ describe("Swap Shield — checkSwapPrice", () => {
 
   it("normalizes WETH to address(0) for Base chain", async () => {
     const WETH_BASE = "0x4200000000000000000000000000000000000006" as Address;
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockResolvedValue(1000n);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: true, oracleAmount: 1000n });
 
     await checkSwapPrice(
       8453, WETH_BASE, TOKEN_OUT,
@@ -375,7 +363,7 @@ describe("Swap Shield — checkSwapPrice", () => {
     );
 
     // convertTokenAmountViaOracle should be called with address(0) as the tokenIn
-    const callArgs = mockConvertTokenAmount.mock.calls[0];
+    const callArgs = mockGetOracleQuoteData.mock.calls[0];
     expect(callArgs[1]).toBe("0x0000000000000000000000000000000000000000");
   });
 
@@ -393,14 +381,12 @@ describe("Swap Shield — checkSwapPrice", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
-    expect(mockHasPriceFeed).not.toHaveBeenCalled();
-    expect(mockConvertTokenAmount).not.toHaveBeenCalled();
+    expect(mockGetOracleQuoteData).not.toHaveBeenCalled();
   });
 
   it("respects custom maxDivergencePct", async () => {
     // Divergence = 4%, custom threshold 2%
-    mockHasPriceFeed.mockResolvedValue(true);
-    mockConvertTokenAmount.mockResolvedValue(1000n);
+    mockGetOracleQuoteData.mockResolvedValue({ priceFeedExists: true, oracleAmount: 1000n });
 
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,

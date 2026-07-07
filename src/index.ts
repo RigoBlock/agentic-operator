@@ -28,6 +28,7 @@ import { oracle } from "./routes/oracle.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
+import { mapWithConcurrencySettled } from "./services/concurrency.js";
 import { withRpcMetrics, getRpcMetrics } from "./services/rpcMetrics.js";
 import { createX402Middleware } from "./middleware/x402.js";
 
@@ -108,11 +109,12 @@ app.get("/api/vault", async (c) => {
     const otherChains = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS].filter(
       (ch) => ch.id !== preferredChain,
     );
-    const results = await Promise.allSettled(
-      otherChains.map(async (ch) => {
+    const results = await mapWithConcurrencySettled(
+      otherChains,
+      async (ch) => {
         const info = await getVaultInfo(ch.id, address as Address, c.env.ALCHEMY_API_KEY);
         return { ...info, chainId: ch.id };
-      }),
+      },
     );
     const found = results.find((r) => r.status === "fulfilled");
     if (found && found.status === "fulfilled") {

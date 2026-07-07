@@ -15,8 +15,8 @@ const { mockEnrich } = vi.hoisted(() => ({
   mockEnrich: vi.fn(),
 }));
 
-vi.mock("../src/services/quoteEnrichment.js", () => ({
-  enrichQuoteWithOracle: mockEnrich,
+vi.mock("../src/services/swapShield.js", () => ({
+  getOracleSwapMetrics: mockEnrich,
 }));
 
 import { quoteUniswap } from "../src/routes/quoteUniswap.js";
@@ -223,7 +223,7 @@ describe("POST /api/quote/uniswap", () => {
     expect(json.priceFeedExists).toBe(false);
     expect(json.deltaBps).toBe(0);
     expect(json.oracleAmount).toBe("0");
-    // enrichQuoteWithOracle should NOT have been called for EXACT_OUTPUT
+    // getOracleSwapMetrics should NOT have been called for EXACT_OUTPUT
     expect(mockEnrich).not.toHaveBeenCalled();
   });
 
@@ -262,7 +262,7 @@ describe("POST /api/quote/uniswap", () => {
     expect(json.priceFeedExists).toBe(false);
     expect(json.deltaBps).toBe(0);
     expect(json.oracleAmount).toBe("0");
-    // enrichQuoteWithOracle should NOT have been called when chainId is missing
+    // getOracleSwapMetrics should NOT have been called when chainId is missing
     expect(mockEnrich).not.toHaveBeenCalled();
   });
 });
@@ -385,8 +385,8 @@ describe("GET /api/quote/0x", () => {
       8453,
       "0x0000000000000000000000000000000000000000",
       "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-      "1000000000000000000",
-      "2000000000",
+      1000000000000000000n,
+      2000000000n,
       "test-alchemy-key",
     );
   });

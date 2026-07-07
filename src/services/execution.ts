@@ -44,7 +44,7 @@ import {
 import { checkNavImpact } from "./navGuard.js";
 import { getClient, ALCHEMY_ORIGIN } from "./rpcClient.js";
 import { getNavShieldThreshold } from "./navGuard.js";
-import { decodeRevertData, extractRevertData } from "./errorDecoder.js";
+import { decodeRevertData, extractRevertData, getRevertDataFromError } from "./errorDecoder.js";
 
 /**
  * Parse simulation revert messages to detect common ERC20/DEX token balance issues.
@@ -426,11 +426,30 @@ export async function prepareTransaction(
     });
   } catch (estErr) {
     const msg = estErr instanceof Error ? estErr.message : String(estErr);
-    const friendly = parseSimulationRevert(msg);
+    let revertData = getRevertDataFromError(estErr);
+
+    // Some RPCs return a generic "execution reverted" from eth_estimateGas without
+    // the actual revert payload. A follow-up eth_call with the same transaction often
+    // surfaces the real revert data so we can decode it for the user.
+    if (!revertData && (msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert"))) {
+      try {
+        await publicClient.call({
+          account: executor,
+          to: tx.to,
+          data: tx.data,
+          value: txValue,
+        });
+      } catch (callErr) {
+        revertData = getRevertDataFromError(callErr);
+      }
+    }
+
+    const decodedRevert = revertData ? decodeRevertData(revertData) : null;
+    const friendly = decodedRevert || parseSimulationRevert(msg);
     if (friendly || msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert")) {
       throw new ExecutionError(
         friendly ||
-        `Transaction simulation failed — the transaction would revert on-chain. Details: ${sanitizeError(msg)}`,
+        `Transaction simulation failed — the transaction would revert on-chain. The RPC did not return a revert reason.`,
         "SIMULATION_FAILED",
       );
     }

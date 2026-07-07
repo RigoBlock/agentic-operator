@@ -2,7 +2,7 @@
  * Revert-data decoder tests.
  */
 import { describe, it, expect } from "vitest";
-import { decodeRevertData, extractRevertData } from "../src/services/errorDecoder.js";
+import { decodeRevertData, extractRevertData, getRevertDataFromError } from "../src/services/errorDecoder.js";
 
 describe("decodeRevertData", () => {
   it("decodes Error(string) revert messages", () => {
@@ -50,5 +50,44 @@ describe("extractRevertData", () => {
 
   it("returns null when no revert data is present", () => {
     expect(extractRevertData("some random error")).toBeNull();
+  });
+});
+
+describe("getRevertDataFromError", () => {
+  it("reads data from the top-level error object", () => {
+    const err = { data: "0x3471741b" };
+    expect(getRevertDataFromError(err)).toBe("0x3471741b");
+  });
+
+  it("reads data from nested error.data", () => {
+    const err = { error: { data: "0x08c379a0" } };
+    expect(getRevertDataFromError(err)).toBe("0x08c379a0");
+  });
+
+  it("reads data from cause.data", () => {
+    const err = { cause: { data: "0x0f6e887f" } };
+    expect(getRevertDataFromError(err)).toBe("0x0f6e887f");
+  });
+
+  it("extracts hex from message strings when no structured data exists", () => {
+    const err = { message: "execution reverted: 0x3471741b" };
+    expect(getRevertDataFromError(err)).toBe("0x3471741b");
+  });
+
+  it("does not mistake raw transaction calldata for revert data", () => {
+    // viem prints the original calldata under "Raw Call Arguments: data: 0x2213bc0b...".
+    // The 0x AllowanceHolder execute selector is NOT a revert reason.
+    const msg =
+      'The contract function "execute" reverted.\n\n' +
+      'Raw Call Arguments:\n' +
+      '  data: 0x2213bc0b0000000000000000000000000000000000000000000000000000000000000000\n\n' +
+      'Details: execution reverted';
+    expect(extractRevertData(msg)).toBeNull();
+    expect(getRevertDataFromError(new Error(msg))).toBeNull();
+  });
+
+  it("returns null when nothing resembles revert data", () => {
+    expect(getRevertDataFromError(new Error("execution reverted"))).toBeNull();
+    expect(getRevertDataFromError({ message: "timeout" })).toBeNull();
   });
 });

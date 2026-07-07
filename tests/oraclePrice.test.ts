@@ -37,6 +37,7 @@ import {
   getOracleSpotTick,
   convertTokenAmountViaOracle,
   hasPriceFeedForPair,
+  getOracleQuoteData,
   clearOracleTickCache,
 } from "../src/services/oraclePrice.js";
 
@@ -240,6 +241,75 @@ describe("convertTokenAmountViaOracle", () => {
       8453, "0x0000000000000000000000000000000000000000" as Address, -500n, TOKEN, "test-key",
     );
     expect(result).toBe(-500n);
+  });
+});
+
+describe("getOracleQuoteData", () => {
+  it("returns same amount for same token without RPC", async () => {
+    const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
+    const result = await getOracleQuoteData(
+      8453, TOKEN, 1000n, TOKEN, "test-key",
+    );
+    expect(result.priceFeedExists).toBe(true);
+    expect(result.oracleAmount).toBe(1000n);
+    expect(mockMulticall).not.toHaveBeenCalled();
+  });
+
+  it("returns converted amount for ETH → token in a single multicall", async () => {
+    const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
+    mockMulticall.mockResolvedValueOnce([
+      { status: "success", result: { index: 0, cardinality: 5, cardinalityNext: 5 } },
+      { status: "success", result: [[0n, 0n], []] },
+    ]);
+
+    const result = await getOracleQuoteData(
+      8453,
+      "0x0000000000000000000000000000000000000000" as Address,
+      1000n,
+      TOKEN,
+      "test-key",
+    );
+
+    expect(result.priceFeedExists).toBe(true);
+    expect(result.oracleAmount).toBe(1000n);
+    expect(mockMulticall).toHaveBeenCalledTimes(1);
+    expect(mockReadContract).not.toHaveBeenCalled();
+  });
+
+  it("returns converted amount for tokenA → tokenB in one batched multicall", async () => {
+    const TOKEN_A = "0xaaaa000000000000000000000000000000000001" as Address;
+    const TOKEN_B = "0xbbbb000000000000000000000000000000000002" as Address;
+
+    mockMulticall.mockResolvedValueOnce([
+      { status: "success", result: { index: 0, cardinality: 5, cardinalityNext: 5 } },
+      { status: "success", result: [[1000n, 0n], []] }, // tickA = 1000
+      { status: "success", result: { index: 0, cardinality: 5, cardinalityNext: 5 } },
+      { status: "success", result: [[3000n, 1000n], []] }, // tickB = 2000
+    ]);
+
+    const result = await getOracleQuoteData(
+      8453, TOKEN_A, 1000n, TOKEN_B, "test-key",
+    );
+
+    expect(result.priceFeedExists).toBe(true);
+    expect(result.oracleAmount).toBeGreaterThan(1000n);
+    expect(mockMulticall).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when a required feed has zero cardinality", async () => {
+    const TOKEN_A = "0xaaaa000000000000000000000000000000000001" as Address;
+    const TOKEN_B = "0xbbbb000000000000000000000000000000000002" as Address;
+
+    mockMulticall.mockResolvedValueOnce([
+      { status: "success", result: { index: 0, cardinality: 5, cardinalityNext: 5 } },
+      { status: "success", result: [[0n, 0n], []] },
+      { status: "success", result: { index: 0, cardinality: 0, cardinalityNext: 0 } },
+      { status: "success", result: [[0n, 0n], []] },
+    ]);
+
+    await expect(
+      getOracleQuoteData(8453, TOKEN_A, 1000n, TOKEN_B, "test-key"),
+    ).rejects.toThrow("No oracle price feed");
   });
 });
 

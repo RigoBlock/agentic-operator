@@ -40,9 +40,7 @@ export function getClient(chainId: number, alchemyKey?: string): PublicClient {
 
   const client = createPublicClient({
     chain,
-    // Aggregate multiple readContract calls in the same microtask into one
-    // Multicall3 eth_call. This is the single biggest "free" RPC reduction.
-    batch: { multicall: true },
+    batch: { multicall: { wait: 16 } },
     transport: http(rpcUrl, {
       timeout: 10_000,
       fetchFn: instrumentedFetch,

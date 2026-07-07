@@ -22,13 +22,6 @@ import { getTokenDecimals } from "./vault.js";
 
 const ZEROX_API_URL = "https://api.0x.org";
 
-/**
- * AllowanceHolder contract address (same on all Cancun-hardfork chains).
- * Mantle uses a different address — not currently supported.
- */
-export const ALLOWANCE_HOLDER_ADDRESS =
-  "0x0000000000001fF3684f28c67538d4D072C22734" as Address;
-
 // ── Types ──────────────────────────────────────────────────────────────
 
 export interface ZeroXQuote {
