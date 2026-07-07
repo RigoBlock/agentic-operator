@@ -251,6 +251,14 @@ import { resolveTokenBySymbol } from "./services/tokenResolver.js";
  *  - Full viem "HTTP request failed" stack (keeps only the Details line)
  */
 export function sanitizeError(raw: string): string {
+  // 0. Preserve CoinGecko diagnostic URLs so users can see the exact endpoint
+  //    that failed. They contain no secrets and are useful for debugging.
+  const cgUrls: string[] = [];
+  raw = raw.replace(/https?:\/\/[^\s"')\/]*coingecko\.com[^\s"')]*/g, (match) => {
+    cgUrls.push(match);
+    return `__CG_URL_${cgUrls.length - 1}__`;
+  });
+
   // 1. Collapse the verbose viem "HTTP request failed" block into just the details
   const viemMatch = raw.match(/Details:\s*(.+?)(?:\n|$)/i);
   if (viemMatch) {
@@ -265,6 +273,11 @@ export function sanitizeError(raw: string): string {
   //    Preserves Ethereum addresses (0x-prefixed) while redacting bare keys.
   //    Negative lookahead (?!0x) prevents matching words that start with "0x".
   raw = raw.replace(/\b(?!0x)[A-Za-z0-9_-]{32,}\b/g, "[REDACTED]");
+
+  // Restore CoinGecko URLs
+  cgUrls.forEach((url, i) => {
+    raw = raw.replace(`__CG_URL_${i}__`, url);
+  });
 
   return raw;
 }

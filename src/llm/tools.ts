@@ -109,6 +109,34 @@ export const TOOL_DEFINITIONS = [
   {
     type: "function" as const,
     function: {
+      name: "verify_token",
+      description:
+        "Verify a token address or name against CoinGecko and register it for the current chain. " +
+        "Use this when a previous swap or quote failed because a token symbol could not be resolved " +
+        "or was ambiguous. The registry only stores mappings that CoinGecko confirms.",
+      parameters: {
+        type: "object",
+        properties: {
+          symbol: {
+            type: "string",
+            description: "Token symbol, e.g. LIT",
+          },
+          identifier: {
+            type: "string",
+            description: "Contract address (0x...) or exact token name as shown on CoinGecko",
+          },
+          chain: {
+            type: "string",
+            description: "Target chain name or ID. Only needed if different from the current chain.",
+          },
+        },
+        required: ["symbol", "identifier"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "get_vault_info",
       description: "Get vault name, symbol, owner, total supply.",
       parameters: { type: "object", properties: {}, required: [] },

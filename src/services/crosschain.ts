@@ -716,8 +716,8 @@ export async function buildRebalancePlan(params: {
  * fill profitably.
  *
  * These values are always applied (not a cap). For non-stablecoin tokens
- * (WETH/WBTC), the USD overhead is converted to token units using a live
- * market price fetched at quote time via fetchTokenPriceUsd().
+ * (WETH/WBTC), the USD overhead is converted to token units using a static
+ * conservative USD price floor (no external API call).
  *
  * Values are based on observed destination gas usage (~350K for sync fills,
  * ~500K for transfers) with 3-5x safety margin. A percentage cap
@@ -746,74 +746,22 @@ const AINTENTS_GAS_OVERHEAD_USD: Record<number, number> = {
  */
 const MAX_OVERHEAD_BPS = 50n;
 
-/** CoinGecko API IDs for live price lookups */
-const COINGECKO_IDS: Record<string, string> = {
-  WETH: "ethereum",
-  WBTC: "bitcoin",
-  ETH: "ethereum",
-  BNB: "binancecoin",
-  POL: "polygon-ecosystem-token",
-};
-
 /**
- * Batch-fetch live USD prices from CoinGecko for a set of symbols.
- * Stablecoins return 1 without a network call.
- * Throws on network failure or missing price so callers can decide
- * whether to fail (NAV display) or fall back (bridge fee overhead).
+ * Static conservative USD price floor for bridgeable token types.
+ * Used only for the AIntents gas-overhead deduction. Values are intentionally
+ * LOW so we deduct MORE tokens as overhead, giving the solver margin.
+ * Stablecoins use 1. No external API call is made.
  */
-async function fetchCoinGeckoPricesUsd(symbols: string[]): Promise<Record<string, number>> {
-  const normalized = symbols.map((s) => s.toUpperCase());
-  const unique = [...new Set(normalized)];
-  const result: Record<string, number> = {};
-  const ids: string[] = [];
-
-  for (const sym of unique) {
-    if (sym === "USDC" || sym === "USDT") {
-      result[sym] = 1;
-    } else {
-      const id = COINGECKO_IDS[sym];
-      if (!id) throw new Error(`No CoinGecko price mapping for ${sym}`);
-      ids.push(id);
-    }
-  }
-
-  if (ids.length === 0) return result;
-
-  const resp = await fetch(
-    `https://api.coingecko.com/api/v3/simple/price?ids=${ids.join(",")}&vs_currencies=usd`,
-  );
-  if (!resp.ok) throw new Error(`CoinGecko HTTP ${resp.status}`);
-  const data = (await resp.json()) as Record<string, { usd?: number }>;
-
-  for (const sym of unique) {
-    const id = COINGECKO_IDS[sym];
-    if (!id) continue;
-    const price = data[id]?.usd;
-    if (!price || price <= 0) {
-      throw new Error(`No USD price returned by CoinGecko for ${sym} (${id})`);
-    }
-    result[sym] = price;
-  }
-
-  return result;
-}
-
-/**
- * Fetch live USD price for a bridgeable token type.
- * Stablecoins return 1 without a network call.
- * Falls back to a conservative floor if CoinGecko is unavailable — the
- * fallback is intentional for bridge fee overhead estimation (gives the
- * solver margin), NOT for NAV computation.
- */
-async function fetchTokenPriceUsd(tokenType: BridgeableTokenType): Promise<number> {
-  try {
-    const prices = await fetchCoinGeckoPricesUsd([tokenType]);
-    return prices[tokenType.toUpperCase()];
-  } catch {
-    // Conservative floor: intentionally LOW so we deduct MORE tokens as
-    // overhead, giving the solver better margin. Safe for fills but the
-    // user pays slightly more than necessary.
-    return tokenType === "WBTC" ? 30000 : 1000;
+function getStaticTokenPriceFloor(tokenType: BridgeableTokenType): number {
+  switch (tokenType) {
+    case "USDC":
+    case "USDT":
+      return 1;
+    case "WBTC":
+      return 30000;
+    case "WETH":
+    default:
+      return 1000;
   }
 }
 
@@ -923,7 +871,8 @@ export async function getCrosschainQuote(
   // Parse amount in input token's native decimals (e.g. 18 for BSC USDT)
   const inputAmountRaw = parseUnits(amount, inputToken.decimals);
 
-  // Fetch suggested fees and live token price in parallel (zero added latency)
+  // Fetch suggested fees. Token price is a static conservative floor used only
+  // for the AIntents gas-overhead deduction (no external price API).
   const [fee, tokenPrice] = await Promise.all([
     getAcrossSuggestedFees(
       srcChainId,
@@ -935,7 +884,7 @@ export async function getCrosschainQuote(
       simulatedFill?.message,
     ),
     // Only need token price for static overhead (skip when simulation available)
-    simulatedFill ? Promise.resolve(1) : fetchTokenPriceUsd(outputToken.type),
+    simulatedFill ? Promise.resolve(1) : getStaticTokenPriceFloor(outputToken.type),
   ]);
 
   if (fee.isAmountTooLow) {

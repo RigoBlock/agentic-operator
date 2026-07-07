@@ -207,6 +207,13 @@ describe("sanitizeError", () => {
     expect(clean).toContain("execution reverted");
     expect(clean).not.toContain("Version:");
   });
+
+  it("preserves CoinGecko diagnostic URLs", () => {
+    const dirty = `CoinGecko rate-limited or blocked this IP (403) at https://api.coingecko.com/api/v3/search?query=LIT`;
+    const clean = sanitizeError(dirty);
+    expect(clean).toContain("https://api.coingecko.com/api/v3/search?query=LIT");
+    expect(clean).not.toContain("[RPC_URL]");
+  });
 });
 
 describe("resolveTokenAddress", () => {

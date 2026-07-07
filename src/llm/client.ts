@@ -16,6 +16,7 @@ import { getSkillTools, getSkillSystemPrompt } from "../skills/index.js";
 // Merge skill tools into the LLM-facing definitions (skill tools are always available for dispatch)
 const ALL_AGENT_TOOL_DEFINITIONS = [...AGENT_TOOL_DEFINITIONS, ...getSkillTools()];
 import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, getNativeTokenSymbol } from "../config.js";
+import { TokenResolutionError } from "../services/tokenResolver.js";
 import { AuthError } from "../services/auth.js";
 import { formatUnits, type Address, type Hex } from "viem";
 
@@ -1130,6 +1131,26 @@ ${executionModeNote}${contextDocsBlock}`;
             detectedDex = "GMX";
           }
         } catch (err) {
+          // Token resolution failures should ask the user for a contract address or
+          // exact token name instead of retrying the same failing swap tool.
+          if (err instanceof TokenResolutionError) {
+            let ask = err.message;
+            if (err.hint) ask += `\n\n${err.hint}`;
+            if (err.candidates && err.candidates.length > 0) {
+              ask += "\n" + err.candidates.map((c) => `• ${c.name} — ${c.address}`).join("\n");
+            }
+            toolMessages.push({ role: "tool", tool_call_id: toolCall.id, content: ask });
+            return {
+              reply: ask,
+              toolCalls: toolCallResults,
+              chainSwitch: pendingChainSwitch,
+              dexProvider: detectedDex,
+              reasoning: orchestrationReasoning,
+              modelsUsed,
+              finalModel: "tooling",
+            };
+          }
+
           // Extract the most informative error string from viem/RPC errors.
           // Viem wraps errors in multiple layers:
           //   EstimateGasExecutionError → CallExecutionError → ExecutionRevertedError → RpcRequestError

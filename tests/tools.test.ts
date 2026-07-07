@@ -12,6 +12,7 @@ const REQUIRED_TOOLS = [
   // Core trading
   "get_swap_quote",
   "build_vault_swap",
+  "verify_token",
   // Delegation management
   "setup_delegation",
   "revoke_delegation",

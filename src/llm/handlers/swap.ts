@@ -16,6 +16,7 @@ import {
 import { getZeroXQuote, getZeroXVaultQuote, formatZeroXQuoteForDisplay, type ZeroXQuote } from "../../services/zeroXTrading.js";
 import { getVaultTokenBalance, encodeVaultExecute } from "../../services/vault.js";
 import { resolveTokenAddress, getWrappedNativeAddress, getNativeTokenSymbol } from "../../config.js";
+import { TokenResolutionError } from "../../services/tokenResolver.js";
 import { encodeFunctionData, decodeFunctionData, parseUnits, formatUnits } from "viem";
 import { getClient } from "../../services/rpcClient.js";
 import { getRevertDataFromError, decodeRevertData } from "../../services/errorDecoder.js";
@@ -207,6 +208,7 @@ async function checkExactInputBalance(
     }
   } catch (err) {
     if (err instanceof Error && err.message.includes("Insufficient")) throw err;
+    if (err instanceof TokenResolutionError) throw err;
   }
 }
 
@@ -454,8 +456,10 @@ export async function handle_build_vault_swap(
   {
     const wrappedNative = getWrappedNativeAddress(ctx.chainId);
     if (wrappedNative) {
-      const sellAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn).catch(() => null);
-      const buyAddr  = await resolveTokenAddress(ctx.chainId, intent.tokenOut).catch(() => null);
+      const [sellAddr, buyAddr] = await Promise.all([
+        resolveTokenAddress(ctx.chainId, intent.tokenIn),
+        resolveTokenAddress(ctx.chainId, intent.tokenOut),
+      ]);
       const nativeSym = getNativeTokenSymbol(ctx.chainId);
 
       const isWrap   = sellAddr?.toLowerCase() === ZERO_ADDR && buyAddr?.toLowerCase() === wrappedNative.toLowerCase();

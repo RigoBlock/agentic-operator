@@ -194,6 +194,73 @@ describe("verifyAndRegisterToken", () => {
     const kv = makeMockKv();
     initTokenResolver(kv as unknown as KVNamespace);
 
-    await expect(verifyAndRegisterToken(1, "LIT", "0x999999")).rejects.toThrow(/Invalid token identifier/);
+    await expect(verifyAndRegisterToken(1, "LIT", "0x999999")).rejects.toThrow(/Invalid contract address/);
+  });
+});
+
+
+describe("CoinGecko API resilience", () => {
+  beforeEach(() => {
+    clearTokenResolverCache();
+  });
+
+  it("does not retry on CoinGecko 429 and asks for address/name", async () => {
+    const kv = makeMockKv();
+    initTokenResolver(kv as unknown as KVNamespace);
+
+    const fetchMock = vi.fn(async () => new Response("rate limit", { status: 429, statusText: "Too Many Requests" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(resolveTokenBySymbol(1, "LIT")).rejects.toThrow(/rate-limited/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends no auth headers for the keyless public API", async () => {
+    const kv = makeMockKv();
+    initTokenResolver(kv as unknown as KVNamespace);
+
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const url = _url as string;
+      expect(init?.headers).toBeUndefined();
+      if (url.includes("/search?")) {
+        return new Response(JSON.stringify({
+          coins: [{ id: "lighter", symbol: "LIT", name: "Lighter", market_cap_rank: 93 }],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ platforms: { ethereum: "0x232ce3bd40fcd6f80f3d55a522d03f25df784ee2" } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const addr = await resolveTokenBySymbol(1, "LIT");
+    expect(addr.toLowerCase()).toBe("0x232ce3bd40fcd6f80f3d55a522d03f25df784ee2");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("dedupes concurrent lookups for the same chain+symbol", async () => {
+    const kv = makeMockKv();
+    initTokenResolver(kv as unknown as KVNamespace);
+
+    let callCount = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      callCount++;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      if (url.includes("/search?")) {
+        return new Response(JSON.stringify({
+          coins: [{ id: "lighter", symbol: "LIT", name: "Lighter", market_cap_rank: 93 }],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        platforms: { ethereum: "0x232ce3bd40fcd6f80f3d55a522d03f25df784ee2" },
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [addr1, addr2] = await Promise.all([
+      resolveTokenBySymbol(1, "LIT"),
+      resolveTokenBySymbol(1, "LIT"),
+    ]);
+
+    expect(addr1).toBe(addr2);
+    expect(callCount).toBe(2); // one shared search + one shared detail
   });
 });

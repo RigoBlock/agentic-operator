@@ -7,6 +7,7 @@ import type { ToolResult } from "../client.js";
 
 import { handle_get_swap_quote } from "./swap.js";
 import { handle_build_vault_swap } from "./swap.js";
+import { handle_verify_token } from "./token.js";
 import { handle_get_vault_info } from "./vault.js";
 import { handle_get_token_balance } from "./vault.js";
 import { handle_verify_bridge_arrival } from "./vault.js";
@@ -54,6 +55,7 @@ import { handle_grg_claim_rewards } from "./staking.js";
 export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContext, args: Record<string, unknown>, toolName: string) => Promise<ToolResult>> = {
   "get_swap_quote": handle_get_swap_quote,
   "build_vault_swap": handle_build_vault_swap,
+  "verify_token": handle_verify_token,
   "get_vault_info": handle_get_vault_info,
   "get_token_balance": handle_get_token_balance,
   "verify_bridge_arrival": handle_verify_bridge_arrival,
