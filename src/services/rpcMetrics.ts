@@ -58,7 +58,62 @@ export function getRpcMetrics(): RpcMetrics | undefined {
 }
 
 /**
- * Wrap a fetch function so it increments the current request's HTTP RPC counter.
+ * Parse the body of an outgoing JSON-RPC request and count the individual
+ * RPC calls. Single requests count as 1; batched arrays count as their length.
+ * Only bodies with Content-Type `application/json` are parsed.
+ */
+function countRpcCallsInBody(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): { count: number; methods: string[] } {
+  const headers = init?.headers ?? (input instanceof Request ? input.headers : undefined);
+  const contentType = extractContentType(headers);
+  if (!contentType?.toLowerCase().includes("application/json")) {
+    return { count: 0, methods: [] };
+  }
+
+  const body = init?.body ?? (input instanceof Request ? input.body : undefined);
+  if (!body) return { count: 0, methods: [] };
+
+  try {
+    const text = typeof body === "string" ? body : body instanceof URLSearchParams ? body.toString() : undefined;
+    if (text === undefined) return { count: 0, methods: [] };
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      const methods: string[] = [];
+      let count = 0;
+      for (const item of parsed) {
+        if (item && typeof item === "object" && typeof item.method === "string") {
+          count++;
+          methods.push(item.method);
+        }
+      }
+      return { count, methods };
+    }
+    if (parsed && typeof parsed === "object" && typeof parsed.method === "string") {
+      return { count: 1, methods: [parsed.method] };
+    }
+  } catch {
+    // Not valid JSON — ignore.
+  }
+  return { count: 0, methods: [] };
+}
+
+function extractContentType(headers?: HeadersInit | Headers): string | undefined {
+  if (!headers) return undefined;
+  if (headers instanceof Headers) {
+    return headers.get("content-type") ?? undefined;
+  }
+  if (Array.isArray(headers)) {
+    const entry = headers.find(([k]) => k.toLowerCase() === "content-type");
+    return entry?.[1];
+  }
+  return (headers as Record<string, string>)["content-type"] ?? (headers as Record<string, string>)["Content-Type"];
+}
+
+/**
+ * Wrap a fetch function so it increments the current request's HTTP RPC counter
+ * and counts individual JSON-RPC calls in the outgoing body.
  * Safe to use even when no metrics context is active.
  */
 export function wrapFetchWithMetrics(
@@ -68,6 +123,12 @@ export function wrapFetchWithMetrics(
     const metrics = getRpcMetrics();
     if (metrics) {
       metrics.incrementHttpRequest();
+      const { count, methods } = countRpcCallsInBody(input, init as RequestInit | undefined);
+      if (count > 0) {
+        for (const method of methods) {
+          metrics.incrementRpcCall(method);
+        }
+      }
     }
     return fetch(input, init);
   };

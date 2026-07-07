@@ -50,7 +50,7 @@ app.use("*", async (c, next) => {
     await next();
     const metrics = getRpcMetrics();
     if (metrics) {
-      c.header("X-RPC-Calls", String(metrics.snapshot().httpRequests));
+      c.header("X-RPC-Calls", String(metrics.snapshot().rpcCalls));
     }
   });
 });

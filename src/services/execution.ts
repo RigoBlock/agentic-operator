@@ -30,19 +30,20 @@ import {
   type PublicClient,
 } from "viem";
 import type { LocalAccount } from "viem/accounts";
-import type { Env, UnsignedTransaction, ExecutionResult } from "../types.js";
+import type { Env, UnsignedTransaction, ExecutionResult, RequestContext } from "../types.js";
 import { getChain, getRpcUrl, sanitizeError } from "../config.js";
 import { loadAgentWalletAccount } from "./agentWallet.js";
 import { getDelegationConfig, getChainDelegation } from "./delegation.js";
 import { recordGasSpend } from "../routes/gasPolicy.js";
-import { ALLOWED_VAULT_SELECTORS } from "../abi/rigoblockVault.js";
+import { ALLOWED_VAULT_SELECTORS, RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import {
   executeSponsoredCalls,
   getSponsoredCallsStatus,
   type WalletCall,
 } from "./bundler.js";
-import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
+import { checkNavImpact } from "./navGuard.js";
 import { getClient, ALCHEMY_ORIGIN } from "./rpcClient.js";
+import { getNavShieldThreshold } from "./navGuard.js";
 import { decodeRevertData, extractRevertData } from "./errorDecoder.js";
 
 /**
@@ -349,6 +350,145 @@ function bumpFees(fees: FeeEstimate, chainId: number): FeeEstimate {
 // ── Public API ────────────────────────────────────────────────────────
 
 /**
+ * Shared transaction finalizer: estimate gas once and run the NAV shield once.
+ *
+ * This is the single place where `eth_estimateGas` and the full `multicall`
+ * NAV simulation run for transactions that are about to be returned to the
+ * wallet/frontend or broadcast by the agent. Keeping both checks here prevents
+ * the duplicate simulation that previously happened in handlers + broadcast.
+ */
+export async function prepareTransaction(
+  env: Env,
+  ctx: Pick<RequestContext, "vaultAddress" | "chainId" | "operatorAddress" | "operatorVerified" | "executionMode">,
+  tx: UnsignedTransaction,
+): Promise<{ tx: UnsignedTransaction; warning?: string }> {
+  if (!env.ALCHEMY_API_KEY) {
+    throw new ExecutionError("No RPC key configured", "RPC_UNAVAILABLE");
+  }
+
+  const publicClient = getClient(tx.chainId, env.ALCHEMY_API_KEY);
+
+  // Determine the operator/owner address to use for NAV simulation.
+  let callerAddress: Address;
+  if (ctx.operatorVerified && ctx.operatorAddress) {
+    callerAddress = ctx.operatorAddress;
+  } else {
+    try {
+      callerAddress = await publicClient.readContract({
+        address: ctx.vaultAddress,
+        abi: RIGOBLOCK_VAULT_ABI,
+        functionName: "owner",
+      }) as Address;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new ExecutionError(
+        `Could not read vault owner for NAV simulation: ${sanitizeError(msg)}`,
+        "RPC_UNAVAILABLE",
+      );
+    }
+  }
+
+  // Determine the transaction executor (sender for gas estimation).
+  let executor: Address;
+  if (tx.operatorOnly || ctx.executionMode === "manual") {
+    executor = callerAddress;
+  } else {
+    // Delegated mode: simulate from the agent address without loading the private key.
+    const config = await getDelegationConfig(env.KV, ctx.vaultAddress);
+    if (!config || !config.enabled) {
+      throw new ExecutionError(
+        "Delegation not configured. Set up delegation on the vault first.",
+        "DELEGATION_NOT_CONFIGURED",
+      );
+    }
+    executor = config.agentAddress;
+  }
+
+  // Estimate gas from the actual executor. This is also the structural simulation.
+  const txValue = BigInt(tx.value || "0x0");
+  let estimatedGas: bigint;
+  try {
+    estimatedGas = await publicClient.estimateGas({
+      account: executor,
+      to: tx.to,
+      data: tx.data,
+      value: txValue,
+    });
+  } catch (estErr) {
+    const msg = estErr instanceof Error ? estErr.message : String(estErr);
+    const friendly = parseSimulationRevert(msg);
+    if (friendly || msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert")) {
+      throw new ExecutionError(
+        friendly ||
+        `Transaction simulation failed — the transaction would revert on-chain. Details: ${sanitizeError(msg)}`,
+        "SIMULATION_FAILED",
+      );
+    }
+    throw new ExecutionError(
+      `Gas estimation failed: ${sanitizeError(msg)}`,
+      "GAS_ESTIMATION_FAILED",
+    );
+  }
+
+  tx.gas = `0x${(estimatedGas + (estimatedGas * 20n) / 100n).toString(16)}`;
+
+  // NAV shield only applies when the transaction targets the vault itself.
+  const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+  const isVaultTarget = !!ctx.vaultAddress &&
+    ctx.vaultAddress.toLowerCase() !== ZERO_ADDR &&
+    tx.to.toLowerCase() === ctx.vaultAddress.toLowerCase();
+
+  if (isVaultTarget) {
+    // Read operator's custom NAV shield threshold (falls back to default 10%).
+    const storedNavThreshold = env.KV
+      ? await getNavShieldThreshold(env.KV, callerAddress)
+      : null;
+
+    const navResult = await checkNavImpact(
+      ctx.vaultAddress as Address,
+      tx.data,
+      txValue,
+      tx.chainId,
+      env.ALCHEMY_API_KEY,
+      callerAddress,
+      env.KV,
+      storedNavThreshold ?? undefined,
+      env.requestCache,
+    );
+
+    if (!navResult.allowed) {
+      if (navResult.code === "TRADE_REVERTS") {
+        // Advisory warning for manual signing; auto-execution will refuse later.
+        const warning = `⚠️ Simulation warning: ${navResult.reason || "transaction may revert on-chain"} — verify token approvals and vault adapter support before signing.`;
+        tx.revertWarning = warning;
+        tx.navShieldChecked = true;
+        return { tx, warning };
+      }
+      throw new ExecutionError(
+        navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
+        "NAV_SHIELD_BLOCKED",
+      );
+    }
+
+    tx.navShieldChecked = true;
+
+    if (navResult.code === "UNVERIFIED") {
+      return {
+        tx,
+        warning: `⚠️ NAV verification unavailable — could not measure NAV impact atomically (${navResult.reason || "multicall simulation failed"}). Proceeding with gas estimate only.`,
+      };
+    }
+
+    return { tx };
+  }
+
+  // Non-vault transactions (operator-only approvals, pool initialization, etc.)
+  // are not subject to the NAV shield, but gas estimation still happens above.
+  tx.navShieldChecked = true;
+  return { tx };
+}
+
+/**
  * Execute a transaction via the agent wallet.
  *
  * This is the ONLY public function that broadcasts transactions from the agent
@@ -445,8 +585,7 @@ export async function executeViaDelegation(
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // ██ NAV SHIELD — MANDATORY (must NEVER be skipped, disabled, or bypassed) ██
-  // ══════════════════════════════════════════════════════════════════════
+  // ██ NAV SHIELD + GAS — MANDATORY (must NEVER be skipped, disabled, or bypassed) ██
   // Simulates multicall([tx, updateUnitaryValue]) as the OPERATOR (vault owner).
   // If NAV drops > threshold → transaction BLOCKED, never broadcast.
   //
@@ -461,54 +600,40 @@ export async function executeViaDelegation(
   // getNavDataView() to avoid an ENavView edge case where the view incorrectly
   // returns unitaryValue=0 when the actual contract preserves the stored value.
   //
-  // Cross-chain bridge operations (depositV3) have two fundamentally different
-  // behaviors based on opType:
-  //   - Transfer (OpType.Transfer): updates virtual supply — source NAV is preserved
-  //     because effectiveSupply decreases proportionally with value. The NAV shield
-  //     correctly allows these because updateUnitaryValue() returns stored value
-  //     when effectiveSupply reaches 0.
-  //   - Sync (OpType.Sync): does NOT update virtual supply — source NAV drops because
-  //     tokens leave but supply stays. The 10% default threshold applies normally.
-  //
-  // The NAV shield must NEVER be skipped. When it produces incorrect results, the
-  // fix must be in correcting the root cause (e.g. switching from getNavDataView
-  // to updateUnitaryValue), not in skipping the shield.
+  // If the transaction was already finalized upstream (e.g. by processChat via
+  // prepareTransaction), we reuse its gas and NAV result instead of running the
+  // simulation again. This removes the duplicate eth_estimateGas + NAV check that
+  // previously ran in handlers and again at broadcast time.
 
-  // Read operator's custom NAV shield threshold (falls back to default 10%)
-  const storedNavThreshold = env.KV
-    ? await getNavShieldThreshold(env.KV, config.operatorAddress)
-    : null;
-
-  const navResult = await checkNavImpact(
-    tx.to as Address,
-    tx.data as Hex,
-    BigInt(tx.value),
-    tx.chainId,
-    env.ALCHEMY_API_KEY,
-    config.operatorAddress,
-    env.KV,
-    storedNavThreshold ?? undefined,
-    requestCache ?? env.requestCache,
-  );
-
-  // Route based on what the NAV shield actually found
-  if (!navResult.allowed) {
-    // Use the specific error code from the NAV shield to distinguish root causes
-    const errorCode = navResult.code === 'TRADE_REVERTS'
-      ? "SIMULATION_FAILED"   // The swap itself would revert — not a NAV issue
-      : "NAV_SHIELD_BLOCKED"; // NAV would drop too much, or pre-NAV read failed
-
-    throw new ExecutionError(
-      navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
-      errorCode,
-    );
+  if (!tx.gas || tx.gas === "0x0" || !tx.navShieldChecked) {
+    try {
+      await prepareTransaction(
+        env,
+        {
+          vaultAddress: tx.to,
+          chainId: tx.chainId,
+          operatorAddress: config.operatorAddress,
+          operatorVerified: false,
+          executionMode: "delegated",
+        },
+        tx,
+      );
+    } catch (prepErr) {
+      if (prepErr instanceof ExecutionError) throw prepErr;
+      const msg = prepErr instanceof Error ? prepErr.message : String(prepErr);
+      throw new ExecutionError(
+        `Transaction preparation failed: ${sanitizeError(msg)}`,
+        "SIMULATION_FAILED",
+        true,
+      );
+    }
   }
 
-  // Log NAV verification status
-  if (!navResult.verified) {
-
-  } else if (navResult.dropPct !== "0" && navResult.dropPct !== "0.00") {
-
+  // Refuse to auto-execute a transaction that was flagged as likely reverting
+  // during prepareTransaction. The caller can still return it as unsigned calldata
+  // for manual signing.
+  if (tx.revertWarning) {
+    throw new ExecutionError(tx.revertWarning, "SIMULATION_FAILED", true);
   }
 
   // 7. Execute the transaction
@@ -519,15 +644,6 @@ export async function executeViaDelegation(
     : config.sponsoredGas;
   const effectiveSponsored = sponsoredGasOverride !== undefined ? sponsoredGasOverride : chainSponsored;
   const useSponsored = effectiveSponsored && !!env.ALCHEMY_GAS_POLICY_ID;
-
-  // Track whether the NAV shield ran as operator and confirmed the transaction is valid.
-  // We use this to distinguish "trade is bad" (SIMULATION_FAILED from NAV shield) from
-  // "agent lacks on-chain delegation for this selector" (SIMULATION_FAILED from broadcast).
-  // If the operator simulation succeeded (verified OR unverified-but-swap-passed),
-  // the transaction is valid and the operator CAN execute it — but the agent may not be
-  // delegated for this specific selector. In that case, fall back to manual signing.
-  const operatorValidated = navResult.allowed; // always true here (we threw above if not)
-  void operatorValidated; // prevents unused-var lint warnings
 
   let result: ExecutionResult;
 
@@ -729,42 +845,17 @@ async function broadcastAgentTransaction(
     );
   }
 
-  // ── Step 2: Estimate gas on-chain ──
-  // CRITICAL: tx.gas comes from DEX APIs (0x, Uniswap, GMX) which estimate gas
-  // for a direct user transaction. The RigoBlock vault proxy adds 100-200k+ gas
-  // overhead for adapter routing. We MUST estimate on-chain to get accurate gas.
-  // eth_estimateGas also simulates the call, so a revert here means the
-  // transaction would fail on-chain (delegation, slippage, balance, etc.).
-  let estimatedGas: bigint;
-  try {
-    estimatedGas = await publicClient.estimateGas({
-      account: agentAccount.address,
-      to: tx.to as Address,
-      data: tx.data as Hex,
-      value: txValue,
-    });
-  } catch (estError) {
-    const msg = estError instanceof Error ? estError.message : String(estError);
-    const friendly = parseSimulationRevert(msg);
-    if (friendly || msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert")) {
-      throw new ExecutionError(
-        friendly ||
-        `Transaction simulation failed — the transaction would revert on-chain. ` +
-        `This could mean the agent is not delegated on the vault, or the trade parameters are invalid. ` +
-        `Details: ${sanitizeError(msg)}`,
-        "SIMULATION_FAILED",
-      );
-    }
+  // ── Step 2: Use pre-computed gas limit ──
+  // Gas was already estimated once by prepareTransaction() from the agent address
+  // and includes a 20% buffer. We reuse it here to avoid a duplicate eth_estimateGas
+  // on the broadcast hot path.
+  const gasLimit = BigInt(tx.gas || "0x0");
+  if (gasLimit === 0n) {
     throw new ExecutionError(
-      `Gas estimation failed — the transaction may revert or the RPC is unreachable. Details: ${msg}`,
+      "Gas limit is missing for this transaction. Rebuild the transaction to estimate gas.",
       "GAS_ESTIMATION_FAILED",
     );
   }
-  // 20% buffer over the on-chain estimate — the estimate already accounts for
-  // vault proxy overhead since we estimate from the actual agent address.
-  // Buffer covers minor execution-time variance (oracle reads, internal state).
-  // Excess gas is refunded.
-  const gasLimit = estimatedGas + (estimatedGas * 20n) / 100n;
 
   // ── Step 3: Estimate fees with safety caps ──
   let fees = await estimateFees(publicClient, chainId);
@@ -933,35 +1024,16 @@ async function sponsoredAgentTransaction(
   const publicClient = getClient(chainId, alchemyKey);
   const txValue = BigInt(tx.value);
 
-  // ── Step 1: Estimate gas on-chain ──
-  // The Alchemy bundler's internal gas estimation underestimates for complex
-  // vault adapter calls (crosschain depositV3, security tokens, etc.).
-  // We run eth_estimateGas ourselves and pass the result as callGasLimit
-  // override to the bundler via gasParamsOverride.
-  // eth_estimateGas also simulates the call, so a revert here blocks the
-  // transaction before we spend sponsorship quota.
-  let callGasLimit: bigint | undefined;
-  try {
-    const estimatedGas = await publicClient.estimateGas({
-      account: agentAccount.address,
-      to: tx.to as Address,
-      data: tx.data as Hex,
-      value: txValue,
-    });
-    // 30% buffer over estimate: vault proxy + EIP-7702 overhead
-    callGasLimit = estimatedGas + (estimatedGas * 30n) / 100n;
-  } catch (estError) {
-    const msg = estError instanceof Error ? estError.message : String(estError);
-    const friendly = parseSimulationRevert(msg);
-    if (friendly || msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert")) {
-      throw new ExecutionError(
-        friendly ||
-        `Transaction simulation failed — would revert on-chain. Details: ${sanitizeError(msg)}`,
-        "SIMULATION_FAILED",
-      );
-    }
-    // Non-revert estimation failure: proceed without override so the bundler
-    // can try its own estimate rather than blocking for a transient RPC issue.
+  // ── Step 1: Use pre-computed gas limit ──
+  // Gas was already estimated once by prepareTransaction() from the agent address
+  // and includes a 20% buffer. We pass it as the callGasLimit override to prevent
+  // the bundler from underestimating complex vault adapter calls.
+  const callGasLimit = BigInt(tx.gas || "0x0");
+  if (callGasLimit === 0n) {
+    throw new ExecutionError(
+      "Gas limit is missing for this transaction. Rebuild the transaction to estimate gas.",
+      "GAS_ESTIMATION_FAILED",
+    );
   }
 
   // ── Step 2: Fee estimate + sponsorship viability check ──

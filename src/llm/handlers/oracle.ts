@@ -8,11 +8,11 @@
 
 import type { Env, RequestContext } from "../../types.js";
 import type { ToolResult } from "../client.js";
-import { estimateGas } from "../client.js";
+
 import { getTokenDecimals } from "../../services/vault.js";
 import { getClient } from "../../services/rpcClient.js";
 import { resolveTokenAddress, resolveChainId, resolveChainName, getNativeTokenSymbol, NATIVE_TOKEN } from "../../config.js";
-import { parseUnits, formatUnits, encodeFunctionData, type Address, type Hex } from "viem";
+import { parseUnits, formatUnits, encodeFunctionData, type Address, type Hex, type Abi } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import { buildOraclePoolSwapTx, UNIVERSAL_ROUTER } from "../../services/oraclePool.js";
 import { AuthError } from "../../services/auth.js";
@@ -384,19 +384,12 @@ export async function handle_refresh_oracle_feed(
   const tokenSymbol = result.poolInfo.tokenSymbol;
   const amountInWei = result.amountInWei;
 
-  // Vault path: estimate gas — throws if the transaction would revert on-chain.
-  // Never fall back to a hardcoded limit: a gas estimation failure means the
-  // transaction will fail on-chain, and the user must not be allowed to sign it.
-  if (viaVault && env.ALCHEMY_API_KEY && ctx.operatorAddress) {
-    const vaultGas = await estimateGas(
-      ctx.chainId, vaultAddr as Address,
-      result.transaction.data as Hex, "0x0",
-      ctx.operatorAddress, env.ALCHEMY_API_KEY, "oracle refresh",
-    );
-    result.transaction.gas = vaultGas;
+  // Vault transaction gas is finalized centrally by prepareTransaction.
+  if (viaVault) {
+    result.transaction.gas = "0x0";
   }
 
-  // EOA path: pre-flight balance / allowance check + simulation to catch reverts early.
+  // EOA path: pre-flight balance / allowance check to catch missing approvals early.
   if (!viaVault && env.ALCHEMY_API_KEY && ctx.operatorAddress) {
     const publicClient = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
     const operator = ctx.operatorAddress as Address;
@@ -408,12 +401,33 @@ export async function handle_refresh_oracle_feed(
     // We check both and return the missing approval transaction so the user can sign it.
     if (direction === "sell") {
       try {
-        const balance = await publicClient.readContract({
-          address: tokenAddr,
-          abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" }],
-          functionName: "balanceOf",
-          args: [operator],
-        }) as bigint;
+        const universalRouter = UNIVERSAL_ROUTER[ctx.chainId];
+        const preflightContracts: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] }[] = [
+          {
+            address: tokenAddr,
+            abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" }] as const,
+            functionName: "balanceOf",
+            args: [operator],
+          },
+          {
+            address: tokenAddr,
+            abi: [{ name: "allowance", type: "function", inputs: [{ type: "address" }, { type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" }] as const,
+            functionName: "allowance",
+            args: [operator, PERMIT2],
+          },
+        ];
+        if (universalRouter) {
+          preflightContracts.push({
+            address: PERMIT2,
+            abi: PERMIT2_ABI,
+            functionName: "allowance",
+            args: [operator, tokenAddr, universalRouter],
+          });
+        }
+
+        const [balanceResult, erc20AllowanceResult, permit2AllowanceResult] = await publicClient.multicall({ contracts: preflightContracts });
+
+        const balance = balanceResult.status === "success" ? (balanceResult.result as bigint) : 0n;
         if (balance < amountInWei) {
           throw new Error(
             `Your wallet (${operator.slice(0, 6)}…${operator.slice(-4)}) has ${formatUnits(balance, result.tokenDecimals)} ${tokenSymbol}, ` +
@@ -423,13 +437,7 @@ export async function handle_refresh_oracle_feed(
         }
 
         // Step 1: ERC-20 allowance to Permit2
-        const erc20Allowance = await publicClient.readContract({
-          address: tokenAddr,
-          abi: [{ name: "allowance", type: "function", inputs: [{ type: "address" }, { type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" }],
-          functionName: "allowance",
-          args: [operator, PERMIT2],
-        }) as bigint;
-
+        const erc20Allowance = erc20AllowanceResult.status === "success" ? (erc20AllowanceResult.result as bigint) : 0n;
         if (erc20Allowance < amountInWei) {
           // Build an ERC-20 approve(Permit2, amountInWei) transaction for the user to sign first.
           const approveData = encodeFunctionData({
@@ -437,7 +445,6 @@ export async function handle_refresh_oracle_feed(
             functionName: "approve",
             args: [PERMIT2, amountInWei],
           });
-          const approveGas = "0x" + (80_000n).toString(16);
           return {
             message: (
               `🔐 Step 1/2: ERC-20 Approval Required\n\n` +
@@ -452,7 +459,7 @@ export async function handle_refresh_oracle_feed(
               data: approveData,
               value: "0x0",
               chainId: ctx.chainId,
-              gas: approveGas,
+              gas: "0x0",
               description: `Step 1/2: Approve ${amountIn} ${tokenSymbol} for Permit2`,
               operatorOnly: true,
             },
@@ -460,14 +467,10 @@ export async function handle_refresh_oracle_feed(
         }
 
         // Step 2: Permit2 allowance for the Universal Router
-        const universalRouter = UNIVERSAL_ROUTER[ctx.chainId];
-        if (universalRouter) {
-          const [permit2Amount, permit2Expiration] = await publicClient.readContract({
-            address: PERMIT2,
-            abi: PERMIT2_ABI,
-            functionName: "allowance",
-            args: [operator, tokenAddr, universalRouter],
-          }) as [bigint, number, number];
+        if (universalRouter && permit2AllowanceResult) {
+          const [permit2Amount, permit2Expiration] = permit2AllowanceResult.status === "success"
+            ? (permit2AllowanceResult.result as unknown as [bigint, number, number])
+            : [0n, 0];
 
           const now = Math.floor(Date.now() / 1000);
           const permit2Sufficient = permit2Amount >= amountInWei && permit2Expiration > now;
@@ -480,7 +483,6 @@ export async function handle_refresh_oracle_feed(
               functionName: "approve",
               args: [tokenAddr, universalRouter, amountInWei, expiration],
             });
-            const approveGas = "0x" + (80_000n).toString(16);
             return {
               message: (
                 `🔐 Step 2/2: Permit2 Approval Required\n\n` +
@@ -496,7 +498,7 @@ export async function handle_refresh_oracle_feed(
                 data: permit2ApproveData,
                 value: "0x0",
                 chainId: ctx.chainId,
-                gas: approveGas,
+                gas: "0x0",
                 description: `Step 2/2: Permit2 approve ${amountIn} ${tokenSymbol} for Universal Router`,
                 operatorOnly: true,
               },
@@ -530,41 +532,9 @@ export async function handle_refresh_oracle_feed(
       }
     }
 
-    try {
-      const tx = result.transaction;
-
-      // eth_call simulation — catches pool reverts, insufficient cardinality, etc.
-      await publicClient.call({
-        account: operator,
-        to: tx.to as Address,
-        data: tx.data,
-        value: BigInt(tx.value),
-      });
-
-      // eth_estimateGas for accurate gas limit
-      const estimatedGas = await publicClient.estimateGas({
-        account: operator,
-        to: tx.to as Address,
-        data: tx.data,
-        value: BigInt(tx.value),
-      });
-
-      // Add 20% buffer for execution variance
-      const gasWithBuffer = (estimatedGas * 120n) / 100n;
-      result.transaction.gas = "0x" + gasWithBuffer.toString(16);
-    } catch (simErr) {
-      const rawReason = simErr instanceof Error ? simErr.message : String(simErr);
-      const decoded = extractRevertReason(simErr);
-      console.warn(`[oracle] EOA simulation failed: ${decoded} (raw: ${rawReason.slice(0, 300)})`);
-      throw new Error(
-        `Oracle refresh simulation failed: ${decoded}\n\n` +
-        `Likely causes:\n` +
-        `• Pool not initialized or no liquidity\n` +
-        `• Missing Permit2 approval for Universal Router (try the vault path instead)\n` +
-        `• Insufficient token balance or gas\n\n` +
-        `If your vault holds the tokens, use: "refresh oracle sell ${amountIn} ${tokenSymbol} via vault"`
-      );
-    }
+    // Gas is finalized centrally by prepareTransaction; keep operatorOnly so it
+    // is signed from the user's wallet rather than executed via delegation.
+    result.transaction.gas = "0x0";
   }
 
   return {

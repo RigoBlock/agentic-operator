@@ -45,8 +45,8 @@ enabling sandwich attacks that extract ~10% per day within NAV shield limits.
 RULE: The NAV shield (10% max drop check) runs BEFORE every transaction
       is returned or broadcast — for ALL transaction types including swaps,
       LP operations, AND cross-chain bridges. It protects ALL execution modes:
-        - Manual: runs when building unsigned calldata (preCheckNavImpact in client.ts)
-        - Delegated: runs BOTH when building calldata AND at broadcast time (execution.ts)
+        - Manual: runs when building unsigned calldata (prepareTransaction in execution.ts)
+        - Delegated: runs once when finalizing calldata, then reused at broadcast time (execution.ts)
       It is outside the agent's control surface. Do NOT add code paths that skip it.
       When NAV can be measured: FAIL-CLOSED (block if drop > threshold).
       When NAV cannot be measured: graceful degradation (proceed with warning).
@@ -55,11 +55,11 @@ RULE: The NAV shield (10% max drop check) runs BEFORE every transaction
       NEVER skip or bypass the shield to avoid errors.
 ```
 
-- **Pre-check** (`preCheckNavImpact()` in `client.ts`): runs before returning unsigned
-  calldata from any tool that builds vault transactions. Blocks toxic transactions
-  before the user sees them.
-- **Broadcast check** (`checkNavImpact()` in `execution.ts`): runs before delegated
-  broadcast. Belt-and-suspenders — catches changes between building and broadcasting.
+- **Finalize check** (`prepareTransaction()` in `execution.ts`): estimates gas once and
+  runs the NAV shield once before returning unsigned calldata from any tool that builds
+  vault transactions. Blocks toxic transactions before the user sees them.
+- **Broadcast check** reuses the already-finalized gas and NAV result; if a transaction
+  was not finalized upstream, `prepareTransaction()` is invoked once before broadcast.
 - Both call the same `checkNavImpact()` from `navGuard.ts`
 - It simulates atomically via `multicall([tx, updateUnitaryValue])` on the RPC
 - **Uses `updateUnitaryValue()`** (the actual contract NAV algorithm via `eth_call`),

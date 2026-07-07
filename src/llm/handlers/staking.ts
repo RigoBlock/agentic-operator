@@ -14,7 +14,7 @@ import {
   buildStakeCalldata, buildUndelegateStakeCalldata, buildUnstakeCalldata,
   buildEndEpochCalldata, buildWithdrawDelegatorRewardsCalldata,
 } from "../../services/grgStaking.js";
-import { estimateGas, txActionLine } from "../client.js";
+import { txActionLine } from "../client.js";
 
 export async function handle_grg_stake(
   env: Env,
@@ -36,18 +36,12 @@ export async function handle_grg_stake(
   const amount = args.amount as string;
   const calldata = buildStakeCalldata(amount);
 
-  const gas = await estimateGas(
-    1, ctx.vaultAddress as Address,
-    calldata, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "staking",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: 1,
-    gas,
+    gas: "0x0",
     description: `[GRG Staking] Stake ${amount} GRG`,
   };
 
@@ -79,18 +73,12 @@ export async function handle_grg_unstake(
   const amount = args.amount as string;
   const calldata = buildUnstakeCalldata(amount);
 
-  const gas = await estimateGas(
-    1, ctx.vaultAddress as Address,
-    calldata, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "staking",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: 1,
-    gas,
+    gas: "0x0",
     description: `[GRG Staking] Unstake ${amount} GRG`,
   };
 
@@ -122,18 +110,12 @@ export async function handle_grg_undelegate_stake(
   const amount = args.amount as string;
   const calldata = buildUndelegateStakeCalldata(amount);
 
-  const gas = await estimateGas(
-    1, ctx.vaultAddress as Address,
-    calldata, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "staking",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: 1,
-    gas,
+    gas: "0x0",
     description: `[GRG Staking] Undelegate ${amount} GRG`,
   };
 
@@ -169,18 +151,12 @@ export async function handle_grg_end_epoch(
 
   const calldata = buildEndEpochCalldata();
 
-  const gas = await estimateGas(
-    1, stakingProxy,
-    calldata, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "staking",
-  );
-
   const transaction: UnsignedTransaction = {
     to: stakingProxy,
     data: calldata,
     value: "0x0",
     chainId: 1,
-    gas,
+    gas: "0x0",
     description: `[GRG Staking] Finalize epoch on staking proxy`,
     operatorOnly: true,
   };
@@ -211,18 +187,12 @@ export async function handle_grg_claim_rewards(
 
   const calldata = buildWithdrawDelegatorRewardsCalldata();
 
-  const gas = await estimateGas(
-    1, ctx.vaultAddress as Address,
-    calldata, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "staking",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: 1,
-    gas,
+    gas: "0x0",
     description: `[GRG Staking] Claim delegator rewards`,
   };
 

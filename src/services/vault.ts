@@ -201,6 +201,39 @@ export async function getVaultTokenBalance(
 }
 
 /**
+ * Batch-read vault balances for a list of ERC-20 token addresses.
+ * Treats failures as 0 balance (matching the per-call `.catch` behavior).
+ */
+export async function getVaultTokenBalancesBulk(
+  chainId: number,
+  vaultAddress: Address,
+  tokenAddresses: Address[],
+  alchemyKey?: string,
+): Promise<Map<string, bigint>> {
+  if (tokenAddresses.length === 0) return new Map();
+  const client = getClient(chainId, alchemyKey);
+  const results = await client.multicall({
+    contracts: tokenAddresses.map((address) => ({
+      address,
+      abi: ERC20_ABI,
+      functionName: "balanceOf" as const,
+      args: [vaultAddress] as const,
+    })),
+    allowFailure: true,
+  });
+
+  const balances = new Map<string, bigint>();
+  for (let i = 0; i < tokenAddresses.length; i++) {
+    const result = results[i];
+    balances.set(
+      tokenAddresses[i].toLowerCase(),
+      result.status === "success" && result.result != null ? (result.result as bigint) : 0n,
+    );
+  }
+  return balances;
+}
+
+/**
  * Encode a call to vault.execute(commands, inputs, deadline).
  *
  * This is the Uniswap Universal Router `execute` function that the

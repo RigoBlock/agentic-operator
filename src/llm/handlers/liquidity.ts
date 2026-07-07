@@ -13,9 +13,9 @@ import { type Address } from "viem";
 import {
   buildAddLiquidityTx, buildRemoveLiquidityTx, buildInitializePoolTx,
   getVaultLPPositions, buildCollectFeesTx, buildBurnPositionTx,
-  getPoolInfoById, getPositionDirect, POOL_MANAGER,
+  getVaultActivePools, getPositionDirect, POOL_MANAGER,
 } from "../../services/uniswapLP.js";
-import { estimateGas, resolveChainArg, resolveChainName, txActionLine } from "../client.js";
+import { resolveChainArg, resolveChainName, txActionLine } from "../client.js";
 
 export async function handle_get_pool_info(
   env: Env,
@@ -28,11 +28,25 @@ export async function handle_get_pool_info(
     chainId = resolveChainArg((args.chain as string).trim()).id;
   }
 
-  const poolId = (args.poolId as string).trim() as `0x${string}`;
-  const info = await getPoolInfoById(poolId, chainId, env.ALCHEMY_API_KEY);
+  const activePools = await getVaultActivePools(chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+  const requestedPoolId = args.poolId ? ((args.poolId as string).trim() as `0x${string}`) : undefined;
 
-  const message = [
-    `ℹ️ Uniswap v4 Pool Info`,
+  const pools = requestedPoolId
+    ? activePools.filter((p) => p.poolId.toLowerCase() === requestedPoolId.toLowerCase())
+    : activePools;
+
+  if (pools.length === 0) {
+    const chainName = resolveChainName(chainId);
+    return {
+      message: requestedPoolId
+        ? `No active Uniswap v4 pool matching ${requestedPoolId} found for this vault on ${chainName}. `
+          + `If the pool exists but is not held by the vault, provide the full pool key directly to initialize_pool or add_liquidity.`
+        : `No active Uniswap v4 pools found for this vault on ${chainName}.`,
+      selfContained: true,
+    };
+  }
+
+  const formatPool = (info: (typeof pools)[0]) => [
     `Pool ID: ${info.poolId}`,
     `Initialized: ${info.initialized ? "Yes" : "No"}`,
     `Fee: ${info.fee} (${info.fee / 10000}%)`,
@@ -41,20 +55,19 @@ export async function handle_get_pool_info(
     `Currency 0: ${info.currency0}`,
     `Currency 1: ${info.currency1}`,
     `Current Tick: ${info.currentTick}`,
-    ``,
+    `Liquidity: ${info.liquidity}`,
     info.initialized
-      ? info.poolKeyKnown
-        ? `To add liquidity: use fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`
-        : `⚠️ Pool is initialized but the pool key could not be confirmed from on-chain Initialize event logs (RPC/node limitation). ` +
-          `The fee/tickSpacing/hooks/currency0/currency1 values shown may be placeholders or estimates. ` +
-          `Please verify the exact pool key (fee, tickSpacing, hooks) before calling add_liquidity to avoid a pool-key mismatch. ` +
-          `You can retry get_pool_info with a different RPC, or provide the known pool key directly.`
-      : info.poolKeyKnown
-        ? `⚠️ Pool is NOT initialized. Call initialize_pool first with fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`
-        : `⚠️ Pool is NOT initialized. The pool key (fee, tickSpacing, hooks, token0, token1) could not be determined from the pool ID alone — please provide the full pool key so initialize_pool can be called with the correct parameters.`,
+      ? `To add liquidity: use fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`
+      : `⚠️ Pool is NOT initialized. Call initialize_pool first with fee=${info.fee}, tickSpacing=${info.tickSpacing}, hooks=${info.hooks}`,
   ].join("\n");
 
-  return { message };
+  const message = [
+    `ℹ️ Uniswap v4 Pool Info — ${pools.length} active pool${pools.length === 1 ? "" : "s"}`,
+    "",
+    ...pools.flatMap((p, i) => (i > 0 ? ["", formatPool(p)] : [formatPool(p)])),
+  ].join("\n");
+
+  return { message, selfContained: true };
 
 }
 
@@ -88,18 +101,12 @@ export async function handle_add_liquidity(
     hooks: args.hooks as Address | undefined,
   }, ctx.chainId, ctx.vaultAddress as Address);
 
-  const gas = await estimateGas(
-    ctx.chainId, ctx.vaultAddress as Address,
-    result.calldata, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "lp",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas,
+    gas: "0x0",
     description: result.description,
   };
 
@@ -151,11 +158,7 @@ export async function handle_initialize_pool(
     data: result.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: await estimateGas(
-      ctx.chainId, POOL_MANAGER[ctx.chainId],
-      result.calldata, "0x0",
-      ctx.operatorAddress, env.ALCHEMY_API_KEY, "lp",
-    ),
+    gas: "0x0",
     description: result.description,
     operatorOnly: true,
   };
@@ -215,18 +218,12 @@ export async function handle_remove_liquidity(
     burn: args.burn as boolean | undefined,
   }, ctx.chainId, ctx.vaultAddress as Address);
 
-  const gas = await estimateGas(
-    ctx.chainId, ctx.vaultAddress as Address,
-    result.calldata, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "lp",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas,
+    gas: "0x0",
     description: result.description,
   };
 
@@ -358,18 +355,12 @@ export async function handle_collect_lp_fees(
 
   const result = buildCollectFeesTx(tokenId, currency0, currency1, ctx.vaultAddress as Address);
 
-  const gas = await estimateGas(
-    ctx.chainId, ctx.vaultAddress as Address,
-    result.calldata, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "lp",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas,
+    gas: "0x0",
     description: result.description,
   };
 
@@ -447,18 +438,12 @@ export async function handle_burn_position(
 
   const result = buildBurnPositionTx(tokenId, currency0, currency1, ctx.vaultAddress as Address);
 
-  const gas = await estimateGas(
-    ctx.chainId, ctx.vaultAddress as Address,
-    result.calldata, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "lp",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas,
+    gas: "0x0",
     description: result.description,
   };
 

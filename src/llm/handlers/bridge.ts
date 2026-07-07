@@ -16,9 +16,9 @@ import {
   getAggregatedNav, buildRebalancePlan, chainName as crosschainChainName,
 } from "../../services/crosschain.js";
 import {
-  friendlyError, estimateGas, resolveChainArg, resolveChainName, txActionLine,
+  friendlyError, resolveChainArg, resolveChainName, txActionLine,
 } from "../client.js";
-import { decodeRevertData } from "../../services/errorDecoder.js";
+
 
 export async function handle_crosschain_transfer(
   env: Env,
@@ -68,18 +68,12 @@ export async function handle_crosschain_transfer(
     operatorAddress: ctx.operatorAddress,
   });
 
-  const gas = await estimateGas(
-    srcChainId, ctx.vaultAddress as Address,
-    result.calldata as Hex, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "bridge",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: srcChainId,
-    gas,
+    gas: "0x0",
     description: result.description,
     swapMeta: {
       sellAmount: result.quote.inputAmount,
@@ -169,15 +163,11 @@ export async function handle_crosschain_sync(
   // CRITICAL: Use the EFFECTIVE chain IDs from the quote, NOT the user's
   // original args. When NAV equalization auto-swaps direction (bridges
   // FROM higher-NAV chain), the effective source differs from user input.
-  // Using the original srcChainId for estimateGas would simulate on the
-  // WRONG chain → SameChainTransfer revert (the calldata targets the
-  // swapped source but simulation runs on the original source).
   const effectiveSrcChainId = result.quote.srcChainId;
   const effectiveDstChainId = result.quote.dstChainId;
   const effectiveSrcName = resolveChainName(effectiveSrcChainId);
   const effectiveDstName = resolveChainName(effectiveDstChainId);
 
-  // Build context summary BEFORE estimateGas — so we can include it in errors.
   const eq = result.navEqualization;
   const navImpact = result.navImpact;
   const navContext = eq
@@ -197,89 +187,12 @@ export async function handle_crosschain_sync(
         ].join('\n')
       : '');
 
-  let syncGas: string;
-  try {
-    syncGas = await estimateGas(
-      effectiveSrcChainId, ctx.vaultAddress as Address,
-      result.calldata as Hex, "0x0",
-      ctx.operatorAddress, env.ALCHEMY_API_KEY, "bridge",
-    );
-  } catch (err) {
-    let revertReason: string;
-    if (err instanceof Error) {
-      let revertData: string | undefined;
-      let bestMessage: string | undefined;
-      const GENERIC_MSG = /RPC Request failed|unknown reason/i;
-      let e: any = err;
-      while (e) {
-        const hexData =
-          (typeof e.data === 'string' && e.data.startsWith('0x') && e.data.length > 2) ? e.data
-          : (typeof e.error?.data === 'string' && e.error.data.startsWith('0x') && e.error.data.length > 2) ? e.error.data
-          : undefined;
-        if (hexData) {
-          revertData = hexData;
-          break;
-        }
-        if (!bestMessage) {
-          if (e.shortMessage && !GENERIC_MSG.test(e.shortMessage)) {
-            bestMessage = e.shortMessage;
-          } else if (e.details && !GENERIC_MSG.test(e.details)) {
-            bestMessage = e.details;
-          }
-        }
-        e = e.cause;
-      }
-      if (revertData) {
-        const decoded = decodeRevertData(revertData);
-        revertReason = decoded || friendlyError(`execution reverted: ${revertData}`);
-      } else if (bestMessage) {
-        revertReason = friendlyError(sanitizeError(bestMessage));
-      } else {
-        revertReason = friendlyError(sanitizeError(err.message));
-      }
-    } else {
-      revertReason = friendlyError(sanitizeError(String(err)));
-    }
-
-    const isNavImpact = /NavImpactTooHigh/i.test(revertReason);
-    const errorLines = [
-      `❌ NAV sync failed — transaction would revert on-chain on ${effectiveSrcName}`,
-      ``,
-      `Proposed action:`,
-      `  Route: ${effectiveSrcName} → ${effectiveDstName}`,
-      `  Token: ${result.quote.inputToken.symbol}`,
-      `  Amount: ${result.quote.inputAmount} ${result.quote.inputToken.symbol}`,
-      `  Bridge fee: ${result.quote.feePct}`,
-    ];
-    if (navContext) {
-      errorLines.push(``, navContext);
-    }
-    errorLines.push(``, `Revert reason: ${revertReason}`);
-    if (isNavImpact) {
-      errorLines.push(
-        ``,
-        `Why this happens for NAV sync:`,
-        `  A sync moves tokens to the destination chain but does NOT burn virtual supply on the source chain (${effectiveSrcName}). ` +
-        `That makes the source-chain unit price drop. The on-chain contract rejects the transaction on ${effectiveSrcName} when that drop exceeds navToleranceBps.`,
-        ``,
-        `What you can do:`,
-        `  1. Tell me what navToleranceBps to use. Examples: 500 = 5%, 1000 = 10%, 4000 = 40%, up to 10000 = 100%.`,
-        `  2. Sync a smaller amount (e.g., 0.1 WETH instead of ${result.quote.inputAmount}).`,
-        `  3. Use a plain bridge (crosschain_transfer) if you just want to move the tokens — transfers update virtual supply and avoid this limit.`,
-        `  4. If the server-side NAV shield is also blocking, raise the per-trade threshold via Settings → NAV Shield or Telegram /navshield.`,
-        ``,
-        `Which option would you like? (If you want to proceed with a higher tolerance, just say the percentage, e.g. "40%".)`,
-      );
-    }
-    throw new Error(errorLines.join('\n'));
-  }
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: effectiveSrcChainId,
-    gas: syncGas,
+    gas: "0x0",
     description: result.description,
   };
 

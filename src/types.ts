@@ -178,6 +178,8 @@ export interface UnsignedTransaction {
   };
   /** Internal marker: NAV shield pre-check already ran for this tx build path. */
   navShieldChecked?: boolean;
+  /** Advisory warning produced when the NAV shield simulation shows the trade itself reverts. */
+  revertWarning?: string;
   /** Per-transaction metrics (NAV impact, swap-shield divergence) for frontend display. */
   metrics?: Record<string, unknown>;
 }

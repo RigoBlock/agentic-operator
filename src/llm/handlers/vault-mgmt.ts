@@ -15,7 +15,7 @@ import { resolveTokenAddress } from "../../config.js";
 import { encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../../abi/poolFactory.js";
 import { ERC20_ABI } from "../../abi/erc20.js";
-import { estimateGas, resolveChainArg, resolveChainName } from "../client.js";
+import { resolveChainArg, resolveChainName } from "../client.js";
 
 export async function handle_deploy_smart_pool(
   env: Env,
@@ -57,18 +57,12 @@ export async function handle_deploy_smart_pool(
     args: [poolName, poolSymbol, baseTokenAddress],
   });
 
-  const gas = await estimateGas(
-    ctx.chainId, POOL_FACTORY_ADDRESS as Address,
-    data, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "deploy",
-  );
-
   const transaction: UnsignedTransaction = {
     to: POOL_FACTORY_ADDRESS as Address,
     data,
     value: "0x0",
     chainId: ctx.chainId,
-    gas,
+    gas: "0x0",
     description: `Deploy new Rigoblock pool: ${poolName} (${poolSymbol})`,
     operatorOnly: true,
   };
@@ -172,18 +166,12 @@ export async function handle_fund_pool(
 
   if (isNativeBase) {
     // Native base token — send as msg.value, no approval needed
-    const mintGas = await estimateGas(
-      ctx.chainId, ctx.vaultAddress as Address,
-      mintData as Hex, "0x" + amountInWei.toString(16),
-      ctx.operatorAddress, env.ALCHEMY_API_KEY,
-    );
-
     const transaction: UnsignedTransaction = {
       to: ctx.vaultAddress as Address,
       data: mintData,
       value: "0x" + amountInWei.toString(16),
       chainId: ctx.chainId,
-      gas: mintGas,
+      gas: "0x0",
       description: `Fund pool: deposit ${amountStr} ${baseSymbol} into ${poolData.name}`,
       operatorOnly: true,
     };
@@ -213,18 +201,12 @@ export async function handle_fund_pool(
   });
 
   // Return the approve transaction first — the mint follows after approval
-  const approveGas = await estimateGas(
-    ctx.chainId, baseToken as Address,
-    approveData, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "approve",
-  );
-
   const transaction: UnsignedTransaction = {
     to: baseToken as Address,
     data: approveData,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: approveGas,
+    gas: "0x0",
     description: `Approve ${amountStr} ${baseSymbol} for pool ${poolData.name}`,
     operatorOnly: true,
   };

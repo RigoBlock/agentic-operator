@@ -69,7 +69,7 @@ import {
   type BridgeableToken,
   type BridgeableTokenType,
 } from "./crosschainConfig.js";
-import { getVaultTokenBalance } from "./vault.js";
+import { getVaultTokenBalance, getVaultTokenBalancesBulk } from "./vault.js";
 import type { EffectivePoolState } from "./vault.js";
 import { getClient } from "./rpcClient.js";
 import { convertTokenAmountViaOracle } from "./oraclePrice.js";
@@ -1726,13 +1726,16 @@ export async function computeNavEqualization(params: {
   let isBaseMatch = false;
   let isStableMatch = false;
 
+  // Batch balance reads for all candidates in one multicall round-trip.
+  const candidateBalances = await getVaultTokenBalancesBulk(
+    srcChainId,
+    params.vaultAddress,
+    candidates.map((c) => c.address),
+    params.alchemyKey,
+  );
+
   for (const candidate of candidates) {
-    const { balance } = await getVaultTokenBalance(
-      srcChainId,
-      params.vaultAddress,
-      candidate.address,
-      params.alchemyKey,
-    ).catch(() => ({ balance: 0n, decimals: candidate.decimals, symbol: candidate.symbol }));
+    const balance = candidateBalances.get(candidate.address.toLowerCase()) ?? 0n;
 
     const isBT = candidate.type === baseTokenType;
     const isStable = candidate.type === "USDC" || candidate.type === "USDT";

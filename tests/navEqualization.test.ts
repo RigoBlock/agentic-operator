@@ -11,6 +11,7 @@ import type { Address } from "viem";
 
 const mockGetEffectivePoolState = vi.hoisted(() => vi.fn());
 const mockGetVaultTokenBalance = vi.hoisted(() => vi.fn());
+const mockGetVaultTokenBalancesBulk = vi.hoisted(() => vi.fn());
 const mockGetClient = vi.hoisted(() => vi.fn());
 const mockConvertTokenAmountViaOracle = vi.hoisted(() => vi.fn());
 const mockGetDelegationConfig = vi.hoisted(() => vi.fn());
@@ -19,6 +20,7 @@ const mockGetActiveChains = vi.hoisted(() => vi.fn());
 vi.mock("../src/services/vault.js", () => ({
   getEffectivePoolState: mockGetEffectivePoolState,
   getVaultTokenBalance: mockGetVaultTokenBalance,
+  getVaultTokenBalancesBulk: mockGetVaultTokenBalancesBulk,
 }));
 
 vi.mock("../src/services/rpcClient.js", () => ({
@@ -60,6 +62,13 @@ describe("computeNavEqualization", () => {
       balance: 1_000_000_000_000_000_000_000n,
       decimals: 18,
       symbol: "WETH",
+    });
+    mockGetVaultTokenBalancesBulk.mockImplementation(async (_chainId, _vault, tokenAddresses) => {
+      const balances = new Map<string, bigint>();
+      for (const addr of tokenAddresses) {
+        balances.set(addr.toLowerCase(), 1_000_000_000_000_000_000_000n);
+      }
+      return balances;
     });
     mockGetClient.mockImplementation((chainId: number) => ({
       readContract: vi.fn().mockResolvedValue(0n),

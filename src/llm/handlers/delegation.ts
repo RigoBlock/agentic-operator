@@ -15,7 +15,7 @@ import {
 } from "../../services/delegation.js";
 import { getAgentWalletInfo } from "../../services/agentWallet.js";
 import { checkPendingTxForVault } from "../../services/execution.js";
-import { estimateGas, resolveChainArg, resolveChainName } from "../client.js";
+import { resolveChainArg, resolveChainName } from "../client.js";
 
 export async function handle_check_pending_tx(
   env: Env,
@@ -92,18 +92,12 @@ export async function handle_setup_delegation(
 
   const newSelectors = result.selectors; // already filtered to only missing ones
 
-  const gas = await estimateGas(
-    ctx.chainId, ctx.vaultAddress as Address,
-    result.transaction.data as Hex, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "delegation",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: result.transaction.data,
     value: "0x0",
     chainId: ctx.chainId,
-    gas,
+    gas: "0x0",
     description: result.transaction.description,
     operatorOnly: true,
   };
@@ -166,18 +160,12 @@ export async function handle_revoke_delegation(
   // until delegation is explicitly re-set up.
   await revokeDelegationOnChain(env.KV, ctx.vaultAddress as string, ctx.chainId).catch(() => {});
 
-  const gas = await estimateGas(
-    ctx.chainId, ctx.vaultAddress as Address,
-    revocation.transaction.data as Hex, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "delegation",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: revocation.transaction.data,
     value: "0x0",
     chainId: ctx.chainId,
-    gas,
+    gas: "0x0",
     description: revocation.transaction.description,
     operatorOnly: true,
   };
@@ -296,18 +284,12 @@ export async function handle_revoke_selectors(
     ctx.chainId,
   );
 
-  const gas = await estimateGas(
-    ctx.chainId, ctx.vaultAddress as Address,
-    result.transaction.data as Hex, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "delegation",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: result.transaction.data,
     value: "0x0",
     chainId: ctx.chainId,
-    gas,
+    gas: "0x0",
     description: result.transaction.description,
   };
 

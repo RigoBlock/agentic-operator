@@ -724,14 +724,13 @@ export const TOOL_DEFINITIONS = [
         properties: {
           poolId: {
             type: "string",
-            description: "The pool ID (bytes32 keccak256 hash of the PoolKey) — e.g., '0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34'",
+            description: "Optional pool ID (bytes32 keccak256 hash of the PoolKey). If omitted, returns every active pool owned by the vault — e.g., '0xb896675bfb20eed4b90d83f64cf137a860a99a86604f7fac201a822f2b4abc34'",
           },
           chain: {
             type: "string",
             description: "Chain name or ID (e.g., 'arbitrum', '42161')",
           },
         },
-        required: ["poolId"],
       },
     },
   },

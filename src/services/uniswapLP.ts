@@ -296,8 +296,8 @@ function computePoolId(poolKey: PoolKey): Hex {
 /**
  * Default fee → tickSpacing mapping for the standard Uniswap v4 tiers.
  * Uniswap v4 permits any uint24 fee and any int24 tickSpacing — custom pools
- * may use values not covered here.  When in doubt, call getPoolInfoById() to
- * read the exact tickSpacing from the pool's Initialize event.
+ * may use values not covered here. Use getVaultActivePools() to read exact
+ * tickSpacing/hooks from the vault's active positions.
  */
 function defaultTickSpacing(fee: number): number {
   if (fee <= 100)  return 1;
@@ -814,36 +814,14 @@ const POSITION_MANAGER_ABI = [
 
 // ── Pool Info Lookup ───────────────────────────────────────────────────
 
-/** Uniswap v4 PoolManager Initialize event ABI fragment (for getLogs). */
-const INITIALIZE_EVENT_ABI = [{
-  type: "event" as const,
-  name: "Initialize",
-  inputs: [
-    { name: "id",          type: "bytes32"  as const, indexed: true  },
-    { name: "currency0",   type: "address"  as const, indexed: true  },
-    { name: "currency1",   type: "address"  as const, indexed: true  },
-    { name: "fee",         type: "uint24"   as const, indexed: false },
-    { name: "tickSpacing", type: "int24"    as const, indexed: false },
-    { name: "hooks",       type: "address"  as const, indexed: false },
-    { name: "sqrtPriceX96",type: "uint160"  as const, indexed: false },
-    { name: "tick",        type: "int24"    as const, indexed: false },
-  ],
-}] as const;
-
-export interface PoolInfo {
+export interface ActivePoolInfo {
   /** The keccak256(abi.encode(PoolKey)) pool ID. */
   poolId: Hex;
+  /** True when StateView.getSlot0() reports a non-zero sqrtPriceX96. */
   initialized: boolean;
-  /**
-   * True when fee/tickSpacing/hooks/currency0/currency1 are authoritative values from
-   * the on-chain Initialize event.  False when the pool is uninitialized and these fields
-   * are zero/unknown placeholders — callers must ask the user for the full pool key before
-   * presenting them as parameters for initialize_pool.
-   */
-  poolKeyKnown: boolean;
   /** Fee tier in hundredths of a bip (e.g. 6000 = 0.60%). */
   fee: number;
-  /** Tick spacing — always exact (from Initialize event or provided). */
+  /** Tick spacing. */
   tickSpacing: number;
   /** Hook contract address (zero = no hook). */
   hooks: Address;
@@ -851,105 +829,99 @@ export interface PoolInfo {
   currency1: Address;
   sqrtPriceX96: string;
   currentTick: number;
+  liquidity: string;
 }
 
 /**
- * Look up full pool key details for a Uniswap v4 pool by its pool ID.
- *
- * Reads slot0 (sqrtPriceX96, tick, lpFee) via StateView.getSlot0(), then
- * fetches the PoolManager Initialize event to recover tickSpacing and hooks.
- *
- * All together the returned PoolInfo contains everything required to call
- * add_liquidity on that pool.
+ * Return every Uniswap v4 pool that currently has at least one vault-owned
+ * position NFT. Uses vault.getUniV4TokenIds() → PositionManager batch →
+ * StateView batch, with no getLogs round-trip.
  */
-export async function getPoolInfoById(
-  poolId: Hex,
+export async function getVaultActivePools(
   chainId: number,
+  vaultAddress: Address,
   alchemyApiKey: string,
-): Promise<PoolInfo> {
+): Promise<ActivePoolInfo[]> {
+  const posm = POSITION_MANAGER[chainId];
+  if (!posm) {
+    throw new Error(`Uniswap v4 PositionManager not available on chain ${chainId}. Supported chains: ${Object.keys(POSITION_MANAGER).join(", ")}.`);
+  }
   const stateView = STATE_VIEW[chainId];
   if (!stateView) {
     throw new Error(`Uniswap v4 StateView not available on chain ${chainId}.`);
   }
-  const poolManager = POOL_MANAGER[chainId];
-  if (!poolManager) {
-    throw new Error(`Uniswap v4 PoolManager not available on chain ${chainId}.`);
-  }
 
   const client = getClient(chainId, alchemyApiKey);
 
-  // 1. Read slot0 via StateView
-  const slot0Result = await client.readContract({
-    address: stateView,
-    abi: STATEVIEW_ABI,
-    functionName: "getSlot0",
-    args: [poolId],
+  let tokenIds: readonly bigint[];
+  try {
+    tokenIds = await client.readContract({
+      address: vaultAddress,
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "getUniV4TokenIds",
+    }) as readonly bigint[];
+  } catch (err) {
+    throw new Error(`Failed to read Uniswap v4 token IDs from vault ${vaultAddress}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (tokenIds.length === 0) return [];
+
+  const posmResults = await client.multicall({
+    contracts: tokenIds.map((tokenId) => ({
+      address: posm,
+      abi: POSITION_MANAGER_ABI,
+      functionName: "getPoolAndPositionInfo" as const,
+      args: [tokenId] as const,
+    })),
   });
 
-  const sqrtPriceX96 = slot0Result[0];
-  const tick = slot0Result[1];
-  const lpFee = slot0Result[3];
-
-  // 2. Fetch Initialize event to recover tickSpacing, hooks, and token addresses
-  let fee: number = lpFee;
-  let tickSpacing: number = defaultTickSpacing(lpFee);
-  let hooks: Address = "0x0000000000000000000000000000000000000000" as Address;
-  let currency0: Address = "0x0000000000000000000000000000000000000000" as Address;
-  let currency1: Address = "0x0000000000000000000000000000000000000000" as Address;
-
-  let hasInitializeEvent = false;
-  try {
-    const logs = await client.getLogs({
-      address: poolManager,
-      event: INITIALIZE_EVENT_ABI[0],
-      args: { id: poolId },
-      fromBlock: 0n,
-      toBlock: "latest",
-    });
-    if (logs.length > 0 && logs[0].args) {
-      hasInitializeEvent = true;
-      const e = logs[0].args;
-      fee         = Number(e.fee ?? lpFee);
-      tickSpacing = Number(e.tickSpacing ?? defaultTickSpacing(lpFee));
-      hooks       = (e.hooks ?? "0x0000000000000000000000000000000000000000") as Address;
-      currency0   = (e.currency0 ?? currency0) as Address;
-      currency1   = (e.currency1 ?? currency1) as Address;
+  const pools = new Map<string, { poolKey: PoolKey; poolId: Hex }>();
+  for (const result of posmResults) {
+    if (result.status !== "success" || !result.result) continue;
+    const [poolKey] = result.result as [PoolKey, bigint];
+    const poolId = computePoolId(poolKey);
+    if (!pools.has(poolId)) {
+      pools.set(poolId, { poolKey, poolId });
     }
-  } catch {
-    // Initialize event lookup failed (node limitation) — fee from slot0, ts estimated
   }
 
-  if (sqrtPriceX96 === 0n && !hasInitializeEvent) {
-    // Pool is uninitialized (slot0 returns 0 and no Initialize event found).
-    // Return an uninitialized PoolInfo so callers can guide the user to initialize_pool.
-    // Note: initialize_pool requires the full pool key (tokenA, tokenB, fee, tickSpacing,
-    // hooks) — it cannot be derived from a poolId alone.
+  if (pools.size === 0) return [];
+
+  const poolList = [...pools.values()];
+  const stateResults = await client.multicall({
+    contracts: poolList.flatMap(({ poolId }) => [
+      { address: stateView, abi: STATEVIEW_ABI, functionName: "getSlot0" as const, args: [poolId] as const },
+      { address: stateView, abi: STATEVIEW_ABI, functionName: "getLiquidity" as const, args: [poolId] as const },
+    ]),
+  });
+
+  return poolList.map(({ poolKey, poolId }, i) => {
+    const slot0 = stateResults[i * 2];
+    const liq = stateResults[i * 2 + 1];
+
+    let sqrtPriceX96 = 0n;
+    let tick = 0;
+    if (slot0.status === "success" && slot0.result) {
+      const [price, t] = slot0.result as [bigint, number, number, number];
+      sqrtPriceX96 = price;
+      tick = t;
+    }
+
+    const liquidity = liq.status === "success" && liq.result ? (liq.result as bigint) : 0n;
+
     return {
       poolId,
-      initialized: false,
-      poolKeyKnown: false,
-      fee,
-      tickSpacing,
-      hooks,
-      currency0,
-      currency1,
-      sqrtPriceX96: "0",
-      currentTick: 0,
+      initialized: sqrtPriceX96 > 0n,
+      fee: poolKey.fee,
+      tickSpacing: poolKey.tickSpacing,
+      hooks: poolKey.hooks,
+      currency0: poolKey.currency0,
+      currency1: poolKey.currency1,
+      sqrtPriceX96: sqrtPriceX96.toString(),
+      currentTick: tick,
+      liquidity: liquidity.toString(),
     };
-  }
-
-  return {
-    poolId,
-    initialized: hasInitializeEvent || sqrtPriceX96 !== 0n,
-    poolKeyKnown: hasInitializeEvent,
-    fee,
-    tickSpacing,
-    hooks,
-    currency0,
-    currency1,
-    sqrtPriceX96: sqrtPriceX96.toString(),
-    currentTick: tick,
-  };
+  });
 }
 
 // ── LP Position Reading ────────────────────────────────────────────────

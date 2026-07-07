@@ -25,7 +25,7 @@ import {
 } from "../../services/gmxTrading.js";
 import { getGmxPositionsSummary, getGmxPositions, findGmxPosition, computeGmxLeverage, computeEffectiveCollateral, type GmxPosition } from "../../services/gmxPositions.js";
 import { ARBITRUM_CHAIN_ID, GmxOrderType } from "../../abi/gmx.js";
-import { estimateGas, executeToolCall, txActionLine } from "../client.js";
+import { executeToolCall, txActionLine } from "../client.js";
 
 /** Parse a formatted USD string like "$12,345.67" or "$12.34K" back to number */
 function parseUsdString(s: string): number {
@@ -293,12 +293,6 @@ export async function handle_gmx_increase_position(
     acceptablePriceUsd,
   });
 
-  const gmxGas = await estimateGas(
-    ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
-    calldata as Hex, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
-  );
-
   // ── Compute display values ──────────────────────────────────────────
   // Leverage must use EFFECTIVE collateral (raw collateral + unrealized PnL),
   // matching GMX v2's on-chain formula. We derive effective collateral from
@@ -329,7 +323,7 @@ export async function handle_gmx_increase_position(
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
-    gas: gmxGas,
+    gas: "0x0",
     description: txDescription,
   };
 
@@ -554,18 +548,12 @@ export async function handle_gmx_decrease_position(
           ? "Market Close"
           : "Market Decrease";
 
-  const gmxDecGas = await estimateGas(
-    ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
-    calldata as Hex, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
-    gas: gmxDecGas,
+    gas: "0x0",
     description: `[GMX] ${orderLabel} ${isLong ? "Long" : "Short"} ${marketSymbol} — $${sizeDeltaUsd} size`,
   };
 
@@ -682,18 +670,12 @@ export async function handle_gmx_cancel_order(
   const orderKey = args.orderKey as Hex;
   const calldata = buildCancelOrderCalldata(orderKey);
 
-  const cancelGas = await estimateGas(
-    ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
-    calldata as Hex, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
-    gas: cancelGas,
+    gas: "0x0",
     description: `[GMX] Cancel order ${orderKey.slice(0, 10)}…`,
   };
 
@@ -730,18 +712,12 @@ export async function handle_gmx_update_order(
     triggerPriceUsd: args.triggerPrice as string,
   });
 
-  const updateGas = await estimateGas(
-    ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
-    calldata as Hex, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
-    gas: updateGas,
+    gas: "0x0",
     description: `[GMX] Update order ${(args.orderKey as string).slice(0, 10)}…`,
   };
 
@@ -797,18 +773,12 @@ export async function handle_gmx_claim_funding_fees(
     tokens: claimTokens as Address[],
   });
 
-  const claimGas = await estimateGas(
-    ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address,
-    calldata as Hex, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "gmx",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
-    gas: claimGas,
+    gas: "0x0",
     description: `[GMX] Claim funding fees from ${claimMarkets.length} market(s)`,
   };
 

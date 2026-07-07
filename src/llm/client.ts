@@ -18,9 +18,7 @@ const ALL_AGENT_TOOL_DEFINITIONS = [...AGENT_TOOL_DEFINITIONS, ...getSkillTools(
 import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, getNativeTokenSymbol } from "../config.js";
 import { AuthError } from "../services/auth.js";
 import { formatUnits, type Address, type Hex } from "viem";
-import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
-import { getClient } from "../services/rpcClient.js";
-import { checkNavImpact, getNavShieldThreshold, MAX_NAV_DROP_PCT } from "../services/navGuard.js";
+
 import {
   getSwapShieldTolerance,
   getStoredSlippage,
@@ -33,6 +31,7 @@ import {
 } from "../services/swapShield.js";
 import { TOOL_HANDLER_REGISTRY } from "./handlers/index.js";
 import { decodeRevertData, extractRevertData } from "../services/errorDecoder.js";
+import { prepareTransaction } from "../services/execution.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
 // These appear as 4-byte hex prefixes in "execution reverted" messages.
@@ -951,16 +950,12 @@ ${executionModeNote}${contextDocsBlock}`;
     try {
       onStreamEvent?.({ type: "status", message: `Executing ${immediateFastPath.name}...` });
       const toolResult = await executeToolCall(env, ctx, immediateFastPath.name, immediateFastPath.args);
-      // Outer NAV shield for tools that don't self-check (build_vault_swap already sets navShieldChecked)
+      // Finalize transaction: single gas estimate + NAV shield before returning it.
       let fastPathReply = toolResult.message;
-      if (toolResult.transaction && !toolResult.transaction.navShieldChecked && toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress?.toLowerCase()) {
-        const navCheck = await preCheckNavImpact(env, ctx, toolResult.transaction);
-        toolResult.transaction.navShieldChecked = true;
-        if (navCheck.warning) fastPathReply += '\n' + navCheck.warning;
-        if (navCheck.metrics) {
-          toolResult.metadata = { ...toolResult.metadata, navMetrics: navCheck.metrics };
-          if (toolResult.transaction) toolResult.transaction.metrics = toolResult.metadata;
-        }
+      if (toolResult.transaction) {
+        const { tx: finalizedTx, warning } = await prepareTransaction(env, ctx, toolResult.transaction);
+        toolResult.transaction = finalizedTx;
+        if (warning) fastPathReply += '\n' + warning;
       }
       return {
         reply: fastPathReply,
@@ -1099,19 +1094,8 @@ ${executionModeNote}${contextDocsBlock}`;
           result = toolResult.message;
 
           if (toolResult.transaction) {
-            // ── NAV shield pre-check (universal hook) ──
-            if (
-              !toolResult.transaction.navShieldChecked &&
-              toolResult.transaction.to?.toLowerCase() === ctx.vaultAddress.toLowerCase()
-            ) {
-              const navCheck = await preCheckNavImpact(env, ctx, toolResult.transaction);
-              toolResult.transaction.navShieldChecked = true;
-              if (navCheck.warning) result += '\n' + navCheck.warning;
-              if (navCheck.metrics) {
-                toolResult.metadata = { ...toolResult.metadata, navMetrics: navCheck.metrics };
-                if (toolResult.transaction) toolResult.transaction.metrics = toolResult.metadata;
-              }
-            }
+            // Transactions are finalized centrally after the tool loop so gas
+            // estimation and the NAV shield run exactly once per transaction.
             pendingTransactions.push(toolResult.transaction);
           }
 
@@ -1281,13 +1265,37 @@ ${executionModeNote}${contextDocsBlock}`;
         });
       }
 
-      // Actionable outcome available — return immediately.
+      // Actionable outcome available — finalize transactions and return.
       if (pendingTransactions.length > 0) {
+        const warningLines: string[] = [];
+        for (let i = 0; i < pendingTransactions.length; i++) {
+          try {
+            const { tx: finalizedTx, warning } = await prepareTransaction(env, ctx, pendingTransactions[i]);
+            pendingTransactions[i] = finalizedTx;
+            if (warning) warningLines.push(warning);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return {
+              reply: friendlyError(sanitizeError(msg)),
+              toolCalls: toolCallResults,
+              chainSwitch: pendingChainSwitch,
+              dexProvider: detectedDex,
+              reasoning: orchestrationReasoning,
+              modelsUsed,
+              finalModel: "tooling",
+            };
+          }
+        }
+
         for (const tx of pendingTransactions) {
           onStreamEvent?.({ type: "transaction", transaction: tx });
         }
+
+        let reply = toolCallResults.filter(tc => !tc.error && tc.result).pop()?.result || "";
+        if (warningLines.length) reply += "\n\n" + warningLines.join("\n");
+
         const result: ChatResponse = {
-          reply: toolCallResults.filter(tc => !tc.error && tc.result).pop()?.result || "",
+          reply,
           toolCalls: toolCallResults,
           transaction: pendingTransactions[pendingTransactions.length - 1],
           transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,
@@ -1410,78 +1418,6 @@ ${executionModeNote}${contextDocsBlock}`;
   };
 }
 
-// ── Gas estimation helper ─────────────────────────────────────────────
-
-/**
- * Estimate gas for an unsigned transaction via eth_estimateGas.
- * Returns a hex string gas limit with a 20% safety buffer.
- *
- * If estimation fails, it means the transaction would revert on-chain.
- * We propagate the error rather than using a fallback — the user needs to
- * see why the transaction would fail.
- *
- * The only exception is when no `from` address is available (can't simulate
- * without a sender), in which case we throw an explicit error.
- */
-export async function estimateGas(
-  chainId: number,
-  to: Address,
-  data: Hex,
-  value: string,
-  from: Address | undefined,
-  alchemyKey?: string,
-  _category?: string,
-): Promise<string> {
-  if (!from) {
-    throw new Error("Cannot estimate gas without a sender address. Connect your wallet first.");
-  }
-  const client = getClient(chainId, alchemyKey);
-  const txValue = BigInt(value);
-  let estimated: bigint;
-  try {
-    estimated = await client.estimateGas({
-      account: from,
-      to,
-      data,
-      value: txValue,
-    });
-  } catch (err) {
-    // Extract the most useful error message from viem's error chain.
-    // viem wraps execution reverts in EstimateGasExecutionError → CallExecutionError.
-    // Walk the chain to find a non-generic message or hex revert data.
-    let detail = '';
-    let e: any = err;
-    while (e) {
-      if (typeof e.data === 'string' && e.data.startsWith('0x') && e.data.length > 2) {
-        detail = `revert data: ${e.data}`;
-        break;
-      }
-      if (typeof e.error?.data === 'string' && e.error.data.startsWith('0x') && e.error.data.length > 2) {
-        detail = `revert data: ${e.error.data}`;
-        break;
-      }
-      const msg = e.shortMessage || e.details || '';
-      if (msg && !/unknown reason|RPC Request failed/i.test(msg) && msg.length > detail.length) {
-        detail = msg;
-      }
-      e = e.cause;
-    }
-    const label = _category ? `${_category} ` : '';
-    let reason = `${label}transaction would revert on-chain`;
-    if (detail) {
-      const revertHex = detail.startsWith('revert data: ') ? detail.slice(13).trim() : extractRevertData(detail);
-      const decoded = revertHex ? decodeRevertData(revertHex) : null;
-      reason += decoded ? `: ${decoded}` : `: ${detail}`;
-    }
-    throw new Error(reason);
-  }
-  // 20% buffer — covers execution-time variance (adapter routing, internal
-  // approvals, oracle reads). The on-chain estimate is already accurate for
-  // the vault proxy overhead since we estimate from the actual sender.
-  const buffered = estimated + (estimated * 20n) / 100n;
-  return `0x${buffered.toString(16)}`;
-}
-
 /**
  * Returns the appropriate action line to append to a transaction message.
  * In delegated mode the agent executes automatically — no sign prompt needed.
@@ -1508,146 +1444,6 @@ export interface ToolResult {
   executionResult?: ExecutionResult;
 }
 
-/**
- * NAV shield pre-check — runs BEFORE returning unsigned calldata to the caller.
- *
- * This ensures the NAV shield protects ALL transactions equally — swaps, bridges,
- * LP, everything. The 10% threshold applies universally. If a transaction would
- * cause NAV to drop > 10%, the calldata is never returned.
- *
- * The NAV shield MUST NEVER be skipped for any transaction type. When something
- * doesn't work, the effort must be in fixing the root cause, not in skipping
- * the shield to avoid errors. The NAV shield is the user's primary protection
- * against rogue transactions.
- *
- * For cross-chain bridges (depositV3), Transfer and Sync have fundamentally
- * different NAV behavior:
- *   - Transfer (OpType.Transfer): updates virtual supply — source NAV is preserved
- *     because effectiveSupply decreases proportionally with value.
- *   - Sync (OpType.Sync): does NOT update virtual supply — source NAV drops because
- *     tokens leave but supply stays. Uses navToleranceBps for on-chain validation.
- *
- * The NAV shield uses updateUnitaryValue() (the actual contract algorithm) instead
- * of getNavDataView() (view-only extension) to avoid an edge case where the view
- * returns unitaryValue=0 when the actual contract preserves the stored value.
- *
- * For delegated mode, the execution engine runs the NAV shield again at broadcast
- * time (belt-and-suspenders — market conditions could change between building
- * and broadcasting). For manual mode, this is the ONLY NAV shield checkpoint.
- */
-/** Metrics returned by the NAV shield pre-check. */
-export interface NavPreCheckMetrics {
-  navImpactPct: string;
-  navReferenceValue: string;
-  navPostValue: string;
-}
-
-export async function preCheckNavImpact(
-  env: Env,
-  ctx: RequestContext,
-  tx: UnsignedTransaction,
-): Promise<{ warning: string; metrics?: NavPreCheckMetrics }> {
-  const ZERO = "0x0000000000000000000000000000000000000000";
-  if (!ctx.vaultAddress || ctx.vaultAddress === ZERO) {
-    return { warning: '' };
-  }
-
-  // Determine who to simulate as — must be the actual vault owner.
-  // Verified callers: use their address (already proven to be the owner via signature).
-  // Unverified callers: read owner() on-chain rather than trusting the caller-supplied
-  // operatorAddress, which could be wrong and would produce misleading simulation reverts.
-  let simulationSender: Address;
-  if (ctx.operatorVerified && ctx.operatorAddress) {
-    simulationSender = ctx.operatorAddress as Address;
-  } else {
-    try {
-      const vaultClient = getClient(tx.chainId, env.ALCHEMY_API_KEY);
-      simulationSender = await vaultClient.readContract({
-        address: ctx.vaultAddress as Address,
-        abi: RIGOBLOCK_VAULT_ABI,
-        functionName: "owner",
-      }) as Address;
-    } catch {
-      // RPC error reading vault owner — skip NAV pre-check; delegated path has a hard stop
-      return { warning: '' };
-    }
-  }
-
-  // Read operator's custom NAV shield threshold (falls back to default 10%)
-  const storedNavThreshold = env.KV && ctx.operatorAddress
-    ? await getNavShieldThreshold(env.KV, ctx.operatorAddress)
-    : null;
-
-  try {
-    const result = await checkNavImpact(
-      ctx.vaultAddress as Address,
-      tx.data as Hex,
-      BigInt(tx.value || "0x0"),
-      tx.chainId,
-      env.ALCHEMY_API_KEY,
-      simulationSender,
-      env.KV,
-      storedNavThreshold ?? undefined,
-      env.requestCache,
-    );
-
-    if (!result.allowed) {
-      if (result.code === 'TRADE_REVERTS') {
-        // For the pre-check (building unsigned calldata for manual signing), a simulation
-        // failure is advisory — the user signs themselves. If the tx fails on-chain, they
-        // see the real revert reason. We warn but don't block.
-        // The delegated-mode broadcast check in execution.ts is the hard stop.
-        const warning = `⚠️ Simulation warning: ${result.reason || "transaction may revert on-chain"} — verify token approvals and vault adapter support before signing.`;
-        console.warn(`[NavShield pre-check] Non-blocking simulation failure: ${result.reason}`);
-        return { warning };
-      }
-      // BLOCKED — NAV would drop more than the threshold. Hard security block.
-      const maxDrop = storedNavThreshold ? Number(storedNavThreshold) : 10;
-      const dropPctNum = Number(result.dropPct);
-      const suggestedNavThreshold = Math.min(
-        Number(MAX_NAV_DROP_PCT),
-        Math.max(1, Math.ceil(dropPctNum)),
-      );
-      const navShieldGuidance = `raise the threshold to ${suggestedNavThreshold}% (Settings → NAV Shield, or Telegram /navshield)`;
-      const reason =
-        `Server-side NAV shield blocked this transaction: it would reduce the vault unit value by ${result.dropPct}% ` +
-        `(max allowed: ${maxDrop}%). ${result.reason || ""}\n\n` +
-        `This is independent of the on-chain NavImpactTooHigh check. ` +
-        `To allow a larger loss per trade, ${navShieldGuidance}.`;
-      throw new Error(reason.trim());
-    }
-
-    if (result.verified) {
-      return {
-        warning: '',
-        metrics: {
-          // impactPct is signed: positive = NAV improved, negative = NAV dropped.
-          navImpactPct: result.impactPct,
-          navReferenceValue: result.baselineUnitaryValue || result.preNavUnitaryValue,
-          navPostValue: result.postNavUnitaryValue,
-        },
-      };
-    } else {
-      console.warn(
-        `[NavShield pre-check] ⚠ Unverified: NAV impact could not be measured (chain ${tx.chainId})`,
-      );
-      return { warning: '' };
-    }
-  } catch (err) {
-    // Re-throw NAV shield blocks — these are security violations
-    if (err instanceof Error && err.message.includes("NAV shield blocked")) {
-      throw err;
-    }
-    // Swallow infrastructure errors (RPC timeouts, etc.) — don't block the
-    // calldata for transient failures. The delegated path has a second check.
-    console.warn(
-      `[NavShield pre-check] Infrastructure error (non-blocking): ${
-        err instanceof Error ? err.message.slice(0, 200) : String(err)
-      }`,
-    );
-    return { warning: '' };
-  }
-}
 
 /**
  * Execute a single tool call. Returns a message and optionally an unsigned transaction.

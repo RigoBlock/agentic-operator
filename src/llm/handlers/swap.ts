@@ -19,7 +19,7 @@ import { resolveTokenAddress, getWrappedNativeAddress, getNativeTokenSymbol } fr
 import { encodeFunctionData, decodeFunctionData, parseUnits, formatUnits } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import {
-  estimateGas, preCheckNavImpact, resolveChainName, resolveSlippage, runSwapShield, switchChainIfNeeded, txActionLine,
+  resolveChainName, resolveSlippage, runSwapShield, switchChainIfNeeded, txActionLine,
 } from "../client.js";
 import { enrichQuoteWithOracle } from "../../services/quoteEnrichment.js";
 
@@ -221,18 +221,12 @@ async function assembleSwapTransaction(
   const descParts = [`[${assembly.dexLabel}] Sell ${sellDesc} for ${buyDesc}`];
   if (priceLine) descParts.push(priceLine);
 
-  const gas = await estimateGas(
-    ctx.chainId, ctx.vaultAddress as Address,
-    assembly.calldata, "0x0",
-    ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
-  );
-
   const transaction: UnsignedTransaction = {
     to: ctx.vaultAddress as Address,
     data: assembly.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas,
+    gas: "0x0",
     description: descParts.join(" | "),
     swapMeta: {
       sellAmount: inputAmount,
@@ -265,18 +259,12 @@ async function assembleSwapTransaction(
     ...(priceLine ? [priceLine] : []),
     `Slippage: ${intent.slippageBps ? intent.slippageBps / 100 : 1}%`,
     `Chain: ${chainName}`,
-    `Gas limit: ${parseInt(gas, 16)}`,
     ...(shield.warning ? [shield.warning] : []),
     ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
   ].join("\n");
 
-  // ── NAV shield pre-check ──
-  const navCheck = await preCheckNavImpact(env, ctx, transaction);
-  if (navCheck.warning) message += '\n' + navCheck.warning;
-
   const metadata: Record<string, unknown> = {};
   if (shield.metrics) metadata.swapShield = shield.metrics;
-  if (navCheck.metrics) metadata.navShield = navCheck.metrics;
   if (Object.keys(metadata).length) transaction.metrics = metadata;
 
   return { message, transaction, chainSwitch: chainSwitched, metadata: Object.keys(metadata).length ? metadata : undefined };
@@ -425,12 +413,6 @@ export async function handle_build_vault_swap(
           ? encodeFunctionData({ abi: AUNISWAP_ABI, functionName: "wrapETH",     args: [amountRaw] })
           : encodeFunctionData({ abi: AUNISWAP_ABI, functionName: "unwrapWETH9", args: [amountRaw] });
 
-        const gas = await estimateGas(
-          ctx.chainId, ctx.vaultAddress as Address,
-          calldata, "0x0",
-          ctx.operatorAddress, env.ALCHEMY_API_KEY, "swap",
-        );
-
         const wrappedSym = `W${nativeSym}`;
         const [fromSym, toSym] = isWrap ? [nativeSym, wrappedSym] : [wrappedSym, nativeSym];
         const transaction: UnsignedTransaction = {
@@ -438,7 +420,7 @@ export async function handle_build_vault_swap(
           data: calldata,
           value: "0x0",
           chainId: ctx.chainId,
-          gas,
+          gas: "0x0",
           description: `${isWrap ? "Wrap" : "Unwrap"} ${intent.amountIn} ${fromSym} → ${toSym}`,
           swapMeta: {
             sellAmount: intent.amountIn,
@@ -450,22 +432,14 @@ export async function handle_build_vault_swap(
           },
         };
 
-        let message = [
+        const message = [
           `✅ ${isWrap ? "Wrap" : "Unwrap"} ready`,
           `${isWrap ? "Deposit" : "Withdraw"}: ${intent.amountIn} ${fromSym} → ${intent.amountIn} ${toSym} (1:1)`,
           `Chain: ${chainName}`,
-          `Gas limit: ${parseInt(gas, 16)}`,
           ...(txActionLine(ctx) ? [txActionLine(ctx)] : []),
         ].join("\n");
 
-        const navCheckWrap = await preCheckNavImpact(env, ctx, transaction);
-        if (navCheckWrap.warning) message += '\n' + navCheckWrap.warning;
-
-        const metaWrap: Record<string, unknown> = {};
-        if (navCheckWrap.metrics) metaWrap.navShield = navCheckWrap.metrics;
-        if (Object.keys(metaWrap).length) transaction.metrics = metaWrap;
-
-        return { message, transaction, chainSwitch: chainSwitched, metadata: Object.keys(metaWrap).length ? metaWrap : undefined };
+        return { message, transaction, chainSwitch: chainSwitched };
       }
     }
   }
