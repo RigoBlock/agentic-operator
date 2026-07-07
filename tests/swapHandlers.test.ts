@@ -8,6 +8,7 @@ import { RIGOBLOCK_VAULT_ABI } from "../src/abi/rigoblockVault.js";
 // ── Mocked dependencies (must be in vi.hoisted so vi.mock factories can reference them) ──
 const {
   mockGetZeroXQuote,
+  mockGetZeroXVaultQuote,
   mockFormatZeroXQuoteForDisplay,
   mockGetUniswapQuote,
   mockFormatUniswapQuoteForDisplay,
@@ -25,6 +26,7 @@ const {
   mockGetNativeTokenSymbol,
 } = vi.hoisted(() => ({
   mockGetZeroXQuote: vi.fn(),
+  mockGetZeroXVaultQuote: vi.fn(),
   mockFormatZeroXQuoteForDisplay: vi.fn(),
   mockGetUniswapQuote: vi.fn(),
   mockFormatUniswapQuoteForDisplay: vi.fn(() => "📊 Uniswap quote display"),
@@ -51,6 +53,7 @@ const {
 
 vi.mock("../src/services/zeroXTrading.js", () => ({
   getZeroXQuote: mockGetZeroXQuote,
+  getZeroXVaultQuote: mockGetZeroXVaultQuote,
   formatZeroXQuoteForDisplay: mockFormatZeroXQuoteForDisplay,
 }));
 
@@ -207,6 +210,7 @@ describe("handle_get_swap_quote", () => {
 describe("handle_build_vault_swap", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetZeroXVaultQuote.mockResolvedValue(makeZeroXQuoteExactOutput());
     mockGetVaultTokenBalance.mockResolvedValue({ balance: BigInt("100000000000000000000"), decimals: 18, symbol: "POL" });
     mockEncodeVaultExecute.mockReturnValue("0xencoded" as Hex);
     mockGetUniswapSwapCalldata.mockResolvedValue(makeUniswapSwapTx());
@@ -214,7 +218,7 @@ describe("handle_build_vault_swap", () => {
   });
 
   it("falls back to Uniswap when 0x reports no liquidity", async () => {
-    mockGetZeroXQuote.mockRejectedValue(
+    mockGetZeroXVaultQuote.mockRejectedValue(
       new Error("No liquidity found on 0x for POL → GRG on chain 137. Try Uniswap or a different chain."),
     );
     mockGetUniswapQuote.mockResolvedValue(makeUniswapQuote());
@@ -225,7 +229,7 @@ describe("handle_build_vault_swap", () => {
       amountOut: "1",
     }, "build_vault_swap");
 
-    expect(mockGetZeroXQuote).toHaveBeenCalledTimes(1);
+    expect(mockGetZeroXVaultQuote).toHaveBeenCalledTimes(1);
     expect(mockGetUniswapQuote).toHaveBeenCalledTimes(1);
     expect(result.message).toContain("0x could not route");
     expect(result.message).toContain("routed via Uniswap instead");
@@ -233,7 +237,7 @@ describe("handle_build_vault_swap", () => {
   });
 
   it("does not fallback on non-liquidity 0x errors", async () => {
-    mockGetZeroXQuote.mockRejectedValue(new Error("Swap Shield blocked this trade"));
+    mockGetZeroXVaultQuote.mockRejectedValue(new Error("Swap Shield blocked this trade"));
 
     await expect(
       handle_build_vault_swap(makeEnv(), makeCtx(), {
@@ -247,9 +251,10 @@ describe("handle_build_vault_swap", () => {
   });
 
   it("falls back to Uniswap when the vault's A0xRouter rejects the settler action", async () => {
-    mockGetZeroXQuote.mockResolvedValue(makeZeroXQuoteExactOutput());
+    mockGetZeroXVaultQuote.mockResolvedValue(makeZeroXQuoteExactOutput());
+    // A0xRouter reverts ActionNotAllowed(CHECK_SLIPPAGE) when 0x embeds a disallowed settler action.
     mockRpcCall.mockRejectedValue(
-      new Error("0x Settler action 0x131ad428 is not allowed by Rigoblock's A0xRouter on this chain. Try the same swap via Uniswap or on another chain."),
+      new Error("execution reverted: 0x2f1cda64131ad42800000000000000000000000000000000000000000000000000000000"),
     );
     mockGetUniswapQuote.mockResolvedValue(makeUniswapQuote());
 
@@ -265,8 +270,8 @@ describe("handle_build_vault_swap", () => {
     expect(result.transaction?.swapMeta?.dex).toBe("Uniswap");
   });
 
-  it("returns a transaction for exact-output native 0x swaps using the raw 0x calldata", async () => {
-    mockGetZeroXQuote.mockResolvedValue(makeZeroXQuoteExactOutput());
+  it("returns a transaction via 0x for vault swaps", async () => {
+    mockGetZeroXVaultQuote.mockResolvedValue(makeZeroXQuoteExactOutput());
     mockGetVaultTokenBalance.mockResolvedValue({ balance: BigInt("1000000000000000000"), decimals: 18, symbol: "ETH" });
 
     const result = await handle_build_vault_swap(makeEnv(), makeCtx({ chainId: 42161 }), {

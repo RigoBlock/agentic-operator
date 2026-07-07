@@ -13,7 +13,7 @@ import type { ToolResult } from "../client.js";
 import {
   getUniswapQuote, getUniswapSwapCalldata,
 } from "../../services/uniswapTrading.js";
-import { getZeroXQuote, formatZeroXQuoteForDisplay, type ZeroXQuote } from "../../services/zeroXTrading.js";
+import { getZeroXQuote, getZeroXVaultQuote, formatZeroXQuoteForDisplay, type ZeroXQuote } from "../../services/zeroXTrading.js";
 import { getVaultTokenBalance, encodeVaultExecute } from "../../services/vault.js";
 import { resolveTokenAddress, getWrappedNativeAddress, getNativeTokenSymbol } from "../../config.js";
 import { encodeFunctionData, decodeFunctionData, parseUnits, formatUnits } from "viem";
@@ -32,8 +32,20 @@ const AUNISWAP_ABI = [
 
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 
+class ZeroXVaultRevertError extends Error {
+  isZeroXFatal: boolean;
+  revertData?: string;
+  constructor(message: string, opts: { fatal: boolean; revertData?: string }) {
+    super(message);
+    this.isZeroXFatal = opts.fatal;
+    this.revertData = opts.revertData;
+  }
+}
+
 /** Detect 0x errors that should trigger a Uniswap fallback. */
-function isZeroXFatalError(message: string): boolean {
+function isZeroXFatalError(err: unknown): boolean {
+  if (err instanceof ZeroXVaultRevertError) return err.isZeroXFatal;
+  const message = typeof err === "string" ? err : (err instanceof Error ? err.message : String(err));
   const lower = message.toLowerCase();
   return (
     lower.includes("no liquidity found on 0x") ||
@@ -46,7 +58,8 @@ function isZeroXFatalError(message: string): boolean {
     // allowlist (e.g., the CHECK_SLIPPAGE action on Unichain). Route these through Uniswap instead.
     lower.includes("actionnotallowed") ||
     lower.includes("settler action") ||
-    lower.includes("a0xrouter")
+    lower.includes("a0xrouter") ||
+    lower.includes("0x exact-output vault swap cannot be converted")
   );
 }
 
@@ -80,9 +93,14 @@ async function simulate0xVaultSwap(
   } catch (err) {
     const revertData = getRevertDataFromError(err);
     const decoded = revertData ? decodeRevertData(revertData) : null;
+    if (decoded?.startsWith("Contract reverted: ActionNotAllowed(")) {
+      // The A0xRouter explicitly rejected a 0x Settler action (e.g. CHECK_SLIPPAGE).
+      // Surface the decoded contract error and flag it so the caller falls back to Uniswap.
+      throw new ZeroXVaultRevertError(decoded, { fatal: true, revertData: revertData ?? undefined });
+    }
     const msg = decoded || (err instanceof Error ? err.message : String(err));
     if (isZeroXFatalError(msg)) {
-      throw new Error(msg);
+      throw new ZeroXVaultRevertError(msg, { fatal: true });
     }
     // Non-fatal reverts are left for the unified finalization path to surface.
   }
@@ -307,7 +325,7 @@ async function buildVaultSwapWith0x(
   chainName: string,
   fallbackNote?: string,
 ): Promise<ToolResult> {
-  const zxQuote = await getZeroXQuote(env, intent, ctx.chainId, ctx.vaultAddress);
+  const zxQuote = await getZeroXVaultQuote(env, intent, ctx.chainId, ctx.vaultAddress);
 
   const assembly: SwapAssembly = {
     dexLabel: "0x Aggregator",
@@ -320,7 +338,9 @@ async function buildVaultSwapWith0x(
     maxSellAmount: zxQuote.maxSellAmount,
     calldata: zxQuote.transaction.data,
     value: zxQuote.transaction.value || "0x0",
-    fallbackNote,
+    fallbackNote:
+      fallbackNote ??
+      (zxQuote.convertedFromExactOutput ? "estimated input for target output" : undefined),
   };
 
   // Fail fast if the vault's A0xRouter adapter rejects this settler action.

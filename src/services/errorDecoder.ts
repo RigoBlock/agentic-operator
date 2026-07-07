@@ -73,6 +73,36 @@ const COMMON_ERRORS = [
   { name: "OutputAmountTooHigh", type: "error", inputs: [] },
 ];
 
+/** Names for 0x Settler action selectors that A0xRouter may report via ActionNotAllowed. */
+const SETTLER_ACTION_NAMES: Record<string, string> = {
+  "0xee01edc0": "TRANSFER_FROM",
+  "0xbd01c226": "NATIVE_CHECK",
+  "0x34ee90ca": "POSITIVE_SLIPPAGE",
+  "0x38c9c147": "BASIC",
+  "0x8d68a156": "UNISWAPV3",
+  "0xd5022441": "UNISWAPV3_VIP",
+  "0x103b48be": "UNISWAPV2",
+  "0xaf72634f": "UNISWAPV4",
+  "0xfd8c38e1": "BALANCERV3",
+  "0xd4351666": "BALANCERV3_VIP",
+  "0xdf753f1e": "PANCAKE_INFINITY",
+  "0x2084a6e9": "PANCAKE_INFINITY_VIP",
+  "0x4340af3f": "CURVE_TRICRYPTO_VIP",
+  "0xb8df6d4d": "DODOV1",
+  "0xca9e5d0f": "DODOV2",
+  "0xf5b99189": "VELODROME",
+  "0x9b59756f": "MAVERICKV2",
+  "0x736180c8": "MAKERPSM",
+  "0x6c5f9cf9": "EKUBO",
+  "0xf61460f9": "EKUBOV3",
+  "0xfc9ba903": "EKUBOV3_VIP",
+  "0x6472b276": "EULERSWAP",
+  "0xb4d5761a": "BEBOP",
+  "0xd47868c9": "HANJI",
+  "0xb202e9b4": "RFQ",
+  "0x131ad428": "CHECK_SLIPPAGE",
+};
+
 const PANIC_CODES: Record<number, string> = {
   0x00: "generic compiler panic",
   0x01: "assertion failed",
@@ -103,8 +133,9 @@ function formatDecodedError(name: string, args: unknown): string {
     return `Uniswap command ${record.commandIndex ?? record["0"]} failed${inner && !inner.startsWith("0x") ? `: ${inner}` : ""}`;
   }
   if (name === "ActionNotAllowed") {
-    const sel = String(record.actionSelector ?? record["0"] ?? "0x");
-    return `0x Settler action ${sel} is not allowed by Rigoblock's A0xRouter on this chain. Try the same swap via Uniswap or on another chain.`;
+    const sel = String(record.actionSelector ?? record["0"] ?? "0x").toLowerCase();
+    const actionName = SETTLER_ACTION_NAMES[sel] ?? "unknown 0x settler action";
+    return `ActionNotAllowed(${sel} = ${actionName}) — Rigoblock A0xRouter rejected this 0x settler action.`;
   }
   if (name === "NavImpactTooHigh") {
     return "NavImpactTooHigh — this operation would move too much value out of the vault in one transaction. " +
