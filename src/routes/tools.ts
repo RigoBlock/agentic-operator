@@ -13,7 +13,7 @@
 import { Hono } from "hono";
 import type { Env, AppVariables, RequestContext, ExecutionMode } from "../types.js";
 import { executeToolCall, TOOL_NAME_ALIASES, OPERATOR_VERIFIED_TOOLS } from "../llm/client.js";
-import { executeTxList, formatOutcomesMarkdown } from "../services/execution.js";
+import { executeTxList, formatOutcomesMarkdown, prepareTransaction } from "../services/execution.js";
 import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS } from "../llm/tools.js";
 import { getSkillTools } from "../skills/index.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
@@ -171,6 +171,13 @@ tools.post("/", async (c) => {
 
     const canonicalName = TOOL_NAME_ALIASES[toolName] ?? toolName;
     const result = await executeToolCall(c.env, ctx, toolName, body.arguments);
+
+    // Finalize any produced transaction (gas + NAV shield) before returning or executing.
+    if (result.transaction) {
+      const { tx: finalizedTx, warning } = await prepareTransaction(c.env, ctx, result.transaction);
+      result.transaction = finalizedTx;
+      if (warning) result.message += "\n" + warning;
+    }
 
     // ── Delegated execution: auto-execute only when confirmExecution is set ──
     // Mirrors /api/chat behaviour: delegated mode alone returns unsigned calldata.
