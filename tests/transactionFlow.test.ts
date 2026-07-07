@@ -130,6 +130,7 @@ describe("runTransactionFlow", () => {
       [txs[0]],
       VAULT,
       expect.any(Function),
+      undefined,
     );
     expect(result.outcomes).toEqual([outcome]);
   });

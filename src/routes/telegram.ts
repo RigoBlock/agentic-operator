@@ -1016,6 +1016,10 @@ async function handleMessage(
   };
 
   try {
+    // Request-scoped cache so the NAV shield can reuse the pre-swap NAV read
+    // across the calldata-build pre-check and the broadcast check.
+    const requestEnv: Env = { ...env, requestCache: new Map() };
+
     // Initialize token resolver
     if (env.KV) initTokenResolver(env.KV);
 
@@ -1040,7 +1044,7 @@ async function handleMessage(
     };
 
     const response: ChatResponse = await processChat(
-      env,
+      requestEnv,
       conv.messages as ChatMessage[],
       ctx,
       undefined,
@@ -1151,7 +1155,7 @@ async function handleMessage(
         const statusMsgId = statusMsg?.message_id;
 
         const flowResult = await runTransactionFlow(
-          env,
+          requestEnv,
           operatorAddress,
           vault.address,
           txList,
@@ -1165,6 +1169,7 @@ async function handleMessage(
             },
           },
           "autonomous",
+          requestEnv.requestCache,
         );
 
         if (flowResult.kind === "executed") {

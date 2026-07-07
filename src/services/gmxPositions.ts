@@ -9,7 +9,7 @@
  */
 
 import { type Address } from "viem";
-import { getClient } from "./vault.js";
+import { getClient } from "./rpcClient.js";
 import { GMX_READER_ABI, GMX_ADDRESSES } from "../abi/gmx.js";
 import {
   getGmxTickers,

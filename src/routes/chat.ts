@@ -149,6 +149,10 @@ chat.post("/", async (c) => {
       slippageBps: body.slippageBps,
     };
 
+    // Request-scoped cache so the NAV shield can reuse the pre-swap NAV read
+    // across the calldata-build pre-check and the broadcast check.
+    const requestEnv: Env = { ...c.env, requestCache: new Map() };
+
     // ── SSE streaming mode ──
     if (body.stream) {
       const encoder = new TextEncoder();
@@ -164,7 +168,7 @@ chat.post("/", async (c) => {
             send({ type: "status", message: "Processing..." });
 
             const response = await processChat(
-              c.env, messages, ctx,
+              requestEnv, messages, ctx,
               undefined, // onToolResult
               send,      // onStreamEvent
             );
@@ -176,7 +180,7 @@ chat.post("/", async (c) => {
                 : response.transaction ? [response.transaction] : [];
               if (txList.length > 0) {
                 const flowResult = await runTransactionFlow(
-                  c.env,
+                  requestEnv,
                   body.operatorAddress || "",
                   body.vaultAddress || "",
                   txList,
@@ -192,6 +196,7 @@ chat.post("/", async (c) => {
                     },
                   },
                   body.confirmExecution ? "autonomous" : undefined,
+                  requestEnv.requestCache,
                 );
 
                 if (flowResult.kind === "executed") {
@@ -240,7 +245,7 @@ chat.post("/", async (c) => {
     }
 
     // ── Standard JSON response ──
-    const response: ChatResponse = await processChat(c.env, messages, ctx);
+    const response: ChatResponse = await processChat(requestEnv, messages, ctx);
 
     // ── Delegated execution: use the unified TransactionFlow engine ──
     // Handles both single (response.transaction) and multi (response.transactions).
@@ -256,7 +261,7 @@ chat.post("/", async (c) => {
 
       if (txList.length > 0) {
         const flowResult = await runTransactionFlow(
-          c.env,
+          requestEnv,
           body.operatorAddress || "",
           body.vaultAddress || "",
           txList,
@@ -267,6 +272,7 @@ chat.post("/", async (c) => {
             requestConfirmation: async () => { /* no-op */ },
           },
           body.confirmExecution ? "autonomous" : undefined,
+          requestEnv.requestCache,
         );
 
         if (flowResult.kind === "executed") {

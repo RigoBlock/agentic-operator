@@ -32,7 +32,8 @@ import { Pool, Position, V4PositionManager } from "@uniswap/v4-sdk";
 import { TickMath } from "@uniswap/v3-sdk";
 import JSBI from "jsbi";
 import { Token, Ether, Percent, type Currency } from "@uniswap/sdk-core";
-import { encodeVaultModifyLiquidities, getTokenDecimals, getClient } from "./vault.js";
+import { encodeVaultModifyLiquidities, getTokenDecimals } from "./vault.js";
+import { getClient } from "./rpcClient.js";
 import { resolveTokenAddress } from "../config.js";
 import type { Env } from "../types.js";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
@@ -186,24 +187,22 @@ async function readPoolState(
 
   const client = getClient(chainId, alchemyApiKey);
 
-  const [slot0Result, liqResult] = await Promise.all([
-    client.readContract({
-      address: stateView,
-      abi: STATEVIEW_ABI,
-      functionName: "getSlot0",
-      args: [poolId],
-    }),
-    client.readContract({
-      address: stateView,
-      abi: STATEVIEW_ABI,
-      functionName: "getLiquidity",
-      args: [poolId],
-    }),
-  ]);
+  // Batch getSlot0 + getLiquidity into one Multicall3 round-trip.
+  const [slot0Result, liqResult] = await client.multicall({
+    contracts: [
+      { address: stateView, abi: STATEVIEW_ABI, functionName: "getSlot0", args: [poolId] },
+      { address: stateView, abi: STATEVIEW_ABI, functionName: "getLiquidity", args: [poolId] },
+    ],
+  });
 
-  const sqrtPriceX96 = slot0Result[0];
-  const tick = slot0Result[1];
-  const liquidity = liqResult;
+  if (slot0Result.status !== "success" || liqResult.status !== "success") {
+    throw new Error(`Failed to read pool state for ${poolId} on chain ${chainId}`);
+  }
+
+  const slot0 = slot0Result.result as [bigint, number, number, number];
+  const sqrtPriceX96 = slot0[0];
+  const tick = slot0[1];
+  const liquidity = liqResult.result as bigint;
 
   return { sqrtPriceX96, tick, liquidity };
 }

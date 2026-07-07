@@ -32,7 +32,8 @@ import {
   GmxDecreasePositionSwapType,
   ARBITRUM_CHAIN_ID,
 } from "../abi/gmx.js";
-import { getClient, getVaultTokenBalance } from "./vault.js";
+import { getVaultTokenBalance } from "./vault.js";
+import { getClient } from "./rpcClient.js";
 import type { Env } from "../types.js";
 import { formatUnits } from "viem";
 

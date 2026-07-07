@@ -16,8 +16,9 @@
  */
 
 import { type Address, type Hex, keccak256, encodeAbiParameters } from "viem";
-import { getClient } from "./vault.js";
+import { getClient } from "./rpcClient.js";
 import { getWrappedNativeAddress } from "../config.js";
+import { BACKGEO_ORACLE_ABI } from "./oracleAbi.js";
 import { TickMath } from "@uniswap/v3-sdk";
 import JSBI from "jsbi";
 import { BACKGEO_ORACLE } from "./oraclePool.js";
@@ -50,64 +51,6 @@ function getTickCacheKey(chainId: number, token: Address, oracle: Address): stri
 export function clearOracleTickCache(): void {
   tickCache.clear();
 }
-
-// ── ABI ────────────────────────────────────────────────────────────────
-
-/** Minimal ABI for the BackgeoOracle hook — observe() and getState() */
-const ORACLE_ABI = [
-  {
-    name: "observe",
-    type: "function" as const,
-    stateMutability: "view" as const,
-    inputs: [
-      {
-        name: "key",
-        type: "tuple" as const,
-        components: [
-          { name: "currency0", type: "address" as const },
-          { name: "currency1", type: "address" as const },
-          { name: "fee", type: "uint24" as const },
-          { name: "tickSpacing", type: "int24" as const },
-          { name: "hooks", type: "address" as const },
-        ],
-      },
-      { name: "secondsAgos", type: "uint32[]" as const },
-    ],
-    outputs: [
-      { name: "tickCumulatives", type: "int48[]" as const },
-      { name: "secondsPerLiquidityCumulativeX128s", type: "uint144[]" as const },
-    ],
-  },
-  {
-    name: "getState",
-    type: "function" as const,
-    stateMutability: "view" as const,
-    inputs: [
-      {
-        name: "key",
-        type: "tuple" as const,
-        components: [
-          { name: "currency0", type: "address" as const },
-          { name: "currency1", type: "address" as const },
-          { name: "fee", type: "uint24" as const },
-          { name: "tickSpacing", type: "int24" as const },
-          { name: "hooks", type: "address" as const },
-        ],
-      },
-    ],
-    outputs: [
-      {
-        name: "state",
-        type: "tuple" as const,
-        components: [
-          { name: "index", type: "uint16" as const },
-          { name: "cardinality", type: "uint16" as const },
-          { name: "cardinalityNext", type: "uint16" as const },
-        ],
-      },
-    ],
-  },
-] as const;
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -204,7 +147,7 @@ export async function getOracleSpotTick(
   const SECONDS_AGOS = [0, 1] as const;
   const result = (await client.readContract({
     address: oracle,
-    abi: ORACLE_ABI,
+    abi: BACKGEO_ORACLE_ABI,
     functionName: "observe",
     args: [poolKey, SECONDS_AGOS],
   })) as unknown as [bigint[], bigint[]];
@@ -248,7 +191,7 @@ export async function hasOraclePriceFeed(
   try {
     const state = (await client.readContract({
       address: oracle,
-      abi: ORACLE_ABI,
+      abi: BACKGEO_ORACLE_ABI,
       functionName: "getState",
       args: [poolKey],
     })) as { index: number; cardinality: number; cardinalityNext: number };
@@ -302,13 +245,13 @@ async function getSpotTicksForPair(
     contracts: [
       {
         address: oracle,
-        abi: ORACLE_ABI,
+        abi: BACKGEO_ORACLE_ABI,
         functionName: "observe",
         args: [poolKeyA, SECONDS_AGOS],
       },
       {
         address: oracle,
-        abi: ORACLE_ABI,
+        abi: BACKGEO_ORACLE_ABI,
         functionName: "observe",
         args: [poolKeyB, SECONDS_AGOS],
       },
@@ -416,13 +359,13 @@ export async function hasPriceFeedForPair(
     contracts: [
       {
         address: oracle,
-        abi: ORACLE_ABI,
+        abi: BACKGEO_ORACLE_ABI,
         functionName: "getState",
         args: [buildOraclePoolKey(chainId, normalizedIn)],
       },
       {
         address: oracle,
-        abi: ORACLE_ABI,
+        abi: BACKGEO_ORACLE_ABI,
         functionName: "getState",
         args: [buildOraclePoolKey(chainId, normalizedOut)],
       },

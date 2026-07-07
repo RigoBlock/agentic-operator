@@ -57,6 +57,7 @@ import {
 } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { ACROSS_SPOKE_POOL_ABI } from "../abi/aIntents.js";
+import { ERC20_ABI } from "../abi/erc20.js";
 import { getRpcUrl, getNativeTokenSymbol, getWrappedNativeAddress } from "../config.js";
 import {
   OpType,
@@ -68,8 +69,9 @@ import {
   type BridgeableToken,
   type BridgeableTokenType,
 } from "./crosschainConfig.js";
-import { getVaultTokenBalance, getClient, getEffectivePoolState } from "./vault.js";
+import { getVaultTokenBalance } from "./vault.js";
 import type { EffectivePoolState } from "./vault.js";
+import { getClient } from "./rpcClient.js";
 import { convertTokenAmountViaOracle } from "./oraclePrice.js";
 import { getDelegationConfig, getActiveChains } from "./delegation.js";
 import type { DelegationConfig } from "../types.js";
@@ -372,25 +374,78 @@ async function readChainSnapshot(
     const bridgeableTokens = CROSSCHAIN_TOKENS[chainId] || [];
     const client = getClient(chainId, alchemyKey);
 
-    const [state, totalSupplyRaw, ...balances] = await Promise.all([
-      getEffectivePoolState(chainId, vaultAddress, alchemyKey).catch(() => null),
-      client.readContract({
+    // Build one multicall per chain: pool state (updateUnitaryValue + getPool),
+    // totalSupply, and all bridgeable token balances. This replaces the previous
+    // fan-out where each token triggered its own RPC round-trip.
+    const calls = [
+      {
+        address: vaultAddress,
+        abi: RIGOBLOCK_VAULT_ABI,
+        functionName: "updateUnitaryValue",
+      },
+      {
+        address: vaultAddress,
+        abi: RIGOBLOCK_VAULT_ABI,
+        functionName: "getPool",
+      },
+      {
         address: vaultAddress,
         abi: RIGOBLOCK_VAULT_ABI,
         functionName: "totalSupply",
-      }).catch(() => 0n),
-      ...bridgeableTokens.map((token) =>
-        getVaultTokenBalance(chainId, vaultAddress, token.address, alchemyKey)
-          .catch(() => ({ balance: 0n, decimals: token.decimals, symbol: token.symbol })),
-      ),
-    ]);
+      },
+      ...bridgeableTokens.map((token) => ({
+        address: token.address,
+        abi: ERC20_ABI,
+        functionName: "balanceOf" as const,
+        args: [vaultAddress],
+      })),
+    ];
+
+    const results = await client.multicall({ contracts: calls, allowFailure: true });
+
+    // Decode pool state from the first two multicall results.
+    // With allowFailure: true, viem returns decoded results directly.
+    let state: EffectivePoolState | null = null;
+    const updateResult = results[0];
+    const poolResult = results[1];
+    if (updateResult.status === "success" && poolResult.status === "success") {
+      const nav = updateResult.result as {
+        unitaryValue: bigint;
+        netTotalValue: bigint;
+        netTotalLiabilities: bigint;
+      };
+      const pool = poolResult.result as {
+        name: string;
+        symbol: string;
+        decimals: number;
+        owner: Address;
+        baseToken: Address;
+      };
+      const dec = Number(pool.decimals);
+      const decPow = 10n ** BigInt(dec);
+      state = {
+        unitaryValue: nav.unitaryValue,
+        netTotalValue: nav.netTotalValue,
+        effectiveSupply: nav.unitaryValue > 0n
+          ? (nav.netTotalValue * decPow) / nav.unitaryValue
+          : 0n,
+        decimals: dec,
+        baseToken: pool.baseToken,
+      };
+    }
+
+    const totalSupplyResult = results[2];
+    const totalSupplyRaw = totalSupplyResult.status === "success"
+      ? (totalSupplyResult.result as bigint)
+      : 0n;
 
     const tokenBalances: TokenBalance[] = bridgeableTokens.map((token, i) => {
-      const bal = balances[i];
+      const result = results[i + 3];
+      const balance = result.status === "success" ? (result.result as bigint) : 0n;
       return {
         token,
-        balance: bal.balance,
-        balanceFormatted: formatUnits(bal.balance, token.decimals),
+        balance,
+        balanceFormatted: formatUnits(balance, token.decimals),
       };
     }).filter((b) => b.balance > 0n);
 

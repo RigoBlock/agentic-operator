@@ -40,7 +40,7 @@ import {
   markChainDelegated,
   unmarkChainDelegated,
 } from "./agentWallet.js";
-import { getClient } from "./vault.js";
+import { getClient } from "./rpcClient.js";
 
 // ── KV key helpers ────────────────────────────────────────────────────
 

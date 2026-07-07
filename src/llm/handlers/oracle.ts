@@ -9,7 +9,8 @@
 import type { Env, RequestContext } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import { estimateGas } from "../client.js";
-import { getTokenDecimals, getClient } from "../../services/vault.js";
+import { getTokenDecimals } from "../../services/vault.js";
+import { getClient } from "../../services/rpcClient.js";
 import { resolveTokenAddress, resolveChainId, resolveChainName, getNativeTokenSymbol, NATIVE_TOKEN } from "../../config.js";
 import { parseUnits, formatUnits, encodeFunctionData, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";

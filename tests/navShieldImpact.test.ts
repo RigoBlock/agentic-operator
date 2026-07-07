@@ -31,7 +31,7 @@ const mockState = vi.hoisted(() => {
   };
 });
 
-vi.mock("../src/services/vault.js", () => ({
+vi.mock("../src/services/rpcClient.js", () => ({
   getClient: mockState.getClient,
 }));
 

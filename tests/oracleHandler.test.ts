@@ -23,6 +23,9 @@ const { mockGetTokenDecimals, mockGetClient } = vi.hoisted(() => ({
 
 vi.mock("../src/services/vault.js", () => ({
   getTokenDecimals: mockGetTokenDecimals,
+}));
+
+vi.mock("../src/services/rpcClient.js", () => ({
   getClient: mockGetClient,
 }));
 

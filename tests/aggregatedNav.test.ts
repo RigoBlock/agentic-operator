@@ -18,6 +18,9 @@ const mockGetActiveChains = vi.hoisted(() => vi.fn());
 vi.mock("../src/services/vault.js", () => ({
   getEffectivePoolState: mockGetEffectivePoolState,
   getVaultTokenBalance: mockGetVaultTokenBalance,
+}));
+
+vi.mock("../src/services/rpcClient.js", () => ({
   getClient: mockGetClient,
 }));
 
@@ -34,6 +37,7 @@ const { getAggregatedNav } = await import("../src/services/crosschain.js");
 
 const VAULT = "0xEfa4bDf566aE50537A507863612638680420645C" as Address;
 const ALCHEMY_KEY = "test-key";
+const zeroAddr = "0x0000000000000000000000000000000000000000" as Address;
 
 function makeKV(): KVNamespace {
   return {
@@ -51,9 +55,38 @@ describe("getAggregatedNav global assets", () => {
     mockGetDelegationConfig.mockResolvedValue(null);
     mockGetActiveChains.mockReturnValue([]);
     mockGetVaultTokenBalance.mockResolvedValue({ balance: 0n, decimals: 18, symbol: "WETH" });
-    mockGetClient.mockReturnValue({
+    mockGetClient.mockImplementation((chainId: number) => ({
       readContract: vi.fn().mockResolvedValue(0n),
-    });
+      multicall: vi.fn(async ({ contracts }: { contracts: any[] }) => {
+        const state = await mockGetEffectivePoolState(chainId, VAULT, ALCHEMY_KEY);
+        return contracts.map((c: any, i: number) => {
+          if (i === 0) {
+            // updateUnitaryValue
+            return {
+              status: "success",
+              result: state
+                ? { unitaryValue: state.unitaryValue, netTotalValue: state.netTotalValue, netTotalLiabilities: 0n }
+                : { unitaryValue: 0n, netTotalValue: 0n, netTotalLiabilities: 0n },
+            };
+          }
+          if (i === 1) {
+            // getPool
+            return {
+              status: "success",
+              result: state
+                ? { name: "Test", symbol: "TEST", decimals: state.decimals, owner: VAULT, baseToken: state.baseToken }
+                : { name: "", symbol: "", decimals: 18, owner: VAULT, baseToken: zeroAddr },
+            };
+          }
+          if (i === 2) {
+            // totalSupply
+            return { status: "success", result: 0n };
+          }
+          // balanceOf for bridgeable tokens
+          return { status: "success", result: 0n };
+        });
+      }),
+    }));
     // Default oracle conversion: 1 ETH = 2600 USDC (6 decimals).
     // Input is in base-token decimals (18 for ETH); output must be in USDC decimals (6).
     mockConvertTokenAmountViaOracle.mockImplementation(async (_chainId, _token, amount) => {

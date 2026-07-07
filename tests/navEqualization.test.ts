@@ -19,6 +19,9 @@ const mockGetActiveChains = vi.hoisted(() => vi.fn());
 vi.mock("../src/services/vault.js", () => ({
   getEffectivePoolState: mockGetEffectivePoolState,
   getVaultTokenBalance: mockGetVaultTokenBalance,
+}));
+
+vi.mock("../src/services/rpcClient.js", () => ({
   getClient: mockGetClient,
 }));
 
@@ -35,6 +38,7 @@ const { computeNavEqualization } = await import("../src/services/crosschain.js")
 
 const VAULT = "0xEfa4bDf566aE50537A507863612638680420645C" as Address;
 const ALCHEMY_KEY = "test-key";
+const zeroAddr = "0x0000000000000000000000000000000000000000" as Address;
 
 function makeKV(): KVNamespace {
   return {
@@ -57,9 +61,38 @@ describe("computeNavEqualization", () => {
       decimals: 18,
       symbol: "WETH",
     });
-    mockGetClient.mockReturnValue({
+    mockGetClient.mockImplementation((chainId: number) => ({
       readContract: vi.fn().mockResolvedValue(0n),
-    });
+      multicall: vi.fn(async ({ contracts }: { contracts: any[] }) => {
+        const state = await mockGetEffectivePoolState(chainId, VAULT, ALCHEMY_KEY);
+        return contracts.map((c: any, i: number) => {
+          if (i === 0) {
+            // updateUnitaryValue
+            return {
+              status: "success",
+              result: state
+                ? { unitaryValue: state.unitaryValue, netTotalValue: state.netTotalValue, netTotalLiabilities: 0n }
+                : { unitaryValue: 0n, netTotalValue: 0n, netTotalLiabilities: 0n },
+            };
+          }
+          if (i === 1) {
+            // getPool
+            return {
+              status: "success",
+              result: state
+                ? { name: "Test", symbol: "TEST", decimals: state.decimals, owner: VAULT, baseToken: state.baseToken }
+                : { name: "", symbol: "", decimals: 18, owner: VAULT, baseToken: zeroAddr },
+            };
+          }
+          if (i === 2) {
+            // totalSupply
+            return { status: "success", result: 0n };
+          }
+          // balanceOf for bridgeable tokens
+          return { status: "success", result: 1_000_000_000_000_000_000_000n };
+        });
+      }),
+    }));
     // Oracle: 1 ETH = 1 USDC. Convert keeps the numeric value, maps 6-dec <-> 18-dec.
     const usdcAddresses = new Set([
       "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".toLowerCase(), // Ethereum

@@ -19,7 +19,7 @@ import { resolveTokenAddress, SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError, g
 import { AuthError } from "../services/auth.js";
 import { formatUnits, type Address, type Hex } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
-import { getClient } from "../services/vault.js";
+import { getClient } from "../services/rpcClient.js";
 import { checkNavImpact, getNavShieldThreshold, MAX_NAV_DROP_PCT } from "../services/navGuard.js";
 import {
   getSwapShieldTolerance,
@@ -1588,6 +1588,7 @@ export async function preCheckNavImpact(
       simulationSender,
       env.KV,
       storedNavThreshold ?? undefined,
+      env.requestCache,
     );
 
     if (!result.allowed) {

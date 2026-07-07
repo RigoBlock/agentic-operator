@@ -42,10 +42,11 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { getClient, getTokenDecimals } from "./vault.js";
+import { getTokenDecimals } from "./vault.js";
+import { getClient } from "./rpcClient.js";
 import { resolveTokenAddress, TOKEN_MAP, NATIVE_TOKEN, getNativeTokenSymbol } from "../config.js";
-import { getOracleSpotTick } from "./oraclePrice.js";
 import { TickMath } from "@uniswap/v3-sdk";
+import { BACKGEO_ORACLE_ABI } from "./oracleAbi.js";
 
 // ── BackgeoOracle contract addresses per chain ─────────────────────────
 // Source: https://github.com/RigoBlock/v3-contracts/blob/development/src/utils/constants.ts
@@ -85,40 +86,6 @@ const UR_EXECUTE_ABI = [
       { name: "deadline", type: "uint256" as const },
     ],
     outputs: [],
-  },
-] as const;
-
-// ── BackgeoOracle ABI (for pool state queries) ─────────────────────────
-
-const ORACLE_ABI = [
-  {
-    name: "getState",
-    type: "function" as const,
-    stateMutability: "view" as const,
-    inputs: [
-      {
-        name: "key",
-        type: "tuple" as const,
-        components: [
-          { name: "currency0", type: "address" as const },
-          { name: "currency1", type: "address" as const },
-          { name: "fee", type: "uint24" as const },
-          { name: "tickSpacing", type: "int24" as const },
-          { name: "hooks", type: "address" as const },
-        ],
-      },
-    ],
-    outputs: [
-      {
-        name: "state",
-        type: "tuple" as const,
-        components: [
-          { name: "index", type: "uint16" as const },
-          { name: "cardinality", type: "uint16" as const },
-          { name: "cardinalityNext", type: "uint16" as const },
-        ],
-      },
-    ],
   },
 ] as const;
 
@@ -274,17 +241,41 @@ export async function buildOraclePoolSwapTx(
     ),
   );
 
-  // Verify oracle pool is initialized (cardinality > 0 means at least one observation exists)
+  // Verify oracle pool is initialized and read the current spot tick in one
+  // Multicall3 round-trip: getState(cardinality) + observe(tickCumulatives).
   const client = getClient(chainId, alchemyKey);
   let cardinality: number;
+  let priceLine = "";
   try {
-    const state = await client.readContract({
-      address: oracle,
-      abi: ORACLE_ABI,
-      functionName: "getState",
-      args: [poolKey],
+    const [stateResult, observeResult] = await client.multicall({
+      contracts: [
+        { address: oracle, abi: BACKGEO_ORACLE_ABI, functionName: "getState", args: [poolKey] },
+        { address: oracle, abi: BACKGEO_ORACLE_ABI, functionName: "observe", args: [poolKey, [0, 1]] },
+      ],
     });
-    cardinality = state.cardinality;
+
+    if (stateResult.status !== "success") {
+      throw new Error(stateResult.error?.message || "getState failed");
+    }
+    cardinality = stateResult.result.cardinality;
+
+    if (observeResult.status === "success") {
+      const tickCumulatives = (observeResult.result as unknown as [bigint[], bigint[]])[0];
+      const tick = Number(tickCumulatives[0] - tickCumulatives[1]);
+      if (Number.isFinite(tick)) {
+        const sqrtRatio = TickMath.getSqrtRatioAtTick(Math.round(tick));
+        const sqrtPriceX96 = BigInt(sqrtRatio.toString());
+        const priceNum = sqrtPriceX96 * sqrtPriceX96;
+        const priceDenom = 2n ** 192n;
+        const price = Number(priceNum) / Number(priceDenom);
+        if (price > 0 && Number.isFinite(price)) {
+          const tokenPerNative = price;
+          const nativePerToken = 1 / price;
+          const outSymbol = token.toUpperCase();
+          priceLine = `Pool price: 1 ${nativeSymbol} = ${tokenPerNative.toPrecision(6)} ${outSymbol}  (1 ${outSymbol} = ${nativePerToken.toPrecision(6)} ${nativeSymbol})`;
+        }
+      }
+    }
   } catch (err) {
     throw new Error(
       `Failed to query BackgeoOracle state for ${token} on chain ${chainId}: ` +
@@ -298,29 +289,6 @@ export async function buildOraclePoolSwapTx(
       `BackgeoOracle pool for ${token} on chain ${chainId} has not been initialized (cardinality = 0). ` +
       "This pool needs to be seeded with liquidity and initialized by the RigoBlock protocol before oracle refreshes can be triggered.",
     );
-  }
-
-  // Read current oracle pool price for display via the BackgeoOracle observe() function.
-  // Price is currency1/currency0 = token/native. We format both directions.
-  let priceLine = "";
-  try {
-    const tick = await getOracleSpotTick(chainId, tokenAddr, alchemyKey);
-    if (Number.isFinite(tick)) {
-      // price = 1.0001^tick. Compute via sqrtRatio to reuse Uniswap math and avoid precision loss.
-      const sqrtRatio = TickMath.getSqrtRatioAtTick(Math.round(tick));
-      const sqrtPriceX96 = BigInt(sqrtRatio.toString());
-      const priceNum = sqrtPriceX96 * sqrtPriceX96;
-      const priceDenom = 2n ** 192n;
-      const price = Number(priceNum) / Number(priceDenom);
-      if (price > 0 && Number.isFinite(price)) {
-        const tokenPerNative = price;
-        const nativePerToken = 1 / price;
-        const outSymbol = token.toUpperCase();
-        priceLine = `Pool price: 1 ${nativeSymbol} = ${tokenPerNative.toPrecision(6)} ${outSymbol}  (1 ${outSymbol} = ${nativePerToken.toPrecision(6)} ${nativeSymbol})`;
-      }
-    }
-  } catch {
-    // Non-fatal: price display is optional.
   }
 
   // Parse input amount (native token for buy, ERC-20 token for sell)

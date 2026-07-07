@@ -1,7 +1,7 @@
 import { GmxSdk } from "@gmx-io/sdk";
 import type { Address } from "viem";
 import { getRpcUrl } from "../config.js";
-import { getClient } from "./vault.js";
+import { getClient } from "./rpcClient.js";
 
 const GMX_ORACLE_URL = "https://arbitrum-api.gmxinfra.io";
 const GMX_SUBSQUID_URL = "https://gmx.squids.live/gmx-synthetics-arbitrum:prod/api/graphql";

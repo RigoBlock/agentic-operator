@@ -4,7 +4,7 @@ import type { Env } from "../src/types.js";
 const mockGetTransactionReceipt = vi.hoisted(() => vi.fn());
 const mockGetSponsoredCallsStatus = vi.hoisted(() => vi.fn());
 
-vi.mock("../src/services/vault.js", () => ({
+vi.mock("../src/services/rpcClient.js", () => ({
   getClient: vi.fn(() => ({
     getTransactionReceipt: mockGetTransactionReceipt,
   })),

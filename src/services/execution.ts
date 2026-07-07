@@ -42,7 +42,7 @@ import {
   type WalletCall,
 } from "./bundler.js";
 import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
-import { getClient, ALCHEMY_ORIGIN } from "./vault.js";
+import { getClient, ALCHEMY_ORIGIN } from "./rpcClient.js";
 import { decodeRevertData, extractRevertData } from "./errorDecoder.js";
 
 /**
@@ -258,6 +258,14 @@ interface FeeEstimate {
 }
 
 /**
+ * Per-Worker-invocation cache for fee estimates.
+ * Cloudflare Workers isolates do not reliably share in-memory state across HTTP
+ * requests, so this cache is intentionally scoped to the current invocation.
+ * Key: `${chainId}:${blockHash}`.
+ */
+const feeEstimateCache = new Map<string, FeeEstimate>();
+
+/**
  * Estimate EIP-1559 gas fees with safety caps.
  *
  * Exported for testing the priority-fee floor logic.
@@ -278,6 +286,12 @@ export async function estimateFees(
   // We read the actual protocol base fee, then buffer it 2× to cover
   // ~5 blocks of 12.5% compounded increases (Ethereum max per-block bump).
   const block = await publicClient.getBlock({ blockTag: "latest" });
+
+  // Re-use the fee estimate for this chain+block within the same Worker invocation.
+  const feeCacheKey = `${chainId}:${block.hash}`;
+  const cached = feeEstimateCache.get(feeCacheKey);
+  if (cached) return cached;
+
   const baseFee = block.baseFeePerGas ?? parseGwei("0");
   const bufferedBaseFee = (baseFee * BASE_FEE_MULTIPLIER) / 100n;
 
@@ -302,12 +316,13 @@ export async function estimateFees(
   const maxFee = bufferedBaseFee + cappedPriorityFee;
   const cappedMaxFee = maxFee < caps.maxFeePerGas ? maxFee : caps.maxFeePerGas;
 
-
-
-  return {
+  const result: FeeEstimate = {
     maxFeePerGas: cappedMaxFee,
     maxPriorityFeePerGas: cappedPriorityFee,
   };
+
+  feeEstimateCache.set(feeCacheKey, result);
+  return result;
 }
 
 /**
@@ -355,6 +370,7 @@ export async function executeViaDelegation(
   tx: UnsignedTransaction,
   vaultAddress: string,
   sponsoredGasOverride?: boolean,
+  requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>,
 ): Promise<ExecutionResult> {
   // 1. Load the delegation config
   const config = await getDelegationConfig(env.KV, vaultAddress);
@@ -472,6 +488,7 @@ export async function executeViaDelegation(
     config.operatorAddress,
     env.KV,
     storedNavThreshold ?? undefined,
+    requestCache ?? env.requestCache,
   );
 
   // Route based on what the NAV shield actually found
@@ -682,12 +699,11 @@ export async function executeViaDelegation(
  * Broadcast a transaction from the agent wallet directly to the vault.
  *
  * Steps:
- *   1. Simulate the transaction via eth_call (catches reverts before spending gas)
- *   2. Check agent balance
- *   3. Estimate gas on-chain via eth_estimateGas (accurate for vault proxy overhead)
- *   4. Estimate fees with safety caps
- *   5. Send the transaction
- *   6. Wait for confirmation with automatic resubmission
+ *   1. Check agent balance
+ *   2. Estimate gas on-chain via eth_estimateGas (also catches reverts; accurate for vault proxy overhead)
+ *   3. Estimate fees with safety caps
+ *   4. Send the transaction
+ *   5. Wait for confirmation with automatic resubmission
  */
 async function broadcastAgentTransaction(
   agentAccount: LocalAccount,
@@ -702,29 +718,7 @@ async function broadcastAgentTransaction(
   const publicClient = getClient(chainId, alchemyKey);
   const txValue = BigInt(tx.value);
 
-  // ── Step 1: Simulate the transaction ──
-  // This catches reverts BEFORE broadcasting, preventing wasted gas.
-  // The vault's delegation check is also validated here.
-  try {
-    await publicClient.call({
-      account: agentAccount.address,
-      to: tx.to as Address,
-      data: tx.data as Hex,
-      value: txValue,
-    });
-  } catch (simError) {
-    const msg = simError instanceof Error ? simError.message : String(simError);
-    const friendly = parseSimulationRevert(msg);
-    throw new ExecutionError(
-      friendly ||
-      `Transaction simulation failed — the transaction would revert on-chain. ` +
-      `This could mean the agent is not delegated on the vault, or the trade parameters are invalid. ` +
-      `Details: ${sanitizeError(msg)}`,
-      "SIMULATION_FAILED",
-    );
-  }
-
-  // ── Step 2: Check agent wallet balance ──
+  // ── Step 1: Check agent wallet balance ──
   const balance = await publicClient.getBalance({ address: agentAccount.address });
 
   if (txValue > 0n && balance < txValue) {
@@ -735,10 +729,12 @@ async function broadcastAgentTransaction(
     );
   }
 
-  // ── Step 3: Estimate gas on-chain ──
+  // ── Step 2: Estimate gas on-chain ──
   // CRITICAL: tx.gas comes from DEX APIs (0x, Uniswap, GMX) which estimate gas
   // for a direct user transaction. The RigoBlock vault proxy adds 100-200k+ gas
   // overhead for adapter routing. We MUST estimate on-chain to get accurate gas.
+  // eth_estimateGas also simulates the call, so a revert here means the
+  // transaction would fail on-chain (delegation, slippage, balance, etc.).
   let estimatedGas: bigint;
   try {
     estimatedGas = await publicClient.estimateGas({
@@ -749,6 +745,16 @@ async function broadcastAgentTransaction(
     });
   } catch (estError) {
     const msg = estError instanceof Error ? estError.message : String(estError);
+    const friendly = parseSimulationRevert(msg);
+    if (friendly || msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert")) {
+      throw new ExecutionError(
+        friendly ||
+        `Transaction simulation failed — the transaction would revert on-chain. ` +
+        `This could mean the agent is not delegated on the vault, or the trade parameters are invalid. ` +
+        `Details: ${sanitizeError(msg)}`,
+        "SIMULATION_FAILED",
+      );
+    }
     throw new ExecutionError(
       `Gas estimation failed — the transaction may revert or the RPC is unreachable. Details: ${msg}`,
       "GAS_ESTIMATION_FAILED",
@@ -760,7 +766,7 @@ async function broadcastAgentTransaction(
   // Excess gas is refunded.
   const gasLimit = estimatedGas + (estimatedGas * 20n) / 100n;
 
-  // ── Step 4: Estimate fees with safety caps ──
+  // ── Step 3: Estimate fees with safety caps ──
   let fees = await estimateFees(publicClient, chainId);
 
   const estimatedCost = (gasLimit * fees.maxFeePerGas) + txValue;
@@ -778,7 +784,7 @@ async function broadcastAgentTransaction(
     );
   }
 
-  // ── Step 5: Send the transaction ──
+  // ── Step 4: Send the transaction ──
   const walletClient = createWalletClient({
     account: agentAccount,
     chain,
@@ -802,7 +808,7 @@ async function broadcastAgentTransaction(
   });
 
 
-  // ── Step 6: Wait for confirmation with resubmission ──
+  // ── Step 5: Wait for confirmation with resubmission ──
   let receipt: TransactionReceipt | null = null;
   let attempt = 0;
 
@@ -910,7 +916,7 @@ async function broadcastAgentTransaction(
  *   - wallet_getCallsStatus (polls until confirmed)
  *
  * We only:
- *   1. Simulate the vault call (catches reverts before submission)
+ *   1. Estimate gas on-chain via eth_estimateGas (catches reverts before submission)
  *   2. Call executeSponsoredCalls() — one function, handles everything
  *   3. Map the result to ExecutionResult
  */
@@ -927,29 +933,13 @@ async function sponsoredAgentTransaction(
   const publicClient = getClient(chainId, alchemyKey);
   const txValue = BigInt(tx.value);
 
-  // ── Step 1: Simulate the vault call ──
-  try {
-    await publicClient.call({
-      account: agentAccount.address,
-      to: tx.to as Address,
-      data: tx.data as Hex,
-      value: txValue,
-    });
-  } catch (simError) {
-    const msg = simError instanceof Error ? simError.message : String(simError);
-    const friendly = parseSimulationRevert(msg);
-    throw new ExecutionError(
-      friendly ||
-      `Transaction simulation failed — would revert on-chain. Details: ${sanitizeError(msg)}`,
-      "SIMULATION_FAILED",
-    );
-  }
-
-  // ── Step 1b: Estimate gas on-chain ──
+  // ── Step 1: Estimate gas on-chain ──
   // The Alchemy bundler's internal gas estimation underestimates for complex
   // vault adapter calls (crosschain depositV3, security tokens, etc.).
   // We run eth_estimateGas ourselves and pass the result as callGasLimit
   // override to the bundler via gasParamsOverride.
+  // eth_estimateGas also simulates the call, so a revert here blocks the
+  // transaction before we spend sponsorship quota.
   let callGasLimit: bigint | undefined;
   try {
     const estimatedGas = await publicClient.estimateGas({
@@ -961,13 +951,20 @@ async function sponsoredAgentTransaction(
     // 30% buffer over estimate: vault proxy + EIP-7702 overhead
     callGasLimit = estimatedGas + (estimatedGas * 30n) / 100n;
   } catch (estError) {
-    // If gas estimation fails but simulation passed, proceed without override.
-    // The bundler will use its own estimate (potentially too low, but better
-    // than blocking a transaction that simulated successfully).
     const msg = estError instanceof Error ? estError.message : String(estError);
+    const friendly = parseSimulationRevert(msg);
+    if (friendly || msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert")) {
+      throw new ExecutionError(
+        friendly ||
+        `Transaction simulation failed — would revert on-chain. Details: ${sanitizeError(msg)}`,
+        "SIMULATION_FAILED",
+      );
+    }
+    // Non-revert estimation failure: proceed without override so the bundler
+    // can try its own estimate rather than blocking for a transient RPC issue.
   }
 
-  // ── Step 1c: Fee estimate + sponsorship viability check ──
+  // ── Step 2: Fee estimate + sponsorship viability check ──
   // We override the bundler's fee estimation with our own values (base fee from
   // the latest block × 2, priority fee from RPC with a 0.05 gwei floor). This
   // gives us control over the cost Alchemy sees in the UserOperation while
@@ -989,7 +986,7 @@ async function sponsoredAgentTransaction(
   // and presented to the user so they can decide: fund agent wallet,
   // disable sponsorship, or sign manually.
 
-  // ── Step 2: Execute via Alchemy Smart Wallet SDK ──
+  // ── Step 3: Execute via Alchemy Smart Wallet SDK ──
   const calls: WalletCall[] = [{
     to: tx.to as Address,
     value: txValue > 0n ? (`0x${txValue.toString(16)}` as Hex) : ("0x0" as Hex),
@@ -1473,13 +1470,14 @@ export async function executeTxList(
   txList: UnsignedTransaction[],
   vaultAddress: string,
   onProgress?: (index: number, total: number, outcomesSoFar: TxExecOutcome[]) => Promise<void>,
+  requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>,
 ): Promise<TxExecOutcome[]> {
   const outcomes: TxExecOutcome[] = [];
   for (let i = 0; i < txList.length; i++) {
     const tx = txList[i];
     if (onProgress) await onProgress(i, txList.length, outcomes);
     try {
-      const result = await executeViaDelegation(env, tx, vaultAddress);
+      const result = await executeViaDelegation(env, tx, vaultAddress, undefined, requestCache);
       outcomes.push({ tx, result });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

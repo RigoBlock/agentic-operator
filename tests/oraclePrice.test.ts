@@ -14,7 +14,7 @@ import type { Address } from "viem";
 const mockReadContract = vi.fn();
 const mockMulticall = vi.fn();
 
-vi.mock("../src/services/vault.js", () => ({
+vi.mock("../src/services/rpcClient.js", () => ({
   getClient: () => ({ readContract: mockReadContract, multicall: mockMulticall }),
 }));
 

@@ -64,7 +64,7 @@ import {
   type Hex,
 } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
-import { getClient } from "./vault.js";
+import { getClient } from "./rpcClient.js";
 
 /** Default maximum allowed NAV drop per transaction (10%) — used for swaps */
 export const DEFAULT_MAX_NAV_DROP_PCT = 10n;
@@ -261,6 +261,7 @@ export async function checkNavImpact(
   callerAddress: Address,
   kv?: KVNamespace,
   maxDropPct: bigint = DEFAULT_MAX_NAV_DROP_PCT,
+  requestCache?: Map<string, Promise<NavData>>,
 ): Promise<NavShieldResult> {
   const publicClient = getClient(chainId, alchemyKey);
 
@@ -270,8 +271,9 @@ export async function checkNavImpact(
   // where it returns unitaryValue=0 when effectiveSupply > 0 AND totalValue <= 0,
   // while the actual _updateNav() preserves the stored unitaryValue in that case.
   // eth_call simulates the non-view function without persisting state changes.
-  let preNav: NavData;
-  try {
+  const preNavCacheKey = `${chainId}:${vaultAddress.toLowerCase()}:preNav`;
+
+  async function readPreNav(): Promise<NavData> {
     const updateNavCalldata = encodeFunctionData({
       abi: RIGOBLOCK_VAULT_ABI,
       functionName: "updateUnitaryValue",
@@ -289,11 +291,25 @@ export async function checkNavImpact(
       data: callResult.data,
     }) as { unitaryValue: bigint; netTotalValue: bigint; netTotalLiabilities: bigint };
 
-    preNav = {
+    return {
       totalValue: navResult.netTotalValue,
       unitaryValue: navResult.unitaryValue,
       timestamp: 0n, // updateUnitaryValue doesn't return timestamp
     };
+  }
+
+  let preNav: NavData;
+  try {
+    if (requestCache) {
+      let cached = requestCache.get(preNavCacheKey);
+      if (!cached) {
+        cached = readPreNav();
+        requestCache.set(preNavCacheKey, cached);
+      }
+      preNav = await cached;
+    } else {
+      preNav = await readPreNav();
+    }
   } catch (err) {
     // FAIL-CLOSED: If we can't read pre-swap NAV, we MUST block the transaction.
     // Allowing it would bypass the NAV shield entirely — leaving the vault unprotected.

@@ -86,6 +86,7 @@ export async function runTransactionFlow(
   baseReply: string,
   hooks: ExecutionHooks,
   modeOverride?: ExecutionModePreference,
+  requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>,
 ): Promise<TransactionFlowResult> {
   if (transactions.length === 0) {
     return { kind: "pending_confirmation", transactions: [], reply: baseReply };
@@ -109,7 +110,7 @@ export async function runTransactionFlow(
         total,
         description: executableTxs[idx]?.description,
       });
-    });
+    }, requestCache);
 
     await hooks.onComplete?.(outcomes);
 

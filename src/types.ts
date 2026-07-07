@@ -45,6 +45,14 @@ export interface Env {
   CDP_API_KEY_SECRET: string;  // Coinbase Developer Platform API key secret
   CDP_WALLET_SECRET: string;   // Coinbase Developer Platform wallet secret (agent wallet signing)
 
+  /**
+   * Optional request-scoped cache for pre-swap NAV reads.
+   * Routes create a fresh Map per request and pass it through processChat /
+   * runTransactionFlow so the pre-NAV `updateUnitaryValue` read can be reused
+   * across the calldata-build check and the broadcast check in a single
+   * delegated+confirmed transaction.
+   */
+  requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>;
 }
 
 // ── Telegram types ────────────────────────────────────────────────────

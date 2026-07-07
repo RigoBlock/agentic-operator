@@ -28,6 +28,7 @@ import { oracle } from "./routes/oracle.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
+import { withRpcMetrics, getRpcMetrics } from "./services/rpcMetrics.js";
 import { createX402Middleware } from "./middleware/x402.js";
 
 import { runAllSkills } from "./skills/index.js";
@@ -40,6 +41,19 @@ const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 // ── Middleware ─────────────────────────────────────────────────────────
 app.use("*", cors());
+
+// RPC metrics: count HTTP RPC requests during this Worker invocation and
+// expose the count in the response header. Must be early so all RPC calls
+// happen inside the AsyncLocalStorage context.
+app.use("*", async (c, next) => {
+  await withRpcMetrics(async () => {
+    await next();
+    const metrics = getRpcMetrics();
+    if (metrics) {
+      c.header("X-RPC-Calls", String(metrics.snapshot().httpRequests));
+    }
+  });
+});
 
 // Set a permissive CSP so the browser enforces it alongside any report-only policy.
 app.use("*", async (c, next) => {
