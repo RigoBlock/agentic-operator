@@ -10,7 +10,7 @@
  *   order submission and keeper execution.
  */
 
-import type { Env, RequestContext, UnsignedTransaction } from "../../types.js";
+import type { Env, RequestContext, TransactionDraft } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import type { GmxMarketInfo } from "../../services/gmxTrading.js";
 import { getVaultTokenBalance } from "../../services/vault.js";
@@ -318,12 +318,11 @@ export async function handle_gmx_increase_position(
     ? `[GMX] Add ${collateralAmount} ${collateralSymbol} collateral to ${isLong ? "Long" : "Short"} ${marketSymbol}`
     : `[GMX] ${isLong ? "Long" : "Short"} ${marketSymbol} ${newLeverage.toFixed(1)}x — ${collateralAmount} ${collateralSymbol} collateral (~$${addedCollateralValueUsd.toFixed(2)}), $${sizeDeltaUsd} size`;
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
-    gas: "0x0",
     description: txDescription,
   };
 
@@ -548,12 +547,11 @@ export async function handle_gmx_decrease_position(
           ? "Market Close"
           : "Market Decrease";
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
-    gas: "0x0",
     description: `[GMX] ${orderLabel} ${isLong ? "Long" : "Short"} ${marketSymbol} — $${sizeDeltaUsd} size`,
   };
 
@@ -670,12 +668,11 @@ export async function handle_gmx_cancel_order(
   const orderKey = args.orderKey as Hex;
   const calldata = buildCancelOrderCalldata(orderKey);
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
-    gas: "0x0",
     description: `[GMX] Cancel order ${orderKey.slice(0, 10)}…`,
   };
 
@@ -712,12 +709,11 @@ export async function handle_gmx_update_order(
     triggerPriceUsd: args.triggerPrice as string,
   });
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
-    gas: "0x0",
     description: `[GMX] Update order ${(args.orderKey as string).slice(0, 10)}…`,
   };
 
@@ -773,12 +769,11 @@ export async function handle_gmx_claim_funding_fees(
     tokens: claimTokens as Address[],
   });
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: ARBITRUM_CHAIN_ID,
-    gas: "0x0",
     description: `[GMX] Claim funding fees from ${claimMarkets.length} market(s)`,
   };
 

@@ -16,7 +16,7 @@
  * 7-point validation).
  */
 
-import type { Env, RequestContext, UnsignedTransaction } from "../types.js";
+import type { Env, RequestContext, TransactionDraft } from "../types.js";
 import type { Address } from "viem";
 import type { StrategySkill, SkillToolDefinition, SkillToolResult } from "./types.js";
 import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
@@ -300,12 +300,11 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
         operatorAddress: config.operatorAddress as Address,
       });
 
-      const tx: UnsignedTransaction = {
+      const tx: TransactionDraft = {
         to: config.vaultAddress as Address,
         data: result.calldata,
         value: "0x0",
         chainId: src.chainId,
-        gas: "0x7a120", // 500k gas — standard for crosschain sync
         description: result.description,
       };
 

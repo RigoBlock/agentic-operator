@@ -6,7 +6,7 @@
  * Tool Handlers — all tool call handlers + registry.
  */
 
-import type { Env, RequestContext, UnsignedTransaction } from "../../types.js";
+import type { Env, RequestContext, TransactionDraft } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import { type Address, type Hex } from "viem";
 import {
@@ -92,12 +92,11 @@ export async function handle_setup_delegation(
 
   const newSelectors = result.selectors; // already filtered to only missing ones
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: result.transaction.data,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: result.transaction.description,
     operatorOnly: true,
   };
@@ -160,12 +159,11 @@ export async function handle_revoke_delegation(
   // until delegation is explicitly re-set up.
   await revokeDelegationOnChain(env.KV, ctx.vaultAddress as string, ctx.chainId).catch(() => {});
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: revocation.transaction.data,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: revocation.transaction.description,
     operatorOnly: true,
   };
@@ -284,12 +282,11 @@ export async function handle_revoke_selectors(
     ctx.chainId,
   );
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: result.transaction.data,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: result.transaction.description,
   };
 

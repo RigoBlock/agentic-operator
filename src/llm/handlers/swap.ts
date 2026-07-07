@@ -8,7 +8,7 @@
  */
 
 import type { Address, Hex } from "viem";
-import type { Env, RequestContext, SwapIntent, UnsignedTransaction } from "../../types.js";
+import type { Env, RequestContext, SwapIntent, TransactionDraft } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import {
   getUniswapQuote, getUniswapSwapCalldata,
@@ -221,12 +221,11 @@ async function assembleSwapTransaction(
   const descParts = [`[${assembly.dexLabel}] Sell ${sellDesc} for ${buyDesc}`];
   if (priceLine) descParts.push(priceLine);
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: assembly.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: descParts.join(" | "),
     swapMeta: {
       sellAmount: inputAmount,
@@ -238,7 +237,6 @@ async function assembleSwapTransaction(
         : "",
       dex: assembly.dexLabel,
     },
-    navShieldChecked: true,
   };
 
   const sellLine = isExactOutput
@@ -415,12 +413,11 @@ export async function handle_build_vault_swap(
 
         const wrappedSym = `W${nativeSym}`;
         const [fromSym, toSym] = isWrap ? [nativeSym, wrappedSym] : [wrappedSym, nativeSym];
-        const transaction: UnsignedTransaction = {
+        const transaction: TransactionDraft = {
           to: ctx.vaultAddress as Address,
           data: calldata,
           value: "0x0",
           chainId: ctx.chainId,
-          gas: "0x0",
           description: `${isWrap ? "Wrap" : "Unwrap"} ${intent.amountIn} ${fromSym} → ${toSym}`,
           swapMeta: {
             sellAmount: intent.amountIn,

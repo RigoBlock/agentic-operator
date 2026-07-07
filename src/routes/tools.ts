@@ -13,7 +13,7 @@
 import { Hono } from "hono";
 import type { Env, AppVariables, RequestContext, ExecutionMode } from "../types.js";
 import { executeToolCall, TOOL_NAME_ALIASES, OPERATOR_VERIFIED_TOOLS } from "../llm/client.js";
-import { executeTxList, formatOutcomesMarkdown, prepareTransaction } from "../services/execution.js";
+import { executeTxList, formatOutcomesMarkdown, finalizeToolTransaction } from "../services/execution.js";
 import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS } from "../llm/tools.js";
 import { getSkillTools } from "../skills/index.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
@@ -174,7 +174,7 @@ tools.post("/", async (c) => {
 
     // Finalize any produced transaction (gas + NAV shield) before returning or executing.
     if (result.transaction) {
-      const { tx: finalizedTx, warning } = await prepareTransaction(c.env, ctx, result.transaction);
+      const { tx: finalizedTx, warning } = await finalizeToolTransaction(c.env, ctx, result.transaction);
       result.transaction = finalizedTx;
       if (warning) result.message += "\n" + warning;
     }

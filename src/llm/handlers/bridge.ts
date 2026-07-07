@@ -6,7 +6,7 @@
  * Tool Handlers — all tool call handlers + registry.
  */
 
-import type { Env, RequestContext, UnsignedTransaction } from "../../types.js";
+import type { Env, RequestContext, TransactionDraft } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import { formatUnits } from "viem";
 import { sanitizeError } from "../../config.js";
@@ -68,12 +68,11 @@ export async function handle_crosschain_transfer(
     operatorAddress: ctx.operatorAddress,
   });
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: srcChainId,
-    gas: "0x0",
     description: result.description,
     swapMeta: {
       sellAmount: result.quote.inputAmount,
@@ -187,12 +186,11 @@ export async function handle_crosschain_sync(
         ].join('\n')
       : '');
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: effectiveSrcChainId,
-    gas: "0x0",
     description: result.description,
   };
 

@@ -12,7 +12,7 @@
  *   - Its cron executor (what happens on each tick)
  */
 
-import type { Env, RequestContext, UnsignedTransaction, ChatMessage } from "../types.js";
+import type { Env, RequestContext, UnsignedTransaction, TransactionDraft, ChatMessage } from "../types.js";
 
 /** Minimal tool definition for the LLM (matches OpenAI function calling schema). */
 export interface SkillToolDefinition {
@@ -27,8 +27,8 @@ export interface SkillToolDefinition {
 /** Result of handling a tool call. */
 export interface SkillToolResult {
   message: string;
-  transaction?: UnsignedTransaction;
-  transactions?: UnsignedTransaction[];
+  transaction?: TransactionDraft;
+  transactions?: TransactionDraft[];
   chainSwitch?: number;
   suggestions?: string[];
 }

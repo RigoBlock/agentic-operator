@@ -155,14 +155,19 @@ export interface ToolCallResult {
   metadata?: Record<string, unknown>;
 }
 
-/** An unsigned transaction returned to the frontend for operator signing */
-export interface UnsignedTransaction {
+/**
+ * Transaction draft produced by tool handlers.
+ *
+ * Handlers MUST NOT set gas limits or claim NAV-shield checks. A centralized
+ * finalization step adds gas, runs the NAV shield, and marks the transaction
+ * as prepared before it is returned to the frontend or broadcast.
+ */
+export interface TransactionDraft {
   to: Address;
   data: Hex;
   value: string;       // hex-encoded wei
   chainId: number;
-  gas: string;          // hex-encoded gas limit
-  description: string;  // human-readable summary for the confirm modal
+  description: string; // human-readable summary for the confirm modal
   /** When true, this tx MUST be signed by the operator wallet, not the agent.
    *  Used for delegation setup, pool deployment, pool funding — operations
    *  that cannot go through delegated execution. */
@@ -176,12 +181,22 @@ export interface UnsignedTransaction {
     price: string;        // "1 ETH = 3000.12 USDC"
     dex: string;          // "0x Aggregator" | "Uniswap"
   };
-  /** Internal marker: NAV shield pre-check already ran for this tx build path. */
+  /** Per-transaction metrics (NAV impact, swap-shield divergence) for frontend display. */
+  metrics?: Record<string, unknown>;
+}
+
+/** An unsigned transaction returned to the frontend for operator signing.
+ *  This type is only produced by the centralized finalization helper; it
+ *  carries the gas limit and the NAV-shield marker. */
+export interface UnsignedTransaction extends TransactionDraft {
+  gas: string;          // hex-encoded gas limit
+  /** Internal marker: NAV shield pre-check already ran for this tx build path.
+   *  This is set ONLY by the centralized finalization helper. */
   navShieldChecked?: boolean;
   /** Advisory warning produced when the NAV shield simulation shows the trade itself reverts. */
   revertWarning?: string;
-  /** Per-transaction metrics (NAV impact, swap-shield divergence) for frontend display. */
-  metrics?: Record<string, unknown>;
+  /** Internal marker: transaction has been finalized (gas + NAV shield) by the engine. */
+  prepared?: true;
 }
 
 export interface ChatResponse {

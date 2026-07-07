@@ -8,7 +8,7 @@
  */
 
 import OpenAI from "openai";
-import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, RequestContext, StreamEvent, ExecutionResult } from "../types.js";
+import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, TransactionDraft, RequestContext, StreamEvent, ExecutionResult } from "../types.js";
 import { AGENT_TOOL_DEFINITIONS, RUNTIME_CONTEXT_PACK } from "./tools.js";
 import { detectDomains, buildSystemPrompt, DOMAIN_TOOLS, CORE_TOOLS } from "./prompts.js";
 import { getSkillTools, getSkillSystemPrompt } from "../skills/index.js";
@@ -31,7 +31,7 @@ import {
 } from "../services/swapShield.js";
 import { TOOL_HANDLER_REGISTRY } from "./handlers/index.js";
 import { decodeRevertData, extractRevertData } from "../services/errorDecoder.js";
-import { prepareTransaction } from "../services/execution.js";
+import { finalizeToolTransaction } from "../services/execution.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
 // These appear as 4-byte hex prefixes in "execution reverted" messages.
@@ -952,16 +952,17 @@ ${executionModeNote}${contextDocsBlock}`;
       const toolResult = await executeToolCall(env, ctx, immediateFastPath.name, immediateFastPath.args);
       // Finalize transaction: single gas estimate + NAV shield before returning it.
       let fastPathReply = toolResult.message;
+      let finalizedTransaction: UnsignedTransaction | undefined;
       if (toolResult.transaction) {
-        const { tx: finalizedTx, warning } = await prepareTransaction(env, ctx, toolResult.transaction);
-        toolResult.transaction = finalizedTx;
+        const { tx, warning } = await finalizeToolTransaction(env, ctx, toolResult.transaction);
+        finalizedTransaction = tx;
         if (warning) fastPathReply += '\n' + warning;
       }
       return {
         reply: fastPathReply,
         toolCalls: [{ name: immediateFastPath.name, arguments: immediateFastPath.args, result: fastPathReply, error: false, metadata: toolResult.metadata }],
-        transaction: toolResult.transaction,
-        transactions: toolResult.transaction ? [toolResult.transaction] : undefined,
+        transaction: finalizedTransaction,
+        transactions: finalizedTransaction ? [finalizedTransaction] : undefined,
         chainSwitch: toolResult.chainSwitch,
         suggestions: toolResult.suggestions,
         metadata: toolResult.metadata,
@@ -1094,9 +1095,12 @@ ${executionModeNote}${contextDocsBlock}`;
           result = toolResult.message;
 
           if (toolResult.transaction) {
-            // Transactions are finalized centrally after the tool loop so gas
-            // estimation and the NAV shield run exactly once per transaction.
-            pendingTransactions.push(toolResult.transaction);
+            // Finalize immediately: gas estimation + NAV shield run exactly once
+            // per transaction, and every entry in pendingTransactions is a real
+            // UnsignedTransaction that can be returned or broadcast safely.
+            const { tx: finalizedTx, warning } = await finalizeToolTransaction(env, ctx, toolResult.transaction);
+            pendingTransactions.push(finalizedTx);
+            if (warning) result += '\n' + warning;
           }
 
           if (toolResult.chainSwitch) {
@@ -1265,34 +1269,13 @@ ${executionModeNote}${contextDocsBlock}`;
         });
       }
 
-      // Actionable outcome available — finalize transactions and return.
+      // Actionable outcome available — return finalized transactions.
       if (pendingTransactions.length > 0) {
-        const warningLines: string[] = [];
-        for (let i = 0; i < pendingTransactions.length; i++) {
-          try {
-            const { tx: finalizedTx, warning } = await prepareTransaction(env, ctx, pendingTransactions[i]);
-            pendingTransactions[i] = finalizedTx;
-            if (warning) warningLines.push(warning);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            return {
-              reply: friendlyError(sanitizeError(msg)),
-              toolCalls: toolCallResults,
-              chainSwitch: pendingChainSwitch,
-              dexProvider: detectedDex,
-              reasoning: orchestrationReasoning,
-              modelsUsed,
-              finalModel: "tooling",
-            };
-          }
-        }
-
         for (const tx of pendingTransactions) {
           onStreamEvent?.({ type: "transaction", transaction: tx });
         }
 
-        let reply = toolCallResults.filter(tc => !tc.error && tc.result).pop()?.result || "";
-        if (warningLines.length) reply += "\n\n" + warningLines.join("\n");
+        const reply = toolCallResults.filter(tc => !tc.error && tc.result).pop()?.result || "";
 
         const result: ChatResponse = {
           reply,
@@ -1432,7 +1415,8 @@ export function txActionLine(ctx: Pick<RequestContext, "executionMode">): string
 
 export interface ToolResult {
   message: string;
-  transaction?: UnsignedTransaction;
+  /** Transaction draft — handlers must NOT set gas or NAV-shield flags. */
+  transaction?: TransactionDraft;
   chainSwitch?: number;
   /** Quick-action suggestions shown as clickable chips */
   suggestions?: string[];

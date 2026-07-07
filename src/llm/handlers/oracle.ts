@@ -384,11 +384,6 @@ export async function handle_refresh_oracle_feed(
   const tokenSymbol = result.poolInfo.tokenSymbol;
   const amountInWei = result.amountInWei;
 
-  // Vault transaction gas is finalized centrally by prepareTransaction.
-  if (viaVault) {
-    result.transaction.gas = "0x0";
-  }
-
   // EOA path: pre-flight balance / allowance check to catch missing approvals early.
   if (!viaVault && env.ALCHEMY_API_KEY && ctx.operatorAddress) {
     const publicClient = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
@@ -459,7 +454,6 @@ export async function handle_refresh_oracle_feed(
               data: approveData,
               value: "0x0",
               chainId: ctx.chainId,
-              gas: "0x0",
               description: `Step 1/2: Approve ${amountIn} ${tokenSymbol} for Permit2`,
               operatorOnly: true,
             },
@@ -498,7 +492,6 @@ export async function handle_refresh_oracle_feed(
                 data: permit2ApproveData,
                 value: "0x0",
                 chainId: ctx.chainId,
-                gas: "0x0",
                 description: `Step 2/2: Permit2 approve ${amountIn} ${tokenSymbol} for Universal Router`,
                 operatorOnly: true,
               },
@@ -532,9 +525,8 @@ export async function handle_refresh_oracle_feed(
       }
     }
 
-    // Gas is finalized centrally by prepareTransaction; keep operatorOnly so it
-    // is signed from the user's wallet rather than executed via delegation.
-    result.transaction.gas = "0x0";
+    // Transaction is finalized centrally; keep operatorOnly so it is signed from
+    // the user's wallet rather than executed via delegation.
   }
 
   return {

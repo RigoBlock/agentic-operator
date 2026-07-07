@@ -6,7 +6,7 @@
  * Tool Handlers — all tool call handlers + registry.
  */
 
-import type { Env, RequestContext, UnsignedTransaction } from "../../types.js";
+import type { Env, RequestContext, TransactionDraft } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import { STAKING_PROXY } from "../../config.js";
 import { type Address } from "viem";
@@ -36,12 +36,11 @@ export async function handle_grg_stake(
   const amount = args.amount as string;
   const calldata = buildStakeCalldata(amount);
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: 1,
-    gas: "0x0",
     description: `[GRG Staking] Stake ${amount} GRG`,
   };
 
@@ -73,12 +72,11 @@ export async function handle_grg_unstake(
   const amount = args.amount as string;
   const calldata = buildUnstakeCalldata(amount);
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: 1,
-    gas: "0x0",
     description: `[GRG Staking] Unstake ${amount} GRG`,
   };
 
@@ -110,12 +108,11 @@ export async function handle_grg_undelegate_stake(
   const amount = args.amount as string;
   const calldata = buildUndelegateStakeCalldata(amount);
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: 1,
-    gas: "0x0",
     description: `[GRG Staking] Undelegate ${amount} GRG`,
   };
 
@@ -151,12 +148,11 @@ export async function handle_grg_end_epoch(
 
   const calldata = buildEndEpochCalldata();
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: stakingProxy,
     data: calldata,
     value: "0x0",
     chainId: 1,
-    gas: "0x0",
     description: `[GRG Staking] Finalize epoch on staking proxy`,
     operatorOnly: true,
   };
@@ -187,12 +183,11 @@ export async function handle_grg_claim_rewards(
 
   const calldata = buildWithdrawDelegatorRewardsCalldata();
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: calldata,
     value: "0x0",
     chainId: 1,
-    gas: "0x0",
     description: `[GRG Staking] Claim delegator rewards`,
   };
 

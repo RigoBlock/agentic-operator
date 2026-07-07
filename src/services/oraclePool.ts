@@ -127,7 +127,6 @@ export interface OraclePoolSwapResult {
     data: Hex;
     value: string;   // hex wei string
     chainId: number;
-    gas: string;     // hex
     description: string;
     operatorOnly?: boolean;
   };
@@ -416,7 +415,6 @@ export async function buildOraclePoolSwapTx(
         data: calldata,
         value: "0x0",
         chainId,
-        gas: "0x" + ORACLE_SWAP_GAS_LIMIT.toString(16),
         description: vaultDescription,
       },
       poolInfo: {
@@ -453,7 +451,6 @@ export async function buildOraclePoolSwapTx(
       data: calldata,
       value: isBuy ? "0x" + amountInWei.toString(16) : "0x0",
       chainId,
-      gas: "0x" + ORACLE_SWAP_GAS_LIMIT.toString(16),
       description: eoaDescription,
       operatorOnly: true,
     },

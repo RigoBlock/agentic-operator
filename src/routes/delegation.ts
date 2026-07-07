@@ -468,6 +468,10 @@ delegation.post("/execute", async (c) => {
       gas: body.transaction.gas || "0x0",
       description: body.transaction.description || "",
     };
+    // Do not trust NAV-shield or prepared markers from the client; re-finalize here.
+    tx.prepared = undefined;
+    tx.navShieldChecked = undefined;
+    if (!tx) throw new Error("Transaction not built");
 
     const result = await executeViaDelegation(c.env, tx, body.vaultAddress, body.sponsoredGas);
     return c.json({ executionResult: result });

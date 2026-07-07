@@ -30,7 +30,7 @@ import {
   type PublicClient,
 } from "viem";
 import type { LocalAccount } from "viem/accounts";
-import type { Env, UnsignedTransaction, ExecutionResult, RequestContext } from "../types.js";
+import type { Env, UnsignedTransaction, TransactionDraft, ExecutionResult, RequestContext } from "../types.js";
 import { getChain, getRpcUrl, sanitizeError } from "../config.js";
 import { loadAgentWalletAccount } from "./agentWallet.js";
 import { getDelegationConfig, getChainDelegation } from "./delegation.js";
@@ -350,6 +350,15 @@ function bumpFees(fees: FeeEstimate, chainId: number): FeeEstimate {
 // ── Public API ────────────────────────────────────────────────────────
 
 /**
+ * Type guard: a transaction is "prepared" only when it has a non-zero gas limit
+ * AND the internal `prepared` marker set by finalizeToolTransaction().
+ */
+function isPreparedTransaction(tx: TransactionDraft): tx is UnsignedTransaction & { prepared: true } {
+  const maybe = tx as Partial<UnsignedTransaction>;
+  return !!maybe.gas && maybe.gas !== "0x0" && maybe.prepared === true;
+}
+
+/**
  * Shared transaction finalizer: estimate gas once and run the NAV shield once.
  *
  * This is the single place where `eth_estimateGas` and the full `multicall`
@@ -360,8 +369,9 @@ function bumpFees(fees: FeeEstimate, chainId: number): FeeEstimate {
 export async function prepareTransaction(
   env: Env,
   ctx: Pick<RequestContext, "vaultAddress" | "chainId" | "operatorAddress" | "operatorVerified" | "executionMode">,
-  tx: UnsignedTransaction,
+  draft: TransactionDraft,
 ): Promise<{ tx: UnsignedTransaction; warning?: string }> {
+  const tx: UnsignedTransaction = { ...draft, gas: "0x0", navShieldChecked: false };
   if (!env.ALCHEMY_API_KEY) {
     throw new ExecutionError("No RPC key configured", "RPC_UNAVAILABLE");
   }
@@ -489,6 +499,23 @@ export async function prepareTransaction(
 }
 
 /**
+ * Centralized transaction finalization for tool handlers.
+ *
+ * Handlers MUST return a `TransactionDraft` (no gas, no NAV-shield markers).
+ * This function is the only place that turns a draft into a full
+ * `UnsignedTransaction` with gas and a validated NAV shield.
+ */
+export async function finalizeToolTransaction(
+  env: Env,
+  ctx: Pick<RequestContext, "vaultAddress" | "chainId" | "operatorAddress" | "operatorVerified" | "executionMode">,
+  draft: TransactionDraft,
+): Promise<{ tx: UnsignedTransaction; warning?: string }> {
+  const result = await prepareTransaction(env, ctx, draft);
+  result.tx.prepared = true;
+  return result;
+}
+
+/**
  * Execute a transaction via the agent wallet.
  *
  * This is the ONLY public function that broadcasts transactions from the agent
@@ -507,7 +534,7 @@ export async function prepareTransaction(
  */
 export async function executeViaDelegation(
   env: Env,
-  tx: UnsignedTransaction,
+  txInput: TransactionDraft,
   vaultAddress: string,
   sponsoredGasOverride?: boolean,
   requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>,
@@ -522,18 +549,18 @@ export async function executeViaDelegation(
   }
 
   // 2. Get per-chain delegation state
-  const chainDelegation = await getChainDelegation(env.KV, vaultAddress, tx.chainId);
+  const chainDelegation = await getChainDelegation(env.KV, vaultAddress, txInput.chainId);
   if (!chainDelegation) {
     throw new ExecutionError(
-      `Delegation not active on chain ${tx.chainId}. Set up delegation on this chain first.`,
+      `Delegation not active on chain ${txInput.chainId}. Set up delegation on this chain first.`,
       "DELEGATION_NOT_ON_CHAIN",
     );
   }
 
   // 3. Verify the transaction target is the vault
-  if (tx.to.toLowerCase() !== vaultAddress.toLowerCase()) {
+  if (txInput.to.toLowerCase() !== vaultAddress.toLowerCase()) {
     throw new ExecutionError(
-      `Transaction target ${tx.to} is not the vault ${vaultAddress}. ` +
+      `Transaction target ${txInput.to} is not the vault ${vaultAddress}. ` +
       `The agent can only send transactions to the delegated vault.`,
       "TARGET_NOT_ALLOWED",
     );
@@ -544,7 +571,7 @@ export async function executeViaDelegation(
   //    the KV-stored selectors — the KV config may be stale if new selectors
   //    were added after the initial delegation setup. The on-chain delegation
   //    is the ultimate guard (eth_call simulation at step 7 catches unauthorized calls).
-  const selector = tx.data.slice(0, 10) as Hex;
+  const selector = txInput.data.slice(0, 10) as Hex;
   const whitelistedSelectors = Object.values(ALLOWED_VAULT_SELECTORS).map((s) => s.toLowerCase());
   if (!whitelistedSelectors.includes(selector.toLowerCase())) {
     throw new ExecutionError(
@@ -605,19 +632,24 @@ export async function executeViaDelegation(
   // simulation again. This removes the duplicate eth_estimateGas + NAV check that
   // previously ran in handlers and again at broadcast time.
 
-  if (!tx.gas || tx.gas === "0x0" || !tx.navShieldChecked) {
+  // Only reuse a previously finalized transaction if it carries the internal
+  // `prepared` marker set by finalizeToolTransaction(). External callers cannot
+  // forge this marker through JSON because the field is stripped/ignored at the
+  // route boundary; any transaction without it is re-finalized here.
+  let finalizedTx: UnsignedTransaction;
+  if (!isPreparedTransaction(txInput)) {
     try {
-      await prepareTransaction(
+      finalizedTx = (await prepareTransaction(
         env,
         {
-          vaultAddress: tx.to,
-          chainId: tx.chainId,
+          vaultAddress: txInput.to,
+          chainId: txInput.chainId,
           operatorAddress: config.operatorAddress,
           operatorVerified: false,
           executionMode: "delegated",
         },
-        tx,
-      );
+        txInput,
+      )).tx;
     } catch (prepErr) {
       if (prepErr instanceof ExecutionError) throw prepErr;
       const msg = prepErr instanceof Error ? prepErr.message : String(prepErr);
@@ -627,7 +659,12 @@ export async function executeViaDelegation(
         true,
       );
     }
+  } else {
+    finalizedTx = txInput as UnsignedTransaction;
   }
+
+  // From here on we operate on a fully finalized UnsignedTransaction.
+  const tx: UnsignedTransaction = finalizedTx;
 
   // Refuse to auto-execute a transaction that was flagged as likely reverting
   // during prepareTransaction. The caller can still return it as unsigned calldata
@@ -1523,7 +1560,7 @@ export class ExecutionError extends Error {
 
 /** Result of executing a single transaction in a batch */
 export interface TxExecOutcome {
-  tx: UnsignedTransaction;
+  tx: UnsignedTransaction | TransactionDraft;
   result?: ExecutionResult;
   error?: string;
   /** When true, the user can sign this transaction directly from their wallet. */
@@ -1539,7 +1576,7 @@ export interface TxExecOutcome {
  */
 export async function executeTxList(
   env: Env,
-  txList: UnsignedTransaction[],
+  txList: TransactionDraft[],
   vaultAddress: string,
   onProgress?: (index: number, total: number, outcomesSoFar: TxExecOutcome[]) => Promise<void>,
   requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>,

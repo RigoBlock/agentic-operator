@@ -12,7 +12,7 @@
  * slippage). Auto-pauses after 3 consecutive failures.
  */
 
-import type { Env, RequestContext, UnsignedTransaction } from "../types.js";
+import type { Env, RequestContext, TransactionDraft } from "../types.js";
 import type { Address } from "viem";
 import type { StrategySkill, SkillToolDefinition, SkillToolResult, ProcessChatFn } from "./types.js";
 import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
@@ -481,7 +481,7 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
 
       // Track the built transaction outside try/catch so the catch block can
       // include tx details (to/value/data) in error logs for Tenderly debugging.
-      let lastBuiltTx: UnsignedTransaction | undefined;
+      let lastBuiltTx: TransactionDraft | undefined;
 
       try {
         // Direct tool call — bypasses the LLM entirely for deterministic execution.

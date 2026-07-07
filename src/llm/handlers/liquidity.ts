@@ -6,7 +6,7 @@
  * Tool Handlers — all tool call handlers + registry.
  */
 
-import type { Env, RequestContext, UnsignedTransaction } from "../../types.js";
+import type { Env, RequestContext, TransactionDraft } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import { resolveTokenAddress } from "../../config.js";
 import { type Address } from "viem";
@@ -101,12 +101,11 @@ export async function handle_add_liquidity(
     hooks: args.hooks as Address | undefined,
   }, ctx.chainId, ctx.vaultAddress as Address);
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: result.description,
   };
 
@@ -153,12 +152,11 @@ export async function handle_initialize_pool(
     amountB: args.amountB as string | undefined,
   }, ctx.chainId);
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: POOL_MANAGER[ctx.chainId],
     data: result.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: result.description,
     operatorOnly: true,
   };
@@ -218,12 +216,11 @@ export async function handle_remove_liquidity(
     burn: args.burn as boolean | undefined,
   }, ctx.chainId, ctx.vaultAddress as Address);
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: result.description,
   };
 
@@ -355,12 +352,11 @@ export async function handle_collect_lp_fees(
 
   const result = buildCollectFeesTx(tokenId, currency0, currency1, ctx.vaultAddress as Address);
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: result.description,
   };
 
@@ -438,12 +434,11 @@ export async function handle_burn_position(
 
   const result = buildBurnPositionTx(tokenId, currency0, currency1, ctx.vaultAddress as Address);
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: ctx.vaultAddress as Address,
     data: result.calldata,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: result.description,
   };
 

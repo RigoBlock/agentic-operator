@@ -6,7 +6,7 @@
  * Tool Handlers — all tool call handlers + registry.
  */
 
-import type { Env, RequestContext, UnsignedTransaction } from "../../types.js";
+import type { Env, RequestContext, TransactionDraft } from "../../types.js";
 import type { ToolResult } from "../client.js";
 import {
   getPoolData, getNavData, getTokenDecimals, getVaultTokenBalance, encodeMint,
@@ -57,12 +57,11 @@ export async function handle_deploy_smart_pool(
     args: [poolName, poolSymbol, baseTokenAddress],
   });
 
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: POOL_FACTORY_ADDRESS as Address,
     data,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: `Deploy new Rigoblock pool: ${poolName} (${poolSymbol})`,
     operatorOnly: true,
   };
@@ -166,13 +165,12 @@ export async function handle_fund_pool(
 
   if (isNativeBase) {
     // Native base token — send as msg.value, no approval needed
-    const transaction: UnsignedTransaction = {
+    const transaction: TransactionDraft = {
       to: ctx.vaultAddress as Address,
       data: mintData,
       value: "0x" + amountInWei.toString(16),
       chainId: ctx.chainId,
-      gas: "0x0",
-      description: `Fund pool: deposit ${amountStr} ${baseSymbol} into ${poolData.name}`,
+        description: `Fund pool: deposit ${amountStr} ${baseSymbol} into ${poolData.name}`,
       operatorOnly: true,
     };
 
@@ -201,12 +199,11 @@ export async function handle_fund_pool(
   });
 
   // Return the approve transaction first — the mint follows after approval
-  const transaction: UnsignedTransaction = {
+  const transaction: TransactionDraft = {
     to: baseToken as Address,
     data: approveData,
     value: "0x0",
     chainId: ctx.chainId,
-    gas: "0x0",
     description: `Approve ${amountStr} ${baseSymbol} for pool ${poolData.name}`,
     operatorOnly: true,
   };
