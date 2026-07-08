@@ -1410,11 +1410,13 @@ async function handleCallbackQuery(
     // single transaction, update the elapsed time every 5 seconds. After 30s
     // switch to a calmer message so the counter does not look like a hang.
     let progressTimer: ReturnType<typeof setInterval> | undefined;
+    let executionComplete = false;
     let pendingPoller: Promise<void> | undefined;
     try {
       const executionStart = Date.now();
       if (txList.length === 1) {
         progressTimer = setInterval(() => {
+          if (executionComplete) return;
           const elapsedSec = Math.round((Date.now() - executionStart) / 1000);
           const text = elapsedSec > 30
             ? `⏳ Trade is still being processed. Sponsored transactions on Ethereum can take a minute to land. I'll update you once it completes.`
@@ -1432,6 +1434,13 @@ async function handleCallbackQuery(
           ).catch(() => {});
         }
       });
+
+      // Stop the progress timer before editing the final message. A callback
+      // already queued by setInterval can still run after clearInterval, so we
+      // also guard with executionComplete to prevent it from overwriting the
+      // final outcome message.
+      executionComplete = true;
+      if (progressTimer) clearInterval(progressTimer);
 
       // Separate outcomes into final states vs. still-pending (e.g., sponsored
       // mainnet tx whose status check timed out before on-chain confirmation).
@@ -1484,6 +1493,8 @@ async function handleCallbackQuery(
         );
       }
     } catch (execErr) {
+      executionComplete = true;
+      if (progressTimer) clearInterval(progressTimer);
       console.error("[telegram] executeTxList error:", execErr);
       const rawMsg = execErr instanceof Error ? execErr.message : String(execErr);
       const safeMsg = sanitizeError(rawMsg);

@@ -81,8 +81,30 @@ const WAIT_FOR_CALLS_STATUS_TIMEOUT_MS: Record<number, number> = {
   84532: 15_000,    // Base Sepolia
 };
 
+/**
+ * Per-chain polling interval for `wallet_getCallsStatus`.
+ * Ethereum mainnet has ~12s blocks, so 4s polling is reasonable.
+ * All other supported chains have sub-second or ~1-2s blocks, so poll every 1s.
+ */
+const WAIT_FOR_CALLS_STATUS_POLL_MS: Record<number, number> = {
+  1: 4_000,         // Ethereum mainnet
+  11155111: 4_000,  // Sepolia
+  // L2s / sidechains
+  10: 1_000,        // Optimism
+  56: 1_000,        // BNB Chain
+  130: 1_000,       // Unichain
+  137: 1_000,       // Polygon
+  8453: 1_000,      // Base
+  42161: 1_000,     // Arbitrum
+  84532: 1_000,     // Base Sepolia
+};
+
 function getWaitForCallsStatusTimeout(chainId: number): number {
   return WAIT_FOR_CALLS_STATUS_TIMEOUT_MS[chainId] ?? 20_000;
+}
+
+function getWaitForCallsStatusPollInterval(chainId: number): number {
+  return WAIT_FOR_CALLS_STATUS_POLL_MS[chainId] ?? 1_000;
 }
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -225,15 +247,16 @@ export async function executeSponsoredCalls(
     }
 
     // ── Step 6: Wait for confirmation ──
-    // Use a longer timeout (90s) and explicit polling so transient Alchemy
-    // latency does not immediately kill the request. If the status still cannot
-    // be determined, return a pending result with the callId so the caller can
+    // Poll explicitly with a per-chain timeout (15s on L2s, 30s on mainnet).
+    // This is long enough for fast chains while still failing fast enough to
+    // surface the callId for background polling. If the status still cannot be
+    // determined, return a pending result with the callId so the caller can
     // surface "submitted but not yet confirmed" instead of hanging forever.
     let statusResult;
     try {
       statusResult = await client.waitForCallsStatus({
         id: callId,
-        pollingInterval: 4_000,
+        pollingInterval: getWaitForCallsStatusPollInterval(chainId),
         timeout: getWaitForCallsStatusTimeout(chainId),
       });
     } catch (waitErr) {

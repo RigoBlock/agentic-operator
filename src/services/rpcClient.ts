@@ -44,6 +44,9 @@ export function getClient(chainId: number, alchemyKey?: string): PublicClient {
     transport: http(rpcUrl, {
       timeout: 10_000,
       fetchFn: instrumentedFetch,
+      // Batch independent JSON-RPC requests into a single HTTP call.
+      // This is separate from the contract-layer multicall batching above.
+      batch: true,
     }),
   });
   clientCache.set(cacheKey, client);

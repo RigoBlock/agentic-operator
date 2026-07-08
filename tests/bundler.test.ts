@@ -143,14 +143,14 @@ describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
     );
   });
 
-  it("uses a 15s timeout on L2s", async () => {
+  it("uses a 1s poll interval and 15s timeout on L2s", async () => {
     const waitForCallsStatus = vi.fn().mockResolvedValue({ status: "success", receipts: [] });
     mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ waitForCallsStatus }));
 
     await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "test-key", "policy-id", [CALL]);
 
     expect(waitForCallsStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ pollingInterval: 4_000, timeout: 15_000 }),
+      expect.objectContaining({ pollingInterval: 1_000, timeout: 15_000 }),
     );
   });
 

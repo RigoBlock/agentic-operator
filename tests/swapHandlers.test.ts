@@ -20,7 +20,6 @@ const {
   mockTxActionLine,
   mockSwitchChainIfNeeded,
   mockResolveChainName,
-  mockRpcCall,
   mockResolveTokenAddress,
   mockGetWrappedNativeAddress,
   mockGetNativeTokenSymbol,
@@ -38,7 +37,6 @@ const {
   mockTxActionLine: vi.fn().mockReturnValue(""),
   mockSwitchChainIfNeeded: vi.fn().mockReturnValue(undefined),
   mockResolveChainName: vi.fn().mockReturnValue("Polygon"),
-  mockRpcCall: vi.fn(),
   mockResolveTokenAddress: vi.fn().mockImplementation(async (_chainId: number, symbol: string) => {
     const map: Record<string, string> = {
       POL: "0x0000000000000000000000000000000000000000",
@@ -84,7 +82,7 @@ vi.mock("../src/config.js", () => ({
 }));
 
 vi.mock("../src/services/rpcClient.js", () => ({
-  getClient: () => ({ call: mockRpcCall }),
+  getClient: () => ({}),
 }));
 
 import {
@@ -214,7 +212,6 @@ describe("handle_build_vault_swap", () => {
     mockGetVaultTokenBalance.mockResolvedValue({ balance: BigInt("100000000000000000000"), decimals: 18, symbol: "POL" });
     mockEncodeVaultExecute.mockReturnValue("0xencoded" as Hex);
     mockGetUniswapSwapCalldata.mockResolvedValue(makeUniswapSwapTx());
-    mockRpcCall.mockResolvedValue(undefined);
   });
 
   it("falls back to Uniswap when 0x reports no liquidity", async () => {
@@ -248,26 +245,6 @@ describe("handle_build_vault_swap", () => {
     ).rejects.toThrow("Swap Shield blocked this trade");
 
     expect(mockGetUniswapQuote).not.toHaveBeenCalled();
-  });
-
-  it("falls back to Uniswap when the vault's A0xRouter rejects the settler action", async () => {
-    mockGetZeroXVaultQuote.mockResolvedValue(makeZeroXQuoteExactOutput());
-    // A0xRouter reverts ActionNotAllowed(CHECK_SLIPPAGE) when 0x embeds a disallowed settler action.
-    mockRpcCall.mockRejectedValue(
-      new Error("execution reverted: 0x2f1cda64131ad42800000000000000000000000000000000000000000000000000000000"),
-    );
-    mockGetUniswapQuote.mockResolvedValue(makeUniswapQuote());
-
-    const result = await handle_build_vault_swap(makeEnv(), makeCtx({ chainId: 42161 }), {
-      tokenIn: "ETH",
-      tokenOut: "GRG",
-      amountOut: "2.5",
-    }, "build_vault_swap");
-
-    expect(mockRpcCall).toHaveBeenCalledTimes(1);
-    expect(mockGetUniswapQuote).toHaveBeenCalledTimes(1);
-    expect(result.message).toContain("0x could not route");
-    expect(result.transaction?.swapMeta?.dex).toBe("Uniswap");
   });
 
   it("returns a transaction via 0x for vault swaps", async () => {

@@ -18,8 +18,6 @@ import { getVaultTokenBalance, encodeVaultExecute } from "../../services/vault.j
 import { resolveTokenAddress, getWrappedNativeAddress, getNativeTokenSymbol } from "../../config.js";
 import { TokenResolutionError } from "../../services/tokenResolver.js";
 import { encodeFunctionData, decodeFunctionData, parseUnits, formatUnits } from "viem";
-import { getClient } from "../../services/rpcClient.js";
-import { getRevertDataFromError, decodeRevertData } from "../../services/errorDecoder.js";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import {
   resolveChainName, resolveSlippage, runSwapShield, switchChainIfNeeded, txActionLine,
@@ -62,49 +60,6 @@ function isZeroXFatalError(err: unknown): boolean {
     lower.includes("a0xrouter") ||
     lower.includes("0x exact-output vault swap cannot be converted")
   );
-}
-
-/**
- * Simulate a 0x vault swap as the operator before returning it to the caller.
- *
- * The 0x API quote may embed a settler action that Rigoblock's A0xRouter adapter
- * does not allow on the target chain. That revert only surfaces when the swap is
- * simulated through the vault. By catching it here we trigger the Uniswap fallback
- * inside `handle_build_vault_swap` instead of returning a revert to the user.
- */
-async function simulate0xVaultSwap(
-  env: Env,
-  ctx: RequestContext,
-  assembly: SwapAssembly,
-): Promise<void> {
-  if (!ctx.operatorAddress || ctx.operatorAddress.toLowerCase() === "0x0000000000000000000000000000000000000000") {
-    return;
-  }
-
-  const client = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
-  const txValue = BigInt(assembly.value || "0x0");
-
-  try {
-    await client.call({
-      account: ctx.operatorAddress as Address,
-      to: ctx.vaultAddress as Address,
-      data: assembly.calldata,
-      value: txValue,
-    });
-  } catch (err) {
-    const revertData = getRevertDataFromError(err);
-    const decoded = revertData ? decodeRevertData(revertData) : null;
-    if (decoded?.startsWith("Contract reverted: ActionNotAllowed(")) {
-      // The A0xRouter explicitly rejected a 0x Settler action (e.g. CHECK_SLIPPAGE).
-      // Surface the decoded contract error and flag it so the caller falls back to Uniswap.
-      throw new ZeroXVaultRevertError(decoded, { fatal: true, revertData: revertData ?? undefined });
-    }
-    const msg = decoded || (err instanceof Error ? err.message : String(err));
-    if (isZeroXFatalError(msg)) {
-      throw new ZeroXVaultRevertError(msg, { fatal: true });
-    }
-    // Non-fatal reverts are left for the unified finalization path to surface.
-  }
 }
 
 /** Format a raw wei amount to a human-readable decimal string (6 places). */
@@ -344,11 +299,6 @@ async function buildVaultSwapWith0x(
       fallbackNote ??
       (zxQuote.convertedFromExactOutput ? "estimated input for target output" : undefined),
   };
-
-  // Fail fast if the vault's A0xRouter adapter rejects this settler action.
-  // This lets `handle_build_vault_swap` fall back to Uniswap before the user
-  // sees a revert during gas estimation.
-  await simulate0xVaultSwap(env, ctx, assembly);
 
   return assembleSwapTransaction(env, ctx, intent, chainSwitched, chainName, assembly);
 }
