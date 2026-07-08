@@ -3,6 +3,11 @@ main = "src/index.ts"
 compatibility_date = "2024-11-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Match the dashboard settings (the *.workers.dev subdomain and preview URLs
+# are enabled in the Cloudflare Dashboard).
+workers_dev = true
+preview_urls = true
+
 # No [vars] needed — vault address and chain come from the frontend per-request.
 
 # Workers AI binding — enables zero-config LLM access (no API tokens needed).
@@ -13,6 +18,10 @@ binding = "AI"
 [assets]
 directory = "./public"
 binding = "ASSETS"
+# Invoke the Worker first; only fall back to static assets if the Worker
+# returns a 404. This keeps API routes under /api/* handled by code and lets
+# the homepage handler add its RFC 8288 Link headers before serving index.html.
+run_worker_first = true
 
 # KV namespace for storing operator vault lists, delegation config, agent wallets
 # For local dev (`wrangler dev`), KV works automatically without a real id.
@@ -33,6 +42,38 @@ id = "2c0f24cd5916471ab4e2cd8d3fd1b1b7"
 # CDP_API_KEY_ID        — Coinbase Developer Platform API key ID
 # CDP_API_KEY_SECRET    — Coinbase Developer Platform API key secret
 # CDP_WALLET_SECRET     — Coinbase Developer Platform wallet secret (agent wallet signing)
+
+# ── Routes ─────────────────────────────────────────────────────────────
+# Match the remote dashboard configuration so deploys don't accidentally
+# drop existing routes. Patterns are ordered from most-specific to root.
+[[routes]]
+pattern = "trader.rigoblock.com/api/oracle/*"
+zone_name = "rigoblock.com"
+
+[[routes]]
+pattern = "trader.rigoblock.com/api/tools/*"
+zone_name = "rigoblock.com"
+
+[[routes]]
+pattern = "trader.rigoblock.com/api/quote/*"
+zone_name = "rigoblock.com"
+
+[[routes]]
+pattern = "trader.rigoblock.com/api/chat/*"
+zone_name = "rigoblock.com"
+
+[[routes]]
+pattern = "trader.rigoblock.com/api/telegram/*"
+zone_name = "rigoblock.com"
+
+[[routes]]
+pattern = "trader.rigoblock.com/api/gas-policy"
+zone_name = "rigoblock.com"
+
+[[routes]]
+pattern = "trader.rigoblock.com"
+zone_name = "rigoblock.com"
+custom_domain = true
 
 # ── CPU time limit ─────────────────────────────────────────────────────
 # DeepSeek reasoning takes 15-20s of active CPU, plus Llama tool pass.

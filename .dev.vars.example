@@ -5,3 +5,4 @@
 
 OPENAI_API_KEY=sk-...
 UNISWAP_API_KEY=your-uniswap-api-key
+COINGECKO_API_KEY=your-coingecko-api-key

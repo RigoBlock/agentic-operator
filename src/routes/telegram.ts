@@ -1025,7 +1025,7 @@ async function handleMessage(
     const requestEnv: Env = { ...env, requestCache: new Map() };
 
     // Initialize token resolver
-    if (env.KV) initTokenResolver(env.KV);
+    if (env.KV) initTokenResolver(env.KV, env.COINGECKO_API_KEY);
 
     // Live progress message: shows real-time status and tool results, then is deleted
     // before the final human-friendly reply is sent. This avoids duplicating output.
@@ -1333,7 +1333,7 @@ async function handleCallbackQuery(
       return;
     }
 
-    if (env.KV) initTokenResolver(env.KV);
+    if (env.KV) initTokenResolver(env.KV, env.COINGECKO_API_KEY);
 
     const ctx: RequestContext = {
       vaultAddress: vault.address,

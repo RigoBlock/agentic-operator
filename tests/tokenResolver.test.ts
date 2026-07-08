@@ -215,7 +215,7 @@ describe("CoinGecko API resilience", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("sends no auth headers for the keyless public API", async () => {
+  it("sends no auth headers when no API key is configured", async () => {
     const kv = makeMockKv();
     initTokenResolver(kv as unknown as KVNamespace);
 
@@ -223,6 +223,27 @@ describe("CoinGecko API resilience", () => {
       const url = _url as string;
       expect(init?.headers).toBeUndefined();
       if (url.includes("/search?")) {
+        return new Response(JSON.stringify({
+          coins: [{ id: "lighter", symbol: "LIT", name: "Lighter", market_cap_rank: 93 }],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ platforms: { ethereum: "0x232ce3bd40fcd6f80f3d55a522d03f25df784ee2" } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const addr = await resolveTokenBySymbol(1, "LIT");
+    expect(addr.toLowerCase()).toBe("0x232ce3bd40fcd6f80f3d55a522d03f25df784ee2");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends the x-cg-demo-api-key header when COINGECKO_API_KEY is configured", async () => {
+    const kv = makeMockKv();
+    initTokenResolver(kv as unknown as KVNamespace, "demo-key-123");
+
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const url = _url as string;
+      if (url.includes("/search?")) {
+        expect(init?.headers).toMatchObject({ "x-cg-demo-api-key": "demo-key-123" });
         return new Response(JSON.stringify({
           coins: [{ id: "lighter", symbol: "LIT", name: "Lighter", market_cap_rank: 93 }],
         }), { status: 200 });

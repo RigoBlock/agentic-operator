@@ -36,6 +36,11 @@ export class TokenResolutionError extends Error {
 
 const COINGECKO_API = "https://api.coingecko.com/api/v3";
 
+/** Optional CoinGecko demo API key. Set via initTokenResolver().
+ *  Cloudflare Workers appear to require a demo key even for endpoints that are
+ *  keyless from localhost. When unset, no auth header is sent. */
+let _apiKey: string | null = null;
+
 /** CoinGecko platform id per chain. Empty string means "no data". */
 const CHAIN_TO_PLATFORM: Record<number, string> = {
   1: "ethereum",
@@ -110,9 +115,15 @@ class CoinGeckoRateLimitError extends Error {
   }
 }
 
+function getCoinGeckoHeaders(): Record<string, string> | undefined {
+  if (!_apiKey) return undefined;
+  return { "x-cg-demo-api-key": _apiKey };
+}
+
 /** Call once per request to enable KV persistent caching. */
-export function initTokenResolver(kv: KVNamespace): void {
+export function initTokenResolver(kv: KVNamespace, apiKey?: string): void {
   _kv = kv;
+  _apiKey = apiKey ?? null;
 }
 
 /** Clear the in-memory cache. Useful in tests. */
@@ -239,9 +250,11 @@ async function fetchCoinGecko(
   { timeoutMs = COINGECKO_TIMEOUT_MS }: { timeoutMs?: number } = {},
 ): Promise<Response> {
   const url = `${COINGECKO_API}${path}`;
+  const headers = getCoinGeckoHeaders();
   let res: Response;
   try {
     res = await fetch(url, {
+      headers,
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {

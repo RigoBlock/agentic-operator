@@ -292,7 +292,7 @@ async function handleCreate(
   // This validates that both tokens exist on the target chain BEFORE creating
   // the strategy. Prevents cron-time failures like "GRG not found on chain 8453".
   // Stores resolved addresses so execution uses them directly (no CoinGecko needed).
-  initTokenResolver(env.KV);
+  initTokenResolver(env.KV, env.COINGECKO_API_KEY);
   let sellTokenAddress: string | undefined;
   let buyTokenAddress: string | undefined;
   try {

@@ -37,6 +37,7 @@ export interface Env {
   UNISWAP_API_KEY: string;  // Uniswap Trading API key (developers.uniswap.org)
   ZEROX_API_KEY: string;    // 0x Swap API key (dashboard.0x.org)
   ALCHEMY_API_KEY: string;  // Alchemy RPC key (avoids public RPC rate limits)
+  COINGECKO_API_KEY?: string; // Optional CoinGecko demo API key (Cloudflare Workers may need it)
   ALCHEMY_GAS_POLICY_ID?: string; // Alchemy Gas Manager policy ID (optional, enables sponsored gas)
   GAS_SPENDING_LIMIT_USD?: string; // Per-wallet daily gas sponsorship limit in USD (default: 5)
   TELEGRAM_BOT_TOKEN?: string;        // Telegram Bot API token (optional, enables Telegram control)

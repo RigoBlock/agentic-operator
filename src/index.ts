@@ -67,7 +67,7 @@ app.use("*", async (c, next) => {
 
 // Initialise token resolver KV on every request
 app.use("*", async (c, next) => {
-  if (c.env.KV) initTokenResolver(c.env.KV);
+  if (c.env.KV) initTokenResolver(c.env.KV, c.env.COINGECKO_API_KEY);
   await next();
 });
 
