@@ -72,8 +72,15 @@ function createMockKV(baseline?: { unitaryValue: string; recordedAt: number }): 
   } as unknown as KVNamespace;
 }
 
-function makeSimulateResult(
-  preUnitaryValue: bigint,
+function makePreNavSimulateResult(preUnitaryValue: bigint) {
+  return {
+    results: [
+      { status: "success" as const, data: encodeNavReturn(preUnitaryValue), gasUsed: 50_000n },
+    ],
+  };
+}
+
+function makeSwapNavSimulateResult(
   postUnitaryValue: bigint,
   swapReverts = false,
 ) {
@@ -92,7 +99,6 @@ function makeSimulateResult(
 
   return {
     results: [
-      { status: "success" as const, data: encodeNavReturn(preUnitaryValue), gasUsed: 50_000n },
       swapResult,
       { status: "success" as const, data: encodeNavReturn(postUnitaryValue), gasUsed: 50_000n },
     ],
@@ -100,9 +106,12 @@ function makeSimulateResult(
 }
 
 function setupClient(preUnitaryValue: bigint, postUnitaryValue: bigint, swapReverts = false) {
-  mockSimulateCalls.mockImplementation(async () =>
-    makeSimulateResult(preUnitaryValue, postUnitaryValue, swapReverts)
-  );
+  mockSimulateCalls.mockImplementation(async (_client: unknown, args: { calls: unknown[] }) => {
+    if (args.calls.length === 1) {
+      return makePreNavSimulateResult(preUnitaryValue);
+    }
+    return makeSwapNavSimulateResult(postUnitaryValue, swapReverts);
+  });
 }
 
 describe("NAV Shield impact logic", () => {
@@ -120,7 +129,7 @@ describe("NAV Shield impact logic", () => {
     expect(result.dropPct).toBe("10.0000");
     expect(result.impactPct).toBe("-10.0000");
     expect(result.gasUsed).toBe(100_000n);
-    expect(mockSimulateCalls).toHaveBeenCalledTimes(1);
+    expect(mockSimulateCalls).toHaveBeenCalledTimes(2);
   });
 
   it("blocks a trade that exceeds the max NAV drop threshold", async () => {
@@ -189,36 +198,4 @@ describe("NAV Shield impact logic", () => {
     expect(result.reason).toContain("would revert on-chain");
   });
 
-  it("falls back to legacy operator-multicall when eth_simulateV1 is unsupported", async () => {
-    mockSimulateCalls.mockRejectedValue(new Error("unsupported method: eth_simulateV1"));
-
-    const call = vi.fn();
-    mockState.getClient.mockReturnValueOnce({ call });
-
-    call.mockImplementation(async ({ data }: { data?: Hex }) => {
-      const selector = data?.slice(0, 10);
-      if (selector === UPDATE_SELECTOR) {
-        return { data: encodeNavReturn(10000n) };
-      }
-      // multicall selector
-      if (selector === "0xac9650d8") {
-        const navBytes = encodeNavReturn(9000n);
-        return {
-          data: encodeFunctionResult({
-            abi: RIGOBLOCK_VAULT_ABI,
-            functionName: "multicall",
-            result: ["0x", navBytes],
-          }),
-        };
-      }
-      throw new Error(`Unexpected selector: ${selector}`);
-    });
-
-    const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, ALCHEMY_KEY, EXECUTOR, createMockKV(), 10n, undefined, EXECUTOR,
-    );
-    expect(result.allowed).toBe(true);
-    expect(result.verified).toBe(true);
-    expect(result.gasUsed).toBeUndefined();
-  });
 });

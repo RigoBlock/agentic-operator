@@ -204,13 +204,13 @@ const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }>
 const BASE_FEE_MULTIPLIER = 150n; // 150% = 1.5x (divided by 100)
 
 /** Maximum number of resubmission attempts */
-const MAX_RESUBMIT_ATTEMPTS = 1;
+const MAX_RESUBMIT_ATTEMPTS = 2;
 
 /** Fee bump percentage for resubmission (10% = minimum for most clients) */
 const RESUBMIT_FEE_BUMP_PCT = 15n; // 15% bump
 
 /** Timeout for waiting for a tx receipt (ms) */
-const TX_CONFIRM_TIMEOUT_MS = 15_000;
+const TX_CONFIRM_TIMEOUT_MS = 60_000;
 
 /** Fast-confirming chains (L2s, BSC) with sub-second block times */
 const FAST_CHAIN_IDS = new Set([10, 42161, 8453, 130, 56, 84532]);
@@ -443,11 +443,13 @@ export async function prepareTransaction(
       executor,
       env.KV,
       storedNavThreshold ?? undefined,
-      env.requestCache,
-      operatorAddress,
     );
 
     if (navResult.gasUsed != null) {
+      // The NAV shield simulates the swap in a fresh state (not warmed by a
+      // preceding updateUnitaryValue call), so its gasUsed is a good estimate
+      // of standalone net consumption. We apply the same +25% buffer we use for
+      // eth_estimateGas.
       estimatedGas = navResult.gasUsed;
     }
 
@@ -475,7 +477,7 @@ export async function prepareTransaction(
     }
   }
 
-  // If the unified simulation didn't return gas (legacy fallback or non-vault tx),
+  // If the NAV shield didn't return gas (legacy fallback or non-vault tx),
   // estimate gas directly from the executor.
   if (estimatedGas == null) {
     try {
@@ -487,23 +489,7 @@ export async function prepareTransaction(
       });
     } catch (estErr) {
       const msg = estErr instanceof Error ? estErr.message : String(estErr);
-      let revertData = getRevertDataFromError(estErr);
-
-      // Some RPCs return a generic "execution reverted" from eth_estimateGas without
-      // the actual revert payload. A follow-up eth_call often surfaces the real data.
-      if (!revertData && (msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert"))) {
-        try {
-          await publicClient.call({
-            account: executor,
-            to: tx.to,
-            data: tx.data,
-            value: txValue,
-          });
-        } catch (callErr) {
-          revertData = getRevertDataFromError(callErr);
-        }
-      }
-
+      const revertData = getRevertDataFromError(estErr);
       const decodedRevert = revertData ? decodeRevertData(revertData) : null;
       const friendly = decodedRevert || parseSimulationRevert(msg);
       if (friendly || msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert")) {
@@ -520,7 +506,7 @@ export async function prepareTransaction(
     }
   }
 
-  tx.gas = `0x${(estimatedGas + (estimatedGas * 20n) / 100n).toString(16)}`;
+  tx.gas = `0x${(estimatedGas + (estimatedGas * 25n) / 100n).toString(16)}`;
 
   // Non-vault transactions are not subject to the NAV shield.
   if (!isVaultTarget) {
@@ -883,9 +869,12 @@ export async function executeViaDelegation(
 /**
  * Broadcast a transaction from the agent wallet directly to the vault.
  *
+ * Gas is pre-computed by prepareTransaction() and reused here. This function
+ * only estimates fees, checks balance, broadcasts, and waits for confirmation.
+ *
  * Steps:
  *   1. Check agent balance
- *   2. Estimate gas on-chain via eth_estimateGas (also catches reverts; accurate for vault proxy overhead)
+ *   2. Reuse pre-computed gas limit (tx.gas)
  *   3. Estimate fees with safety caps
  *   4. Send the transaction
  *   5. Wait for confirmation with automatic resubmission
@@ -922,7 +911,7 @@ async function broadcastAgentTransaction(
 
   // ── Step 2: Use pre-computed gas limit ──
   // Gas was already estimated once by prepareTransaction() from the agent address
-  // and includes a 20% buffer. We reuse it here to avoid a duplicate eth_estimateGas
+  // and includes a 25% buffer. We reuse it here to avoid a duplicate eth_estimateGas
   // on the broadcast hot path.
   const gasLimit = BigInt(tx.gas || "0x0");
   if (gasLimit === 0n) {
@@ -981,7 +970,7 @@ async function broadcastAgentTransaction(
       });
       break;
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
+      const errMsg = (err instanceof Error ? err.message : String(err)).toLowerCase();
       if (!errMsg.includes("timed out") && !errMsg.includes("timeout")) {
         throw err;
       }
@@ -1019,6 +1008,18 @@ async function broadcastAgentTransaction(
       } catch (resubmitErr) {
         break;
       }
+    }
+  }
+
+  // Final check: the last wait may have timed out right before the tx landed.
+  if (!receipt) {
+    try {
+      const finalReceipt = await publicClient.getTransactionReceipt({ hash: txHash });
+      if (finalReceipt) {
+        receipt = finalReceipt;
+      }
+    } catch {
+      // Still not on-chain
     }
   }
 
@@ -1095,7 +1096,7 @@ async function sponsoredAgentTransaction(
 
   // ── Step 1: Use pre-computed gas limit ──
   // Gas was already estimated once by prepareTransaction() from the agent address
-  // and includes a 20% buffer. We pass it as the callGasLimit override to prevent
+  // and includes a 25% buffer. We pass it as the callGasLimit override to prevent
   // the bundler from underestimating complex vault adapter calls.
   const callGasLimit = BigInt(tx.gas || "0x0");
   if (callGasLimit === 0n) {

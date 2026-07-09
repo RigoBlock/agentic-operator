@@ -250,19 +250,6 @@ function decodeUpdateUnitaryValue(data: Hex): NavData {
   };
 }
 
-/** Determine whether an error indicates eth_simulateV1 is unsupported. */
-function isSimulateUnsupported(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  const lower = msg.toLowerCase();
-  return (
-    lower.includes("unsupported method") ||
-    lower.includes("method not found") ||
-    lower.includes("invalid method") ||
-    lower.includes("eth_simulatev1") ||
-    lower.includes("the method eth_simulatev1 does not exist")
-  );
-}
-
 /** Build a TRADE_REVERTS result from a swap simulation failure. */
 function handleSwapSimulationFailure(
   err: unknown,
@@ -433,12 +420,13 @@ async function evaluateNavImpact(
 /**
  * Unified NAV shield simulation via eth_simulateV1.
  *
- * Simulates the actual transaction from the address that will execute it:
- *   1. updateUnitaryValue()  — pre-swap NAV
- *   2. tx                    — the real transaction (swap, bridge, etc.)
- *   3. updateUnitaryValue()  — post-swap NAV
+ * We run two simulations in parallel so they can be batched into one HTTP
+ * request, but the swap is simulated from a fresh state (not warmed by a
+ * preceding updateUnitaryValue call). This gives an accurate gasUsed for the
+ * standalone transaction.
  *
- * A single RPC call gives us structural validation, gasUsed, and NAV impact.
+ * Simulation 1: [updateUnitaryValue()]            — pre-swap NAV baseline
+ * Simulation 2: [tx, updateUnitaryValue()]        — swap + post-swap NAV impact
  */
 async function checkNavImpactUnified(
   publicClient: PublicClient,
@@ -455,17 +443,25 @@ async function checkNavImpactUnified(
     functionName: "updateUnitaryValue",
   });
 
-  const { results } = await simulateCalls(publicClient, {
-    account: executorAddress,
-    calls: [
-      { to: vaultAddress, data: updateNavCalldata },
-      { to: vaultAddress, data: txData, value: txValue },
-      { to: vaultAddress, data: updateNavCalldata },
-    ],
-  });
+  const preNavCall = { to: vaultAddress, data: updateNavCalldata };
+  const swapCall = { to: vaultAddress, data: txData, value: txValue };
+  const postNavCall = { to: vaultAddress, data: updateNavCalldata };
+
+  // Run both simulations concurrently. viem's HTTP transport batches independent
+  // JSON-RPC requests into a single HTTP call, so this is still one round-trip.
+  const [preSim, swapSim] = await Promise.all([
+    simulateCalls(publicClient, {
+      account: executorAddress,
+      calls: [preNavCall],
+    }),
+    simulateCalls(publicClient, {
+      account: executorAddress,
+      calls: [swapCall, postNavCall],
+    }),
+  ]);
 
   // Pre-swap NAV
-  const preResult = results[0];
+  const preResult = preSim.results[0];
   if (preResult.status !== "success") {
     const errMsg = preResult.error instanceof Error ? preResult.error.message : String(preResult.error);
     throw new Error(`Pre-swap NAV read failed: ${errMsg}`);
@@ -473,13 +469,13 @@ async function checkNavImpactUnified(
   const preNav = decodeUpdateUnitaryValue(preResult.data);
 
   // Swap execution
-  const swapResult = results[1];
+  const swapResult = swapSim.results[0];
   if (swapResult.status !== "success") {
     return handleSwapSimulationFailure(swapResult.error, preNav.unitaryValue, chainId);
   }
 
   // Post-swap NAV
-  const postResult = results[2];
+  const postResult = swapSim.results[1];
   if (postResult.status !== "success") {
     const errMsg = postResult.error instanceof Error ? postResult.error.message : String(postResult.error);
     throw new Error(`Post-swap NAV read failed: ${errMsg}`);
@@ -490,160 +486,15 @@ async function checkNavImpactUnified(
 }
 
 /**
- * Legacy NAV shield fallback using raw eth_call.
- *
- * Used when eth_simulateV1 is unavailable. Simulates multicall([tx, updateUnitaryValue])
- * as the operator/owner because vault.multicall is not delegated to the agent.
- */
-async function checkNavImpactLegacy(
-  publicClient: PublicClient,
-  vaultAddress: Address,
-  txData: Hex,
-  txValue: bigint,
-  operatorAddress: Address,
-  chainId: number,
-  kv: KVNamespace | undefined,
-  maxDropPct: bigint,
-  requestCache?: Map<string, Promise<NavData>>,
-): Promise<NavShieldResult> {
-  // ── Step 1: Read current (pre-swap) NAV via updateUnitaryValue() ──
-  const preNavCacheKey = `${chainId}:${vaultAddress.toLowerCase()}:preNav`;
-
-  async function readPreNav(): Promise<NavData> {
-    const updateNavCalldata = encodeFunctionData({
-      abi: RIGOBLOCK_VAULT_ABI,
-      functionName: "updateUnitaryValue",
-    });
-    const callResult = await publicClient.call({
-      to: vaultAddress,
-      data: updateNavCalldata,
-    });
-    if (!callResult.data) {
-      throw new Error("updateUnitaryValue simulation returned no data");
-    }
-    return decodeUpdateUnitaryValue(callResult.data);
-  }
-
-  let preNav: NavData;
-  try {
-    if (requestCache) {
-      let cached = requestCache.get(preNavCacheKey);
-      if (!cached) {
-        cached = readPreNav();
-        requestCache.set(preNavCacheKey, cached);
-      }
-      preNav = await cached;
-    } else {
-      preNav = await readPreNav();
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[NavShield] ✗ BLOCKED: Could not read pre-swap NAV: ${msg}`);
-    return {
-      allowed: false,
-      verified: false,
-      preNavUnitaryValue: "0",
-      postNavUnitaryValue: "0",
-      dropPct: "0",
-      impactPct: "0",
-      reason: `Cannot read vault NAV — RPC or vault may be unreachable on chain ${chainId}: ${msg.slice(0, 300)}`,
-    };
-  }
-
-  // ── Step 2: Simulate multicall([tx, updateUnitaryValue]) as operator ──
-  const navCalldata = encodeFunctionData({
-    abi: RIGOBLOCK_VAULT_ABI,
-    functionName: "updateUnitaryValue",
-  });
-
-  const multicallData = encodeFunctionData({
-    abi: RIGOBLOCK_VAULT_ABI,
-    functionName: "multicall",
-    args: [[txData, navCalldata]],
-  });
-
-  let postNav: NavData;
-  try {
-    const multicallResult = await publicClient.call({
-      account: operatorAddress,
-      to: vaultAddress,
-      data: multicallData,
-      value: txValue,
-    });
-
-    if (!multicallResult.data) {
-      throw new Error("Multicall simulation returned no data");
-    }
-
-    const decodedMulticall = decodeFunctionResult({
-      abi: RIGOBLOCK_VAULT_ABI,
-      functionName: "multicall",
-      data: multicallResult.data,
-    }) as readonly Hex[];
-
-    const navResultBytes = decodedMulticall[1];
-    postNav = decodeUpdateUnitaryValue(navResultBytes);
-
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const knownMulticallError = parseKnownError(msg);
-    console.error(`[NavShield] Multicall simulation failed: ${knownMulticallError ?? msg}`);
-
-    let reason: string;
-    let code: 'TRADE_REVERTS' | 'UNVERIFIED';
-    let allowed: boolean;
-    try {
-      await publicClient.call({
-        account: operatorAddress,
-        to: vaultAddress,
-        data: txData,
-        value: txValue,
-      });
-      code = 'UNVERIFIED';
-      allowed = true;
-      reason = `NAV verification unavailable — vault multicall simulation failed on chain ${chainId}. ` +
-        `Trade is valid (swap simulation passed). Proceeding without NAV impact check.`;
-      console.warn(`[NavShield] ⚠ UNVERIFIED: Swap passes but multicall fails on chain ${chainId} — proceeding without NAV check`);
-    } catch (swapErr) {
-      const swapMsg = swapErr instanceof Error ? swapErr.message : String(swapErr);
-      code = 'TRADE_REVERTS';
-      allowed = false;
-      const knownError = parseKnownError(swapMsg);
-      reason = knownError
-        ? `On-chain error: ${knownError}`
-        : `Trade simulation failed — the transaction would revert on-chain: ${swapMsg.slice(0, 500)}`;
-      console.error(`[NavShield] ✗ TRADE REVERTS: ${reason}`);
-    }
-
-    return {
-      allowed,
-      verified: false,
-      code,
-      preNavUnitaryValue: preNav.unitaryValue.toString(),
-      postNavUnitaryValue: "0",
-      dropPct: "0",
-      impactPct: "0",
-      reason,
-    };
-  }
-
-  return evaluateNavImpact(preNav, postNav, chainId, vaultAddress, kv, maxDropPct);
-}
-
-/**
  * Check if a transaction would drop the vault's NAV per unit by more
  * than the allowed threshold.
  *
- * Uses a unified eth_simulateV1 simulation from the address that will actually
- * execute the transaction. This single RPC gives us:
+ * Uses eth_simulateV1 from the address that will actually execute the transaction.
+ * This gives us:
  *   - the pre-swap unitary value
  *   - whether the transaction succeeds as the executor
  *   - the gas used by the transaction
  *   - the post-swap unitary value
- *
- * If eth_simulateV1 is unavailable, falls back to the legacy operator-multicall
- * approach. The legacy path cannot return gasUsed, so callers should run a
- * separate eth_estimateGas in that case.
  *
  * RECOVERY RULE: trades that improve or hold the current unitaryValue are
  * always allowed, even when the vault is below the 24h baseline. Only trades
@@ -657,8 +508,6 @@ async function checkNavImpactLegacy(
  * @param executorAddress - Address that will actually execute the tx
  * @param kv - KV namespace for baseline storage (optional)
  * @param maxDropPct - Maximum allowed NAV drop percentage (default 10).
- * @param requestCache - Optional request-scoped cache for legacy fallback
- * @param operatorAddress - Operator/owner address for legacy fallback
  * @returns NavShieldResult with allowed=true/false and optional gasUsed
  */
 export async function checkNavImpact(
@@ -670,8 +519,6 @@ export async function checkNavImpact(
   executorAddress: Address,
   kv?: KVNamespace,
   maxDropPct: bigint = DEFAULT_MAX_NAV_DROP_PCT,
-  requestCache?: Map<string, Promise<NavData>>,
-  operatorAddress?: Address,
 ): Promise<NavShieldResult> {
   const publicClient = getClient(chainId, alchemyKey);
 
@@ -687,26 +534,7 @@ export async function checkNavImpact(
       maxDropPct,
     );
   } catch (err) {
-    if (isSimulateUnsupported(err)) {
-      console.warn(
-        `[NavShield] eth_simulateV1 unsupported on chain ${chainId}, ` +
-        `falling back to legacy operator-multicall NAV shield`
-      );
-      const legacyOperator = operatorAddress ?? executorAddress;
-      return await checkNavImpactLegacy(
-        publicClient,
-        vaultAddress,
-        txData,
-        txValue,
-        legacyOperator,
-        chainId,
-        kv,
-        maxDropPct,
-        requestCache,
-      );
-    }
-
-    // FAIL-CLOSED: any other simulation failure (RPC error, timeout, etc.)
+    // FAIL-CLOSED: any simulation failure (RPC error, timeout, unsupported method)
     // means we cannot verify NAV impact. We MUST block the transaction.
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[NavShield] ✗ BLOCKED: Could not simulate NAV impact: ${msg}`);
