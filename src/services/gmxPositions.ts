@@ -1,14 +1,14 @@
 /**
  * GMX v2 Positions Service
  *
- * Uses the official `@gmx-io/sdk` v1 client to read open GMX positions for a
- * Rigoblock vault on Arbitrum. The SDK returns `liquidationPrice`, PnL, fees,
- * leverage, and price impact directly, so we no longer need to maintain a
- * manual reimplementation of the GMX liquidation math or DataStore parameter
- * fetching.
+ * Reads open GMX positions for a Rigoblock vault on Arbitrum. By default we use
+ * the GMX v2 HTTP API, which returns full computed position data (`liquidationPrice`,
+ * PnL, fees, leverage, and price impact) in a single HTTP request. If the API is
+ * unavailable or fails, we fall back to the optimized `@gmx-io/sdk` path, which
+ * itself only queries markets that actually hold positions.
  */
 
-import { type Address } from "viem";
+import { type Address, getAddress, zeroAddress } from "viem";
 import { getClient } from "./rpcClient.js";
 import { GMX_READER_ABI, GMX_ADDRESSES } from "../abi/gmx.js";
 import {
@@ -17,10 +17,12 @@ import {
   getGmxTokenDecimals,
   warmTokenDecimalsCache,
   type GmxTickerPrice,
+  type GmxMarketInfo,
 } from "./gmxTrading.js";
 import { createGmxSdk } from "./gmxSdk.js";
 import type { PositionInfo, PositionsInfoData } from "@gmx-io/sdk/utils/positions";
-import type { TokenData } from "@gmx-io/sdk/utils/tokens";
+import type { TokenData, TokensData } from "@gmx-io/sdk/utils/tokens";
+import type { MarketsInfoData } from "@gmx-io/sdk/utils/markets";
 
 export interface GmxPosition {
   market: string;
@@ -75,6 +77,8 @@ export interface GmxPositionsSummary {
   totalSizeUsd: string;
   formattedReport: string;
 }
+
+const GMX_API_BASE_URL = "https://arbitrum.gmxapi.io";
 
 const ORDER_TYPE_LABELS: Record<number, string> = {
   0: "Market Swap",
@@ -225,23 +229,297 @@ export function buildGmxPositionFromSdk(info: PositionInfo): GmxPosition {
   };
 }
 
+/** In-process cache for GMX markets metadata. Markets/token configs rarely change,
+ *  so reusing them across "Refresh positions" clicks avoids refetching ~15 RPC calls
+ *  on every subsequent read. Worker isolates are short-lived, so a 5-minute TTL is
+ *  conservative and safe. */
+let cachedMarketsInfoData: MarketsInfoData | undefined;
+let cachedTokensData: TokensData | undefined;
+let cachedMarketsTs = 0;
+const GMX_MARKETS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function getGmxMarketsInfoData(sdk: Awaited<ReturnType<typeof createGmxSdk>>): Promise<{
+  marketsInfoData: MarketsInfoData | undefined;
+  tokensData: TokensData | undefined;
+}> {
+  const now = Date.now();
+  if (cachedMarketsInfoData && cachedTokensData && now - cachedMarketsTs < GMX_MARKETS_CACHE_TTL) {
+    return { marketsInfoData: cachedMarketsInfoData, tokensData: cachedTokensData };
+  }
+
+  const marketsInfo = await sdk.markets.getMarketsInfo();
+  if (marketsInfo.marketsInfoData && marketsInfo.tokensData) {
+    cachedMarketsInfoData = marketsInfo.marketsInfoData;
+    cachedTokensData = marketsInfo.tokensData;
+    cachedMarketsTs = now;
+  }
+
+  return {
+    marketsInfoData: marketsInfo.marketsInfoData,
+    tokensData: marketsInfo.tokensData,
+  };
+}
+
+type GmxApiPosition = {
+  marketAddress: Address;
+  collateralTokenAddress: Address;
+  indexName: string;
+  poolName: string;
+  isLong: boolean;
+  sizeInUsd: string;
+  sizeInTokens: string;
+  collateralAmount: string;
+  pnl: string;
+  pnlPercentage: string;
+  pnlAfterFees: string;
+  pnlAfterFeesPercentage: string;
+  pnlAfterAllFees: string;
+  pnlAfterAllFeesPercentage: string;
+  netValue: string;
+  netValueAfterAllFees: string;
+  leverage: string;
+  markPrice: string;
+  entryPrice: string;
+  liquidationPrice: string;
+  closingFeeUsd: string;
+  uiFeeUsd: string;
+  pendingFundingFeesUsd: string;
+  pendingBorrowingFeesUsd: string;
+  pendingClaimableFundingFeesUsd: string;
+  netPriceImapctDeltaUsd: string;
+  priceImpactDiffUsd: string;
+  pendingImpactUsd: string;
+  closePriceImpactDeltaUsd: string;
+  hasLowCollateral: boolean;
+};
+
 /**
- * Fetch all open GMX positions for a vault (Arbitrum only) using the official SDK.
+ * Fetch open GMX positions from the GMX v2 HTTP API.
+ *
+ * This avoids every RPC call related to position scanning because the API
+ * returns full computed position data (mark price, entry price, leverage,
+ * liquidation price, PnL, fees, net value) in a single HTTP request.
+ */
+async function fetchGmxApiPositions(
+  vaultAddress: Address,
+): Promise<GmxApiPosition[]> {
+  const url = `${GMX_API_BASE_URL}/v1/positions?address=${vaultAddress.toLowerCase()}`;
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `GMX API positions request failed: ${response.status} ${response.statusText}`,
+    );
+  }
+
+  const data = (await response.json()) as GmxApiPosition[];
+  return data ?? [];
+}
+
+function buildGmxPositionFromApi(
+  position: GmxApiPosition,
+  marketInfo: GmxMarketInfo | undefined,
+  tickerMap: Map<string, GmxTickerPrice>,
+): GmxPosition {
+  const marketAddress = getAddress(position.marketAddress);
+  const collateralToken = getAddress(position.collateralTokenAddress);
+  const indexToken = getAddress(marketInfo?.indexToken ?? position.marketAddress);
+
+  const collateralDecimals = getGmxTokenDecimals(collateralToken);
+  const indexDecimals = getGmxTokenDecimals(indexToken);
+
+  const sizeInUsd = BigInt(position.sizeInUsd ?? "0");
+  const sizeInTokens = BigInt(position.sizeInTokens ?? "0");
+  const collateralAmount = BigInt(position.collateralAmount ?? "0");
+  const pnl = BigInt(position.pnl ?? "0");
+  const pnlAfterAllFees = BigInt(position.pnlAfterAllFees ?? "0");
+  const netValue = BigInt(position.netValue ?? "0");
+  const leverage = Number(position.leverage ?? "0");
+  const markPrice = BigInt(position.markPrice ?? "0");
+  const entryPrice = BigInt(position.entryPrice ?? "0");
+  const liquidationPrice = BigInt(position.liquidationPrice ?? "0");
+  const closingFeeUsd = BigInt(position.closingFeeUsd ?? "0");
+  const uiFeeUsd = BigInt(position.uiFeeUsd ?? "0");
+  const pendingFundingFeesUsd = BigInt(position.pendingFundingFeesUsd ?? "0");
+  const pendingBorrowingFeesUsd = BigInt(position.pendingBorrowingFeesUsd ?? "0");
+  const netPriceImpactDeltaUsd = BigInt(position.netPriceImapctDeltaUsd ?? "0");
+
+  const indexName = position.indexName ?? "";
+  const marketSymbol = indexName;
+  const indexTokenSymbol =
+    indexName.split("/")[0] || marketInfo?.indexTokenSymbol || "";
+  const collateralSymbol =
+    (collateralToken.toLowerCase() === marketInfo?.longToken.toLowerCase()
+      ? marketInfo?.longTokenSymbol
+      : collateralToken.toLowerCase() === marketInfo?.shortToken.toLowerCase()
+        ? marketInfo?.shortTokenSymbol
+        : undefined) ||
+    tickerMap.get(collateralToken.toLowerCase())?.tokenSymbol ||
+    "";
+
+  const sizeUsdNum = rawToUsd(sizeInUsd);
+  const entryPriceNum = entryPrice > 0n ? rawToUsd(entryPrice) : 0;
+  const markPriceNum = rawToUsd(markPrice);
+  const liquidationPriceNum = liquidationPrice > 0n ? rawToUsd(liquidationPrice) : 0;
+  const collateralNum = rawToTokenAmount(collateralAmount, collateralDecimals);
+
+  const grossPnl = rawToUsd(pnl);
+  const netPnl = rawToUsd(pnlAfterAllFees);
+  const netValueNum = rawToUsd(netValue);
+  const pnlPercent = position.pnlAfterAllFeesPercentage
+    ? Number(position.pnlAfterAllFeesPercentage) / 100
+    : 0;
+  const leverageNum = leverage / 10_000;
+
+  const borrowingFeeUsd = rawToUsd(pendingBorrowingFeesUsd);
+  const fundingFeeUsd = rawToUsd(pendingFundingFeesUsd);
+  const closeFeeUsd = rawToUsd(closingFeeUsd);
+  const uiFeeUsdNum = rawToUsd(uiFeeUsd);
+  const priceImpactUsd = rawToUsd(netPriceImpactDeltaUsd);
+
+  const totalCostUsd = borrowingFeeUsd + fundingFeeUsd + closeFeeUsd + uiFeeUsdNum - priceImpactUsd;
+
+  return {
+    market: marketAddress,
+    collateralToken,
+    isLong: position.isLong,
+    sizeInUsd: formatUsd(sizeUsdNum),
+    sizeInUsdRaw: sizeInUsd.toString(),
+    sizeInTokens: formatTokenValue(rawToTokenAmount(sizeInTokens, indexDecimals)),
+    sizeInTokensRaw: sizeInTokens.toString(),
+    collateralAmount: formatTokenValue(collateralNum),
+    collateralAmountRaw: collateralAmount.toString(),
+    entryPrice: formatPrice4(entryPriceNum),
+    markPrice: formatPrice4(markPriceNum),
+    leverage: `${leverageNum.toFixed(1)}x`,
+    unrealizedPnl: formatSignedUsd(netPnl),
+    unrealizedPnlPercent: formatPercent(pnlPercent),
+    grossPnl: formatSignedUsd(grossPnl),
+    netValue: formatUsd(netValueNum),
+    fundingFee: fundingFeeUsd > 0 ? formatSignedUsd(-fundingFeeUsd) : "$0.00",
+    borrowingFee: borrowingFeeUsd > 0 ? formatSignedUsd(-borrowingFeeUsd) : "$0.00",
+    closeFee: closeFeeUsd > 0 ? formatSignedUsd(-closeFeeUsd) : "$0.00",
+    uiFee: uiFeeUsdNum > 0 ? formatSignedUsd(-uiFeeUsdNum) : "$0.00",
+    priceImpact: formatSignedUsd(priceImpactUsd),
+    totalCosts: totalCostUsd !== 0 ? formatSignedUsd(-totalCostUsd) : "$0.00",
+    liquidationPrice: liquidationPriceNum > 0 ? formatPrice4(liquidationPriceNum) : "N/A",
+    marketSymbol,
+    collateralSymbol,
+    indexTokenSymbol,
+    indexToken,
+    longToken: marketInfo?.longToken ?? zeroAddress,
+    shortToken: marketInfo?.shortToken ?? zeroAddress,
+  };
+}
+
+/**
+ * Fetch all open GMX positions for a vault (Arbitrum only).
+ *
+ * By default, positions are read from the GMX v2 HTTP API, which returns full
+ * computed position data in a single HTTP request. If the API fails or returns
+ * no data, we fall back to the GMX SDK path (which is itself optimized to only
+ * query markets that actually hold positions).
  */
 export async function getGmxPositions(
   vaultAddress: Address,
   alchemyKey?: string,
+  useApi = true,
+): Promise<GmxPosition[]> {
+  if (useApi) {
+    try {
+      const apiPositions = await fetchGmxApiPositions(vaultAddress);
+      if (apiPositions.length === 0) {
+        return [];
+      }
+
+      const markets = await getGmxMarkets();
+      const marketMap = new Map(markets.map((m) => [m.marketToken.toLowerCase(), m]));
+      const tickers = await getGmxTickers();
+      const tickerMap = new Map(tickers.map((t) => [t.tokenAddress.toLowerCase(), t]));
+      await warmTokenDecimalsCache(tickers, alchemyKey);
+
+      const positions: GmxPosition[] = [];
+      for (const position of apiPositions) {
+        if (BigInt(position.sizeInUsd ?? "0") === 0n) continue;
+        const marketInfo = marketMap.get(position.marketAddress.toLowerCase());
+        positions.push(buildGmxPositionFromApi(position, marketInfo, tickerMap));
+      }
+      return positions;
+    } catch (apiError) {
+      console.warn(
+        "GMX API positions fetch failed, falling back to SDK:",
+        apiError instanceof Error ? apiError.message : String(apiError),
+      );
+    }
+  }
+
+  return getGmxPositionsFromSdk(vaultAddress, alchemyKey);
+}
+
+/**
+ * Fetch open GMX positions using the official SDK.
+ *
+ * Optimization: instead of asking the SDK to enumerate all possible position keys
+ * across every market, we first read the vault's actual positions with
+ * `getAccountPositions`, then fetch position info only for the markets that have
+ * an open position. For a vault with one position this reduces the position scan
+ * from ~100 possible keys to ~4, and skips the SDK's all-markets referral/info
+ * overhead.
+ */
+async function getGmxPositionsFromSdk(
+  vaultAddress: Address,
+  alchemyKey?: string,
 ): Promise<GmxPosition[]> {
   const sdk = createGmxSdk(vaultAddress, alchemyKey);
+  const client = getClient(42161, alchemyKey);
 
-  const marketsInfo = await sdk.markets.getMarketsInfo();
-  if (!marketsInfo.marketsInfoData || !marketsInfo.tokensData) {
+  // 1. Discover the vault's actual positions first.
+  const accountPositions = await client.readContract({
+    address: GMX_ADDRESSES.READER,
+    abi: GMX_READER_ABI,
+    functionName: "getAccountPositions",
+    args: [GMX_ADDRESSES.DATA_STORE, vaultAddress, 0n, 1000n],
+  }) as unknown as {
+    addresses: { account: Address; market: Address; collateralToken: Address };
+    numbers: { sizeInUsd: bigint; sizeInTokens: bigint; collateralAmount: bigint };
+    flags: { isLong: boolean };
+  }[];
+
+  if (!accountPositions || accountPositions.length === 0) {
     return [];
   }
 
+  // 2. Load markets metadata (cached) so we can build MarketInfo for the
+  //    position-specific markets only.
+  const { marketsInfoData, tokensData } = await getGmxMarketsInfoData(sdk);
+  if (!marketsInfoData || !tokensData) {
+    return [];
+  }
+
+  const positionMarkets = new Set(
+    accountPositions.map((p) => p.addresses.market.toLowerCase()),
+  );
+
+  const filteredMarketsInfoData: MarketsInfoData = Object.fromEntries(
+    Object.entries(marketsInfoData).filter(
+      ([marketAddress]) => positionMarkets.has(marketAddress.toLowerCase()),
+    ),
+  );
+
+  if (Object.keys(filteredMarketsInfoData).length === 0) {
+    return [];
+  }
+
+  // 3. Fetch position info only for the markets that have positions.
+  //    Passing a filtered marketsInfoData prevents the SDK from enumerating
+  //    position keys across every GMX market.
   const positionsInfoData: PositionsInfoData = await sdk.positions.getPositionsInfo({
-    marketsInfoData: marketsInfo.marketsInfoData,
-    tokensData: marketsInfo.tokensData,
+    marketsInfoData: filteredMarketsInfoData,
+    tokensData,
     showPnlInLeverage: true,
   });
 

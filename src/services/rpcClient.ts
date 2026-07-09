@@ -40,7 +40,12 @@ export function getClient(chainId: number, alchemyKey?: string): PublicClient {
 
   const client = createPublicClient({
     chain,
-    batch: { multicall: { wait: 16 } },
+    // viem's default multicall batchSize is 1024 bytes, which causes heavy SDK
+    // consumers (e.g. GMX positions) to issue one eth_call per ~10 contracts.
+    // The GMX SDK's intended config is 1 MB / wait 0 (BATCH_CONFIGS[chainId].client);
+    // matching it lets a single Multicall3 aggregate3 call carry hundreds of small
+    // reads, cutting RPC usage by ~95% while staying within provider limits.
+    batch: { multicall: { wait: 0, batchSize: 1024 * 1024 } },
     transport: http(rpcUrl, {
       timeout: 10_000,
       fetchFn: instrumentedFetch,
