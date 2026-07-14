@@ -19,7 +19,7 @@ import type { Env, SwapIntent } from "../types.js";
 import { resolveTokenAddress } from "../config.js";
 import { parseUnits, formatUnits } from "viem";
 import { getTokenDecimals } from "./vault.js";
-import { estimateAmountInViaEOracle } from "./eOracle.js";
+
 
 const ZEROX_API_URL = "https://api.0x.org";
 
@@ -46,8 +46,6 @@ export interface ZeroXQuote {
   decimalsOut: number;
   /** The full raw response */
   _raw: Record<string, unknown>;
-  /** True when an exact-output intent was converted to exact-input via EOracle. */
-  convertedFromExactOutput?: boolean;
 }
 
 // ── Headers ────────────────────────────────────────────────────────────
@@ -310,10 +308,9 @@ export async function getZeroXQuote(
 /**
  * Get a 0x quote for execution through a Rigoblock vault.
  *
- * Exact-output vault swaps are converted to estimated exact-input quotes via the
- * on-chain EOracle TWAP. This avoids the `CHECK_SLIPPAGE` settler action, which
- * Rigoblock's A0xRouter adapter does not allow on chains that have not been
- * upgraded yet. Exact-input intents are passed through unchanged.
+ * Rigoblock's A0xRouter adapter now allows the `CHECK_SLIPPAGE` settler action
+ * on all supported chains, so exact-output (buyAmount) intents are passed
+ * through verbatim to 0x. Exact-input intents are also passed through unchanged.
  */
 export async function getZeroXVaultQuote(
   env: Env,
@@ -321,71 +318,7 @@ export async function getZeroXVaultQuote(
   chainId: number,
   vaultAddress: string,
 ): Promise<ZeroXQuote> {
-  if (!intent.amountOut || intent.amountIn) {
-    return getZeroXQuote(env, intent, chainId, vaultAddress);
-  }
-
-  let tokenIn: Address;
-  let tokenOut: Address;
-  try {
-    [tokenIn, tokenOut] = await Promise.all([
-      resolveTokenAddress(chainId, intent.tokenIn),
-      resolveTokenAddress(chainId, intent.tokenOut),
-    ]);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `0x exact-output vault swap cannot be converted to exact-input: token resolution failed: ${msg}`,
-    );
-  }
-
-  let decimalsOut: number;
-  try {
-    decimalsOut = await getTokenDecimals(chainId, tokenOut, env.ALCHEMY_API_KEY);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `0x exact-output vault swap cannot be converted to exact-input: could not read ${intent.tokenOut} decimals: ${msg}`,
-    );
-  }
-
-  const amountOutRaw = parseUnits(intent.amountOut, decimalsOut);
-
-  let amountInRaw: bigint;
-  try {
-    amountInRaw = await estimateAmountInViaEOracle(
-      chainId,
-      vaultAddress as Address,
-      tokenIn,
-      tokenOut,
-      amountOutRaw,
-      env.ALCHEMY_API_KEY,
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `0x exact-output vault swap cannot be converted to exact-input: EOracle estimate failed: ${msg}`,
-    );
-  }
-
-  let decimalsIn: number;
-  try {
-    decimalsIn = await getTokenDecimals(chainId, tokenIn, env.ALCHEMY_API_KEY);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `0x exact-output vault swap cannot be converted to exact-input: could not read ${intent.tokenIn} decimals: ${msg}`,
-    );
-  }
-
-  const exactInputIntent: SwapIntent = {
-    ...intent,
-    amountIn: formatUnits(amountInRaw, decimalsIn),
-    amountOut: undefined,
-  };
-
-  const quote = await getZeroXQuote(env, exactInputIntent, chainId, vaultAddress);
-  return { ...quote, convertedFromExactOutput: true };
+  return getZeroXQuote(env, intent, chainId, vaultAddress);
 }
 
 // ── Format for display ─────────────────────────────────────────────────

@@ -52,13 +52,7 @@ function isZeroXFatalError(err: unknown): boolean {
     lower.includes("token pair may not be fully supported by 0x") ||
     lower.includes("0x returned empty transaction data") ||
     lower.includes("0x quote response is missing a valid") ||
-    lower.includes("0x api timed out") ||
-    // Rigoblock's A0xRouter adapter blocks settler actions that are not in the chain-specific
-    // allowlist (e.g., the CHECK_SLIPPAGE action on Unichain). Route these through Uniswap instead.
-    lower.includes("actionnotallowed") ||
-    lower.includes("settler action") ||
-    lower.includes("a0xrouter") ||
-    lower.includes("0x exact-output vault swap cannot be converted")
+    lower.includes("0x api timed out")
   );
 }
 
@@ -295,9 +289,7 @@ async function buildVaultSwapWith0x(
     maxSellAmount: zxQuote.maxSellAmount,
     calldata: zxQuote.transaction.data,
     value: zxQuote.transaction.value || "0x0",
-    fallbackNote:
-      fallbackNote ??
-      (zxQuote.convertedFromExactOutput ? "estimated input for target output" : undefined),
+    fallbackNote,
   };
 
   return assembleSwapTransaction(env, ctx, intent, chainSwitched, chainName, assembly);

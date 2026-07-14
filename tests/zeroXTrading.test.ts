@@ -14,10 +14,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Address } from "viem";
 
 // ── Mocks ───────────────────────────────────────────────────────────────
-const { mockResolveTokenAddress, mockGetTokenDecimals, mockEstimateAmountInViaEOracle } = vi.hoisted(() => ({
+const { mockResolveTokenAddress, mockGetTokenDecimals } = vi.hoisted(() => ({
   mockResolveTokenAddress: vi.fn(),
   mockGetTokenDecimals: vi.fn(),
-  mockEstimateAmountInViaEOracle: vi.fn(),
 }));
 
 vi.mock("../src/config.js", () => ({
@@ -27,10 +26,6 @@ vi.mock("../src/config.js", () => ({
 vi.mock("../src/services/vault.js", () => ({
   getTokenDecimals: mockGetTokenDecimals,
   getClient: vi.fn(),
-}));
-
-vi.mock("../src/services/eOracle.js", () => ({
-  estimateAmountInViaEOracle: mockEstimateAmountInViaEOracle,
 }));
 
 import { getZeroXQuote, getZeroXVaultQuote } from "../src/services/zeroXTrading.js";
@@ -100,7 +95,7 @@ describe("getZeroXQuote", () => {
     vi.stubGlobal("fetch", vi.fn());
     mockResolveTokenAddress.mockReset();
     mockGetTokenDecimals.mockReset();
-    mockEstimateAmountInViaEOracle.mockReset();
+
     // WETH = 18 decimals, USDC = 6 decimals
     mockGetTokenDecimals.mockImplementation(async (_chainId: number, address: string) =>
       address.toLowerCase() === USDC.toLowerCase() ? 6 : 18
@@ -284,23 +279,18 @@ describe("getZeroXVaultQuote", () => {
     vi.stubGlobal("fetch", vi.fn());
     mockResolveTokenAddress.mockReset();
     mockGetTokenDecimals.mockReset();
-    mockEstimateAmountInViaEOracle.mockReset();
     mockGetTokenDecimals.mockImplementation(async (_chainId: number, address: string) =>
       address.toLowerCase() === USDC.toLowerCase() ? 6 : 18
     );
   });
 
-  it("converts an exact-output intent to an estimated exact-input quote", async () => {
-    // getZeroXVaultQuote resolves tokens, then getZeroXQuote resolves them again.
+  it("passes an exact-output vault intent through verbatim", async () => {
     mockResolveTokenAddress
       .mockResolvedValueOnce(WETH)
-      .mockResolvedValueOnce(USDC)
-      .mockResolvedValueOnce(WETH)
       .mockResolvedValueOnce(USDC);
-    mockEstimateAmountInViaEOracle.mockResolvedValueOnce(1000000000000000000n); // 1 WETH
 
     (global.fetch as any).mockResolvedValueOnce(
-      new Response(JSON.stringify(mockQuoteResponse()), {
+      new Response(JSON.stringify(mockExactOutputResponse()), {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
@@ -315,14 +305,15 @@ describe("getZeroXVaultQuote", () => {
 
     const quote = await getZeroXVaultQuote(mockEnv(), intent, 1, VAULT);
 
-    expect(quote.convertedFromExactOutput).toBe(true);
+    expect(quote.buyAmount).toBe("2000000000");
+    expect(quote.sellAmount).toBe("1000000000000000000");
+    expect(quote.maxSellAmount).toBe("1010000000000000000");
 
     const fetchCalls = (global.fetch as any).mock.calls;
     expect(fetchCalls.length).toBe(1);
     const url = new URL(fetchCalls[0][0]);
-    expect(url.searchParams.get("buyAmount")).toBeNull();
-    // 1 WETH — EOracle estimate is used directly
-    expect(url.searchParams.get("sellAmount")).toBe("1000000000000000000");
+    expect(url.searchParams.get("buyAmount")).toBe("2000000000");
+    expect(url.searchParams.get("sellAmount")).toBeNull();
   });
 
   it("passes an exact-input vault intent through unchanged", async () => {
@@ -344,27 +335,13 @@ describe("getZeroXVaultQuote", () => {
 
     const quote = await getZeroXVaultQuote(mockEnv(), intent, 1, VAULT);
 
-    expect(quote.convertedFromExactOutput).toBeUndefined();
+    expect(quote.buyAmount).toBe("2000000000");
+    expect(quote.sellAmount).toBe("1000000000000000000");
 
     const fetchCalls = (global.fetch as any).mock.calls;
     expect(fetchCalls.length).toBe(1);
     const url = new URL(fetchCalls[0][0]);
     expect(url.searchParams.get("sellAmount")).toBe("1000000000000000000");
-  });
-
-  it("throws a conversion error when EOracle cannot estimate the input", async () => {
-    mockResolveTokenAddress.mockResolvedValueOnce(WETH).mockResolvedValueOnce(USDC);
-    mockEstimateAmountInViaEOracle.mockRejectedValueOnce(new Error("EOracle not available"));
-
-    const intent: SwapIntent = {
-      tokenIn: "WETH",
-      tokenOut: "USDC",
-      amountOut: "2000",
-      slippageBps: 100,
-    };
-
-    await expect(getZeroXVaultQuote(mockEnv(), intent, 1, VAULT)).rejects.toThrow(
-      /0x exact-output vault swap cannot be converted/,
-    );
+    expect(url.searchParams.get("buyAmount")).toBeNull();
   });
 });
