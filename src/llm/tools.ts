@@ -231,9 +231,9 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "gmx_increase_position",
       description:
-        "Increase the size of an existing GMX v2 perpetual position or add collateral to it. " +
-        "Use this when the user already has an open position and wants to add to it. " +
-        "Modes: (1) notionalUsd + leverage → adds size and collateral, (2) notionalUsd without leverage → preserves current leverage ratio, (3) collateralAmount + leverage → adds collateral AND size, (4) collateralAmount with sizeDeltaUsd='0' → adds collateral ONLY, (5) sizeDeltaUsd without collateralAmount (or collateralAmount='0') → increases size WITHOUT adding collateral (leverage goes up).",
+        "Open a new GMX v2 perpetual position, increase the size of an existing position, or add collateral to it. " +
+        "This is the single tool for all GMX position open/increase operations. " +
+        "Modes: (1) notionalUsd + leverage → opens/increases size with required collateral, (2) notionalUsd without leverage → increases size while preserving current leverage ratio, (3) collateralAmount + leverage → adds collateral AND size, (4) collateralAmount with sizeDeltaUsd='0' → adds collateral ONLY, (5) sizeDeltaUsd without collateralAmount (or collateralAmount='0') → increases size WITHOUT adding collateral (leverage goes up).",
       parameters: {
         type: "object",
         properties: {

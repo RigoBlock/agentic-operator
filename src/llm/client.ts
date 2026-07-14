@@ -2408,7 +2408,7 @@ function tryFastPathGmxIncrease(msg: string): FastPathResult | null {
       args: {
         market: closeMatch[1].toUpperCase(),
         isLong: closeMatch[2]?.toLowerCase() !== "short",
-        sizeDeltaUsd: "0", // full close
+        sizeDeltaUsd: "all", // full close
       },
     };
   }

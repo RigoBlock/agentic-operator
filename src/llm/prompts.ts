@@ -21,57 +21,55 @@ export type DomainKey =
   | "vault"
   | "strategy";
 
-/** Pattern-based intent detection. Returns the set of domains relevant to the user's message.
- *  Only scans USER messages — assistant messages from previous turns contain execution
- *  outcomes (e.g. "delegation active") that trigger false-positive domains and exclude
- *  the tools the user actually needs for their current request.
- */
-export function detectDomains(messages: Array<{ role: string; content: string }>): Set<DomainKey> {
-  const domains = new Set<DomainKey>();
+/** Domains that are included when a single message has no explicit domain signal. */
+const FALLBACK_DOMAINS: DomainKey[] = ["swap", "vault"];
 
-  // Use only the latest user message for domain detection. Previous assistant
-  // messages contain execution outcomes ("delegation active") that trigger false
-  // positives, and older user turns often mention unrelated domains.
-  const lastUserMsg = messages
-    .filter(m => m.role === "user")
-    .slice(-1)[0]?.content.toLowerCase() ?? "";
+/** Number of recent user messages (excluding the latest) to scan for context when
+ *  the latest message is ambiguous (e.g. "yes", "ok", "do it", "proceed").
+ */
+const AMBIGUOUS_LOOKBACK_MESSAGES = 3;
+
+/** Detect domains from a single user message. */
+function detectDomainsFromMessage(message: string): Set<DomainKey> {
+  const domains = new Set<DomainKey>();
+  const msg = message.toLowerCase();
 
   // Swap: match full keywords (buy/sell also catch buying/selling because
   // the regex only needs a partial match inside the word).
-  if (/\b(swap|buy|sell|exchange|convert|trade|quote|price|slippage|swap.?shield|oracle)\b/.test(lastUserMsg) &&
-      !/\b(long|short|perp|leverage|\dx)\b/.test(lastUserMsg)) {
+  if (/\b(swap|buy|sell|exchange|convert|trade|quote|price|slippage|swap.?shield|oracle)\b/.test(msg) &&
+      !/\b(long|short|perp|leverage|\dx)\b/.test(msg)) {
     domains.add("swap");
   }
 
   // GMX perpetuals — keep detection narrow. Avoid generic words like "position"
   // or "margin" that appear in normal spot/LP conversations.
-  if (/\b(long|short|perp|perpetual|leverage|\dx|gmx|funding fee|stop.?loss|take.?profit)\b/.test(lastUserMsg)) {
+  if (/\b(long|short|perp|perpetual|leverage|\dx|gmx|funding fee|stop.?loss|take.?profit)\b/.test(msg)) {
     domains.add("gmx");
   }
 
   // Uniswap LP
-  if (/\b(lp|liquidity|pool.?info|uniswap|tick|range|burn.?position|collect.?fee|nft|position.*id)\b/.test(lastUserMsg)) {
+  if (/\b(lp|liquidity|pool.?info|uniswap|tick|range|burn.?position|collect.?fee|nft|position.*id)\b/.test(msg)) {
     domains.add("lp");
   }
 
   // Cross-chain bridge — include plain "sync" so any NAV-sync / sync request
   // exposes the bridge tool set (crosschain_sync, crosschain_transfer, etc.).
-  if (/\b(bridge|cross.?chain|transfer.*to|move.*to|across|sync|rebalance|consolidate|aggregated?\s*nav|multichain|multi.chain)\b/.test(lastUserMsg)) {
+  if (/\b(bridge|cross.?chain|transfer.*to|move.*to|across|sync|rebalance|consolidate|aggregated?\s*nav|multichain|multi.chain)\b/.test(msg)) {
     domains.add("bridge");
   }
 
   // GRG Staking
-  if (/\b(stake|staking|staked|unstake|undelegate|undelegating|epoch|grg reward|claim reward)\b/.test(lastUserMsg)) {
+  if (/\b(stake|staking|staked|unstake|undelegate|undelegating|epoch|grg reward|claim reward)\b/.test(msg)) {
     domains.add("staking");
   }
 
   // Delegation
-  if (/\b(delegate|delegation|delegating|revoke|agent wallet|auto trade|enable agent|disable agent|selector)\b/.test(lastUserMsg)) {
+  if (/\b(delegate|delegation|delegating|revoke|agent wallet|auto trade|enable agent|disable agent|selector)\b/.test(msg)) {
     domains.add("delegation");
   }
 
   // Vault management
-  if (/\b(vault|pool.*deploy|deploy.*pool|fund.*pool|mint.*pool|deposit.*capital|create.*pool|new.*pool|vault.*info|balance|token.*balance)\b/.test(lastUserMsg)) {
+  if (/\b(vault|pool.*deploy|deploy.*pool|fund.*pool|mint.*pool|deposit.*capital|create.*pool|new.*pool|vault.*info|balance|token.*balance)\b/.test(msg)) {
     domains.add("vault");
   }
 
@@ -79,19 +77,75 @@ export function detectDomains(messages: Array<{ role: string; content: string }>
   // Detect: "every N min", "N at a time", "DCA", "TWAP", "slice", etc.
   // Note: "every.*min" inside \b fails on "every 5 minutes" — check separately.
   if (
-    /\b(strategy|strategies|strategic|cron|automated|automatic|automation|recurring|dca|twap|scheduled|timer|at\s+a\s+time|slice|in\s+parts|incrementally|gradually)\b/.test(lastUserMsg) ||
-    /every\s+\d+\s*(min|hour|hr)/i.test(lastUserMsg)
+    /\b(strategy|strategies|strategic|cron|automated|automatic|automation|recurring|dca|twap|scheduled|timer|at\s+a\s+time|slice|in\s+parts|incrementally|gradually)\b/.test(msg) ||
+    /every\s+\d+\s*(min|hour|hr)/i.test(msg)
   ) {
     domains.add("strategy");
   }
 
   // If nothing detected, include core trading domains as fallback
   if (domains.size === 0) {
-    domains.add("swap");
-    domains.add("vault");
+    for (const d of FALLBACK_DOMAINS) domains.add(d);
   }
 
   return domains;
+}
+
+function isFallbackDomain(domain: DomainKey): boolean {
+  return FALLBACK_DOMAINS.includes(domain);
+}
+
+function isFallbackOnly(domains: Set<DomainKey>): boolean {
+  if (domains.size !== FALLBACK_DOMAINS.length) return false;
+  return FALLBACK_DOMAINS.every(d => domains.has(d));
+}
+
+/** Pattern-based intent detection. Returns the set of domains relevant to the user's message.
+ *  Only scans USER messages — assistant messages from previous turns contain execution
+ *  outcomes (e.g. "delegation active") that trigger false-positive domains and exclude
+ *  the tools the user actually needs for their current request.
+ *
+ *  The latest user message is the primary signal. If it is ambiguous (only fallback
+ *  domains), we look back at a small window of previous user messages to preserve
+ *  context across short confirmations like "yes", "ok", "do it", or "proceed".
+ *  This keeps the tool set stable during multi-turn GMX/swap/bridge operations.
+ */
+export function detectDomains(messages: Array<{ role: string; content: string }>): Set<DomainKey> {
+  const userMessages = messages
+    .filter(m => m.role === "user")
+    .map(m => m.content);
+
+  if (userMessages.length === 0) {
+    return new Set(FALLBACK_DOMAINS);
+  }
+
+  const latestMsg = userMessages[userMessages.length - 1];
+  const latestDomains = detectDomainsFromMessage(latestMsg);
+
+  // If the latest message carries an explicit domain signal, trust it. This lets
+  // the user pivot topics cleanly (e.g. from a GMX discussion to "swap 1 ETH").
+  if (!isFallbackOnly(latestDomains)) {
+    return latestDomains;
+  }
+
+  // Latest message is ambiguous (no explicit domain). Preserve fallback domains
+  // and inherit any non-fallback domains from recent prior user messages.
+  const inheritedDomains = new Set<DomainKey>(latestDomains);
+  const lookbackWindow = userMessages.slice(
+    Math.max(0, userMessages.length - 1 - AMBIGUOUS_LOOKBACK_MESSAGES),
+    userMessages.length - 1,
+  );
+
+  for (const msg of lookbackWindow) {
+    const prevDomains = detectDomainsFromMessage(msg);
+    for (const d of prevDomains) {
+      if (!isFallbackDomain(d)) {
+        inheritedDomains.add(d);
+      }
+    }
+  }
+
+  return inheritedDomains;
 }
 
 /** Map domains to their tool names — used to filter tool definitions. */

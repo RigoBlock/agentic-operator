@@ -22,13 +22,35 @@ describe("detectDomains", () => {
     expect(domains.has("vault")).toBe(true);
   });
 
-  it("uses only the latest user message for detection", () => {
+  it("pivots cleanly when the latest message has an explicit new domain", () => {
     const domains = detectDomains([
       { role: "user", content: "Long ETH with 5x leverage" },
       { role: "assistant", content: "Opened a long position." },
       { role: "user", content: "Now swap 1 ETH for USDC" },
     ]);
     expect(domains.has("swap")).toBe(true);
+    expect(domains.has("gmx")).toBe(false);
+  });
+
+  it("preserves GMX context across short confirmations like 'yes'", () => {
+    const domains = detectDomains([
+      { role: "user", content: "Increase my LIT/USD long by 20000 USD" },
+      { role: "assistant", content: "This will raise leverage. Proceed?" },
+      { role: "user", content: "yes, it's ok" },
+    ]);
+    expect(domains.has("gmx")).toBe(true);
+    expect(domains.has("swap")).toBe(true);
+    expect(domains.has("vault")).toBe(true);
+  });
+
+  it("does not inherit stale domains when the latest message is explicit", () => {
+    const domains = detectDomains([
+      { role: "user", content: "Bridge 100 USDC to Arbitrum" },
+      { role: "assistant", content: "Done." },
+      { role: "user", content: "Swap 1 ETH for USDC" },
+    ]);
+    expect(domains.has("swap")).toBe(true);
+    expect(domains.has("bridge")).toBe(false);
     expect(domains.has("gmx")).toBe(false);
   });
 
