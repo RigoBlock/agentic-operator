@@ -24,20 +24,16 @@ export type DomainKey =
 /** Domains that are included when a single message has no explicit domain signal. */
 const FALLBACK_DOMAINS: DomainKey[] = ["swap", "vault"];
 
-/** Number of recent user messages (excluding the latest) to scan for context when
- *  the latest message is ambiguous (e.g. "yes", "ok", "do it", "proceed").
- */
-const AMBIGUOUS_LOOKBACK_MESSAGES = 3;
-
 /** Detect domains from a single user message. */
 function detectDomainsFromMessage(message: string): Set<DomainKey> {
   const domains = new Set<DomainKey>();
   const msg = message.toLowerCase();
 
-  // Swap: match full keywords (buy/sell also catch buying/selling because
-  // the regex only needs a partial match inside the word).
-  if (/\b(swap|buy|sell|exchange|convert|trade|quote|price|slippage|swap.?shield|oracle)\b/.test(msg) &&
-      !/\b(long|short|perp|leverage|\dx)\b/.test(msg)) {
+  // Swap: explicit keywords OR concrete token-swap pattern (amount + token + with/for/to/into).
+  // The pattern catches typos/conversational continuations like "but 30 usdt with eth on base".
+  const hasSwapKeyword = /\b(swap|buy|sell|exchange|convert|trade|quote|price|slippage|swap.?shield|oracle)\b/.test(msg);
+  const hasSwapPattern = /\b\d[\d,]*(?:\.\d+)?\s*[a-z0-9]{2,10}\s+(?:with|for|to|into|and)\s+[a-z0-9]{2,10}\b/i.test(msg);
+  if ((hasSwapKeyword || hasSwapPattern) && !/\b(long|short|perp|leverage|\dx)\b/.test(msg)) {
     domains.add("swap");
   }
 
@@ -91,61 +87,53 @@ function detectDomainsFromMessage(message: string): Set<DomainKey> {
   return domains;
 }
 
-function isFallbackDomain(domain: DomainKey): boolean {
-  return FALLBACK_DOMAINS.includes(domain);
+/**
+ * True when a message contains enough concrete signals that it should be treated as a
+ * NEW intent rather than a continuation of the previous topic.
+ */
+function hasConcreteIntent(message: string): boolean {
+  const m = message.toLowerCase();
+  // Amount + token (e.g. "30 usdt", "1 eth")
+  if (/\b\d[\d,]*(?:\.\d+)?\s*[a-z0-9]{2,10}\b/i.test(m)) return true;
+  // Explicit action verb
+  if (/\b(swap|buy|sell|bridge|transfer|sync|long|short|stake|unstake|deploy|fund|close|increase|decrease|reduce|open|quote|unwrap|wrap)\b/.test(m)) return true;
+  // Chain + token combination (e.g. "eth on base")
+  if (/\b(ethereum|base|arbitrum|optimism|polygon|bsc|bnb\s+chain|unichain)\b/.test(m) &&
+      /\b(usdc|usdt|eth|weth|wbtc|dai|grg|bnb|pol|link|uni|arb|op)\b/.test(m)) return true;
+  return false;
 }
 
-function isFallbackOnly(domains: Set<DomainKey>): boolean {
-  if (domains.size !== FALLBACK_DOMAINS.length) return false;
-  return FALLBACK_DOMAINS.every(d => domains.has(d));
-}
-
-/** Pattern-based intent detection. Returns the set of domains relevant to the user's message.
- *  Only scans USER messages — assistant messages from previous turns contain execution
- *  outcomes (e.g. "delegation active") that trigger false-positive domains and exclude
- *  the tools the user actually needs for their current request.
+/** Pattern-based intent detection. Returns the set of domains relevant to the user's
+ *  latest message.
  *
- *  The latest user message is the primary signal. If it is ambiguous (only fallback
- *  domains), we look back at a small window of previous user messages to preserve
- *  context across short confirmations like "yes", "ok", "do it", or "proceed".
- *  This keeps the tool set stable during multi-turn GMX/swap/bridge operations.
+ *  - If the latest message has concrete intent signals (amount/token/verb/chain), it is
+ *    treated as a NEW request and only its own domains are returned.
+ *  - If the latest message is short/ambiguous (e.g. "yes", "ok", "do it"), non-fallback
+ *    domains from recent user turns are inherited so confirmations like "yes" keep GMX
+ *    or bridge context alive.
  */
 export function detectDomains(messages: Array<{ role: string; content: string }>): Set<DomainKey> {
-  const userMessages = messages
-    .filter(m => m.role === "user")
-    .map(m => m.content);
+  const userMessages = messages.filter(m => m.role === "user");
+  const latestUserMsg = userMessages.slice(-1)[0]?.content ?? "";
 
-  if (userMessages.length === 0) {
-    return new Set(FALLBACK_DOMAINS);
+  const domains = detectDomainsFromMessage(latestUserMsg);
+
+  // Concrete new intent => do not inherit prior topic.
+  if (hasConcreteIntent(latestUserMsg)) {
+    return domains;
   }
 
-  const latestMsg = userMessages[userMessages.length - 1];
-  const latestDomains = detectDomainsFromMessage(latestMsg);
-
-  // If the latest message carries an explicit domain signal, trust it. This lets
-  // the user pivot topics cleanly (e.g. from a GMX discussion to "swap 1 ETH").
-  if (!isFallbackOnly(latestDomains)) {
-    return latestDomains;
-  }
-
-  // Latest message is ambiguous (no explicit domain). Preserve fallback domains
-  // and inherit any non-fallback domains from recent prior user messages.
-  const inheritedDomains = new Set<DomainKey>(latestDomains);
-  const lookbackWindow = userMessages.slice(
-    Math.max(0, userMessages.length - 1 - AMBIGUOUS_LOOKBACK_MESSAGES),
-    userMessages.length - 1,
-  );
-
-  for (const msg of lookbackWindow) {
-    const prevDomains = detectDomainsFromMessage(msg);
-    for (const d of prevDomains) {
-      if (!isFallbackDomain(d)) {
-        inheritedDomains.add(d);
+  // Ambiguous confirmation/short answer => inherit non-fallback domains from recent user turns.
+  const recentUserMessages = userMessages.slice(-4, -1);
+  for (const msg of recentUserMessages) {
+    for (const d of detectDomainsFromMessage(msg.content)) {
+      if (!FALLBACK_DOMAINS.includes(d)) {
+        domains.add(d);
       }
     }
   }
 
-  return inheritedDomains;
+  return domains;
 }
 
 /** Map domains to their tool names — used to filter tool definitions. */
@@ -186,6 +174,7 @@ export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
 /** Always-included tools regardless of domain detection. */
 export const CORE_TOOLS = [
   "get_vault_info", "get_token_balance", "switch_chain", "check_pending_tx",
+  "verify_token",
 ];
 
 // ── Core system prompt (always sent) ──────────────────────────────────
@@ -246,7 +235,9 @@ RULES:
 - Execute ONE tool call per step. After each step, explain the result and proceed.
 - STRICT SEQUENTIAL EXECUTION: Each step MUST depend on the previous step's SUCCESS.
 - NEVER claim the vault "now holds" a specific amount unless you called get_token_balance to verify it.
-- Token symbols resolve automatically. If resolution fails, retry with the contract address from the reference below.
+- Token symbols resolve automatically. If resolution fails, ask the user for the exact token name or contract address.
+- When the user answers a token disambiguation question (e.g. "Tether" or a 0x address), call verify_token(symbol=<original symbol>, identifier=<user's answer>) to register it, then retry the swap/quote. Do NOT repeat the same question and do NOT retry with the still-ambiguous symbol.
+- INTERPRET EACH MESSAGE INDEPENDENTLY. A new message that mentions tokens, amounts, or chains is a NEW request, not a continuation of the previous topic. Do not let a prior bridge/swap/GMX/LP discussion bias you into calling the wrong tool.
 - Users may use full names (e.g., "chainlink"→LINK, "uniswap"→UNI, "wrapped bitcoin"→WBTC).
 - Default slippage: 1% (100 bps). Slippage and safety-shield settings are managed by the operator — either in the web UI or, if Telegram is paired, via slash commands: /slippage, /swapshield, /navshield. You cannot change these settings.
 

@@ -520,13 +520,13 @@ async function resolveTokenBySymbolNetwork(
   });
 
   // Ambiguous symbol: ask the user instead of guessing. We don't fetch details
-  // for every candidate here; the user can confirm one by name/address and we
-  // verify it through verifyAndRegisterToken.
+  // for every candidate here; the user can confirm one by name/address and the
+  // agent will verify it through verifyAndRegisterToken.
   if (exactMatches.length > 1) {
     const list = exactMatches.map((m) => `• ${m.name}`).join("\n");
     throw new TokenResolutionError(
       `Multiple tokens match "${symbol}" on CoinGecko:\n${list}`,
-      { hint: "Please tell me which one you mean by providing the exact token name or contract address." },
+      { hint: `Reply with the exact token name (e.g. "${exactMatches[0]?.name ?? symbol}") or contract address, and I will verify and register it before retrying your request.` },
     );
   }
 

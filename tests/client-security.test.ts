@@ -102,6 +102,16 @@ describe("client security helpers", () => {
     expect(parsed?.args.chain).toBe("base");
     expect(parsed?.args.dex).toBe("0x");
   });
+
+  it("fast-path swap normalizes leading 'but' typo to 'buy'", () => {
+    const parsed = tryFastPathSwap("but 30 USDT with ETH on base");
+    expect(parsed).not.toBeNull();
+    expect(parsed?.name).toBe("build_vault_swap");
+    expect(parsed?.args.tokenOut).toBe("USDT");
+    expect(parsed?.args.amountOut).toBe("30");
+    expect(parsed?.args.tokenIn).toBe("ETH");
+    expect(parsed?.args.chain).toBe("base");
+  });
 });
 
 describe("tool auth category membership", () => {

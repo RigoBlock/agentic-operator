@@ -10,7 +10,7 @@
 import OpenAI from "openai";
 import type { Env, ChatMessage, ChatResponse, ToolCallResult, SwapIntent, UnsignedTransaction, TransactionDraft, RequestContext, StreamEvent, ExecutionResult } from "../types.js";
 import { AGENT_TOOL_DEFINITIONS, RUNTIME_CONTEXT_PACK } from "./tools.js";
-import { detectDomains, buildSystemPrompt, DOMAIN_TOOLS, CORE_TOOLS } from "./prompts.js";
+import { detectDomains, buildSystemPrompt } from "./prompts.js";
 import { getSkillTools, getSkillSystemPrompt } from "../skills/index.js";
 
 // Merge skill tools into the LLM-facing definitions (skill tools are always available for dispatch)
@@ -803,21 +803,13 @@ export async function processChat(
   const skillPrompts = getSkillSystemPrompt();
   const systemPrompt = buildSystemPrompt(detectedDomains, skillPrompts || undefined);
 
-  // Domain-aware tool filtering: only expose tools that match the detected intent.
-  // This shrinks the LLM context, cuts first-token latency, and reduces hallucinated
-  // tool calls on simple requests. Core tools are always available; skill tools are
-  // kept because they are few and domain-specific (TWAP, nav sync).
-  const allowedToolNames = new Set<string>(CORE_TOOLS);
-  for (const domain of detectedDomains) {
-    const names = DOMAIN_TOOLS[domain];
-    if (names) names.forEach((n) => allowedToolNames.add(n));
-  }
-  const filteredTools = ALL_AGENT_TOOL_DEFINITIONS.filter((t) =>
-    allowedToolNames.has(t.function.name),
-  );
-  const TOOL_DEFINITIONS = filteredTools.length > 0
-    ? [...filteredTools, ...getSkillTools()]
-    : ALL_AGENT_TOOL_DEFINITIONS;
+  // Expose the full agent tool catalog to the LLM on every turn. Deterministic
+  // fast paths handle the common explicit commands; when the request reaches the
+  // LLM it is ambiguous or multi-step, and the model needs the freedom to select
+  // the right tool from the whole catalog rather than being constrained by a
+  // regex-guessed domain. Safety-relevant tools (slippage/shield toggles) remain
+  // excluded from the agent catalog in AGENT_TOOL_DEFINITIONS.
+  const TOOL_DEFINITIONS = ALL_AGENT_TOOL_DEFINITIONS;
 
 
   const executionModeNote = ctx.executionMode === "delegated"
@@ -2228,6 +2220,9 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
     /^(?:(?:i\s+)?(?:want|would like|need|['']d like)\s+to\s+|(?:can|could)\s+you\s+(?:please\s+)?|please\s+)/i,
     "",
   ).trim();
+
+  // Normalize common leading typos that land on "buy" intent (e.g. "but 30 USDT with ETH").
+  m = m.replace(/^(but|bit|bay)\s+/i, "buy ");
 
   // Extract chain modifier — appears either as the final suffix OR before a DEX modifier:
   //   "sell 1 ETH for USDC on base"             → chain=base

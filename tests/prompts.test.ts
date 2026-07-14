@@ -79,4 +79,21 @@ describe("detectDomains", () => {
     expect(domains.has("bridge")).toBe(true);
     expect(domains.has("swap")).toBe(false);
   });
+
+  it("does not inherit bridge domain for a concrete swap-like typo", () => {
+    const domains = detectDomains([
+      { role: "user", content: "bridge 100 USDC to Arbitrum" },
+      { role: "assistant", content: "Done." },
+      { role: "user", content: "but 30 usdt with eth on base" },
+    ]);
+    expect(domains.has("swap")).toBe(true);
+    expect(domains.has("bridge")).toBe(false);
+    expect(domains.has("gmx")).toBe(false);
+  });
+
+  it("detects swap domain from amount + token + with + token even without a verb", () => {
+    const domains = detectDomains([{ role: "user", content: "30 usdt with eth on base" }]);
+    expect(domains.has("swap")).toBe(true);
+    expect(domains.has("bridge")).toBe(false);
+  });
 });

@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { TOOL_DEFINITIONS } from "../src/llm/tools.js";
-import { CORE_PROMPT, DOMAIN_PROMPTS } from "../src/llm/prompts.js";
+import { CORE_PROMPT, DOMAIN_PROMPTS, CORE_TOOLS } from "../src/llm/prompts.js";
 import { TOOL_NAME_ALIASES } from "../src/llm/client.js";
 
 // Tool names that MUST exist (security-relevant)
@@ -102,6 +102,10 @@ describe("TOOL_DEFINITIONS", () => {
     expect(TOOL_NAME_ALIASES.sync_tokens).toBe("crosschain_sync");
     expect(TOOL_NAME_ALIASES.equalize_nav).toBe("crosschain_sync");
   });
+
+  it("includes verify_token in CORE_TOOLS so it is always available for disambiguation", () => {
+    expect(CORE_TOOLS).toContain("verify_token");
+  });
 });
 
 describe("SYSTEM_PROMPT", () => {
@@ -118,5 +122,10 @@ describe("SYSTEM_PROMPT", () => {
 
   it("mentions delegation for agent execution", () => {
     expect(systemPrompt.toLowerCase()).toContain("delegation");
+  });
+
+  it("instructs the LLM to call verify_token when the user answers a token disambiguation question", () => {
+    expect(systemPrompt.toLowerCase()).toContain("verify_token");
+    expect(systemPrompt.toLowerCase()).toContain("disambiguation");
   });
 });
