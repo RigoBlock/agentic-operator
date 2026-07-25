@@ -96,9 +96,17 @@ async function getPrivateKey(): Promise<string> {
   const envPk = process.env.TEST_PRIVATE_KEY;
   if (envPk) {
     console.log("Using TEST_PRIVATE_KEY from environment.\n");
-    return envPk;
+    return normalizePrivateKey(envPk);
   }
-  return promptHidden("Enter private key (with 0x prefix): ");
+  const raw = await promptHidden("Enter private key (with or without 0x prefix): ");
+  return normalizePrivateKey(raw);
+}
+
+/** Prepends 0x if missing; wipes the raw input from the returned string copy. */
+function normalizePrivateKey(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("0x")) return trimmed;
+  return `0x${trimmed}`;
 }
 
 /** Makes a paid x402 request. Returns true only if payment was required, made, and settled. */
@@ -209,8 +217,8 @@ async function paidRequest(
 
 async function main() {
   let pkInput = await getPrivateKey();
-  if (!pkInput || !pkInput.startsWith("0x")) {
-    console.error("Private key must start with 0x");
+  if (!pkInput || pkInput.length !== 66) {
+    console.error("Private key must be 32 bytes (with 0x prefix, 66 hex characters)");
     process.exit(1);
   }
 
@@ -299,8 +307,9 @@ async function main() {
       label: "POST /api/oracle/refresh",
       fn: () => paidRequest(httpClient, "POST", ORACLE_REFRESH_URL, {
         token: "GRG",
+        tokenIn: "ETH",
+        tokenOut: "GRG",
         chainId: 8453,
-        direction: "buy",
         amount: "0.001",
       }),
     },

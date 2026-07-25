@@ -40,6 +40,7 @@ import type {
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { UptoEvmScheme } from "@x402/evm/upto/server";
 import { bazaarResourceServerExtension } from "@x402/extensions";
+import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler } from "hono";
 import type { Env, AppVariables } from "../types.js";
@@ -105,69 +106,91 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       "(10% max loss per trade), Swap Shield (oracle vs DEX price divergence check), slippage " +
       "protection, delegation verification, and transaction simulation.",
     mimeType: "application/json",
-    // Raw bazaar extension: mirrors the GET/query format that CDP Bazaar indexes
-    // successfully. Using queryParams field (like /api/quote) with a permissive
-    // method schema so validation passes regardless of what enrichDeclaration sets.
-    // Background: createBodyDiscoveryExtension uses enum:["POST","PUT","PATCH"] which
-    // CDP's indexer appears to silently reject. GET query-style extensions ARE indexed
-    // (confirmed: both /api/quote here and x402-api.aubr.ai/api/chat which uses
-    // method:"GET" even for a POST endpoint).
+    serviceName: "Rigoblock",
+    tags: ["defi", "trading", "rigoblock", "vault", "swap", "uniswap", "0x", "bridge", "lp", "staking"],
+    iconUrl: "https://trader.rigoblock.com/favicon.png",
+    // Bazaar discovery extension: declared with the official SDK helper so
+    // inputSchema is a real JSON Schema rather than a description map. The
+    // bazaarResourceServerExtension enriches the HTTP method at request time.
     extensions: {
-      bazaar: {
-        info: {
-          name: "Rigoblock",
-          input: {
-            type: "http",
-            method: "GET",
-            queryParams: {
-              messages: "Array of {role, content} chat messages (POST body)",
-              vaultAddress: "Rigoblock vault contract address (POST body)",
-              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130) (POST body)",
-              executionMode: "manual | delegated, default manual (POST body)",
-              confirmExecution: "Set true for auto-execute in delegated mode (POST body)",
-              operatorAddress: "Vault owner wallet address (POST body)",
-              authSignature: "EIP-191 signature signed by operatorAddress (POST body)",
-            },
-          },
-          output: {
-            type: "json",
-            example: {
-              reply: "I'll swap 1 ETH for USDC on Arbitrum via 0x",
-              transaction: {
-                to: "0xVaultAddress",
-                data: "0xcalldata",
-                value: "0x0",
-                chainId: 42161,
-              },
-            },
-          },
+      ...declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          messages: [{ role: "user", content: "Swap 1 ETH for USDC on Base" }],
+          vaultAddress: "0x0000000000000000000000000000000000000000",
+          chainId: 8453,
+          executionMode: "manual",
+          confirmExecution: false,
+          operatorAddress: "0x0000000000000000000000000000000000000000",
+          authSignature: "0x",
+          authTimestamp: 1741700000000,
         },
-        schema: {
-          $schema: "https://json-schema.org/draft/2020-12/schema",
+        inputSchema: {
           type: "object",
           properties: {
-            input: {
-              type: "object",
-              properties: {
-                type: { type: "string", const: "http" },
-                method: { type: "string" },
-                queryParams: { type: "object" },
+            messages: {
+              type: "array",
+              description: "Array of {role, content} chat messages",
+              items: {
+                type: "object",
+                properties: { role: { type: "string" }, content: { type: "string" } },
+                required: ["role", "content"],
               },
-              required: ["type"],
-              additionalProperties: false,
             },
-            output: {
-              type: "object",
-              properties: {
-                type: { type: "string" },
-                example: { type: "object" },
-              },
-              required: ["type"],
+            vaultAddress: {
+              type: "string",
+              description: "Rigoblock vault contract address (optional in manual mode)",
+            },
+            chainId: {
+              type: "integer",
+              description: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
+            },
+            executionMode: {
+              type: "string",
+              enum: ["manual", "delegated"],
+              description: "manual returns unsigned calldata; delegated can auto-execute",
+            },
+            confirmExecution: {
+              type: "boolean",
+              description: "Set true for auto-execute in delegated mode",
+            },
+            operatorAddress: {
+              type: "string",
+              description: "Vault owner wallet address (required for delegated execution)",
+            },
+            authSignature: {
+              type: "string",
+              description: "EIP-191 signature signed by operatorAddress",
+            },
+            authTimestamp: {
+              type: "integer",
+              description: "Unix timestamp when the auth message was signed",
             },
           },
-          required: ["input"],
+          required: ["messages"],
         },
-      },
+        output: {
+          example: {
+            reply: "I'll swap 1 ETH for USDC on Base via Uniswap",
+            transaction: {
+              to: "0xVaultAddress",
+              data: "0xcalldata",
+              value: "0x0",
+              chainId: 8453,
+            },
+          },
+          schema: {
+            type: "object",
+            properties: {
+              reply: { type: "string" },
+              transaction: { type: "object" },
+              transactions: { type: "array" },
+              executionResult: { type: "object" },
+              executionResults: { type: "array" },
+            },
+          },
+        },
+      }),
     },
   },
   "GET /api/quote": {
@@ -184,59 +207,83 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       "DEX price quote across 7 chains (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain). " +
       "Returns sell/buy amounts, price, routing, and gas estimate.",
     mimeType: "application/json",
+    serviceName: "Rigoblock",
+    tags: ["defi", "trading", "rigoblock", "vault", "swap", "uniswap", "0x", "bridge", "lp", "staking"],
+    iconUrl: "https://trader.rigoblock.com/favicon.png",
     extensions: {
-      bazaar: {
-        info: {
-          name: "Rigoblock",
-          input: {
-            type: "http",
-            method: "GET",
-            queryParams: {
-              sell: "Token to sell (ETH, USDC, WBTC, or contract address)",
-              buy: "Token to buy (ETH, USDC, WBTC, or contract address)",
-              amount: "Amount to sell (human-readable, e.g. '1' for 1 ETH)",
-              chain: "Chain name or ID (e.g. 'base', '8453', 'arbitrum', '42161')",
-            },
-          },
-          output: {
-            type: "json",
-            example: {
-              sell: "1 ETH",
-              buy: "2079.54 USDC",
-              price: "1 ETH = 2079.54 USDC",
-              routing: "CLASSIC",
-              gasFeeUSD: "0.0024",
-              gasLimit: "394000",
-              chainId: 8453,
-            },
-          },
+      ...declareDiscoveryExtension({
+        input: {
+          sell: "ETH",
+          buy: "USDC",
+          amount: "1",
+          chain: "8453",
         },
-        schema: {
-          $schema: "https://json-schema.org/draft/2020-12/schema",
+        inputSchema: {
           type: "object",
           properties: {
-            input: {
-              type: "object",
-              properties: {
-                type: { type: "string", const: "http" },
-                method: { type: "string" },
-                queryParams: { type: "object" },
-              },
-              required: ["type"],
-              additionalProperties: false,
+            sell: {
+              type: "string",
+              description: "Token to sell (ETH, USDC, WBTC, or contract address)",
             },
-            output: {
-              type: "object",
-              properties: {
-                type: { type: "string" },
-                example: { type: "object" },
-              },
-              required: ["type"],
+            buy: {
+              type: "string",
+              description: "Token to buy (ETH, USDC, WBTC, or contract address)",
+            },
+            amount: {
+              type: "string",
+              description: "Amount to sell (human-readable, e.g. '1' for 1 ETH)",
+            },
+            chain: {
+              type: "string",
+              description: "Chain name or ID (e.g. 'base', '8453', 'arbitrum', '42161')",
+            },
+            vault: {
+              type: "string",
+              description: "Optional Rigoblock vault address for gas estimation",
+            },
+            slippage: {
+              type: "string",
+              description: "Optional slippage tolerance in basis points (e.g. '100' for 1%)",
+            },
+            operator: {
+              type: "string",
+              description: "Optional operator address for browser auth bypass",
+            },
+            sig: {
+              type: "string",
+              description: "Optional EIP-191 signature for browser auth bypass",
+            },
+            ts: {
+              type: "string",
+              description: "Optional signature timestamp for browser auth bypass",
             },
           },
-          required: ["input"],
+          required: ["sell", "buy", "amount"],
         },
-      },
+        output: {
+          example: {
+            sell: "1 ETH",
+            buy: "2079.54 USDC",
+            price: "1 ETH = 2079.54 USDC",
+            routing: "CLASSIC",
+            gasFeeUSD: "0.0024",
+            gasLimit: "394000",
+            chainId: 8453,
+          },
+          schema: {
+            type: "object",
+            properties: {
+              sell: { type: "string" },
+              buy: { type: "string" },
+              price: { type: "string" },
+              routing: { type: "string" },
+              gasFeeUSD: { type: "string" },
+              gasLimit: { type: "string" },
+              chainId: { type: "integer" },
+            },
+          },
+        },
+      }),
     },
   },
   "POST /api/quote/uniswap": {
@@ -253,59 +300,82 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       "Uniswap Trading API quote with on-chain oracle price comparison. Drop-in proxy for Uniswap /quote " +
       "— same request body, response includes priceFeedExists, deltaBps, and oracleAmount.",
     mimeType: "application/json",
+    serviceName: "Rigoblock",
+    tags: ["defi", "trading", "rigoblock", "vault", "swap", "uniswap", "0x", "bridge", "lp", "staking"],
+    iconUrl: "https://trader.rigoblock.com/favicon.png",
     extensions: {
-      bazaar: {
-        info: {
-          name: "Rigoblock",
-          input: {
-            type: "http",
-            method: "POST",
-            queryParams: {
-              type: "EXACT_INPUT or EXACT_OUTPUT",
-              amount: "Amount in base units (e.g. '1000000000000000000')",
-              tokenIn: "Token to sell (address or symbol)",
-              tokenOut: "Token to buy (address or symbol)",
-              tokenInChainId: "Chain ID (e.g. 8453)",
-              tokenOutChainId: "Chain ID (e.g. 8453)",
-              swapper: "Swapper address (required by Uniswap Trading API)",
-            },
-          },
-          output: {
-            type: "json",
-            example: {
-              routing: "CLASSIC",
-              priceFeedExists: true,
-              deltaBps: 12,
-              oracleAmount: "2079548076",
-            },
-          },
+      ...declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          type: "EXACT_INPUT",
+          amount: "1000000000000000000",
+          tokenIn: "0x0000000000000000000000000000000000000000",
+          tokenOut: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          tokenInChainId: 8453,
+          tokenOutChainId: 8453,
+          swapper: "0x0000000000000000000000000000000000000000",
         },
-        schema: {
-          $schema: "https://json-schema.org/draft/2020-12/schema",
+        inputSchema: {
           type: "object",
           properties: {
-            input: {
-              type: "object",
-              properties: {
-                type: { type: "string", const: "http" },
-                method: { type: "string" },
-                queryParams: { type: "object" },
-              },
-              required: ["type"],
-              additionalProperties: false,
+            type: {
+              type: "string",
+              enum: ["EXACT_INPUT", "EXACT_OUTPUT"],
+              description: "Quote type",
             },
-            output: {
-              type: "object",
-              properties: {
-                type: { type: "string" },
-                example: { type: "object" },
-              },
-              required: ["type"],
+            amount: {
+              type: "string",
+              description: "Amount in base units (e.g. '1000000000000000000')",
+            },
+            tokenIn: {
+              type: "string",
+              description: "Token to sell (address or symbol)",
+            },
+            tokenOut: {
+              type: "string",
+              description: "Token to buy (address or symbol)",
+            },
+            tokenInChainId: {
+              type: "integer",
+              description: "Chain ID for tokenIn (e.g. 8453)",
+            },
+            tokenOutChainId: {
+              type: "integer",
+              description: "Chain ID for tokenOut (e.g. 8453)",
+            },
+            swapper: {
+              type: "string",
+              description: "Swapper address (required by Uniswap Trading API)",
             },
           },
-          required: ["input"],
+          required: [
+            "type",
+            "amount",
+            "tokenIn",
+            "tokenOut",
+            "tokenInChainId",
+            "tokenOutChainId",
+            "swapper",
+          ],
         },
-      },
+        output: {
+          example: {
+            routing: "CLASSIC",
+            priceFeedExists: true,
+            deltaBps: 12,
+            oracleAmount: "2079548076",
+          },
+          schema: {
+            type: "object",
+            properties: {
+              routing: { type: "string" },
+              priceFeedExists: { type: "boolean" },
+              deltaBps: { type: "integer" },
+              oracleAmount: { type: "string" },
+            },
+          },
+        },
+      }),
     },
   },
   "GET /api/quote/0x": {
@@ -322,59 +392,71 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       "0x API v2 quote with on-chain oracle price comparison. Drop-in proxy for 0x /swap/allowance-holder/quote " +
       "— same query parameters, response includes priceFeedExists, deltaBps, and oracleAmount.",
     mimeType: "application/json",
+    serviceName: "Rigoblock",
+    tags: ["defi", "trading", "rigoblock", "vault", "swap", "uniswap", "0x", "bridge", "lp", "staking"],
+    iconUrl: "https://trader.rigoblock.com/favicon.png",
     extensions: {
-      bazaar: {
-        info: {
-          name: "Rigoblock",
-          input: {
-            type: "http",
-            method: "GET",
-            queryParams: {
-              chainId: "Chain ID (e.g. 8453)",
-              sellToken: "Token to sell (address or symbol)",
-              buyToken: "Token to buy (address or symbol)",
-              sellAmount: "Amount to sell in base units. Provide either sellAmount (exact-input) or buyAmount (exact-output).",
-              buyAmount: "Amount to buy in base units. Provide either sellAmount (exact-input) or buyAmount (exact-output).",
-              slippageBps: "Slippage tolerance in basis points (e.g. 100 for 1%)",
-              taker: "Address that will execute the swap",
-            },
-          },
-          output: {
-            type: "json",
-            example: {
-              buyAmount: "2079548076",
-              priceFeedExists: true,
-              deltaBps: -8,
-              oracleAmount: "2081500000",
-            },
-          },
+      ...declareDiscoveryExtension({
+        input: {
+          chainId: "8453",
+          sellToken: "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+          buyToken: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          sellAmount: "1000000000000000000",
+          slippageBps: "100",
+          taker: "0x0000000000000000000000000000000000000000",
         },
-        schema: {
-          $schema: "https://json-schema.org/draft/2020-12/schema",
+        inputSchema: {
           type: "object",
           properties: {
-            input: {
-              type: "object",
-              properties: {
-                type: { type: "string", const: "http" },
-                method: { type: "string" },
-                queryParams: { type: "object" },
-              },
-              required: ["type"],
-              additionalProperties: false,
+            chainId: {
+              type: "string",
+              description: "Chain ID (e.g. '8453')",
             },
-            output: {
-              type: "object",
-              properties: {
-                type: { type: "string" },
-                example: { type: "object" },
-              },
-              required: ["type"],
+            sellToken: {
+              type: "string",
+              description: "Token to sell (address or symbol)",
+            },
+            buyToken: {
+              type: "string",
+              description: "Token to buy (address or symbol)",
+            },
+            sellAmount: {
+              type: "string",
+              description: "Amount to sell in base units. Provide either sellAmount (exact-input) or buyAmount (exact-output).",
+            },
+            buyAmount: {
+              type: "string",
+              description: "Amount to buy in base units. Provide either sellAmount (exact-input) or buyAmount (exact-output).",
+            },
+            slippageBps: {
+              type: "string",
+              description: "Slippage tolerance in basis points (e.g. '100' for 1%)",
+            },
+            taker: {
+              type: "string",
+              description: "Address that will execute the swap",
             },
           },
-          required: ["input"],
+          required: ["chainId", "sellToken", "buyToken"],
         },
-      },
+        output: {
+          example: {
+            buyAmount: "2079548076",
+            priceFeedExists: true,
+            deltaBps: -8,
+            oracleAmount: "2081500000",
+          },
+          schema: {
+            type: "object",
+            properties: {
+              buyAmount: { type: "string" },
+              priceFeedExists: { type: "boolean" },
+              deltaBps: { type: "integer" },
+              oracleAmount: { type: "string" },
+            },
+          },
+        },
+      }),
     },
   },
   "POST /api/oracle/refresh": {
@@ -392,69 +474,73 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       "dedicated Uniswap V4 pool to create a fresh price observation and fix a stale TWAP feed. " +
       "Use when the Swap Shield blocks a trade due to oracle price divergence.",
     mimeType: "application/json",
+    serviceName: "Rigoblock",
+    tags: ["defi", "trading", "rigoblock", "vault", "swap", "uniswap", "0x", "bridge", "lp", "staking"],
+    iconUrl: "https://trader.rigoblock.com/favicon.png",
     extensions: {
-      bazaar: {
-        info: {
-          name: "Rigoblock",
-          input: {
-            type: "http",
-            method: "POST",
-            queryParams: {
-              token: "ERC-20 token symbol or address whose oracle feed is stale (e.g. 'GRG', 'USDC'). Never the native token.",
-              tokenIn: "Token the trader pays: the chain's native token (ETH/POL/BNB) or the ERC-20 'token'.",
-              tokenOut: "Token the trader receives: the chain's native token (ETH/POL/BNB) or the ERC-20 'token'.",
-              amount: "Exact INPUT amount in tokenIn units (e.g. '0.001'). Required; no default.",
-              chainId: "EVM chain ID where the oracle pool lives (e.g. 42161, 8453)",
-            },
-          },
-          output: {
-            type: "json",
-            example: {
-              transaction: {
-                to: "0xUniversalRouter",
-                data: "0xcalldata",
-                value: "0x38d7ea4c68000",
-                chainId: 42161,
-                gas: "0x61a80",
-                description: "Oracle pool refresh: swap ETH → GRG on BackgeoOracle V4 pool",
-              },
-              poolInfo: {
-                oracle: "0x3043e182047F8696dFE483535785ed1C3681baC4",
-                currency0: "0x0000000000000000000000000000000000000000",
-                currency1: "0x4De83a33d0d24B9d3C33A67A844A72b41d2E8e86",
-                tokenSymbol: "GRG",
-                poolId: "0xabc...",
-                cardinality: 1,
-              },
-            },
-          },
+      ...declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          token: "GRG",
+          tokenIn: "ETH",
+          tokenOut: "GRG",
+          amount: "0.001",
+          chainId: 8453,
         },
-        schema: {
-          $schema: "https://json-schema.org/draft/2020-12/schema",
+        inputSchema: {
           type: "object",
           properties: {
-            input: {
-              type: "object",
-              properties: {
-                type: { type: "string", const: "http" },
-                method: { type: "string" },
-                queryParams: { type: "object" },
-              },
-              required: ["type"],
-              additionalProperties: false,
+            token: {
+              type: "string",
+              description: "ERC-20 token symbol or address whose oracle feed is stale. Never the native token.",
             },
-            output: {
-              type: "object",
-              properties: {
-                type: { type: "string" },
-                example: { type: "object" },
-              },
-              required: ["type"],
+            tokenIn: {
+              type: "string",
+              description: "Token the trader pays: the chain native token (ETH/POL/BNB) or the ERC-20 'token'.",
+            },
+            tokenOut: {
+              type: "string",
+              description: "Token the trader receives: the chain native token (ETH/POL/BNB) or the ERC-20 'token'.",
+            },
+            amount: {
+              type: "string",
+              description: "Exact INPUT amount in tokenIn units (e.g. '0.001'). Required; no default.",
+            },
+            chainId: {
+              type: "integer",
+              description: "EVM chain ID where the oracle pool lives (e.g. 42161, 8453)",
             },
           },
-          required: ["input"],
+          required: ["token", "tokenIn", "tokenOut", "amount", "chainId"],
         },
-      },
+        output: {
+          example: {
+            transaction: {
+              to: "0xUniversalRouter",
+              data: "0xcalldata",
+              value: "0x38d7ea4c68000",
+              chainId: 42161,
+              gas: "0x61a80",
+              description: "Oracle pool refresh: swap ETH → GRG on BackgeoOracle V4 pool",
+            },
+            poolInfo: {
+              oracle: "0x3043e182047F8696dFE483535785ed1C3681baC4",
+              currency0: "0x0000000000000000000000000000000000000000",
+              currency1: "0x4De83a33d0d24B9d3C33A67A844A72b41d2E8e86",
+              tokenSymbol: "GRG",
+              poolId: "0xabc...",
+              cardinality: 1,
+            },
+          },
+          schema: {
+            type: "object",
+            properties: {
+              transaction: { type: "object" },
+              poolInfo: { type: "object" },
+            },
+          },
+        },
+      }),
     },
   },
   "GET /api/tools": {
@@ -471,58 +557,40 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       "Rigoblock DeFi tool discovery. Returns the full catalog with JSON schemas, categories, " +
       "and access requirements for all direct-invocation tools.",
     mimeType: "application/json",
+    serviceName: "Rigoblock",
+    tags: ["defi", "trading", "rigoblock", "vault", "swap", "uniswap", "0x", "bridge", "lp", "staking"],
+    iconUrl: "https://trader.rigoblock.com/favicon.png",
     extensions: {
-      bazaar: {
-        info: {
-          name: "Rigoblock",
-          input: {
-            type: "http",
-            method: "GET",
-            queryParams: {},
-          },
-          output: {
-            type: "json",
-            example: {
-              toolCount: 41,
-              tools: [
-                {
-                  name: "get_swap_quote",
-                  description: "Get a price-only quote...",
-                  category: "Spot Trading",
-                  parameters: { type: "object", properties: {} },
-                  requiresOperatorAuth: false,
-                  readOnly: true,
-                },
-              ],
-            },
-          },
-        },
-        schema: {
-          $schema: "https://json-schema.org/draft/2020-12/schema",
+      ...declareDiscoveryExtension({
+        input: {},
+        inputSchema: {
           type: "object",
-          properties: {
-            input: {
-              type: "object",
-              properties: {
-                type: { type: "string", const: "http" },
-                method: { type: "string" },
-                queryParams: { type: "object" },
+          properties: {},
+          required: [],
+        },
+        output: {
+          example: {
+            toolCount: 41,
+            tools: [
+              {
+                name: "get_swap_quote",
+                description: "Get a price-only quote...",
+                category: "Spot Trading",
+                parameters: { type: "object", properties: {} },
+                requiresOperatorAuth: false,
+                readOnly: true,
               },
-              required: ["type"],
-              additionalProperties: false,
-            },
-            output: {
-              type: "object",
-              properties: {
-                type: { type: "string" },
-                example: { type: "object" },
-              },
-              required: ["type"],
+            ],
+          },
+          schema: {
+            type: "object",
+            properties: {
+              toolCount: { type: "integer" },
+              tools: { type: "array" },
             },
           },
-          required: ["input"],
         },
-      },
+      }),
     },
   },
   "POST /api/tools": {
@@ -538,58 +606,87 @@ export const PROTECTED_ROUTES: RoutesConfig = {
     description:
       "Rigoblock direct DeFi tool invocation. POST to /api/tools?toolName={name} with arguments object.",
     mimeType: "application/json",
+    serviceName: "Rigoblock",
+    tags: ["defi", "trading", "rigoblock", "vault", "swap", "uniswap", "0x", "bridge", "lp", "staking"],
+    iconUrl: "https://trader.rigoblock.com/favicon.png",
     extensions: {
-      bazaar: {
-        info: {
-          name: "Rigoblock",
-          input: {
-            type: "http",
-            method: "POST",
-            queryParams: {
-              toolName: "Tool name (e.g. get_swap_quote, get_vault_info, build_vault_swap)",
-              arguments: "Tool arguments object (POST body)",
-              chainId: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130) (POST body)",
-              vaultAddress: "Rigoblock vault address, optional (POST body)",
-            },
-          },
-          output: {
-            type: "json",
-            example: {
-              result: {
-                sell: "1 ETH",
-                buy: "2079.54 USDC",
-                price: "1 ETH = 2079.54 USDC",
-                chainId: 8453,
-              },
-            },
-          },
+      ...declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          toolName: "get_swap_quote",
+          arguments: { tokenIn: "ETH", tokenOut: "USDC", amountIn: "1" },
+          chainId: 8453,
+          vaultAddress: "0x0000000000000000000000000000000000000000",
         },
-        schema: {
-          $schema: "https://json-schema.org/draft/2020-12/schema",
+        inputSchema: {
           type: "object",
           properties: {
-            input: {
-              type: "object",
-              properties: {
-                type: { type: "string", const: "http" },
-                method: { type: "string" },
-                queryParams: { type: "object" },
-              },
-              required: ["type"],
-              additionalProperties: false,
+            toolName: {
+              type: "string",
+              description: "Tool name (e.g. get_swap_quote, get_vault_info, build_vault_swap)",
             },
-            output: {
+            arguments: {
               type: "object",
-              properties: {
-                type: { type: "string" },
-                example: { type: "object" },
-              },
-              required: ["type"],
+              description: "Tool arguments object",
+            },
+            chainId: {
+              type: "integer",
+              description: "EVM chain ID (1, 42161, 8453, 137, 10, 56, 130)",
+            },
+            vaultAddress: {
+              type: "string",
+              description: "Rigoblock vault address, optional",
+            },
+            operatorAddress: {
+              type: "string",
+              description: "Vault owner wallet address, optional",
+            },
+            authSignature: {
+              type: "string",
+              description: "EIP-191 signature signed by operatorAddress, optional",
+            },
+            authTimestamp: {
+              type: "integer",
+              description: "Unix timestamp when the auth message was signed, optional",
+            },
+            executionMode: {
+              type: "string",
+              enum: ["manual", "delegated"],
+              description: "manual returns unsigned calldata; delegated can auto-execute",
+            },
+            confirmExecution: {
+              type: "boolean",
+              description: "Set true for auto-execute in delegated mode",
             },
           },
-          required: ["input"],
+          required: ["toolName", "arguments", "chainId"],
         },
-      },
+        output: {
+          example: {
+            tool: "get_swap_quote",
+            message: "Quote for 1 ETH → 2079.54 USDC",
+            result: {
+              sell: "1 ETH",
+              buy: "2079.54 USDC",
+              price: "1 ETH = 2079.54 USDC",
+              chainId: 8453,
+            },
+          },
+          schema: {
+            type: "object",
+            properties: {
+              tool: { type: "string" },
+              message: { type: "string" },
+              result: { type: "object" },
+              transaction: { type: "object" },
+              executionResult: { type: "object" },
+              chainSwitch: { type: "object" },
+              suggestions: { type: "array" },
+              metadata: { type: "object" },
+            },
+          },
+        },
+      }),
     },
   },
 };
