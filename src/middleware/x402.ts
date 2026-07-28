@@ -86,6 +86,13 @@ export function isProtectedRoute(method: string, path: string): boolean {
   return `${method} ${path}` in PROTECTED_ROUTES;
 }
 
+/** Returns all HTTP methods for which a given path is registered in PROTECTED_ROUTES. */
+function getProtectedMethodsForPath(path: string): string[] {
+  return Object.keys(PROTECTED_ROUTES)
+    .filter((key) => key.endsWith(` ${path}`))
+    .map((key) => key.split(" ")[0]);
+}
+
 // ── Protected route config (v2 format) ────────────────────────────────
 
 export const PROTECTED_ROUTES: RoutesConfig = {
@@ -930,20 +937,50 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
       const path = adapter.getPath();
       const method = adapter.getMethod();
       if (path.startsWith("/api/") && !isPublicApiRoute(method, path) && !isProtectedRoute(method, path)) {
-        console.error(
-          `[x402] SECURITY BLOCK: API route ${method} ${path} is not in ` +
-          `PROTECTED_ROUTES and not in PUBLIC_API_ROUTES. Blocking request.`,
-        );
-        return c.json(
-          {
-            error: "Route not configured for access",
-            detail: `The endpoint ${method} ${path} is not registered in the payment or public route configuration. ` +
-              "This is a server configuration issue — please contact the operator.",
-          },
-          503,
-        );
+        // Some discovery validators (e.g., agentic.market) probe POST endpoints with
+        // GET requests. If the path is registered under a different method, re-process
+        // using the registered method so the probe still gets a 402 instead of 503.
+        const protectedMethods = getProtectedMethodsForPath(path);
+        if (protectedMethods.length > 0 && !protectedMethods.includes(method)) {
+          const registeredMethod = protectedMethods[0];
+          const fallbackAdapter: HTTPAdapter = {
+            ...adapter,
+            getMethod: () => registeredMethod,
+          };
+          const fallbackContext: HTTPRequestContext = {
+            adapter: fallbackAdapter,
+            path: fallbackAdapter.getPath(),
+            method: registeredMethod,
+            paymentHeader: fallbackAdapter.getHeader("x-payment"),
+          };
+          try {
+            const fallbackResult = await server.processHTTPRequest(fallbackContext);
+            if (fallbackResult.type === "payment-error") {
+              result = fallbackResult;
+            } else {
+              return next();
+            }
+          } catch (err) {
+            console.error("[x402] method fallback processing failed:", err);
+            return next();
+          }
+        } else {
+          console.error(
+            `[x402] SECURITY BLOCK: API route ${method} ${path} is not in ` +
+            `PROTECTED_ROUTES and not in PUBLIC_API_ROUTES. Blocking request.`,
+          );
+          return c.json(
+            {
+              error: "Route not configured for access",
+              detail: `The endpoint ${method} ${path} is not registered in the payment or public route configuration. ` +
+                "This is a server configuration issue — please contact the operator.",
+            },
+            503,
+          );
+        }
+      } else {
+        return next();
       }
-      return next();
     }
 
     if (result.type === "payment-error") {
