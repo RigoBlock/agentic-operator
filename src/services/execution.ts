@@ -184,13 +184,13 @@ function parseSponsoredError(_raw: string, _chainId: number, _agentAddress: stri
  * even if the RPC returns an absurd priority fee estimate.
  */
 const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }> = {
-  1:     { maxFeePerGas: parseGwei("10"),    maxPriorityFee: parseGwei("0.1") },
-  10:    { maxFeePerGas: parseGwei("1"),     maxPriorityFee: parseGwei("0.01") },
-  56:    { maxFeePerGas: parseGwei("5"),     maxPriorityFee: parseGwei("0.1") },
-  130:   { maxFeePerGas: parseGwei("0.01"),  maxPriorityFee: parseGwei("0.001") }, // Unichain
-  137:   { maxFeePerGas: parseGwei("500"),   maxPriorityFee: parseGwei("500") },
-  8453:  { maxFeePerGas: parseGwei("1"),     maxPriorityFee: parseGwei("0.01") },
-  42161: { maxFeePerGas: parseGwei("1"),     maxPriorityFee: parseGwei("0.01") },
+  1:     { maxFeePerGas: parseGwei("5"),    maxPriorityFee: parseGwei("0.02") },
+  10:    { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
+  56:    { maxFeePerGas: parseGwei("0.2"),  maxPriorityFee: parseGwei("0.1") },
+  130:   { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
+  137:   { maxFeePerGas: parseGwei("500"),  maxPriorityFee: parseGwei("100") },
+  8453:  { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
+  42161: { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
   // Testnets
   11155111: { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.1") },
   84532:   { maxFeePerGas: parseGwei("1"),    maxPriorityFee: parseGwei("0.01") },
@@ -259,17 +259,7 @@ interface FeeEstimate {
 }
 
 /**
- * Per-Worker-invocation cache for fee estimates.
- * Cloudflare Workers isolates do not reliably share in-memory state across HTTP
- * requests, so this cache is intentionally scoped to the current invocation.
- * Key: `${chainId}:${blockHash}`.
- */
-const feeEstimateCache = new Map<string, FeeEstimate>();
-
-/**
  * Estimate EIP-1559 gas fees with safety caps.
- *
- * Exported for testing the priority-fee floor logic.
  */
 export async function estimateFees(
   publicClient: PublicClient,
@@ -283,48 +273,36 @@ export async function estimateFees(
     );
   }
 
-  // ── Base fee + priority fee in parallel ──
-  // We read the actual protocol base fee, then buffer it 2× to cover
-  // ~5 blocks of 12.5% compounded increases (Ethereum max per-block bump).
   const [block, priorityFeeEstimate] = await Promise.all([
     publicClient.getBlock({ blockTag: "latest" }),
     chainId === 1
       ? Promise.resolve(parseGwei("0.01"))
-      : publicClient.estimateMaxPriorityFeePerGas().catch(() => null),
+      : publicClient.estimateMaxPriorityFeePerGas(),
   ]);
 
-  // Re-use the fee estimate for this chain+block within the same Worker invocation.
-  const feeCacheKey = `${chainId}:${block.hash}`;
-  const cached = feeEstimateCache.get(feeCacheKey);
-  if (cached) return cached;
-
-  const baseFee = block.baseFeePerGas ?? parseGwei("0");
+  // EIP-1559 blocks always include baseFeePerGas. Revert early if the node
+  // returns a pre-1559 block so we don't build an invalid transaction.
+  const baseFee = block.baseFeePerGas ?? (() => {
+    throw new ExecutionError(
+      `Latest block returned no base fee data for chain ${chainId}.`,
+      "GAS_ESTIMATION_FAILED",
+    );
+  })();
   const bufferedBaseFee = (baseFee * BASE_FEE_MULTIPLIER) / 100n;
 
-  // ── Priority fee ──
-  // Use RPC estimateMaxPriorityFeePerGas when available. L2s work fine with
-  // whatever the RPC returns. On mainnet the cap (GAS_CAPS[1].maxPriorityFee)
-  // keeps the value bounded so we don't overpay on sponsored transactions.
-  // If the RPC call fails we fall back to baseFee/10.
-  let priorityFee: bigint;
-  if (priorityFeeEstimate != null) {
-    priorityFee = priorityFeeEstimate;
-  } else {
-    priorityFee = baseFee / 10n;
-    if (priorityFee < parseGwei("0.001")) priorityFee = parseGwei("0.001");
-  }
+  // Ethereum mainnet: use a small fixed priority fee so the transaction is
+  // included quickly. The fixed value is a fraction of the total fee and is
+  // still capped by GAS_CAPS. All other chains use the RPC estimate directly.
+  const priorityFee = chainId === 1 ? parseGwei("0.01") : priorityFeeEstimate;
 
   const cappedPriorityFee = priorityFee < caps.maxPriorityFee ? priorityFee : caps.maxPriorityFee;
   const maxFee = bufferedBaseFee + cappedPriorityFee;
   const cappedMaxFee = maxFee < caps.maxFeePerGas ? maxFee : caps.maxFeePerGas;
 
-  const result: FeeEstimate = {
+  return {
     maxFeePerGas: cappedMaxFee,
     maxPriorityFeePerGas: cappedPriorityFee,
   };
-
-  feeEstimateCache.set(feeCacheKey, result);
-  return result;
 }
 
 /**
@@ -348,7 +326,23 @@ function bumpFees(fees: FeeEstimate, chainId: number): FeeEstimate {
   };
 }
 
-// ── Public API ────────────────────────────────────────────────────────
+/**
+ * Clamp a fee estimate to the chain-specific caps.
+ * Also ensures maxFeePerGas never falls below maxPriorityFeePerGas.
+ */
+function clampFees(fees: FeeEstimate, chainId: number): FeeEstimate {
+  const caps = GAS_CAPS[chainId];
+  if (!caps) return fees;
+
+  const priority = fees.maxPriorityFeePerGas < caps.maxPriorityFee
+    ? fees.maxPriorityFeePerGas
+    : caps.maxPriorityFee;
+  let maxFee = fees.maxFeePerGas;
+  if (maxFee < priority) maxFee = priority;
+  if (maxFee > caps.maxFeePerGas) maxFee = caps.maxFeePerGas;
+
+  return { maxFeePerGas: maxFee, maxPriorityFeePerGas: priority };
+}
 
 /**
  * Type guard: a transaction is "prepared" only when it has a non-zero gas limit
@@ -1107,10 +1101,6 @@ async function sponsoredAgentTransaction(
   }
 
   // ── Step 2: Fee estimate + sponsorship viability check ──
-  // We override the bundler's fee estimation with our own values (base fee from
-  // the latest block × 2, priority fee from RPC with a 0.05 gwei floor). This
-  // gives us control over the cost Alchemy sees in the UserOperation while
-  // respecting bundler minimums.
   let fees: FeeEstimate;
   try {
     fees = await estimateFees(publicClient, chainId);
@@ -1121,12 +1111,6 @@ async function sponsoredAgentTransaction(
       "GAS_ESTIMATION_FAILED",
     );
   }
-
-  // NOTE: We no longer skip sponsorship pre-emptively on mainnet. Alchemy's
-  // paymaster will either accept or reject the UserOperation. If rejected,
-  // the real error (spending limit, policy expired, etc.) is decoded below
-  // and presented to the user so they can decide: fund agent wallet,
-  // disable sponsorship, or sign manually.
 
   // ── Step 3: Execute via Alchemy Smart Wallet SDK ──
   const calls: WalletCall[] = [{
@@ -1192,17 +1176,23 @@ async function sponsoredAgentTransaction(
         errMsg.toLowerCase().includes("precheck failed");
 
       if (isFeeError && (requiredMinWei || dataPriorityFee || dataMaxFee)) {
-        // Recompute fees using the bundler's minimums
-        const newPriorityFee = dataPriorityFee
+        // Recompute fees using the bundler's minimums, then clamp to the same
+        // chain caps so a retry cannot exceed the operator's configured safety
+        // ceiling (especially on Arbitrum, where the policy is sensitive to the
+        // quoted max fee per gas).
+        const rawPriorityFee = dataPriorityFee
           || (requiredMinWei && requiredMinWei > attemptFees.maxPriorityFeePerGas ? requiredMinWei : undefined)
           || attemptFees.maxPriorityFeePerGas;
-        const newMaxFee = dataMaxFee
-          || (newPriorityFee > attemptFees.maxFeePerGas ? newPriorityFee + (newPriorityFee * 10n) / 100n : attemptFees.maxFeePerGas);
+        const rawMaxFee = dataMaxFee
+          || (rawPriorityFee > attemptFees.maxFeePerGas ? rawPriorityFee + (rawPriorityFee * 10n) / 100n : attemptFees.maxFeePerGas);
 
-        const retryFees: FeeEstimate = {
-          maxPriorityFeePerGas: newPriorityFee,
-          maxFeePerGas: newMaxFee,
-        };
+        const retryFees = clampFees(
+          {
+            maxPriorityFeePerGas: rawPriorityFee,
+            maxFeePerGas: rawMaxFee,
+          },
+          chainId,
+        );
 
         return trySponsoredCalls(retryFees, true);
       }
