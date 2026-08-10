@@ -128,7 +128,6 @@ describe("NAV Shield impact logic", () => {
     expect(result.verified).toBe(true);
     expect(result.dropPct).toBe("10.0000");
     expect(result.impactPct).toBe("-10.0000");
-    expect(result.gasUsed).toBe(100_000n);
     expect(mockSimulateCalls).toHaveBeenCalledTimes(2);
   });
 

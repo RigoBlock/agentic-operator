@@ -149,8 +149,8 @@ chat.post("/", async (c) => {
       slippageBps: body.slippageBps,
     };
 
-    // Request-scoped cache so the NAV shield can reuse the pre-swap NAV read
-    // across the calldata-build pre-check and the broadcast check.
+    // Request-scoped cache for the pre-swap NAV read so it is reused across
+    // calldata-build and broadcast in a single delegated+confirmed transaction.
     const requestEnv: Env = { ...c.env, requestCache: new Map() };
 
     // ── SSE streaming mode ──

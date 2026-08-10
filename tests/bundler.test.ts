@@ -97,6 +97,43 @@ describe("executeSponsoredCalls chain-specific routing", () => {
   });
 });
 
+describe("executeSponsoredCalls gas parameter overrides", () => {
+  it("passes gas overrides as hex strings to prepareCalls", async () => {
+    const prepareCalls = vi.fn().mockResolvedValue({ prepared: true });
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls }));
+
+    await executeSponsoredCalls(
+      AGENT_ACCOUNT,
+      8453,
+      "test-key",
+      "policy-id",
+      [CALL],
+      100_000n,
+      1_000_000_000n,
+      500_000n,
+    );
+
+    expect(prepareCalls).toHaveBeenCalledTimes(1);
+    const capabilities = prepareCalls.mock.calls[0][0].capabilities as Record<string, unknown>;
+    expect(capabilities.gasParamsOverride).toEqual({
+      callGasLimit: "0x186a0",
+      maxFeePerGas: "0x3b9aca00",
+      maxPriorityFeePerGas: "0x7a120",
+    });
+  });
+
+  it("omits gas overrides when none are provided", async () => {
+    const prepareCalls = vi.fn().mockResolvedValue({ prepared: true });
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls }));
+
+    await executeSponsoredCalls(AGENT_ACCOUNT, 8453, "test-key", "policy-id", [CALL]);
+
+    const capabilities = prepareCalls.mock.calls[0][0].capabilities as Record<string, unknown>;
+    expect(capabilities.gasParamsOverride).toBeUndefined();
+    expect(capabilities.paymasterService).toEqual({ policyId: "policy-id" });
+  });
+});
+
 describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
   it("returns a pending result when waitForCallsStatus times out", async () => {
     const timeoutError = Object.assign(new Error("Timed out while waiting for call bundle"), {
@@ -156,9 +193,9 @@ describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
 
   it("logs a warning when sendPreparedCalls returns a non-standard callId length", async () => {
     const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const longCallId = `0x${"0".repeat(63)}a${MOCK_CALL_ID.slice(2)}`;
+    const oddCallId = `0x${"0".repeat(65)}a`; // 66 hex chars — not 32 or 64 bytes
     mockCreateSmartWalletClient.mockReturnValue(
-      makeMockClient({ sendPreparedCalls: vi.fn().mockResolvedValue({ id: longCallId }) }),
+      makeMockClient({ sendPreparedCalls: vi.fn().mockResolvedValue({ id: oddCallId }) }),
     );
 
     await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "test-key", "policy-id", [CALL]);

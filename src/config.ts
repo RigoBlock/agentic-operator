@@ -115,6 +115,43 @@ export function getAlchemyNetworkSlug(chainId: number): string {
   return network;
 }
 
+export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as `0x${string}`;
+
+/** Per-chain minimum balance for the agent wallet.
+ *
+ * This is a rough UI indicator used by the /balance endpoint to show
+ * "sufficient" vs "low" in the delegation panel. The ACTUAL balance
+ * check happens at execution time using real gas estimation.
+ *
+ * L2s are extremely cheap (~$0.001-0.01 per tx), so the minimum is tiny.
+ * L1/Polygon/BSC have higher base fees.
+ */
+export const MIN_BALANCE: Record<number, bigint> = {
+  1:        500_000_000_000_000n,    // 0.0005 ETH  — L1 Ethereum
+  10:       1_000_000_000_000n,      // 0.000001 ETH — Optimism
+  56:       500_000_000_000_000n,    // 0.0005 BNB  — BSC
+  130:      1_000_000_000_000n,      // 0.000001 ETH — Unichain
+  137:      50_000_000_000_000_000n, // 0.05 POL    — Polygon
+  8453:     1_000_000_000_000n,      // 0.000001 ETH — Base
+  42161:    1_000_000_000_000n,      // 0.000001 ETH — Arbitrum
+  // Testnets
+  11155111: 500_000_000_000_000n,    // 0.0005 ETH  — Sepolia
+  84532:    1_000_000_000_000n,      // 0.000001 ETH — Base Sepolia
+};
+
+/** Block explorer transaction URLs per chain. */
+export const EXPLORER_TX_URL: Record<number, string> = {
+  1: "https://etherscan.io/tx/",
+  10: "https://optimistic.etherscan.io/tx/",
+  56: "https://bscscan.com/tx/",
+  130: "https://uniscan.xyz/tx/",
+  137: "https://polygonscan.com/tx/",
+  8453: "https://basescan.org/tx/",
+  42161: "https://arbiscan.io/tx/",
+  11155111: "https://sepolia.etherscan.io/tx/",
+  84532: "https://sepolia.basescan.org/tx/",
+};
+
 /** Native token symbol per chain. Used to derive wrapped-native mappings dynamically. */
 export const NATIVE_TOKEN: Record<number, string> = {
   1: "ETH", 10: "ETH", 130: "ETH", 8453: "ETH", 42161: "ETH",

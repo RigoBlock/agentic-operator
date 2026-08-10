@@ -198,11 +198,6 @@ export interface NavShieldResult {
    *  - undefined       — allowed, NAV verified OK
    */
   code?: 'BLOCKED' | 'TRADE_REVERTS' | 'UNVERIFIED';
-  /**
-   * Gas used by the simulated transaction, when available.
-   * Populated by the unified eth_simulateV1 path; undefined in the legacy fallback.
-   */
-  gasUsed?: bigint;
 }
 
 /** @deprecated Use NavShieldResult */
@@ -287,7 +282,6 @@ async function evaluateNavImpact(
   vaultAddress: Address,
   kv: KVNamespace | undefined,
   maxDropPct: bigint,
-  gasUsed?: bigint,
 ): Promise<NavShieldResult> {
   // If unitaryValue is 0, vault is empty — nothing to protect
   if (preNav.unitaryValue === 0n) {
@@ -299,7 +293,6 @@ async function evaluateNavImpact(
       dropPct: "0",
       impactPct: "0",
       reason: "Empty vault (unitaryValue=0)",
-      gasUsed,
     };
   }
 
@@ -353,7 +346,6 @@ async function evaluateNavImpact(
       reason: improvementPct > 0
         ? `Trade improves the pool unit price by ${improvementPct.toFixed(2)}%.`
         : "Trade holds the pool unit price unchanged.",
-      gasUsed,
     };
   }
 
@@ -391,7 +383,6 @@ async function evaluateNavImpact(
       impactPct: computeImpactPct(preNav.unitaryValue, postNav.unitaryValue),
       baselineUnitaryValue: baselineUnitaryValue?.toString(),
       reason,
-      gasUsed,
     };
   }
 
@@ -413,76 +404,7 @@ async function evaluateNavImpact(
     dropPct: dropFromRefPct.toFixed(4),
     impactPct: computeImpactPct(preNav.unitaryValue, postNav.unitaryValue),
     baselineUnitaryValue: baselineUnitaryValue?.toString(),
-    gasUsed,
   };
-}
-
-/**
- * Unified NAV shield simulation via eth_simulateV1.
- *
- * We run two simulations in parallel so they can be batched into one HTTP
- * request, but the swap is simulated from a fresh state (not warmed by a
- * preceding updateUnitaryValue call). This gives an accurate gasUsed for the
- * standalone transaction.
- *
- * Simulation 1: [updateUnitaryValue()]            — pre-swap NAV baseline
- * Simulation 2: [tx, updateUnitaryValue()]        — swap + post-swap NAV impact
- */
-async function checkNavImpactUnified(
-  publicClient: PublicClient,
-  vaultAddress: Address,
-  txData: Hex,
-  txValue: bigint,
-  executorAddress: Address,
-  chainId: number,
-  kv: KVNamespace | undefined,
-  maxDropPct: bigint,
-): Promise<NavShieldResult> {
-  const updateNavCalldata = encodeFunctionData({
-    abi: RIGOBLOCK_VAULT_ABI,
-    functionName: "updateUnitaryValue",
-  });
-
-  const preNavCall = { to: vaultAddress, data: updateNavCalldata };
-  const swapCall = { to: vaultAddress, data: txData, value: txValue };
-  const postNavCall = { to: vaultAddress, data: updateNavCalldata };
-
-  // Run both simulations concurrently. viem's HTTP transport batches independent
-  // JSON-RPC requests into a single HTTP call, so this is still one round-trip.
-  const [preSim, swapSim] = await Promise.all([
-    simulateCalls(publicClient, {
-      account: executorAddress,
-      calls: [preNavCall],
-    }),
-    simulateCalls(publicClient, {
-      account: executorAddress,
-      calls: [swapCall, postNavCall],
-    }),
-  ]);
-
-  // Pre-swap NAV
-  const preResult = preSim.results[0];
-  if (preResult.status !== "success") {
-    const errMsg = preResult.error instanceof Error ? preResult.error.message : String(preResult.error);
-    throw new Error(`Pre-swap NAV read failed: ${errMsg}`);
-  }
-  const preNav = decodeUpdateUnitaryValue(preResult.data);
-
-  // Swap execution
-  const swapResult = swapSim.results[0];
-  if (swapResult.status !== "success") {
-    return handleSwapSimulationFailure(swapResult.error, preNav.unitaryValue, chainId);
-  }
-
-  // Post-swap NAV
-  const postResult = swapSim.results[1];
-  if (postResult.status !== "success") {
-    const errMsg = postResult.error instanceof Error ? postResult.error.message : String(postResult.error);
-    throw new Error(`Post-swap NAV read failed: ${errMsg}`);
-  }
-  const postNav = decodeUpdateUnitaryValue(postResult.data);
-
-  return evaluateNavImpact(preNav, postNav, chainId, vaultAddress, kv, maxDropPct, swapResult.gasUsed);
 }
 
 /**
@@ -493,22 +415,11 @@ async function checkNavImpactUnified(
  * This gives us:
  *   - the pre-swap unitary value
  *   - whether the transaction succeeds as the executor
- *   - the gas used by the transaction
  *   - the post-swap unitary value
  *
  * RECOVERY RULE: trades that improve or hold the current unitaryValue are
  * always allowed, even when the vault is below the 24h baseline. Only trades
  * that reduce unitaryValue are subject to the maxDropPct threshold.
- *
- * @param vaultAddress - The vault contract address
- * @param txData - The encoded transaction calldata (for the vault)
- * @param txValue - ETH value sent with the tx (usually 0)
- * @param chainId - Chain ID
- * @param alchemyKey - Alchemy API key
- * @param executorAddress - Address that will actually execute the tx
- * @param kv - KV namespace for baseline storage (optional)
- * @param maxDropPct - Maximum allowed NAV drop percentage (default 10).
- * @returns NavShieldResult with allowed=true/false and optional gasUsed
  */
 export async function checkNavImpact(
   vaultAddress: Address,
@@ -523,21 +434,56 @@ export async function checkNavImpact(
   const publicClient = getClient(chainId, alchemyKey);
 
   try {
-    return await checkNavImpactUnified(
-      publicClient,
-      vaultAddress,
-      txData,
-      txValue,
-      executorAddress,
-      chainId,
-      kv,
-      maxDropPct,
-    );
+    const updateNavCalldata = encodeFunctionData({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "updateUnitaryValue",
+    });
+
+    const preNavCall = { to: vaultAddress, data: updateNavCalldata };
+    const swapCall = { to: vaultAddress, data: txData, value: txValue };
+    const postNavCall = { to: vaultAddress, data: updateNavCalldata };
+
+    // Run both simulations concurrently. viem's HTTP transport batches independent
+    // JSON-RPC requests into a single HTTP call, so this is still one round-trip.
+    const [preSim, swapSim] = await Promise.all([
+      simulateCalls(publicClient, {
+        account: executorAddress,
+        calls: [preNavCall],
+      }),
+      simulateCalls(publicClient, {
+        account: executorAddress,
+        calls: [swapCall, postNavCall],
+      }),
+    ]);
+
+    // Pre-swap NAV
+    const preResult = preSim.results[0];
+    if (preResult.status !== "success") {
+      const errMsg = preResult.error instanceof Error ? preResult.error.message : String(preResult.error);
+      throw new Error(`Pre-swap NAV read failed: ${errMsg}`);
+    }
+    const preNav = decodeUpdateUnitaryValue(preResult.data);
+
+    // Swap execution
+    const swapResult = swapSim.results[0];
+    if (swapResult.status !== "success") {
+      return handleSwapSimulationFailure(swapResult.error, preNav.unitaryValue, chainId);
+    }
+
+    // Post-swap NAV
+    const postResult = swapSim.results[1];
+    if (postResult.status !== "success") {
+      const errMsg = postResult.error instanceof Error ? postResult.error.message : String(postResult.error);
+      throw new Error(`Post-swap NAV read failed: ${errMsg}`);
+    }
+    const postNav = decodeUpdateUnitaryValue(postResult.data);
+
+    return evaluateNavImpact(preNav, postNav, chainId, vaultAddress, kv, maxDropPct);
   } catch (err) {
     // FAIL-CLOSED: any simulation failure (RPC error, timeout, unsupported method)
     // means we cannot verify NAV impact. We MUST block the transaction.
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[NavShield] ✗ BLOCKED: Could not simulate NAV impact: ${msg}`);
+    console.error(`[NavShield] BLOCKED: Could not simulate NAV impact: ${msg}`);
     return {
       allowed: false,
       verified: false,
@@ -545,7 +491,7 @@ export async function checkNavImpact(
       postNavUnitaryValue: "0",
       dropPct: "0",
       impactPct: "0",
-      reason: `Cannot simulate vault NAV impact — RPC or vault may be unreachable on chain ${chainId}: ${msg.slice(0, 300)}`,
+      reason: `Cannot simulate vault NAV impact - RPC or vault may be unreachable on chain ${chainId}: ${msg.slice(0, 300)}`,
     };
   }
 }

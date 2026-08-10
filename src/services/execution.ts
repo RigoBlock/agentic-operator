@@ -23,15 +23,13 @@ import {
   http,
   formatGwei,
   formatEther,
-  parseGwei,
   type Address,
   type Hex,
   type TransactionReceipt,
-  type PublicClient,
 } from "viem";
 import type { LocalAccount } from "viem/accounts";
 import type { Env, UnsignedTransaction, TransactionDraft, ExecutionResult, RequestContext } from "../types.js";
-import { getChain, getRpcUrl, sanitizeError } from "../config.js";
+import { getChain, getRpcUrl, sanitizeError, ZERO_ADDRESS, MIN_BALANCE, EXPLORER_TX_URL, NATIVE_TOKEN } from "../config.js";
 import { loadAgentWalletAccount } from "./agentWallet.js";
 import { getDelegationConfig, getChainDelegation } from "./delegation.js";
 import { recordGasSpend } from "../routes/gasPolicy.js";
@@ -41,308 +39,27 @@ import {
   getSponsoredCallsStatus,
   type WalletCall,
 } from "./bundler.js";
-import { checkNavImpact } from "./navGuard.js";
+import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
 import { getClient, ALCHEMY_ORIGIN } from "./rpcClient.js";
-import { getNavShieldThreshold } from "./navGuard.js";
-import { decodeRevertData, extractRevertData, getRevertDataFromError } from "./errorDecoder.js";
-
-/**
- * Parse simulation revert messages to detect common ERC20/DEX token balance issues.
- * Returns a user-friendly message if detected, otherwise null.
- */
-function parseSimulationRevert(raw: string): string | null {
-  const lower = raw.toLowerCase();
-
-  // Try to decode any raw revert hex data first — this gives the most precise reason.
-  const revertData = extractRevertData(raw);
-  if (revertData) {
-    const decoded = decodeRevertData(revertData);
-    if (decoded) {
-      // Translate common decoded errors into actionable guidance.
-      const decodedLower = decoded.toLowerCase();
-      if (
-        decodedLower.includes("erc20insufficientbalance") ||
-        decodedLower.includes("toolittlereceived") ||
-        decodedLower.includes("insufficientoutputamount") ||
-        decodedLower.includes("safetransferfrom") ||
-        decodedLower.includes("transfer amount exceeds")
-      ) {
-        return (
-          "The vault does not hold enough of the sell token for this swap. " +
-          "Check the vault's token balances and try a smaller amount."
-        );
-      }
-      if (decodedLower.includes("transactiontooold") || decodedLower.includes("deadline")) {
-        return "The swap quote has expired. Please request a fresh quote.";
-      }
-      if (
-        decodedLower.includes("toomuchrequested") ||
-        decodedLower.includes("slippage") ||
-        decodedLower.includes("minimum amount")
-      ) {
-        return "The swap would result in too much slippage. Try again with a fresh quote or smaller amount.";
-      }
-      if (decodedLower.includes("notdelegated") || decodedLower.includes("unauthorized") || decodedLower.includes("onlyowner")) {
-        return (
-          "The agent wallet is not delegated for this swap selector on the vault. " +
-          "Update your delegation settings, or sign this transaction directly from your wallet."
-        );
-      }
-      return decoded;
-    }
-  }
-
-  // Common ERC20 / Uniswap / 0x revert patterns indicating insufficient token balance
-  if (
-    lower.includes("stf") ||                             // Uniswap SafeTransferFrom
-    lower.includes("transfer amount exceeds balance") ||
-    lower.includes("transfer_from_failed") ||
-    lower.includes("insufficient balance") ||
-    lower.includes("erc20: transfer amount exceeds") ||
-    lower.includes("safetransferfrom") ||
-    lower.includes("subtraction overflow") ||             // balance underflow
-    lower.includes("ds-math-sub-underflow") ||            // MakerDAO-style SafeMath
-    lower.includes("not enough balance") ||
-    lower.includes("exceeds allowance") ||                // approval-related
-    lower.includes("v3_invalid_swap") ||                  // Uniswap V3 revert
-    lower.includes("too little received")
-  ) {
-    return (
-      "The vault does not hold enough of the sell token for this swap. " +
-      "Check the vault's token balances and try a smaller amount."
-    );
-  }
-
-  // Expired deadline
-  if (lower.includes("transaction too old") || lower.includes("deadline")) {
-    return "The swap quote has expired. Please request a fresh quote.";
-  }
-
-  // Slippage
-  if (lower.includes("too much requested") || lower.includes("slippage") || lower.includes("minimum amount")) {
-    return "The swap would result in too much slippage. Try again with a fresh quote or smaller amount.";
-  }
-
-  // GMX v2 acceptable price / execution price (includes "acceptable price", "execution price",
-  // "empty primary price", "invalid primary price", and keeper-revert variants)
-  if (
-    lower.includes("acceptable price") ||
-    lower.includes("execution price") ||
-    lower.includes("empty primary price") ||
-    lower.includes("invalid primary price") ||
-    lower.includes("primary price") ||
-    lower.includes("end of oracle")
-  ) {
-    return (
-      "The GMX order could not be executed at the required price. " +
-      "The oracle price moved beyond the 1% slippage bound before the keeper picked up the order. " +
-      "Retry the order, or wait for less volatility."
-    );
-  }
-
-  // Agent wallet has no ETH to cover gas (viem local pre-check before eth_call)
-  if (lower.includes("total cost") && lower.includes("exceeds the balance")) {
-    return (
-      "Agent wallet has insufficient ETH for gas. " +
-      "Enable gas sponsorship (Alchemy paymaster) or send a small amount of ETH to the agent wallet."
-    );
-  }
-
-  return null;
-}
-
-const NATIVE_TOKEN: Record<number, string> = {
-  1: "ETH", 10: "ETH", 130: "ETH", 8453: "ETH", 42161: "ETH",
-  56: "BNB", 137: "POL",
-  11155111: "ETH", 84532: "ETH",
-};
-
-/**
- * Parse Alchemy bundler/paymaster errors to detect rate-limit or spending-cap issues.
- * Returns a user-friendly message if the error matches, otherwise null.
- */
-/**
- * No friendly interpretations — the raw Alchemy error (in details/cause) is
- * already descriptive. Adding our own text risks being wrong (e.g. saying
- * "bundler rejected fee parameters" when the actual error is a paymaster
- * spending limit). Returns null so the caller shows only facts.
- */
-function parseSponsoredError(_raw: string, _chainId: number, _agentAddress: string, _details?: string): string | null {
-  return null;
-}
+import {
+  estimateTransactionGas,
+  clampGasFees,
+  bumpGasFees,
+  getTransactionFees,
+  RESUBMIT_FEE_BUMP_PCT,
+  type GasFees,
+} from "./gas.js";
 
 // ── Gas Safety Configuration ──────────────────────────────────────────
 
-/**
- * Hard caps on gas fees to protect agent wallet balances.
- * These are absolute maximums — the agent will NEVER pay more than this.
- *
- * IMPORTANT: The priority fee cap is the safety net against rogue values from
- * estimateMaxPriorityFeePerGas(). Unlike baseFee (set by protocol, only burned),
- * the priority fee is fully paid to the block builder — so a rogue high value
- * directly drains the agent wallet. These caps ensure bounded worst-case cost
- * even if the RPC returns an absurd priority fee estimate.
- */
-const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }> = {
-  1:     { maxFeePerGas: parseGwei("5"),    maxPriorityFee: parseGwei("0.02") },
-  10:    { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
-  56:    { maxFeePerGas: parseGwei("0.2"),  maxPriorityFee: parseGwei("0.1") },
-  130:   { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
-  137:   { maxFeePerGas: parseGwei("500"),  maxPriorityFee: parseGwei("100") },
-  8453:  { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
-  42161: { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
-  // Testnets
-  11155111: { maxFeePerGas: parseGwei("10"),  maxPriorityFee: parseGwei("0.1") },
-  84532:   { maxFeePerGas: parseGwei("1"),    maxPriorityFee: parseGwei("0.01") },
-};
-
-/**
- * Multiplier for base fee estimation.
- * 1.5x guarantees inclusion even if the base fee maxes over the next 2 blocks
- * (Ethereum allows max ~12.5% base fee increase per block).
- */
-const BASE_FEE_MULTIPLIER = 150n; // 150% = 1.5x (divided by 100)
-
 /** Maximum number of resubmission attempts */
 const MAX_RESUBMIT_ATTEMPTS = 2;
-
-/** Fee bump percentage for resubmission (10% = minimum for most clients) */
-const RESUBMIT_FEE_BUMP_PCT = 15n; // 15% bump
 
 /** Timeout for waiting for a tx receipt (ms) */
 const TX_CONFIRM_TIMEOUT_MS = 60_000;
 
 /** Fast-confirming chains (L2s, BSC) with sub-second block times */
 const FAST_CHAIN_IDS = new Set([10, 42161, 8453, 130, 56, 84532]);
-
-/**
- * Per-chain minimum balance for the agent wallet.
- *
- * This is a rough UI indicator used by the /balance endpoint to show
- * "sufficient" vs "low" in the delegation panel. The ACTUAL balance
- * check happens at execution time using real gas estimation.
- *
- * L2s are extremely cheap (~$0.001-0.01 per tx), so the minimum is tiny.
- * L1/Polygon/BSC have higher base fees.
- */
-const MIN_BALANCE: Record<number, bigint> = {
-  1:        500_000_000_000_000n,    // 0.0005 ETH  — L1 Ethereum
-  10:       1_000_000_000_000n,      // 0.000001 ETH — Optimism
-  56:       500_000_000_000_000n,    // 0.0005 BNB  — BSC
-  130:      1_000_000_000_000n,      // 0.000001 ETH — Unichain
-  137:      50_000_000_000_000_000n, // 0.05 POL    — Polygon
-  8453:     1_000_000_000_000n,      // 0.000001 ETH — Base
-  42161:    1_000_000_000_000n,      // 0.000001 ETH — Arbitrum
-  // Testnets
-  11155111: 500_000_000_000_000n,    // 0.0005 ETH  — Sepolia
-  84532:    1_000_000_000_000n,      // 0.000001 ETH — Base Sepolia
-};
-
-// ── Block explorer URLs ───────────────────────────────────────────────
-const EXPLORER_TX_URL: Record<number, string> = {
-  1: "https://etherscan.io/tx/",
-  10: "https://optimistic.etherscan.io/tx/",
-  56: "https://bscscan.com/tx/",
-  130: "https://uniscan.xyz/tx/",
-  137: "https://polygonscan.com/tx/",
-  8453: "https://basescan.org/tx/",
-  42161: "https://arbiscan.io/tx/",
-  11155111: "https://sepolia.etherscan.io/tx/",
-  84532: "https://sepolia.basescan.org/tx/",
-};
-
-// ── Fee estimation ────────────────────────────────────────────────────
-
-interface FeeEstimate {
-  maxFeePerGas: bigint;
-  maxPriorityFeePerGas: bigint;
-}
-
-/**
- * Estimate EIP-1559 gas fees with safety caps.
- */
-export async function estimateFees(
-  publicClient: PublicClient,
-  chainId: number,
-): Promise<FeeEstimate> {
-  const caps = GAS_CAPS[chainId];
-  if (!caps) {
-    throw new ExecutionError(
-      `Unsupported chain ID: ${chainId}. Gas fee caps are not configured for this chain.`,
-      "UNSUPPORTED_CHAIN",
-    );
-  }
-
-  const [block, priorityFeeEstimate] = await Promise.all([
-    publicClient.getBlock({ blockTag: "latest" }),
-    chainId === 1
-      ? Promise.resolve(parseGwei("0.01"))
-      : publicClient.estimateMaxPriorityFeePerGas(),
-  ]);
-
-  // EIP-1559 blocks always include baseFeePerGas. Revert early if the node
-  // returns a pre-1559 block so we don't build an invalid transaction.
-  const baseFee = block.baseFeePerGas ?? (() => {
-    throw new ExecutionError(
-      `Latest block returned no base fee data for chain ${chainId}.`,
-      "GAS_ESTIMATION_FAILED",
-    );
-  })();
-  const bufferedBaseFee = (baseFee * BASE_FEE_MULTIPLIER) / 100n;
-
-  // Ethereum mainnet: use a small fixed priority fee so the transaction is
-  // included quickly. The fixed value is a fraction of the total fee and is
-  // still capped by GAS_CAPS. All other chains use the RPC estimate directly.
-  const priorityFee = chainId === 1 ? parseGwei("0.01") : priorityFeeEstimate;
-
-  const cappedPriorityFee = priorityFee < caps.maxPriorityFee ? priorityFee : caps.maxPriorityFee;
-  const maxFee = bufferedBaseFee + cappedPriorityFee;
-  const cappedMaxFee = maxFee < caps.maxFeePerGas ? maxFee : caps.maxFeePerGas;
-
-  return {
-    maxFeePerGas: cappedMaxFee,
-    maxPriorityFeePerGas: cappedPriorityFee,
-  };
-}
-
-/**
- * Bump fees for resubmission (must be at least 10% higher for replacement).
- */
-function bumpFees(fees: FeeEstimate, chainId: number): FeeEstimate {
-  const caps = GAS_CAPS[chainId];
-  if (!caps) {
-    throw new ExecutionError(
-      `Unsupported chain ID: ${chainId}. Cannot bump fees for an unconfigured chain.`,
-      "UNSUPPORTED_CHAIN",
-    );
-  }
-
-  const bumpedMaxFee = fees.maxFeePerGas + (fees.maxFeePerGas * RESUBMIT_FEE_BUMP_PCT) / 100n;
-  const bumpedPriority = fees.maxPriorityFeePerGas + (fees.maxPriorityFeePerGas * RESUBMIT_FEE_BUMP_PCT) / 100n;
-
-  return {
-    maxFeePerGas: bumpedMaxFee < caps.maxFeePerGas ? bumpedMaxFee : caps.maxFeePerGas,
-    maxPriorityFeePerGas: bumpedPriority < caps.maxPriorityFee ? bumpedPriority : caps.maxPriorityFee,
-  };
-}
-
-/**
- * Clamp a fee estimate to the chain-specific caps.
- * Also ensures maxFeePerGas never falls below maxPriorityFeePerGas.
- */
-function clampFees(fees: FeeEstimate, chainId: number): FeeEstimate {
-  const caps = GAS_CAPS[chainId];
-  if (!caps) return fees;
-
-  const priority = fees.maxPriorityFeePerGas < caps.maxPriorityFee
-    ? fees.maxPriorityFeePerGas
-    : caps.maxPriorityFee;
-  let maxFee = fees.maxFeePerGas;
-  if (maxFee < priority) maxFee = priority;
-  if (maxFee > caps.maxFeePerGas) maxFee = caps.maxFeePerGas;
-
-  return { maxFeePerGas: maxFee, maxPriorityFeePerGas: priority };
-}
 
 /**
  * Type guard: a transaction is "prepared" only when it has a non-zero gas limit
@@ -356,12 +73,13 @@ function isPreparedTransaction(tx: TransactionDraft): tx is UnsignedTransaction 
 /**
  * Shared transaction finalizer: run the NAV shield and estimate gas.
  *
- * For vault-targeted transactions, a single eth_simulateV1 call (via viem's
- * simulateCalls) gives us structural validation, gas used, and pre/post NAV
- * from the address that will actually execute the tx. This replaces the
- * previous separate eth_estimateGas + operator multicall NAV simulation.
+ * For vault-targeted transactions, the NAV shield simulates the swap via
+ * eth_simulateV1 and validates the post-swap unitary value does not drop
+ * more than the allowed threshold. Gas is then estimated independently with
+ * eth_estimateGas from the executor address, so every transaction (vault or
+ * not) uses a real gas estimate.
  *
- * Non-vault transactions still use eth_estimateGas directly.
+ * Non-vault transactions skip the NAV shield but still estimate gas and fees.
  */
 export async function prepareTransaction(
   env: Env,
@@ -415,12 +133,9 @@ export async function prepareTransaction(
   const txValue = BigInt(tx.value || "0x0");
 
   // NAV shield only applies when the transaction targets the vault itself.
-  const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
   const isVaultTarget = !!ctx.vaultAddress &&
-    ctx.vaultAddress.toLowerCase() !== ZERO_ADDR &&
+    ctx.vaultAddress.toLowerCase() !== ZERO_ADDRESS &&
     tx.to.toLowerCase() === ctx.vaultAddress.toLowerCase();
-
-  let estimatedGas: bigint | undefined;
 
   if (isVaultTarget) {
     // Read operator's custom NAV shield threshold (falls back to default 10%).
@@ -438,14 +153,6 @@ export async function prepareTransaction(
       env.KV,
       storedNavThreshold ?? undefined,
     );
-
-    if (navResult.gasUsed != null) {
-      // The NAV shield simulates the swap in a fresh state (not warmed by a
-      // preceding updateUnitaryValue call), so its gasUsed is a good estimate
-      // of standalone net consumption. We apply the same +25% buffer we use for
-      // eth_estimateGas.
-      estimatedGas = navResult.gasUsed;
-    }
 
     if (!navResult.allowed) {
       if (navResult.code === "TRADE_REVERTS") {
@@ -471,36 +178,31 @@ export async function prepareTransaction(
     }
   }
 
-  // If the NAV shield didn't return gas (legacy fallback or non-vault tx),
-  // estimate gas directly from the executor.
-  if (estimatedGas == null) {
-    try {
-      estimatedGas = await publicClient.estimateGas({
-        account: executor,
-        to: tx.to,
-        data: tx.data,
-        value: txValue,
-      });
-    } catch (estErr) {
-      const msg = estErr instanceof Error ? estErr.message : String(estErr);
-      const revertData = getRevertDataFromError(estErr);
-      const decodedRevert = revertData ? decodeRevertData(revertData) : null;
-      const friendly = decodedRevert || parseSimulationRevert(msg);
-      if (friendly || msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert")) {
-        throw new ExecutionError(
-          friendly ||
-          `Transaction simulation failed — the transaction would revert on-chain. The RPC did not return a revert reason.`,
-          "SIMULATION_FAILED",
-        );
-      }
-      throw new ExecutionError(
-        `Gas estimation failed: ${sanitizeError(msg)}`,
-        "GAS_ESTIMATION_FAILED",
-      );
+  // Estimate gas units and EIP-1559 fees directly from the executor for every transaction.
+  let gasEstimate: bigint;
+  let fees: GasFees;
+  try {
+    const result = await estimateTransactionGas(
+      publicClient,
+      tx.chainId,
+      { account: executor, to: tx.to, data: tx.data, value: txValue },
+    );
+    gasEstimate = result.gas;
+    fees = result.fees;
+  } catch (estErr) {
+    const msg = estErr instanceof Error ? estErr.message : String(estErr);
+    if (msg.toLowerCase().includes("gas estimation failed")) {
+      throw new ExecutionError(`Gas estimation failed: ${sanitizeError(msg)}`, "GAS_ESTIMATION_FAILED");
     }
+    throw new ExecutionError(
+      sanitizeError(msg) || "Transaction simulation failed — the transaction would revert on-chain.",
+      "SIMULATION_FAILED",
+    );
   }
 
-  tx.gas = `0x${(estimatedGas + (estimatedGas * 25n) / 100n).toString(16)}`;
+  tx.gas = `0x${(gasEstimate + (gasEstimate * 25n) / 100n).toString(16)}`;
+  tx.maxFeePerGas = `0x${fees.maxFeePerGas.toString(16)}` as Hex;
+  tx.maxPriorityFeePerGas = `0x${fees.maxPriorityFeePerGas.toString(16)}` as Hex;
 
   // Non-vault transactions are not subject to the NAV shield.
   if (!isVaultTarget) {
@@ -777,8 +479,6 @@ export async function executeViaDelegation(
             if (gasInfo.callGasLimit) parts.push(`gas limit: ${gasInfo.callGasLimit}`);
             if (gasInfo.ourMaxFeePerGasGwei) parts.push(`our maxFeePerGas: ${gasInfo.ourMaxFeePerGasGwei} gwei`);
             if (gasInfo.ourMaxPriorityFeePerGasGwei) parts.push(`our maxPriorityFeePerGas: ${gasInfo.ourMaxPriorityFeePerGasGwei} gwei`);
-            if (gasInfo.alchemyMaxFeePerGasGwei) parts.push(`Alchemy maxFeePerGas: ${gasInfo.alchemyMaxFeePerGasGwei} gwei`);
-            if (gasInfo.alchemyMaxPriorityFeePerGasGwei) parts.push(`Alchemy maxPriorityFeePerGas: ${gasInfo.alchemyMaxPriorityFeePerGasGwei} gwei`);
             if (gasInfo.maxCostEth) parts.push(`max cost: ${gasInfo.maxCostEth} ${token}`);
             if (parts.length) gasBreakdown = `\n[${parts.join(" · ")}]`;
           }
@@ -863,15 +563,15 @@ export async function executeViaDelegation(
 /**
  * Broadcast a transaction from the agent wallet directly to the vault.
  *
- * Gas is pre-computed by prepareTransaction() and reused here. This function
- * only estimates fees, checks balance, broadcasts, and waits for confirmation.
+ * Gas and EIP-1559 fee values are pre-computed by prepareTransaction() and
+ * reused here. This function checks balance, broadcasts, and waits for
+ * confirmation with automatic resubmission.
  *
  * Steps:
  *   1. Check agent balance
- *   2. Reuse pre-computed gas limit (tx.gas)
- *   3. Estimate fees with safety caps
- *   4. Send the transaction
- *   5. Wait for confirmation with automatic resubmission
+ *   2. Reuse pre-computed gas limit (tx.gas) and fee values
+ *   3. Send the transaction
+ *   4. Wait for confirmation with automatic resubmission
  */
 async function broadcastAgentTransaction(
   agentAccount: LocalAccount,
@@ -887,13 +587,15 @@ async function broadcastAgentTransaction(
   const txValue = BigInt(tx.value);
 
   // ── Step 1: Parallelize independent pre-broadcast reads ──
-  // Balance, fee estimate, and nonce are independent; fetch them together.
-  const [balance, initialFees, nonce] = await Promise.all([
+  // Balance and nonce are independent; the fee estimate is already attached
+  // by prepareTransaction() so the same EIP-1559 values are used for display
+  // and broadcast. If it is missing the transaction was not finalized.
+  const [balance, nonce] = await Promise.all([
     publicClient.getBalance({ address: agentAccount.address }),
-    estimateFees(publicClient, chainId),
     publicClient.getTransactionCount({ address: agentAccount.address }),
   ]);
-  let fees = initialFees;
+
+  let fees = getTransactionFees(tx, chainId);
 
   if (txValue > 0n && balance < txValue) {
     throw new ExecutionError(
@@ -986,7 +688,7 @@ async function broadcastAgentTransaction(
       }
 
       // Bump fees and resubmit with same nonce
-      fees = bumpFees(fees, chainId);
+      fees = bumpGasFees(fees, chainId);
 
 
       try {
@@ -1030,8 +732,6 @@ async function broadcastAgentTransaction(
     effectiveGasPrice = receipt.effectiveGasPrice.toString();
     const cost = receipt.gasUsed * receipt.effectiveGasPrice;
     gasCostEth = formatEther(cost);
-    const status = receipt.status === "success" ? "Confirmed" : "REVERTED";
-
   }
 
   return {
@@ -1100,17 +800,10 @@ async function sponsoredAgentTransaction(
     );
   }
 
-  // ── Step 2: Fee estimate + sponsorship viability check ──
-  let fees: FeeEstimate;
-  try {
-    fees = await estimateFees(publicClient, chainId);
-  } catch (feeErr) {
-    const msg = feeErr instanceof Error ? feeErr.message : String(feeErr);
-    throw new ExecutionError(
-      `Fee estimation failed — RPC may be unreachable on chain ${chainId}. Details: ${sanitizeError(msg)}`,
-      "GAS_ESTIMATION_FAILED",
-    );
-  }
+  // ── Step 2: Reuse the fee values attached by prepareTransaction() ──
+  // The same EIP-1559 values must be used for display and broadcast. If the
+  // transaction was not finalized through prepareTransaction(), refuse to execute.
+  const fees = getTransactionFees(tx, chainId);
 
   // ── Step 3: Execute via Alchemy Smart Wallet SDK ──
   const calls: WalletCall[] = [{
@@ -1120,20 +813,16 @@ async function sponsoredAgentTransaction(
   }];
 
   // Capture gas params so the caller can verify Alchemy's rejection reason.
-  // Also captures Alchemy's returned fee values from -32602 data fields so
-  // the user can compare "what we sent" vs "what Alchemy expects".
-  const buildGasInfo = (overrideFees?: FeeEstimate, alchemyFees?: { maxFee?: bigint; maxPriorityFee?: bigint }) => ({
+  const buildGasInfo = (overrideFees?: GasFees) => ({
     callGasLimit: callGasLimit ? callGasLimit.toString() : undefined,
     ourMaxFeePerGasGwei: formatGwei(overrideFees ? overrideFees.maxFeePerGas : fees.maxFeePerGas),
     ourMaxPriorityFeePerGasGwei: formatGwei(overrideFees ? overrideFees.maxPriorityFeePerGas : fees.maxPriorityFeePerGas),
-    alchemyMaxFeePerGasGwei: alchemyFees?.maxFee ? formatGwei(alchemyFees.maxFee) : undefined,
-    alchemyMaxPriorityFeePerGasGwei: alchemyFees?.maxPriorityFee ? formatGwei(alchemyFees.maxPriorityFee) : undefined,
     maxCostEth: callGasLimit
       ? (Number(callGasLimit * (overrideFees ? overrideFees.maxFeePerGas : fees.maxFeePerGas)) / 1e18).toFixed(6)
       : undefined,
   });
 
-  async function trySponsoredCalls(attemptFees: FeeEstimate, isRetry: boolean): Promise<ReturnType<typeof executeSponsoredCalls>> {
+  async function trySponsoredCalls(attemptFees: GasFees, isRetry: boolean): Promise<ReturnType<typeof executeSponsoredCalls>> {
     try {
       return await executeSponsoredCalls(
         agentAccount,
@@ -1186,7 +875,7 @@ async function sponsoredAgentTransaction(
         const rawMaxFee = dataMaxFee
           || (rawPriorityFee > attemptFees.maxFeePerGas ? rawPriorityFee + (rawPriorityFee * 10n) / 100n : attemptFees.maxFeePerGas);
 
-        const retryFees = clampFees(
+        const retryFees = clampGasFees(
           {
             maxPriorityFeePerGas: rawPriorityFee,
             maxFeePerGas: rawMaxFee,
@@ -1197,11 +886,7 @@ async function sponsoredAgentTransaction(
         return trySponsoredCalls(retryFees, true);
       }
 
-      // Attach Alchemy's returned fee values so the user can compare
-      const alchemyFees = (dataMaxFee || dataPriorityFee)
-        ? { maxFee: dataMaxFee, maxPriorityFee: dataPriorityFee }
-        : undefined;
-      (err as any)._gasInfo = buildGasInfo(attemptFees, alchemyFees);
+      (err as any)._gasInfo = buildGasInfo(attemptFees);
       throw err;
     }
   }
@@ -1237,17 +922,11 @@ async function sponsoredAgentTransaction(
 
   // ── Step 4: Map result to ExecutionResult ──
   const explorerBase = EXPLORER_TX_URL[chainId];
-  const receiptTxHash = receipt?.transactionHash || ("0x" as Hex);
-  const explorerUrl = explorerBase && receiptTxHash !== "0x"
-    ? `${explorerBase}${receiptTxHash}`
-    : undefined;
 
   if (result.status === "success" && receipt) {
     const gasUsed = receipt.gasUsed.toString();
     const isSuccess = receipt.status === "success";
-    const statusLabel = isSuccess ? "Confirmed (sponsored)" : "REVERTED";
-
-
+    const explorerUrl = explorerBase ? `${explorerBase}${receipt.transactionHash}` : undefined;
 
     return {
       txHash: receipt.transactionHash,
@@ -1276,32 +955,17 @@ async function sponsoredAgentTransaction(
     );
   }
 
-  // Pending / status timeout — submission was accepted but we could not
-  // confirm the on-chain status in time. If we have an EVM receipt hash,
-  // return it; otherwise expose the callId (UserOp hash) as userOpHash so
-  // downstream formatters/status checks can label it correctly and poll
-  // wallet_getCallsStatus to map it to the eventual EVM txHash.
-  if (receiptTxHash !== "0x") {
-    return {
-      txHash: receiptTxHash,
-      chainId,
-      confirmed: false,
-      reverted: false,
-      explorerUrl,
-      sponsored: true,
-      userOpHash: result.callId as Hex,
-      gasCostEth: "0 (sponsored)",
-      resubmitAttempts: 0,
-    };
-  }
+  // Pending / status timeout — submission was accepted but we could not confirm
+  // the on-chain status in time. Do NOT expose the UserOp hash as a transaction
+  // hash to the user; it is only a bundler identifier. The frontend/formatter
+  // shows "submitted, waiting for on-chain hash" and polls via callId.
   return {
-    txHash: result.callId as Hex,
     chainId,
     confirmed: false,
     reverted: false,
     explorerUrl: undefined,
     sponsored: true,
-    userOpHash: result.callId as Hex,
+    callId: result.callId as Hex,
     gasCostEth: "0 (sponsored — status check timed out)",
     resubmitAttempts: 0,
   };
@@ -1396,17 +1060,54 @@ export async function checkAgentBalance(
  * Store a pending (unconfirmed) transaction in KV for async monitoring.
  * Also maintains a per-vault index so users can ask "is my transaction stuck?"
  * without knowing the hash.
+ *
+ * For sponsored transactions that have not yet received an EVM hash, the record is
+ * stored under the raw bundler callId so the poller can query wallet_getCallsStatus.
  */
 async function storePendingTx(kv: KVNamespace, vaultAddress: string, result: ExecutionResult): Promise<void> {
-  const key = `pending-tx:${result.txHash}`;
+  // Pending sponsored transactions have no EVM hash yet; use the callId for the key.
+  const lookupValue = result.sponsored && result.callId
+    ? result.callId
+    : result.txHash;
+  if (!lookupValue) return;
+  const key = `pending-tx:${lookupValue}`;
+
   await kv.put(key, JSON.stringify({
     ...result,
     storedAt: Date.now(),
   }), { expirationTtl: 3600 });
 
   // Per-vault index keyed by chain so we can look up the latest pending tx.
+  // Store the value we will query: EVM hash if available, otherwise callId.
   const indexKey = `pending-tx-by-vault:${vaultAddress.toLowerCase()}:${result.chainId}`;
-  await kv.put(indexKey, result.txHash, { expirationTtl: 3600 });
+  await kv.put(indexKey, lookupValue, { expirationTtl: 3600 });
+}
+
+/**
+ * Parse a JSON-stored pending transaction payload into a list of unsigned transactions.
+ * Handles the formats used by both web and Telegram: a single tx, a plain array,
+ * or an object with a `txs` array. Preserves gas, fee, and NAV-shield fields so a
+ * finalized transaction can be reused without re-simulation.
+ */
+export function parseStoredUnsignedTransactions(raw: string): UnsignedTransaction[] {
+  const parsed: Record<string, unknown> = JSON.parse(raw);
+  const rawTxs = parsed.txs ? parsed.txs : (Array.isArray(parsed) ? parsed : [parsed]);
+  return (rawTxs as Record<string, unknown>[]).map((t) => ({
+    to: t.to as Address,
+    data: t.data as `0x${string}`,
+    value: (t.value as string) || "0x0",
+    chainId: t.chainId as number,
+    gas: (t.gas as string) || "0x0",
+    maxFeePerGas: t.maxFeePerGas as `0x${string}` | undefined,
+    maxPriorityFeePerGas: t.maxPriorityFeePerGas as `0x${string}` | undefined,
+    description: (t.description as string) || "",
+    swapMeta: t.swapMeta as UnsignedTransaction["swapMeta"],
+    metrics: t.metrics as UnsignedTransaction["metrics"],
+    operatorOnly: !!t.operatorOnly,
+    navShieldChecked: t.navShieldChecked as boolean | undefined,
+    revertWarning: t.revertWarning as string | undefined,
+    prepared: (t.prepared as true) ?? true,
+  }));
 }
 
 /** KV key for the per-vault pending transaction index. */
@@ -1448,26 +1149,25 @@ export async function checkPendingTxForVault(
   if (!result) {
     return {
       status: "pending",
-      txHash: hash,
-      message: `Transaction <code>${hash}</code> is still pending on chain ${chainId}. It may take a few minutes to land, especially on Ethereum mainnet.`,
+      message: `A transaction is still pending on chain ${chainId}. It may take a few minutes to land, especially on Ethereum mainnet.`,
     };
   }
 
   if (result.confirmed) {
     return {
       status: "confirmed",
-      txHash: hash,
+      txHash: result.txHash,
       explorerUrl: result.explorerUrl,
       blockNumber: result.blockNumber,
-      message: `Transaction <code>${hash}</code> confirmed in block ${result.blockNumber}.${result.explorerUrl ? ` <a href="${result.explorerUrl}">View on explorer</a>` : ""}`,
+      message: `Transaction <code>${result.txHash}</code> confirmed in block ${result.blockNumber}.${result.explorerUrl ? ` <a href="${result.explorerUrl}">View on explorer</a>` : ""}`,
     };
   }
 
   return {
     status: "reverted",
-    txHash: hash,
+    txHash: result.txHash,
     explorerUrl: result.explorerUrl,
-    message: `Transaction <code>${hash}</code> reverted on-chain.${result.explorerUrl ? ` <a href="${result.explorerUrl}">View on explorer</a>` : ""}`,
+    message: `Transaction <code>${result.txHash}</code> reverted on-chain.${result.explorerUrl ? ` <a href="${result.explorerUrl}">View on explorer</a>` : ""}`,
   };
 }
 
@@ -1475,10 +1175,13 @@ export async function checkPendingTxForVault(
  * Check the status of a pending transaction.
  * If a receipt is found, cleans up both the tx record and the per-vault index.
  *
- * For sponsored (UserOp) transactions, the stored `hash` may be the callId
- * (UserOp hash) rather than the EVM transaction hash. In that case we call
- * Alchemy's `wallet_getCallsStatus` to resolve it to a receipt before falling
- * back to a normal eth_getTransactionReceipt.
+ * The identifier is always one of two things:
+ *   - an EVM transaction hash (64 bytes, 66 chars with 0x) for direct broadcasts;
+ *   - an Alchemy sponsored callId (128 bytes, 130 chars with 0x) for sponsored tx.
+ *
+ * When we have a stored record, we know exactly which one it is (direct/sponsored),
+ * so we never need to guess. When there is no stored record, we fall back to the
+ * identifier length to route the lookup correctly.
  */
 export async function checkPendingTxStatus(
   env: Env,
@@ -1489,12 +1192,26 @@ export async function checkPendingTxStatus(
   const alchemyKey = env.ALCHEMY_API_KEY;
   const publicClient = getClient(chainId, alchemyKey);
 
-  // Helper to build an ExecutionResult from an EVM receipt and clean up KV.
+  // Normalize to a lowercase 0x-prefixed string for consistent KV keys.
+  const normalized = hash.toLowerCase().startsWith("0x") ? hash.toLowerCase() : `0x${hash.toLowerCase()}`;
+  const isEvmHash = /^0x[0-9a-f]{64}$/.test(normalized);
+  const isCallId = /^0x[0-9a-f]{128}$/.test(normalized);
+
+  let stored: ExecutionResult | null = null;
+  try {
+    const raw = await env.KV.get(`pending-tx:${normalized}`);
+    if (raw) stored = JSON.parse(raw) as ExecutionResult;
+  } catch {
+    // ignore malformed stored record
+  }
+
+  const sponsored = stored?.sponsored ?? false;
+  const storedTxHash = stored?.txHash?.toLowerCase();
+  const storedCallId = stored?.callId?.toLowerCase();
+
   const buildResult = async (receipt: TransactionReceipt, txHash: Hex): Promise<ExecutionResult> => {
     const explorerBase = EXPLORER_TX_URL[chainId];
-    const gasUsed = receipt.gasUsed;
-    const effectiveGasPrice = receipt.effectiveGasPrice;
-    const cost = gasUsed * effectiveGasPrice;
+    const cost = receipt.gasUsed * receipt.effectiveGasPrice;
 
     const result: ExecutionResult = {
       txHash,
@@ -1503,17 +1220,19 @@ export async function checkPendingTxStatus(
       reverted: receipt.status !== "success",
       blockNumber: Number(receipt.blockNumber),
       explorerUrl: explorerBase ? `${explorerBase}${txHash}` : undefined,
-      gasUsed: gasUsed.toString(),
-      effectiveGasPrice: effectiveGasPrice.toString(),
+      gasUsed: receipt.gasUsed.toString(),
+      effectiveGasPrice: receipt.effectiveGasPrice.toString(),
       gasCostEth: formatEther(cost),
-      sponsored: false,
+      sponsored,
     };
 
-    // Clean up KV under both the UserOp hash (if that was the key) and the
-    // resolved EVM txHash.
-    await env.KV.delete(`pending-tx:${hash}`);
-    if (txHash !== hash) {
-      await env.KV.delete(`pending-tx:${txHash}`);
+    // Clean up the original lookup key, the resolved hash, and any stored callId.
+    const keysToDelete = new Set<string>([`pending-tx:${normalized}`]);
+    if (storedTxHash && storedTxHash !== normalized) keysToDelete.add(`pending-tx:${storedTxHash}`);
+    if (txHash !== normalized && txHash !== storedTxHash) keysToDelete.add(`pending-tx:${txHash}`);
+    if (storedCallId && storedCallId !== normalized) keysToDelete.add(`pending-tx:${storedCallId}`);
+    for (const key of keysToDelete) {
+      await env.KV.delete(key).catch(() => {});
     }
     if (vaultAddress) {
       await env.KV.delete(getPendingTxIndexKey(vaultAddress, chainId));
@@ -1521,29 +1240,24 @@ export async function checkPendingTxStatus(
     return result;
   };
 
-  // 1. Try normal EVM receipt lookup first.
-  try {
-    const receipt = await publicClient.getTransactionReceipt({ hash: hash as Hex });
-    if (receipt) {
-      return await buildResult(receipt, hash as Hex);
-    }
-  } catch {
-    // not found on-chain yet — continue to UserOp resolution
-  }
-
-  // 2. If no EVM receipt, the hash may be a sponsored UserOp callId. Query
-  //    Alchemy's wallet_getCallsStatus to map it to an EVM txHash, then fetch
-  //    the on-chain receipt for that txHash.
-  const candidateHashes = [hash];
-  // Some bundlers return a 64-byte identifier where only the last 32 bytes
-  // are the actual UserOp hash. Try both the full value and its suffix.
-  if (hash.startsWith("0x") && hash.length - 2 === 128) {
-    candidateHashes.push(`0x${hash.slice(-64)}`);
-  }
-
-  for (const candidate of candidateHashes) {
+  // Direct broadcast: the stored record always points to the EVM txHash.
+  if (storedTxHash || (!sponsored && isEvmHash)) {
+    const lookupHash = storedTxHash || normalized;
     try {
-      const sponsoredStatus = await getSponsoredCallsStatus(candidate, chainId, alchemyKey);
+      const receipt = await publicClient.getTransactionReceipt({ hash: lookupHash as Hex });
+      if (receipt) {
+        return await buildResult(receipt, lookupHash as Hex);
+      }
+    } catch {
+      // not found on-chain yet
+    }
+  }
+
+  // Sponsored broadcast: resolve through the Alchemy bundler via the stored callId.
+  const callId = storedCallId || (isCallId ? normalized : undefined);
+  if (callId) {
+    try {
+      const sponsoredStatus = await getSponsoredCallsStatus(callId, chainId, alchemyKey);
       const resolvedHash = sponsoredStatus.receipts?.[0]?.transactionHash;
       if (resolvedHash) {
         const onChainReceipt = await publicClient.getTransactionReceipt({ hash: resolvedHash });
@@ -1552,11 +1266,9 @@ export async function checkPendingTxStatus(
         }
       }
     } catch (err) {
-      // If wallet_getCallsStatus fails (e.g. hash is not a known callId), treat
-      // as still pending rather than throwing. Log the failure for debugging.
       console.warn(
-        `[execution] UserOp status resolution failed for ${candidate} on chain ${chainId}: ` +
-        `${err instanceof Error ? err.message : String(err)}`,
+        `[execution] UserOp status resolution failed for ${callId} on chain ${chainId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -1643,22 +1355,25 @@ export function formatOutcomesMarkdown(outcomes: TxExecOutcome[]): string {
       const fallbackNote = result.sponsoredFallbackReason
         ? `\n\nℹ️ ${result.sponsoredFallbackReason}`
         : "";
-      const isSponsoredTimeout = result.sponsored && result.gasCostEth?.includes("timed out");
-      const isUserOpHash = result.sponsored && result.userOpHash && result.txHash === result.userOpHash;
-      const hashLabel = isUserOpHash
-        ? "UserOp hash (sponsored — not yet on-chain)"
-        : (result.sponsored ? "Sponsored transaction hash" : "Transaction hash");
-      const pendingNote = isSponsoredTimeout
+      const pendingNote = result.sponsored && result.gasCostEth?.includes("timed out")
         ? " The status check timed out; the transaction may still confirm on-chain."
         : " Waiting for confirmation…";
       const checkHint = " Ask me for a status update anytime (e.g. \"is my transaction stuck?\").";
-      const sponsoredHint = result.sponsored && !isUserOpHash
-        ? " This is a sponsored UserOp hash — it may not appear in the public mempool until it lands."
-        : "";
-      const userOpNote = isUserOpHash
-        ? "\nThis is the bundler UserOp identifier, not the on-chain transaction hash. The explorer link will appear once the bundle is included."
-        : "";
-      parts.push(`⏳ ${desc} submitted.\n${hashLabel}: \`${result.txHash}\`${sponsoredHint}${pendingNote}${userOpNote}${checkHint}${fallbackNote}`);
+
+      if (result.sponsored && !result.txHash) {
+        // Pending sponsored transactions have no EVM hash yet. The UserOp / callId
+        // is not user-facing; it is only used for internal polling.
+        parts.push(
+          `⏳ ${desc} submitted (sponsored).\n` +
+            `The on-chain transaction hash will appear once the bundle is included.${pendingNote}${checkHint}${fallbackNote}`,
+        );
+      } else {
+        const link = result.explorerUrl || result.txHash;
+        parts.push(
+          `⏳ ${desc} submitted.\n` +
+            `${result.sponsored ? "Sponsored transaction hash" : "Transaction hash"}: \`${result.txHash}\`${pendingNote}${checkHint}${fallbackNote}`,
+        );
+      }
     } else if (error) {
       const fallbackHint = fallbackToManual
         ? " You can sign this transaction directly from your wallet."

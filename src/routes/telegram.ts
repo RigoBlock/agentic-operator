@@ -33,7 +33,7 @@ import {
 import { getDelegationConfig, getActiveChains } from "../services/delegation.js";
 import { getAgentWalletInfo } from "../services/agentWallet.js";
 import { getCurrentDayBucket, DEFAULT_GAS_SPENDING_LIMIT_USD, GAS_SPEND_KEY } from "./gasPolicy.js";
-import { executeTxList, checkPendingTxStatus, ExecutionError, type TxExecOutcome } from "../services/execution.js";
+import { executeTxList, checkPendingTxStatus, ExecutionError, parseStoredUnsignedTransactions, type TxExecOutcome } from "../services/execution.js";
 import {
   runTransactionFlow,
   getExecutionModePreference,
@@ -1020,8 +1020,8 @@ async function handleMessage(
   };
 
   try {
-    // Request-scoped cache so the NAV shield can reuse the pre-swap NAV read
-    // across the calldata-build pre-check and the broadcast check.
+    // Request-scoped cache for the pre-swap NAV read so it is reused across
+    // calldata-build and broadcast in a single delegated+confirmed transaction.
     const requestEnv: Env = { ...env, requestCache: new Map() };
 
     // Initialize token resolver
@@ -1370,26 +1370,17 @@ async function handleCallbackQuery(
       return;
     }
 
-    // Parse stored transactions — supports legacy (array/single tx) and new { txs, createdAt } format
-    const parsed = JSON.parse(raw);
+    // Parse stored transactions. These were already finalized before storage, so
+    // the shared parser preserves gas, fees, and NAV-shield fields so
+    // executeViaDelegation reuses the result instead of running the simulation again.
+    const storedWrapper = JSON.parse(raw) as { txs?: unknown[]; createdAt?: number; messageId?: number };
     // Defense-in-depth: reject if the stored entry belongs to a different message.
-    if (parsed.messageId != null && parsed.messageId !== messageId) {
+    if (storedWrapper.messageId != null && storedWrapper.messageId !== messageId) {
       await editMessageText(token, chatId, messageId, "⏰ Trade expired. Please request a new quote.");
       return;
     }
-    const rawTxs = parsed.txs ? parsed.txs : (Array.isArray(parsed) ? parsed : [parsed]);
-    const storedAt: number | undefined = parsed.createdAt;
-    const txList: UnsignedTransaction[] = (rawTxs as Record<string, unknown>[]).map(
-      (t: Record<string, unknown>) => ({
-        to: t.to as Address,
-        data: t.data as `0x${string}`,
-        value: (t.value as string) || "0x0",
-        chainId: t.chainId as number,
-        gas: (t.gas as string) || "0x0",
-        description: (t.description as string) || "",
-        swapMeta: t.swapMeta as UnsignedTransaction["swapMeta"],
-      }),
-    );
+    const txList = parseStoredUnsignedTransactions(raw);
+    const storedAt: number | undefined = storedWrapper.createdAt;
 
     // Warn if the quote is likely stale (>90s old)
     const ageMs = storedAt ? Date.now() - storedAt : undefined;
@@ -1548,19 +1539,22 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
       const pendingNote = isSponsoredTimeout
         ? "\n(status check timed out; may still confirm)"
         : "";
-      const isUserOpHash = result.sponsored && result.userOpHash && result.txHash === result.userOpHash;
-      const hashLabel = isUserOpHash ? "UserOp hash" : "Hash";
-      const sponsoredHint = result.sponsored && !isUserOpHash
-        ? "\n(sponsored UserOp — may not appear in the public mempool until it lands)"
-        : "";
-      const userOpNote = isUserOpHash
-        ? "\n(sponsored UserOp — not yet on-chain; the EVM tx hash will appear once it lands)"
-        : "";
-      lines.push(
-        `⏳ ${escapeHtml(desc)} — submitted\n` +
-        `${hashLabel}: <code>${escapeHtml(result.txHash)}</code>${sponsoredHint}${userOpNote}${pendingNote}\n` +
-        `Reply with "status" or "is my transaction stuck?" for an update.`
-      );
+
+      if (result.sponsored && !result.txHash) {
+        // Pending sponsored transactions have no EVM hash yet. The UserOp / callId
+        // is internal-only and must not be shown as a transaction hash.
+        lines.push(
+          `⏳ ${escapeHtml(desc)} — submitted\n` +
+            `Sponsored bundle accepted; the EVM tx hash will appear once it lands on-chain.${pendingNote}\n` +
+            `Reply with "status" or "is my transaction stuck?" for an update.`,
+        );
+      } else {
+        lines.push(
+          `⏳ ${escapeHtml(desc)} — submitted\n` +
+            `${result.sponsored ? "Sponsored transaction hash" : "Transaction hash"}: <code>${escapeHtml(result.txHash || "")}</code>${pendingNote}\n` +
+            `Reply with "status" or "is my transaction stuck?" for an update.`,
+        );
+      }
     } else if (error) {
       // Provide actionable guidance for delegation errors
       if (error.includes("not in the delegated selectors") || error.includes("selector") && error.includes("not")) {
@@ -1615,7 +1609,13 @@ async function pollPendingTelegramTxs(
     for (const outcome of mutableOutcomes) {
       if (!outcome.result || outcome.result.confirmed || outcome.result.reverted) continue;
 
-      const status = await checkPendingTxStatus(env, outcome.result.txHash, outcome.result.chainId).catch(() => null);
+      const status = await checkPendingTxStatus(
+        env,
+        outcome.result.sponsored && outcome.result.callId
+          ? outcome.result.callId
+          : (outcome.result.txHash || ""),
+        outcome.result.chainId,
+      ).catch(() => null);
       if (status) {
         outcome.result = status;
         changed = true;

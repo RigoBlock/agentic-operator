@@ -117,6 +117,9 @@ export interface WalletCall {
 
 export interface SponsoredCallsResult {
   callId: string;
+  /** Normalized UserOp hash (32 bytes). May differ from callId when the
+   *  bundler returns a 64-byte bundle identifier. */
+  userOpHash?: Hex;
   status: "success" | "failure" | "pending" | undefined;
   receipts?: Array<{
     transactionHash: Hex;
@@ -132,11 +135,11 @@ export interface SponsoredCallsResult {
 
 /**
  * Validate and normalize a callId returned by Alchemy's sendPreparedCalls.
- * ERC-4337 UserOp hashes are 32 bytes (64 hex chars + 0x). Some Alchemy
- * responses return a 64-byte identifier; we keep the raw value for status
- * checks but log unexpected formats so operators can report them.
+ * Some Alchemy responses return a 64-byte identifier where only the last 32 bytes
+ * are the actual UserOp hash. We keep both: callId (raw, for status polling) and
+ * userOpHash (32-byte, for display and pending-tx storage).
  */
-function normalizeCallId(raw: unknown): { callId: string; warnings: string[] } {
+export function normalizeCallId(raw: unknown): { callId: string; userOpHash?: Hex; warnings: string[] } {
   const warnings: string[] = [];
   if (typeof raw !== "string") {
     warnings.push(`sendPreparedCalls returned non-string id: ${typeof raw}`);
@@ -146,10 +149,18 @@ function normalizeCallId(raw: unknown): { callId: string; warnings: string[] } {
   const hexLen = callId.length - 2;
   if (!/^0x[0-9a-f]+$/.test(callId)) {
     warnings.push(`sendPreparedCalls returned non-hex id: ${raw.slice(0, 100)}`);
-  } else if (hexLen !== 64) {
-    warnings.push(`sendPreparedCalls returned unexpected callId length: ${hexLen} hex chars (expected 64): ${callId.slice(0, 20)}…${callId.slice(-8)}`);
+    return { callId, warnings };
   }
-  return { callId, warnings };
+  if (hexLen !== 64 && hexLen !== 128) {
+    warnings.push(`sendPreparedCalls returned unexpected callId length: ${hexLen} hex chars (expected 64 or 128): ${callId.slice(0, 20)}…${callId.slice(-8)}`);
+  }
+
+  // The last 32 bytes are the canonical UserOp hash.
+  const userOpHash = hexLen === 128
+    ? `0x${callId.slice(-64)}` as Hex
+    : callId as Hex;
+
+  return { callId, userOpHash, warnings };
 }
 
 // ── Execute Sponsored Calls ──────────────────────────────────────────
@@ -204,19 +215,20 @@ export async function executeSponsoredCalls(
     });
 
     // ── Step 3: Prepare calls ──
+    // Alchemy expects gas-parameter overrides as hex strings, not decimal strings.
     const capabilities: Record<string, unknown> = {
       paymasterService: {
         policyId,
       },
     };
     const gasOverrides: Record<string, string> = {};
-    if (callGasLimit) {
+    if (callGasLimit && callGasLimit > 0n) {
       gasOverrides.callGasLimit = `0x${callGasLimit.toString(16)}`;
     }
-    if (maxFeePerGas) {
+    if (maxFeePerGas && maxFeePerGas > 0n) {
       gasOverrides.maxFeePerGas = `0x${maxFeePerGas.toString(16)}`;
     }
-    if (maxPriorityFeePerGas) {
+    if (maxPriorityFeePerGas && maxPriorityFeePerGas > 0n) {
       gasOverrides.maxPriorityFeePerGas = `0x${maxPriorityFeePerGas.toString(16)}`;
     }
     if (Object.keys(gasOverrides).length > 0) {
@@ -238,7 +250,7 @@ export async function executeSponsoredCalls(
     // ── Step 5: Send the prepared calls ──
     const sendResult = await client.sendPreparedCalls(signedCalls);
 
-    const { callId, warnings } = normalizeCallId(sendResult.id);
+    const { callId, userOpHash, warnings } = normalizeCallId(sendResult.id);
     for (const warning of warnings) {
       console.warn(`[bundler] ${warning}`);
     }
@@ -270,6 +282,7 @@ export async function executeSponsoredCalls(
         );
         return {
           callId,
+          userOpHash,
           status: "pending" as const,
           receipts: undefined,
         };
@@ -281,6 +294,7 @@ export async function executeSponsoredCalls(
 
     return {
       callId,
+      userOpHash,
       status: statusResult.status,
       receipts: statusResult.receipts as SponsoredCallsResult["receipts"],
     };
@@ -355,8 +369,12 @@ export async function getSponsoredCallsStatus(
     throw new Error("wallet_getCallsStatus returned empty result");
   }
 
+  const rawId = result.id || callId;
+  const { callId: normalizedCallId, userOpHash } = normalizeCallId(rawId);
+
   return {
-    callId: result.id || callId,
+    callId: normalizedCallId,
+    userOpHash,
     status: result.status,
     receipts: result.receipts as SponsoredCallsResult["receipts"],
   };

@@ -313,7 +313,7 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
       const dstName = resolveChainName(dst.chainId);
 
       if (outcome.result?.confirmed && !outcome.result?.reverted) {
-        outcomes.push(`✅ ${srcName} → ${dstName}: ${outcome.result.txHash}`);
+        outcomes.push(`✅ ${srcName} → ${dstName}: ${outcome.result.txHash || "no tx hash"}`);
       } else {
         outcomes.push(`⚠️ ${srcName} → ${dstName}: ${outcome.error || "unconfirmed"}`);
       }

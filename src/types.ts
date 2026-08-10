@@ -191,6 +191,12 @@ export interface TransactionDraft {
  *  carries the gas limit and the NAV-shield marker. */
 export interface UnsignedTransaction extends TransactionDraft {
   gas: string;          // hex-encoded gas limit
+  /** Pre-computed EIP-1559 max fee per gas (hex wei). Validated during
+   *  preparation and reused at broadcast so the fee market is read exactly once. */
+  maxFeePerGas?: Hex;
+  /** Pre-computed EIP-1559 max priority fee per gas (hex wei). Validated during
+   *  preparation and reused at broadcast so the fee market is read exactly once. */
+  maxPriorityFeePerGas?: Hex;
   /** Internal marker: NAV shield pre-check already ran for this tx build path.
    *  This is set ONLY by the centralized finalization helper. */
   navShieldChecked?: boolean;
@@ -299,8 +305,9 @@ export interface DelegationConfig {
 
 /** Result of an agent-executed transaction (delegated mode) */
 export interface ExecutionResult {
-  /** Transaction hash */
-  txHash: Hex;
+  /** On-chain EVM transaction hash. Undefined for pending sponsored transactions
+   *  that have not yet been assigned an EVM hash by the bundler. */
+  txHash?: Hex;
   /** Chain the tx was executed on */
   chainId: number;
   /** Whether the tx was confirmed successfully (receipt.status === "success") */
@@ -320,8 +327,8 @@ export interface ExecutionResult {
   gasCostEth?: string;
   /** Whether this tx was gas-sponsored */
   sponsored?: boolean;
-  /** UserOperation hash (when submitted via ERC-4337 bundler) */
-  userOpHash?: Hex;
+  /** Raw bundler callId (may be 64 bytes). Used only for internal status polling. */
+  callId?: Hex;
   /** Number of fee-bump resubmission attempts (0 = first try succeeded) */
   resubmitAttempts?: number;
   /** If sponsorship was attempted and failed, but the tx still succeeded via direct agent broadcast, the reason sponsorship failed. */

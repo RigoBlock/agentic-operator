@@ -6,7 +6,8 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { parseGwei, type PublicClient } from "viem";
-import { ExecutionError, estimateFees, formatOutcomesMarkdown } from "../src/services/execution.js";
+import { ExecutionError, formatOutcomesMarkdown } from "../src/services/execution.js";
+import { estimateGasFees } from "../src/services/gas.js";
 import { handle_check_pending_tx } from "../src/llm/handlers/delegation.js";
 import type { Env, RequestContext } from "../src/types.js";
 
@@ -159,89 +160,73 @@ describe("Agent wallet gas price buffer", () => {
   });
 });
 
-describe("estimateFees gas market handling", () => {
-  it("uses a fixed 0.01 gwei priority fee on Ethereum mainnet", async () => {
-    const publicClient = {
-      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: parseGwei("10") }),
-      estimateMaxPriorityFeePerGas: vi.fn(),
+describe("estimateGasFees gas market handling", () => {
+  function makeClient(estimateResult: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } | null | (() => never)) {
+    return {
+      chain: { id: 1, name: "Ethereum" },
+      estimateFeesPerGas: vi.fn(
+        typeof estimateResult === "function"
+          ? estimateResult
+          : () => Promise.resolve(estimateResult),
+      ),
     } as unknown as PublicClient;
+  }
 
-    const fees = await estimateFees(publicClient, 1);
+  it("uses estimateFeesPerGas with a 1.5x base fee multiplier and caps values", async () => {
+    const publicClient = makeClient({
+      maxFeePerGas: parseGwei("10"),
+      maxPriorityFeePerGas: parseGwei("0.05"),
+    });
 
-    expect(publicClient.getBlock).toHaveBeenCalledWith({ blockTag: "latest" });
-    expect(publicClient.estimateMaxPriorityFeePerGas).not.toHaveBeenCalled();
+    const fees = await estimateGasFees(publicClient, 11155111);
+
+    expect(publicClient.estimateFeesPerGas).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chain: expect.objectContaining({
+          fees: expect.objectContaining({ baseFeeMultiplier: 1.5 }),
+        }),
+      }),
+    );
+    expect(fees.maxPriorityFeePerGas).toBe(parseGwei("0.05"));
+    expect(fees.maxFeePerGas).toBe(parseGwei("10")); // Sepolia cap
+  });
+
+  it("caps priority fee at the chain-specific cap and keeps maxFee >= priority", async () => {
+    const publicClient = makeClient({
+      maxFeePerGas: parseGwei("0.001"),
+      maxPriorityFeePerGas: parseGwei("1"),
+    });
+
+    const fees = await estimateGasFees(publicClient, 8453);
+
     expect(fees.maxPriorityFeePerGas).toBe(parseGwei("0.01"));
-    // Mainnet maxFee cap is 5 gwei; buffered base (10 * 1.5 = 15 gwei) hits it.
-    expect(fees.maxFeePerGas).toBe(parseGwei("5"));
-  });
-
-  it("uses estimateMaxPriorityFeePerGas on non-mainnet chains", async () => {
-    const publicClient = {
-      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: parseGwei("10") }),
-      estimateMaxPriorityFeePerGas: vi.fn().mockResolvedValue(parseGwei("0.05")),
-    } as unknown as PublicClient;
-
-    const fees = await estimateFees(publicClient, 11155111);
-
-    expect(publicClient.estimateMaxPriorityFeePerGas).toHaveBeenCalled();
-    expect(fees.maxPriorityFeePerGas).toBeGreaterThanOrEqual(parseGwei("0.05"));
-    expect(fees.maxPriorityFeePerGas).toBeLessThanOrEqual(parseGwei("0.1"));
-  });
-
-  it("caps priority fee at the chain-specific cap", async () => {
-    const publicClient = {
-      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: parseGwei("0.001") }),
-      estimateMaxPriorityFeePerGas: vi.fn().mockResolvedValue(parseGwei("1")),
-    } as unknown as PublicClient;
-
-    const fees = await estimateFees(publicClient, 8453);
-
-    expect(fees.maxPriorityFeePerGas).toBe(parseGwei("0.01"));
-    // Buffered base (0.001 * 1.5 = 0.0015) + capped priority.
-    expect(fees.maxFeePerGas).toBe(parseGwei("0.0115"));
-  });
-
-  it("does not invent a fallback priority fee when the estimate is 0n", async () => {
-    const publicClient = {
-      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: parseGwei("0.02") }),
-      estimateMaxPriorityFeePerGas: vi.fn().mockResolvedValue(0n),
-    } as unknown as PublicClient;
-
-    const fees = await estimateFees(publicClient, 42161);
-
-    expect(fees.maxPriorityFeePerGas).toBe(0n);
-    expect(fees.maxFeePerGas).toBe(parseGwei("0.03")); // 0.02 * 1.5
-    expect(fees.maxFeePerGas).toBeLessThanOrEqual(parseGwei("0.04"));
+    expect(fees.maxFeePerGas).toBe(parseGwei("0.01")); // bumped up to priority
   });
 
   it("caps maxFee at the chain-specific cap", async () => {
-    const publicClient = {
-      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: parseGwei("0.03") }),
-      estimateMaxPriorityFeePerGas: vi.fn().mockResolvedValue(0n),
-    } as unknown as PublicClient;
+    const publicClient = makeClient({
+      maxFeePerGas: parseGwei("10"),
+      maxPriorityFeePerGas: 0n,
+    });
 
-    const fees = await estimateFees(publicClient, 42161);
+    const fees = await estimateGasFees(publicClient, 42161);
 
-    // 0.03 * 1.5 = 0.045, but Arbitrum cap is 0.04.
-    expect(fees.maxFeePerGas).toBe(parseGwei("0.04"));
+    expect(fees.maxPriorityFeePerGas).toBe(0n);
+    expect(fees.maxFeePerGas).toBe(parseGwei("0.04")); // Arbitrum cap
   });
 
-  it("lets getBlock errors propagate", async () => {
-    const publicClient = {
-      getBlock: vi.fn().mockRejectedValue(new Error("block unavailable")),
-      estimateMaxPriorityFeePerGas: vi.fn(),
-    } as unknown as PublicClient;
+  it("throws if estimateFeesPerGas fails", async () => {
+    const publicClient = makeClient(() => {
+      throw new Error("fee history unavailable");
+    });
 
-    await expect(estimateFees(publicClient, 42161)).rejects.toThrow("block unavailable");
+    await expect(estimateGasFees(publicClient, 42161)).rejects.toThrow("fee history unavailable");
   });
 
-  it("lets estimateMaxPriorityFeePerGas errors propagate", async () => {
-    const publicClient = {
-      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: parseGwei("0.02") }),
-      estimateMaxPriorityFeePerGas: vi.fn().mockRejectedValue(new Error("priority estimate unavailable")),
-    } as unknown as PublicClient;
+  it("throws if estimateFeesPerGas returns invalid data", async () => {
+    const publicClient = makeClient({ maxFeePerGas: null as any, maxPriorityFeePerGas: null as any });
 
-    await expect(estimateFees(publicClient, 42161)).rejects.toThrow("priority estimate unavailable");
+    await expect(estimateGasFees(publicClient, 42161)).rejects.toThrow("invalid EIP-1559 fee estimate");
   });
 });
 
@@ -282,28 +267,26 @@ describe("formatOutcomesMarkdown", () => {
     description: "Test swap",
   };
 
-  it("labels a pending UserOp hash as UserOp hash, not transaction hash", () => {
+  it("does not show a UserOp hash as a transaction hash for pending sponsored txs", () => {
     const userOpHash = "0xb31e63daa2c50ef6e0d99b21a0e18c6e2e1370264f9c77a192244621a2d20c18";
     const summary = formatOutcomesMarkdown([{
       tx: baseTx,
       result: {
-        txHash: userOpHash,
         chainId: 1,
         confirmed: false,
         reverted: false,
         sponsored: true,
-        userOpHash,
+        callId: userOpHash as `0x${string}`,
         gasCostEth: "0 (sponsored — status check timed out)",
       },
     }]);
-    expect(summary).toContain("UserOp hash (sponsored — not yet on-chain)");
-    expect(summary).toContain(userOpHash);
-    expect(summary).toContain("bundler UserOp identifier");
+    expect(summary).not.toContain(userOpHash);
+    expect(summary).toContain("submitted (sponsored)");
+    expect(summary).toContain("on-chain transaction hash will appear once the bundle is included");
   });
 
   it("labels a pending sponsored EVM hash as sponsored transaction hash", () => {
     const txHash = "0xcd725b84cd725b84cd725b84cd725b84cd725b84cd725b84cd725b84cd86d289";
-    const userOpHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const summary = formatOutcomesMarkdown([{
       tx: baseTx,
       result: {
@@ -312,7 +295,6 @@ describe("formatOutcomesMarkdown", () => {
         confirmed: false,
         reverted: false,
         sponsored: true,
-        userOpHash,
         gasCostEth: "0 (sponsored)",
       },
     }]);

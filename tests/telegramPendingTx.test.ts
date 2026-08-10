@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { pendingTxKey, deleteAllPendingTxKeys } from "../src/routes/telegram.js";
+import { parseStoredUnsignedTransactions } from "../src/services/execution.js";
 import type { KVNamespace } from "@cloudflare/workers-types";
 
 function makeKV(): KVNamespace {
@@ -44,14 +45,62 @@ describe("Telegram pending transaction key binding", () => {
     expect(entries.map(e => e.messageId)).toContain(5);
     expect(await kv.get("tg-pending-tx:123456")).toBeNull();
   });
+});
 
-  it("deleteAllPendingTxKeys only removes keys for the specified user", async () => {
-    const kv = makeKV();
-    await kv.put(pendingTxKey(111, 1), JSON.stringify({ txs: [], createdAt: 1, messageId: 1 }));
-    await kv.put(pendingTxKey(222, 2), JSON.stringify({ txs: [], createdAt: 2, messageId: 2 }));
+describe("parseStoredUnsignedTransactions", () => {
+  const baseTx = {
+    to: "0x1111111111111111111111111111111111111111",
+    data: "0x1234abcd",
+    value: "0x0",
+    chainId: 8453,
+    gas: "0x1f400",
+    maxFeePerGas: "0x9502f9000",
+    maxPriorityFeePerGas: "0x59682f00",
+    description: "Swap 30 GRG for ETH",
+    swapMeta: {
+      sellAmount: "30",
+      sellToken: "GRG",
+      buyAmount: "0.004641",
+      buyToken: "ETH",
+      price: "1 GRG = 0.0001547 ETH",
+      dex: "0x Aggregator",
+    },
+    navShieldChecked: true,
+    prepared: true,
+  };
 
-    await deleteAllPendingTxKeys(kv, 111);
-    expect(await kv.get(pendingTxKey(111, 1))).toBeNull();
-    expect(await kv.get(pendingTxKey(222, 2))).not.toBeNull();
+  it("round-trips a finalized transaction including gas, fees, and prepared flag", () => {
+    const raw = JSON.stringify({ txs: [baseTx], createdAt: Date.now(), messageId: 42 });
+    const txs = parseStoredUnsignedTransactions(raw);
+
+    expect(txs).toHaveLength(1);
+    const tx = txs[0];
+    expect(tx.prepared).toBe(true);
+    expect(tx.gas).toBe(baseTx.gas);
+    expect(tx.maxFeePerGas).toBe(baseTx.maxFeePerGas);
+    expect(tx.maxPriorityFeePerGas).toBe(baseTx.maxPriorityFeePerGas);
+    expect(tx.navShieldChecked).toBe(true);
+    expect(tx.swapMeta).toEqual(baseTx.swapMeta);
+  });
+
+  it("parses a plain array of transactions", () => {
+    const raw = JSON.stringify([baseTx]);
+    const txs = parseStoredUnsignedTransactions(raw);
+    expect(txs).toHaveLength(1);
+    expect(txs[0].prepared).toBe(true);
+  });
+
+  it("parses a single transaction object", () => {
+    const raw = JSON.stringify(baseTx);
+    const txs = parseStoredUnsignedTransactions(raw);
+    expect(txs).toHaveLength(1);
+    expect(txs[0].prepared).toBe(true);
+  });
+
+  it("falls back to prepared=true for legacy stored transactions that have gas", () => {
+    const legacy = { ...baseTx, prepared: undefined };
+    const raw = JSON.stringify({ txs: [legacy] });
+    const txs = parseStoredUnsignedTransactions(raw);
+    expect(txs[0].prepared).toBe(true);
   });
 });

@@ -558,6 +558,8 @@ delegation.get("/balance", async (c) => {
  * GET /api/delegation/tx-status?hash=0x…&chainId=8453
  *
  * Check the status of a pending agent transaction.
+ * Never returns the internal bundler callId; only EVM transaction hashes are
+ * exposed to clients.
  */
 delegation.get("/tx-status", async (c) => {
   const hash = c.req.query("hash");
@@ -571,12 +573,22 @@ delegation.get("/tx-status", async (c) => {
     const result = await checkPendingTxStatus(c.env, hash, chainId);
 
     if (!result) {
-      return c.json({ status: "pending", hash, chainId });
+      return c.json({ status: "pending", hash: hash.toLowerCase(), chainId });
     }
 
     return c.json({
-      status: result.confirmed ? "confirmed" : "failed",
-      ...result,
+      status: result.confirmed ? "confirmed" : result.reverted ? "failed" : "pending",
+      txHash: result.txHash,
+      chainId: result.chainId,
+      confirmed: result.confirmed,
+      reverted: result.reverted,
+      blockNumber: result.blockNumber,
+      explorerUrl: result.explorerUrl,
+      gasUsed: result.gasUsed,
+      effectiveGasPrice: result.effectiveGasPrice,
+      gasCostEth: result.gasCostEth,
+      sponsored: result.sponsored,
+      resubmitAttempts: result.resubmitAttempts,
     });
   } catch (err) {
     console.error("[delegation/tx-status] Error:", err);
