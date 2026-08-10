@@ -37,6 +37,7 @@ import {
   unichainMainnet as alchemyUnichain,
 } from "@account-kit/infra";
 import { getRpcUrl } from "../config.js";
+import { getEnv } from "./envContext.js";
 
 // ── Alchemy Chain Map ────────────────────────────────────────────────
 
@@ -192,13 +193,14 @@ export async function executeSponsoredCalls(
 
     // ── Step 2: Create smart wallet client (per SDK quickstart) ──
     const alchemyChain = getAlchemyChain(chainId);
-    // Route all smart-wallet API calls (prepareCalls, sendPreparedCalls,
-    // getCallsStatus) through the chain-specific Alchemy endpoint instead of
-    // the generic api.g.alchemy.com. This gives correct chain tagging in
-    // Alchemy logs and avoids cross-region routing.
-    const alchemyNetworkUrl = getRpcUrl(chainId);
+    // Use the SDK's default Alchemy transport: standard bundler/paymaster methods
+    // go to the chain-specific endpoint, while the smart-wallet API methods
+    // (wallet_prepareCalls, wallet_sendPreparedCalls, wallet_getCallsStatus)
+    // are routed to the chain-agnostic api.g.alchemy.com endpoint. The latter
+    // is required — those methods are not supported on chain-specific URLs.
+    const alchemyKey = (getEnv()?.ALCHEMY_API_KEY ?? process.env.ALCHEMY_API_KEY)!;
     const transport = alchemy({
-      rpcUrl: alchemyNetworkUrl,
+      apiKey: alchemyKey,
       fetchOptions: {
         headers: {
           Origin: "https://trader.rigoblock.com",
@@ -321,7 +323,10 @@ export async function getSponsoredCallsStatus(
   callId: string,
   chainId: number,
 ): Promise<SponsoredCallsResult> {
-  const alchemyNetworkUrl = getRpcUrl(chainId);
+  // wallet_getCallsStatus is a chain-agnostic Wallet API method and is only
+  // served from api.g.alchemy.com, not from chain-specific endpoints.
+  const alchemyKey = (getEnv()?.ALCHEMY_API_KEY ?? process.env.ALCHEMY_API_KEY)!;
+  const alchemyNetworkUrl = `https://api.g.alchemy.com/v2/${alchemyKey}`;
 
   const response = await fetch(alchemyNetworkUrl, {
     method: "POST",

@@ -17,6 +17,7 @@ import {
   sepolia,
   baseSepolia,
 } from "viem/chains";
+import { getEnv } from "./services/envContext.js";
 
 const chainMap: Record<number, Chain> = {
   1: mainnet,
@@ -94,12 +95,15 @@ export const ALCHEMY_NETWORK: Record<number, string> = {
   84532: "base-sepolia",
 };
 
-/** Reads ALCHEMY_API_KEY from `process.env` at call time so tests and the Worker
- *  can both inject it without threading a parameter through every call site. */
+/** Reads ALCHEMY_API_KEY from the active Cloudflare Worker env (set per request
+ *  via AsyncLocalStorage) and falls back to `process.env` for tests/local scripts.
+ *  This avoids threading a parameter through every call site while working in the
+ *  Worker runtime, where secrets are not available on `process.env`.
+ */
 
 /** Get the alchemy RPC URL for a chain */
 export function getRpcUrl(chainId: number): string {
-  const alchemyKey = process.env.ALCHEMY_API_KEY;
+  const alchemyKey = getEnv()?.ALCHEMY_API_KEY ?? process.env.ALCHEMY_API_KEY;
 
   if (!alchemyKey) {
     throw new Error(

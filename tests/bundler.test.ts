@@ -91,8 +91,8 @@ describe("executeSponsoredCalls chain-specific routing", () => {
 
     expect(mockAlchemyTransport).toHaveBeenCalledTimes(1);
     const alchemyConfig = mockAlchemyTransport.mock.calls[0][0];
-    expect(alchemyConfig.rpcUrl).toBe(`https://${slug}.g.alchemy.com/v2/test-key`);
-    expect(alchemyConfig.apiKey).toBeUndefined();
+    expect(alchemyConfig.apiKey).toBe("test-key");
+    expect(alchemyConfig.rpcUrl).toBeUndefined();
     expect(alchemyConfig.chainAgnosticUrl).toBeUndefined();
     expect(alchemyConfig.fetchOptions.headers.Origin).toBe("https://trader.rigoblock.com");
   });

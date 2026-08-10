@@ -36,6 +36,7 @@ import { runAllSkills } from "./skills/index.js";
 import { getTwapEvents } from "./skills/twap.js";
 import { processChat } from "./llm/client.js";
 import { ensureWebhookRegistered, getWebhookSecret } from "./services/telegram.js";
+import { withEnv } from "./services/envContext.js";
 import type { Address } from "viem";
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
@@ -68,7 +69,7 @@ app.use("*", async (c, next) => {
 // Initialise token resolver KV on every request
 app.use("*", async (c, next) => {
   if (c.env.KV) initTokenResolver(c.env.KV, c.env.COINGECKO_API_KEY);
-  await next();
+  await withEnv(c.env, next);
 });
 
 // x402 payment gate — charges external agents for /api/chat and /api/quote.
@@ -604,7 +605,7 @@ export default {
       : Promise.resolve();
 
     ctx.waitUntil(Promise.all([
-      runAllSkills(env, processChat),
+      withEnv(env, () => runAllSkills(env, processChat)),
       telegramRefresh,
     ]));
   },

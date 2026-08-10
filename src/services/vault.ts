@@ -305,8 +305,8 @@ export async function isVaultOwner(
  * Check whether `vaultAddress` is a live Rigoblock vault on `chainId`.
  *
  * Returns true only when the owner() call succeeds and returns a non-zero address.
- * RPC errors are swallowed so callers can distinguish a broken RPC from a
- * wrong-chain / invalid vault address by checking the boolean result.
+ * RPC/auth errors are propagated so callers don't misreport a broken key as
+ * "vault not deployed".
  */
 export async function isVaultOnChain(
   chainId: number,
@@ -316,12 +316,8 @@ export async function isVaultOnChain(
     return false;
   }
 
-  try {
-    const owner = await getVaultOwner(chainId, vaultAddress as Address);
-    return owner.toLowerCase() !== ZERO_ADDRESS.toLowerCase();
-  } catch {
-    return false;
-  }
+  const owner = await getVaultOwner(chainId, vaultAddress as Address);
+  return owner.toLowerCase() !== ZERO_ADDRESS.toLowerCase();
 }
 
 // ── Pool data & capital provision ──────────────────────────────────────

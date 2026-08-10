@@ -21,9 +21,11 @@ import { encodeFunctionData } from "viem";
 // ── Hoist mocks before the module under test imports getRpcProvider / simulateCalls ──
 const mockState = vi.hoisted(() => {
   const simulateCalls = vi.fn();
-  const getRpcProvider = vi.fn(() => ({ simulateCalls } as any));
+  const readContract = vi.fn(async () => 1n);
+  const getRpcProvider = vi.fn(() => ({ simulateCalls, readContract } as any));
   return {
     simulateCalls,
+    readContract,
     getRpcProvider,
   };
 });
@@ -116,6 +118,8 @@ function setupClient(preUnitaryValue: bigint, postUnitaryValue: bigint, swapReve
 describe("NAV Shield impact logic", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockState.readContract.mockReset();
+    mockState.readContract.mockResolvedValue(1n);
   });
 
   it("allows a trade within the max NAV drop threshold", async () => {
@@ -174,6 +178,18 @@ describe("NAV Shield impact logic", () => {
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
+  });
+
+  it("allows first deposit when vault has no outstanding shares (totalSupply = 0)", async () => {
+    mockState.readContract.mockResolvedValue(0n);
+    const result = await checkNavImpact(
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+    );
+    expect(result.allowed).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("UNVERIFIED");
+    expect(result.reason).toContain("no outstanding shares");
+    expect(mockSimulateCalls).not.toHaveBeenCalled();
   });
 
   it("fails closed when pre-swap NAV cannot be read", async () => {
