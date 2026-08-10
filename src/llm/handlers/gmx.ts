@@ -44,7 +44,6 @@ async function checkKeeperFee(
 ): Promise<void> {
   const feeStatus = await checkVaultEthForGmxKeeper(
     ctx.vaultAddress as Address,
-    env.ALCHEMY_API_KEY,
   );
   if (!feeStatus.sufficient) {
     throw new Error(
@@ -70,7 +69,7 @@ async function capCollateralToBalance(
   isPureCollateralAdd: boolean,
 ): Promise<{ collateralAmount: string; sizeDeltaUsd: string; cappedNote: string }> {
   const { balance: colBal } = await getVaultTokenBalance(
-    ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, collateralAddr, env.ALCHEMY_API_KEY,
+    ARBITRUM_CHAIN_ID, ctx.vaultAddress as Address, collateralAddr,
   );
   const requestedRaw = parseUnits(collateralAmount, collateralDecimals);
   if (requestedRaw <= colBal) {
@@ -136,7 +135,6 @@ export async function handle_gmx_increase_position(
       ctx.vaultAddress as Address,
       marketSymbol,
       isLong,
-      env.ALCHEMY_API_KEY,
       userCollateral,
     );
   } catch {
@@ -175,7 +173,7 @@ export async function handle_gmx_increase_position(
 
   const collateralAddr = await resolveGmxCollateral(collateralSymbol);
   const collateralDecimals = getGmxTokenDecimals(collateralAddr);
-  await warmDecimalsForAddresses([collateralAddr, market.indexToken], env.ALCHEMY_API_KEY);
+  await warmDecimalsForAddresses([collateralAddr, market.indexToken]);
   const [collateralPrice, indexTokenPrice] = await Promise.all([
     getGmxTokenPrice(collateralAddr),
     getGmxTokenPrice(market.indexToken),
@@ -401,7 +399,6 @@ export async function handle_gmx_decrease_position(
     ctx.vaultAddress as Address,
     marketSymbol,
     isLong,
-    env.ALCHEMY_API_KEY,
     userCollateral,
   );
   if (!matchedPos) {
@@ -443,7 +440,7 @@ export async function handle_gmx_decrease_position(
   const collateralSymbol = matchedPos.collateralSymbol;
   const collateralAddr = await resolveGmxCollateral(collateralSymbol);
   const collateralDecimals = getGmxTokenDecimals(collateralAddr);
-  await warmDecimalsForAddresses([collateralAddr, market.indexToken], env.ALCHEMY_API_KEY);
+  await warmDecimalsForAddresses([collateralAddr, market.indexToken]);
 
   // Get index token price. For decreases:
   //   - Longs close at the MIN oracle price (selling the index token)
@@ -494,7 +491,6 @@ export async function handle_gmx_decrease_position(
       market,
       `-${sizeDeltaUsd}`, // negative = decrease
       isLong,
-      env.ALCHEMY_API_KEY,
       formatUnits(BigInt(matchedPos.sizeInUsdRaw), 30),
       BigInt(matchedPos.sizeInTokensRaw),
     );
@@ -625,7 +621,6 @@ export async function handle_gmx_get_positions(
 
   const summary = await getGmxPositionsSummary(
     ctx.vaultAddress as Address,
-    env.ALCHEMY_API_KEY,
   );
 
   // Generic suggestions only — per-position actions are rendered inline by the frontend.
@@ -754,7 +749,7 @@ export async function handle_gmx_claim_funding_fees(
 
   // Auto-detect from positions if not provided
   if (claimMarkets.length === 0) {
-    const positions = await getGmxPositions(ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+    const positions = await getGmxPositions(ctx.vaultAddress as Address);
     for (const p of positions) {
       claimMarkets.push(p.market);
       claimTokens.push(p.collateralToken);
@@ -800,7 +795,7 @@ export async function handle_gmx_get_markets(
 
   // Warm decimals cache for all ticker tokens before building the price map.
   // This fetches ERC20 decimals on-chain for unknown tokens (e.g. synthetic BTC = 8 dec, not 18).
-  await warmTokenDecimalsCache(tickers, env.ALCHEMY_API_KEY);
+  await warmTokenDecimalsCache(tickers);
 
   const tickerMap = new Map<string, { symbol: string; price: number }>();
   for (const t of tickers) {

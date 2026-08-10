@@ -16,7 +16,7 @@
  */
 
 import { type Address, type Hex, keccak256, encodeAbiParameters } from "viem";
-import { getClient } from "./rpcClient.js";
+import { getRpcProvider } from "./rpcClient.js";
 import { getWrappedNativeAddress } from "../config.js";
 import { BACKGEO_ORACLE_ABI } from "./oracleAbi.js";
 import { TickMath } from "@uniswap/v3-sdk";
@@ -163,7 +163,6 @@ function getPoolId(poolKey: ReturnType<typeof buildOraclePoolKey>): Hex {
 export async function getOracleSpotTick(
   chainId: number,
   token: Address,
-  alchemyKey: string,
 ): Promise<number> {
   const oracle = BACKGEO_ORACLE[chainId];
   if (!oracle) {
@@ -185,7 +184,7 @@ export async function getOracleSpotTick(
   }
 
   const poolKey = buildOraclePoolKey(chainId, normalizedToken);
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
 
   const SECONDS_AGOS = [0, 1] as const;
   const result = (await client.readContract({
@@ -220,7 +219,6 @@ function observeResultToTick(
 export async function hasOraclePriceFeed(
   chainId: number,
   token: Address,
-  alchemyKey: string,
 ): Promise<boolean> {
   const oracle = BACKGEO_ORACLE[chainId];
   if (!oracle) return false;
@@ -229,7 +227,7 @@ export async function hasOraclePriceFeed(
   if (normalizedToken === ETH_ADDRESS) return true;
 
   const poolKey = buildOraclePoolKey(chainId, normalizedToken);
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
 
   try {
     const state = (await client.readContract({
@@ -258,7 +256,6 @@ async function getSpotTicksForPair(
   chainId: number,
   tokenA: Address,
   tokenB: Address,
-  alchemyKey: string,
 ): Promise<[number, number]> {
   const oracle = BACKGEO_ORACLE[chainId];
   if (!oracle) {
@@ -272,14 +269,14 @@ async function getSpotTicksForPair(
 
   // Single non-ETH token: reuse the cached getOracleSpotTick path.
   if (isAEth) {
-    return [0, await getOracleSpotTick(chainId, tokenB, alchemyKey)];
+    return [0, await getOracleSpotTick(chainId, tokenB)];
   }
   if (isBEth) {
-    return [await getOracleSpotTick(chainId, tokenA, alchemyKey), 0];
+    return [await getOracleSpotTick(chainId, tokenA), 0];
   }
 
   // Both non-ETH: batch the two observe() calls via viem multicall.
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
   const SECONDS_AGOS = [0, 1] as const;
   const poolKeyA = buildOraclePoolKey(chainId, tokenA);
   const poolKeyB = buildOraclePoolKey(chainId, tokenB);
@@ -324,7 +321,6 @@ export async function convertTokenAmountViaOracle(
   token: Address,
   amount: bigint,
   targetToken: Address,
-  alchemyKey: string,
 ): Promise<bigint> {
   if (amount === 0n) return 0n;
 
@@ -339,7 +335,6 @@ export async function convertTokenAmountViaOracle(
     chainId,
     normalizedToken,
     normalizedTarget,
-    alchemyKey,
   );
 
   return convertAmountWithTicks(
@@ -367,7 +362,6 @@ export async function getOracleQuoteData(
   tokenIn: Address,
   amountIn: bigint,
   tokenOut: Address,
-  alchemyKey: string,
 ): Promise<{ priceFeedExists: boolean; oracleAmount: bigint }> {
   if (amountIn === 0n) {
     return { priceFeedExists: false, oracleAmount: 0n };
@@ -395,7 +389,7 @@ export async function getOracleQuoteData(
     return { priceFeedExists: true, oracleAmount: amountIn };
   }
 
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
   const SECONDS_AGOS = [0, 1] as const;
 
   const contracts = tokens.flatMap((token) => [
@@ -475,7 +469,6 @@ export async function hasPriceFeedForPair(
   chainId: number,
   tokenIn: Address,
   tokenOut: Address,
-  alchemyKey: string,
 ): Promise<boolean> {
   const oracle = BACKGEO_ORACLE[chainId];
   if (!oracle) return false;
@@ -487,11 +480,11 @@ export async function hasPriceFeedForPair(
   const outIsEth = normalizedOut === ETH_ADDRESS;
 
   if (inIsEth && outIsEth) return true;
-  if (inIsEth) return hasOraclePriceFeed(chainId, tokenOut, alchemyKey);
-  if (outIsEth) return hasOraclePriceFeed(chainId, tokenIn, alchemyKey);
+  if (inIsEth) return hasOraclePriceFeed(chainId, tokenOut);
+  if (outIsEth) return hasOraclePriceFeed(chainId, tokenIn);
 
   // Both non-ETH: batch the two getState() calls.
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
   const results = await client.multicall({
     allowFailure: true,
     contracts: [

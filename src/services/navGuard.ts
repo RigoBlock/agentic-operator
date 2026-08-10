@@ -66,8 +66,9 @@ import {
 } from "viem";
 import { simulateCalls } from "viem/actions";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
-import { getClient } from "./rpcClient.js";
+import { getRpcProvider } from "./rpcClient.js";
 import { decodeRevertData, getRevertDataFromError } from "./errorDecoder.js";
+import type { Env } from "../types.js";
 
 /** Default maximum allowed NAV drop per transaction (10%) — used for swaps */
 export const DEFAULT_MAX_NAV_DROP_PCT = 10n;
@@ -137,25 +138,6 @@ export async function clearNavShieldThreshold(
   await kv.delete(`${NAV_SHIELD_PREFIX}${operatorAddress.toLowerCase()}`);
 }
 
-/** Known on-chain custom error selectors for clear error reporting */
-const KNOWN_ERRORS: Record<string, string> = {
-  // NavImpactLib — keccak256("NavImpactTooHigh()")[:4]
-  "0x3471741b": "Transfer amount exceeds maximum allowed NAV impact (NavImpactTooHigh). " +
-    "The on-chain contract limits how much value can leave the vault in a single transaction.",
-  // NavImpactLib — keccak256("EffectiveSupplyTooLow()")[:4]
-  "0x0f6e887f": "Effective supply too low after operation (EffectiveSupplyTooLow). " +
-    "The vault's effective supply would fall below the on-chain minimum (MINIMUM_SUPPLY_RATIO = 20). " +
-    "Bridge a smaller amount.",
-  // 0x Settler — TransferFromRecipientNotSettler(address)
-  "0xec8f2f9a": "The 0x Settler contract rejected the swap (TransferFromRecipientNotSettler). " +
-    "This token pair may not be routable via 0x for vault swaps. Try Uniswap instead.",
-  // Rigoblock A0xRouter — ActionNotAllowed(bytes4 actionSelector)
-  "0x829e3733": "The vault's 0x adapter rejected this settler action (ActionNotAllowed). " +
-    "Try routing the swap through Uniswap instead.",
-  "0x2f1cda64": "The vault's 0x adapter rejected this settler action (ActionNotAllowed). " +
-    "Try routing the swap through Uniswap instead.",
-};
-
 /** KV key prefix for 24-hour NAV baseline */
 const NAV_BASELINE_PREFIX = "nav-baseline:";
 
@@ -215,21 +197,6 @@ function computeImpactPct(preUnitaryValue: bigint, postUnitaryValue: bigint): st
 
 // ── Public API ───────────────────────────────────────────────────────
 
-/**
- * Parse a revert message for known on-chain custom error selectors.
- * Returns a human-readable description if recognized, or null.
- */
-function parseKnownError(errMsg: string): string | null {
-  const lower = errMsg.toLowerCase();
-  for (const [selector, description] of Object.entries(KNOWN_ERRORS)) {
-    // Custom errors appear as hex selectors in revert data
-    if (lower.includes(selector.slice(2))) {
-      return description;
-    }
-  }
-  return null;
-}
-
 /** Decode the updateUnitaryValue return tuple into NavData. */
 function decodeUpdateUnitaryValue(data: Hex): NavData {
   const navResult = decodeFunctionResult({
@@ -245,21 +212,27 @@ function decodeUpdateUnitaryValue(data: Hex): NavData {
   };
 }
 
+/**
+ * Format a simulation error for human-readable output, including any raw revert
+ * data and the decoded error if it matches a known ABI.
+ */
+function formatSimulationError(err: unknown, prefix: string): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const revertData = getRevertDataFromError(err);
+  const decoded = revertData ? decodeRevertData(revertData) : null;
+  const parts: string[] = [`${prefix}: ${msg}`];
+  if (decoded) parts.push(`Decoded revert: ${decoded}`);
+  if (revertData && !decoded) parts.push(`Raw revert data: ${revertData}`);
+  return parts.join(" | ");
+}
+
 /** Build a TRADE_REVERTS result from a swap simulation failure. */
 function handleSwapSimulationFailure(
   err: unknown,
   preUnitaryValue: bigint,
   _chainId: number,
 ): NavShieldResult {
-  const msg = err instanceof Error ? err.message : String(err);
-  const revertData = getRevertDataFromError(err);
-  const decoded = revertData ? decodeRevertData(revertData) : null;
-  const knownError = decoded || parseKnownError(msg);
-
-  const reason = knownError
-    ? `On-chain error: ${knownError}`
-    : `Trade simulation failed — the transaction would revert on-chain: ${msg.slice(0, 500)}`;
-
+  const reason = formatSimulationError(err, "Trade simulation failed — the transaction would revert on-chain");
   console.error(`[NavShield] ✗ TRADE_REVERTS: ${reason}`);
 
   return {
@@ -426,12 +399,11 @@ export async function checkNavImpact(
   txData: Hex,
   txValue: bigint,
   chainId: number,
-  alchemyKey: string,
   executorAddress: Address,
   kv?: KVNamespace,
   maxDropPct: bigint = DEFAULT_MAX_NAV_DROP_PCT,
 ): Promise<NavShieldResult> {
-  const publicClient = getClient(chainId, alchemyKey);
+  const publicClient = getRpcProvider(chainId);
 
   try {
     const updateNavCalldata = encodeFunctionData({
@@ -459,8 +431,7 @@ export async function checkNavImpact(
     // Pre-swap NAV
     const preResult = preSim.results[0];
     if (preResult.status !== "success") {
-      const errMsg = preResult.error instanceof Error ? preResult.error.message : String(preResult.error);
-      throw new Error(`Pre-swap NAV read failed: ${errMsg}`);
+      throw new Error(formatSimulationError(preResult.error, "Pre-swap NAV read failed"));
     }
     const preNav = decodeUpdateUnitaryValue(preResult.data);
 
@@ -473,8 +444,7 @@ export async function checkNavImpact(
     // Post-swap NAV
     const postResult = swapSim.results[1];
     if (postResult.status !== "success") {
-      const errMsg = postResult.error instanceof Error ? postResult.error.message : String(postResult.error);
-      throw new Error(`Post-swap NAV read failed: ${errMsg}`);
+      throw new Error(formatSimulationError(postResult.error, "Post-swap NAV read failed"));
     }
     const postNav = decodeUpdateUnitaryValue(postResult.data);
 
@@ -482,8 +452,8 @@ export async function checkNavImpact(
   } catch (err) {
     // FAIL-CLOSED: any simulation failure (RPC error, timeout, unsupported method)
     // means we cannot verify NAV impact. We MUST block the transaction.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[NavShield] BLOCKED: Could not simulate NAV impact: ${msg}`);
+    const reason = formatSimulationError(err, "Could not simulate NAV impact");
+    console.error(`[NavShield] BLOCKED: ${reason}`);
     return {
       allowed: false,
       verified: false,
@@ -491,7 +461,7 @@ export async function checkNavImpact(
       postNavUnitaryValue: "0",
       dropPct: "0",
       impactPct: "0",
-      reason: `Cannot simulate vault NAV impact - RPC or vault may be unreachable on chain ${chainId}: ${msg.slice(0, 300)}`,
+      reason: `Cannot simulate vault NAV impact on chain ${chainId}: ${reason}`,
     };
   }
 }

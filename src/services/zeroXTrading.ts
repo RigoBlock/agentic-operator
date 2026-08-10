@@ -126,8 +126,8 @@ export async function getZeroXQuote(
 
   // Native ETH is 18 decimals; for ERC-20s fetch on-chain decimals
   const [decimalsIn, decimalsOut] = await Promise.all([
-    sellIsNative ? Promise.resolve(18) : getTokenDecimals(chainId, sellToken, env.ALCHEMY_API_KEY),
-    buyIsNative ? Promise.resolve(18) : getTokenDecimals(chainId, buyToken, env.ALCHEMY_API_KEY),
+    sellIsNative ? Promise.resolve(18) : getTokenDecimals(chainId, sellToken),
+    buyIsNative ? Promise.resolve(18) : getTokenDecimals(chainId, buyToken),
   ]);
 
   // Build query parameters

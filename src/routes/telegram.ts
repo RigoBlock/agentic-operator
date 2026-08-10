@@ -394,7 +394,6 @@ telegram.post("/unpair", async (c) => {
       authSignature: body.authSignature,
       authTimestamp: body.authTimestamp,
       preferredChainId: body.chainId,
-      alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
     // Find their Telegram user ID via operator address
@@ -441,7 +440,6 @@ telegram.post("/pair", async (c) => {
       authSignature: body.authSignature,
       authTimestamp: body.authTimestamp,
       preferredChainId: body.chainId,
-      alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
     const code = await createPairingCode(
@@ -860,7 +858,7 @@ async function handleMessage(
         const allChains = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS];
         const results = await Promise.allSettled(
           allChains.map(async (ch) => {
-            const info = await getVaultInfo(ch.id, vaultAddr as `0x${string}`, env.ALCHEMY_API_KEY);
+            const info = await getVaultInfo(ch.id, vaultAddr as `0x${string}`);
             return { ...info, chainId: ch.id };
           }),
         );

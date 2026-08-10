@@ -133,8 +133,8 @@ export async function getUniswapQuote(
   // Fetch actual on-chain decimals (cached after first call).
   // Native tokens are always 18 decimals — skip RPC call.
   const [decimalsIn, decimalsOut] = await Promise.all([
-    tokenInIsNative ? Promise.resolve(18) : getTokenDecimals(chainId, tokenIn, env.ALCHEMY_API_KEY),
-    tokenOutIsNative ? Promise.resolve(18) : getTokenDecimals(chainId, tokenOut, env.ALCHEMY_API_KEY),
+    tokenInIsNative ? Promise.resolve(18) : getTokenDecimals(chainId, tokenIn),
+    tokenOutIsNative ? Promise.resolve(18) : getTokenDecimals(chainId, tokenOut),
   ]);
 
   // Determine swap type and resolve amount

@@ -22,13 +22,13 @@ function loadDevVars(): Record<string, string> {
   return vars;
 }
 
-const devVars = loadDevVars();
-const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY || devVars.ALCHEMY_API_KEY;
+// Skip when no real Alchemy key is configured (the dummy key from tests/setup.ts is not enough).
+const hasKey = Boolean(process.env.ALCHEMY_API_KEY) && process.env.ALCHEMY_API_KEY !== "test-key";
 
 // A known Rigoblock vault on Arbitrum with an open GMX perp position.
 const VAULT = "0xEfa4bDf566aE50537A507863612638680420645C";
 
-describe.skipIf(!ALCHEMY_API_KEY)("GMX positions — live Arbitrum", () => {
+describe.skipIf(!hasKey)("GMX positions — live Arbitrum", () => {
   beforeEach(() => {
     // No-op; kept for clarity.
   });
@@ -36,10 +36,10 @@ describe.skipIf(!ALCHEMY_API_KEY)("GMX positions — live Arbitrum", () => {
   it(
     "reads at least one open position for the vault",
     async () => {
-      const positions = await getGmxPositions(VAULT, ALCHEMY_API_KEY);
+      const positions = await getGmxPositions(VAULT);
       expect(positions.length).toBeGreaterThan(0);
 
-      const summary = await getGmxPositionsSummary(VAULT, ALCHEMY_API_KEY);
+      const summary = await getGmxPositionsSummary(VAULT);
       expect(summary.positions.length).toBeGreaterThan(0);
       expect(summary.totalSizeUsd).toMatch(/^\$[0-9,.]+[KMB]?$/);
     },

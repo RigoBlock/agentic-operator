@@ -44,7 +44,6 @@ quote.get("/", async (c) => {
         authSignature: sig,
         authTimestamp: Number(ts),
         preferredChainId: Number(chain),
-        alchemyKey: c.env.ALCHEMY_API_KEY,
       });
     } catch (err) {
       if (err instanceof AuthError) {

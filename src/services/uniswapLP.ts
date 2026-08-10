@@ -33,7 +33,7 @@ import { TickMath } from "@uniswap/v3-sdk";
 import JSBI from "jsbi";
 import { Token, Ether, Percent, type Currency } from "@uniswap/sdk-core";
 import { encodeVaultModifyLiquidities, getTokenDecimals } from "./vault.js";
-import { getClient } from "./rpcClient.js";
+import { getRpcProvider } from "./rpcClient.js";
 import { resolveTokenAddress } from "../config.js";
 import type { Env } from "../types.js";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
@@ -180,12 +180,11 @@ const STATEVIEW_ABI = [
 async function readPoolState(
   poolId: Hex,
   chainId: number,
-  alchemyApiKey: string,
 ): Promise<PoolState> {
   const stateView = STATE_VIEW[chainId];
   if (!stateView) throw new Error(`Uniswap v4 StateView not available on chain ${chainId}.`);
 
-  const client = getClient(chainId, alchemyApiKey);
+  const client = getRpcProvider(chainId);
 
   // Batch getSlot0 + getLiquidity into one Multicall3 round-trip.
   const [slot0Result, liqResult] = await client.multicall({
@@ -415,8 +414,8 @@ export async function buildAddLiquidityTx(
 
   // 2. Get token decimals on-chain
   const [dec0, dec1] = await Promise.all([
-    getTokenDecimals(chainId, currency0, env.ALCHEMY_API_KEY),
-    getTokenDecimals(chainId, currency1, env.ALCHEMY_API_KEY),
+    getTokenDecimals(chainId, currency0),
+    getTokenDecimals(chainId, currency1),
   ]);
 
   // 3. Build pool key and SDK Token/Currency objects
@@ -434,7 +433,7 @@ export async function buildAddLiquidityTx(
   // 4. Read current pool state (validates the pool exists on this chain)
   let poolState: PoolState;
   try {
-    poolState = await readPoolState(poolId, chainId, env.ALCHEMY_API_KEY);
+    poolState = await readPoolState(poolId, chainId);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // Distinguish between infrastructure failures (StateView not deployed, RPC errors)
@@ -519,7 +518,7 @@ export async function buildAddLiquidityTx(
   //    If one exists, increase it instead of minting a new position (avoids duplicate NFTs).
   let existingTokenId: bigint | undefined;
   try {
-    const existing = await getVaultLPPositions(chainId, vaultAddress, env.ALCHEMY_API_KEY);
+    const existing = await getVaultLPPositions(chainId, vaultAddress);
     const match = existing.find(p =>
       p.currency0.toLowerCase() === currency0.toLowerCase() &&
       p.currency1.toLowerCase() === currency1.toLowerCase() &&
@@ -596,8 +595,8 @@ export async function buildInitializePoolTx(
   const currency1 = (isALower ? addrB : addrA) as Address;
 
   const [dec0, dec1] = await Promise.all([
-    getTokenDecimals(chainId, currency0, env.ALCHEMY_API_KEY),
-    getTokenDecimals(chainId, currency1, env.ALCHEMY_API_KEY),
+    getTokenDecimals(chainId, currency0),
+    getTokenDecimals(chainId, currency1),
   ]);
 
   const fee = params.fee;
@@ -609,7 +608,7 @@ export async function buildInitializePoolTx(
   const poolId = computePoolId(poolKey);
 
   try {
-    const state = await readPoolState(poolId, chainId, env.ALCHEMY_API_KEY);
+    const state = await readPoolState(poolId, chainId);
     if (state.sqrtPriceX96 !== 0n) {
       throw new Error(`Pool ${poolId} is already initialized (sqrtPriceX96 = ${state.sqrtPriceX96.toString()}).`);
     }
@@ -840,7 +839,6 @@ export interface ActivePoolInfo {
 export async function getVaultActivePools(
   chainId: number,
   vaultAddress: Address,
-  alchemyApiKey: string,
 ): Promise<ActivePoolInfo[]> {
   const posm = POSITION_MANAGER[chainId];
   if (!posm) {
@@ -851,7 +849,7 @@ export async function getVaultActivePools(
     throw new Error(`Uniswap v4 StateView not available on chain ${chainId}.`);
   }
 
-  const client = getClient(chainId, alchemyApiKey);
+  const client = getRpcProvider(chainId);
 
   let tokenIds: readonly bigint[];
   try {
@@ -980,14 +978,13 @@ export function decodePositionInfo(packed: bigint): { tickLower: number; tickUpp
 export async function getVaultLPPositions(
   chainId: number,
   vaultAddress: Address,
-  alchemyApiKey: string,
 ): Promise<LPPosition[]> {
   const posm = POSITION_MANAGER[chainId];
   if (!posm) throw new Error(`Uniswap v4 PositionManager not available on chain ${chainId}. Supported chains: ${Object.keys(POSITION_MANAGER).join(", ")}.`);
   const stateView = STATE_VIEW[chainId];
   if (!stateView) throw new Error(`Uniswap v4 StateView not available on chain ${chainId}.`);
 
-  const client = getClient(chainId, alchemyApiKey);
+  const client = getRpcProvider(chainId);
 
   // 1. Get token IDs from the vault's EApps extension
   let tokenIds: readonly bigint[];
@@ -1207,12 +1204,11 @@ export async function getVaultLPPositions(
 export async function getPositionDirect(
   chainId: number,
   tokenId: string,
-  alchemyApiKey: string,
 ): Promise<{ currency0: Address; currency1: Address; liquidity: bigint } | null> {
   const posm = POSITION_MANAGER[chainId];
   if (!posm) return null;
 
-  const client = getClient(chainId, alchemyApiKey);
+  const client = getRpcProvider(chainId);
   const tokenIdBn = BigInt(tokenId);
 
   const results = await client.multicall({

@@ -5,7 +5,7 @@ const mockGetTransactionReceipt = vi.hoisted(() => vi.fn());
 const mockGetSponsoredCallsStatus = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/services/rpcClient.js", () => ({
-  getClient: vi.fn(() => ({
+  getRpcProvider: vi.fn(() => ({
     getTransactionReceipt: mockGetTransactionReceipt,
   })),
   ALCHEMY_ORIGIN: "https://trader.rigoblock.com",
@@ -117,7 +117,7 @@ describe("checkPendingTxStatus — sponsored UserOp resolution", () => {
     expect(result!.txHash).toBe(evmTxHash);
     expect(result!.confirmed).toBe(true);
     expect(result!.sponsored).toBe(true);
-    expect(mockGetSponsoredCallsStatus).toHaveBeenCalledWith(callId, 1, "test-key");
+    expect(mockGetSponsoredCallsStatus).toHaveBeenCalledWith(callId, 1);
   });
 
   it("returns null when the stored sponsored callId is still pending", async () => {

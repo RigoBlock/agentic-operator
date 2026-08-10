@@ -40,7 +40,7 @@ import {
   markChainDelegated,
   unmarkChainDelegated,
 } from "./agentWallet.js";
-import { getClient } from "./rpcClient.js";
+import { getRpcProvider } from "./rpcClient.js";
 
 // ── KV key helpers ────────────────────────────────────────────────────
 
@@ -247,13 +247,12 @@ export async function checkDelegationOnChain(
   vaultAddress: Address,
   agentAddress: Address,
   selectors: Hex[],
-  alchemyKey?: string,
 ): Promise<{
   allDelegated: boolean;
   delegatedSelectors: Hex[];
   undelegatedSelectors: Hex[];
 }> {
-  const publicClient = getClient(chainId, alchemyKey);
+  const publicClient = getRpcProvider(chainId);
 
   try {
     // Single call: get all selectors delegated to the agent

@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { type Hex, type TransactionReceipt } from "viem";
 import { checkPendingTxStatus } from "../src/services/execution.js";
 import { getSponsoredCallsStatus } from "../src/services/bundler.js";
-import { getClient } from "../src/services/rpcClient.js";
+import { getRpcProvider } from "../src/services/rpcClient.js";
 import type { Env, ExecutionResult } from "../src/types.js";
 
 vi.mock("../src/services/bundler.js", () => ({
@@ -18,7 +18,7 @@ vi.mock("../src/services/bundler.js", () => ({
 }));
 
 vi.mock("../src/services/rpcClient.js", () => ({
-  getClient: vi.fn(),
+  getRpcProvider: vi.fn(),
   ALCHEMY_ORIGIN: "https://trader.rigoblock.com",
 }));
 
@@ -62,7 +62,7 @@ describe("checkPendingTxStatus", () => {
   beforeEach(() => {
     kvStore = new Map<string, string>();
     publicClient = { getTransactionReceipt: vi.fn() };
-    (getClient as ReturnType<typeof vi.fn>).mockReturnValue(publicClient);
+    (getRpcProvider as ReturnType<typeof vi.fn>).mockReturnValue(publicClient);
     (getSponsoredCallsStatus as ReturnType<typeof vi.fn>).mockReset();
     env = { KV: makeKV(kvStore), ALCHEMY_API_KEY: "test-key" } as unknown as Env;
   });
@@ -100,7 +100,7 @@ describe("checkPendingTxStatus", () => {
 
     expect(result).toBeNull();
     expect(publicClient.getTransactionReceipt).not.toHaveBeenCalled();
-    expect(getSponsoredCallsStatus).toHaveBeenCalledWith(MOCK_CALL_ID, 8453, "test-key");
+    expect(getSponsoredCallsStatus).toHaveBeenCalledWith(MOCK_CALL_ID, 8453);
   });
 
   it("resolves a 128-byte callId to an EVM hash when the bundler returns a receipt", async () => {
@@ -123,7 +123,7 @@ describe("checkPendingTxStatus", () => {
     expect(result).not.toBeNull();
     expect(result!.txHash).toBe(MOCK_TX_HASH);
     expect(result!.confirmed).toBe(true);
-    expect(getSponsoredCallsStatus).toHaveBeenCalledWith(MOCK_CALL_ID, 8453, "test-key");
+    expect(getSponsoredCallsStatus).toHaveBeenCalledWith(MOCK_CALL_ID, 8453);
     expect(publicClient.getTransactionReceipt).toHaveBeenCalledWith({ hash: MOCK_TX_HASH });
   });
 
@@ -156,7 +156,7 @@ describe("checkPendingTxStatus", () => {
 
     expect(result).not.toBeNull();
     expect(result!.txHash).toBe(MOCK_TX_HASH);
-    expect(getSponsoredCallsStatus).toHaveBeenCalledWith(MOCK_CALL_ID, 8453, "test-key");
+    expect(getSponsoredCallsStatus).toHaveBeenCalledWith(MOCK_CALL_ID, 8453);
   });
 
   it("cleans up the callId and resolved hash KV keys after a sponsored tx lands", async () => {

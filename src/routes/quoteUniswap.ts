@@ -110,7 +110,6 @@ quoteUniswap.post("/", async (c) => {
         tokenOut,
         BigInt(amountIn),
         BigInt(dexExpectedOut),
-        c.env.ALCHEMY_API_KEY,
       );
     }
   } catch {

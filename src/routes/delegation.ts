@@ -68,7 +68,6 @@ delegation.post("/setup", async (c) => {
       authSignature: body.authSignature,
       authTimestamp: body.authTimestamp,
       preferredChainId: body.chainId,
-      alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
     // Determine which selectors to include in the updateDelegation call.
@@ -89,7 +88,6 @@ delegation.post("/setup", async (c) => {
             body.vaultAddress as Address,
             agentInfo.address,
             buildDefaultSelectors(),
-            c.env.ALCHEMY_API_KEY,
           );
           if (undelegatedSelectors.length > 0 && undelegatedSelectors.length < buildDefaultSelectors().length) {
             onlySelectors = undelegatedSelectors;
@@ -158,7 +156,6 @@ delegation.post("/confirm", async (c) => {
       authSignature: body.authSignature,
       authTimestamp: body.authTimestamp,
       preferredChainId: body.chainId,
-      alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
     if (!body.txHash) {
@@ -223,7 +220,6 @@ delegation.post("/revoke", async (c) => {
       authSignature: body.authSignature,
       authTimestamp: body.authTimestamp,
       preferredChainId: body.chainId,
-      alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
     // Prepare on-chain revocation tx (calls vault.revokeAllDelegations(agentAddress))
@@ -308,7 +304,6 @@ delegation.get("/status", async (c) => {
         vaultAddress as Address,
         walletInfo.address,
         selectors,
-        c.env.ALCHEMY_API_KEY,
       );
     } catch (err) {
       console.warn("[delegation/status] On-chain check failed:", err);
@@ -327,7 +322,6 @@ delegation.get("/status", async (c) => {
           vaultAddress as Address,
           walletInfo.address,
           selectors,
-          c.env.ALCHEMY_API_KEY,
         );
         return {
           chainId: cid,
@@ -356,7 +350,7 @@ delegation.get("/status", async (c) => {
   let telegramPaired = false;
   if (verifyOnChain && walletInfo?.address) {
     try {
-      const vaultInfo = await getVaultInfo(chainId || 1, vaultAddress as Address, c.env.ALCHEMY_API_KEY);
+      const vaultInfo = await getVaultInfo(chainId || 1, vaultAddress as Address);
       if (vaultInfo?.owner) {
         const tgUserId = await getTelegramUserIdByAddress(c.env.KV, vaultInfo.owner);
         telegramPaired = !!tgUserId;
@@ -445,7 +439,6 @@ delegation.post("/execute", async (c) => {
       authSignature: body.authSignature,
       authTimestamp: body.authTimestamp,
       preferredChainId: body.chainId,
-      alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
     // Verify delegation is active on this chain
@@ -620,7 +613,6 @@ delegation.post("/settings", async (c) => {
       authSignature: body.authSignature,
       authTimestamp: body.authTimestamp,
       preferredChainId: 1, // Auth is chain-independent
-      alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
     const config = await getDelegationConfig(c.env.KV, body.vaultAddress);
@@ -675,7 +667,6 @@ delegation.post("/telegram-reset", async (c) => {
       authSignature: body.authSignature,
       authTimestamp: body.authTimestamp,
       preferredChainId: 1,
-      alchemyKey: c.env.ALCHEMY_API_KEY,
     });
 
     const addr = body.operatorAddress.toLowerCase();

@@ -21,7 +21,7 @@ vi.mock("../src/services/vault.js", () => ({
 }));
 
 vi.mock("../src/services/rpcClient.js", () => ({
-  getClient: mockGetClient,
+  getRpcProvider: mockGetClient,
 }));
 
 vi.mock("../src/services/oraclePrice.js", () => ({
@@ -36,7 +36,6 @@ vi.mock("../src/services/delegation.js", () => ({
 const { getAggregatedNav } = await import("../src/services/crosschain.js");
 
 const VAULT = "0xEfa4bDf566aE50537A507863612638680420645C" as Address;
-const ALCHEMY_KEY = "test-key";
 const zeroAddr = "0x0000000000000000000000000000000000000000" as Address;
 
 function makeKV(): KVNamespace {
@@ -58,7 +57,7 @@ describe("getAggregatedNav global assets", () => {
     mockGetClient.mockImplementation((chainId: number) => ({
       readContract: vi.fn().mockResolvedValue(0n),
       multicall: vi.fn(async ({ contracts }: { contracts: any[] }) => {
-        const state = await mockGetEffectivePoolState(chainId, VAULT, ALCHEMY_KEY);
+        const state = await mockGetEffectivePoolState(chainId, VAULT);
         return contracts.map((c: any, i: number) => {
           if (i === 0) {
             // updateUnitaryValue
@@ -122,7 +121,7 @@ describe("getAggregatedNav global assets", () => {
       return null;
     });
 
-    const nav = await getAggregatedNav(VAULT, ALCHEMY_KEY, makeKV());
+    const nav = await getAggregatedNav(VAULT, makeKV());
 
     // Total assets USDC = (82.5 + 1.5) ETH * 2,600 = 218,400 USDC
     expect(parseFloat(nav.globalNav.totalUsdc)).toBeCloseTo(218400, 0);
@@ -152,6 +151,6 @@ describe("getAggregatedNav global assets", () => {
       return null;
     });
 
-    await expect(getAggregatedNav(VAULT, ALCHEMY_KEY, makeKV())).rejects.toThrow(/Oracle/);
+    await expect(getAggregatedNav(VAULT, makeKV())).rejects.toThrow(/Oracle/);
   });
 });

@@ -15,7 +15,7 @@ const mockReadContract = vi.fn();
 const mockMulticall = vi.fn();
 
 vi.mock("../src/services/rpcClient.js", () => ({
-  getClient: () => ({ readContract: mockReadContract, multicall: mockMulticall }),
+  getRpcProvider: () => ({ readContract: mockReadContract, multicall: mockMulticall }),
 }));
 
 vi.mock("../src/services/oraclePool.js", () => ({
@@ -77,7 +77,7 @@ describe("normalizeTokenAddress", () => {
 describe("hasOraclePriceFeed", () => {
   it("returns true for ETH without calling the oracle", async () => {
     const ETH = "0x0000000000000000000000000000000000000000" as Address;
-    const result = await hasOraclePriceFeed(8453, ETH, "test-key");
+    const result = await hasOraclePriceFeed(8453, ETH);
     expect(result).toBe(true);
     expect(mockReadContract).not.toHaveBeenCalled();
   });
@@ -85,27 +85,27 @@ describe("hasOraclePriceFeed", () => {
   it("returns true when oracle pool has cardinality > 0", async () => {
     mockReadContract.mockResolvedValueOnce({ index: 0, cardinality: 5, cardinalityNext: 5 });
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
-    const result = await hasOraclePriceFeed(8453, TOKEN, "test-key");
+    const result = await hasOraclePriceFeed(8453, TOKEN);
     expect(result).toBe(true);
   });
 
   it("returns false when oracle pool has cardinality = 0", async () => {
     mockReadContract.mockResolvedValueOnce({ index: 0, cardinality: 0, cardinalityNext: 0 });
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
-    const result = await hasOraclePriceFeed(8453, TOKEN, "test-key");
+    const result = await hasOraclePriceFeed(8453, TOKEN);
     expect(result).toBe(false);
   });
 
   it("returns false when getState reverts", async () => {
     mockReadContract.mockRejectedValueOnce(new Error("execution reverted"));
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
-    const result = await hasOraclePriceFeed(8453, TOKEN, "test-key");
+    const result = await hasOraclePriceFeed(8453, TOKEN);
     expect(result).toBe(false);
   });
 
   it("returns false for unsupported chain", async () => {
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
-    const result = await hasOraclePriceFeed(99999, TOKEN, "test-key");
+    const result = await hasOraclePriceFeed(99999, TOKEN);
     expect(result).toBe(false);
   });
 });
@@ -113,7 +113,7 @@ describe("hasOraclePriceFeed", () => {
 describe("getOracleSpotTick", () => {
   it("returns 0 for ETH", async () => {
     const ETH = "0x0000000000000000000000000000000000000000" as Address;
-    const tick = await getOracleSpotTick(8453, ETH, "test-key");
+    const tick = await getOracleSpotTick(8453, ETH);
     expect(tick).toBe(0);
     expect(mockReadContract).not.toHaveBeenCalled();
   });
@@ -122,7 +122,7 @@ describe("getOracleSpotTick", () => {
     // tickCumulatives[0] = 5000, tickCumulatives[1] = 4000 → tick = 1000
     mockReadContract.mockResolvedValueOnce([[5000n, 4000n], []]);
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
-    const tick = await getOracleSpotTick(8453, TOKEN, "test-key");
+    const tick = await getOracleSpotTick(8453, TOKEN);
     expect(tick).toBe(1000);
   });
 
@@ -130,21 +130,21 @@ describe("getOracleSpotTick", () => {
     // tickCumulatives[0] = 1000, tickCumulatives[1] = 3000 → tick = -2000
     mockReadContract.mockResolvedValueOnce([[1000n, 3000n], []]);
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
-    const tick = await getOracleSpotTick(8453, TOKEN, "test-key");
+    const tick = await getOracleSpotTick(8453, TOKEN);
     expect(tick).toBe(-2000);
   });
 
   it("throws for unsupported chain", async () => {
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
-    await expect(getOracleSpotTick(99999, TOKEN, "test-key")).rejects.toThrow("not deployed");
+    await expect(getOracleSpotTick(99999, TOKEN)).rejects.toThrow("not deployed");
   });
 
   it("caches observe results to avoid redundant RPC calls", async () => {
     mockReadContract.mockResolvedValueOnce([[5000n, 4000n], []]);
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
 
-    const tick1 = await getOracleSpotTick(8453, TOKEN, "test-key");
-    const tick2 = await getOracleSpotTick(8453, TOKEN, "test-key");
+    const tick1 = await getOracleSpotTick(8453, TOKEN);
+    const tick2 = await getOracleSpotTick(8453, TOKEN);
 
     expect(tick1).toBe(1000);
     expect(tick2).toBe(1000);
@@ -155,7 +155,7 @@ describe("getOracleSpotTick", () => {
 describe("convertTokenAmountViaOracle", () => {
   it("returns 0 for zero amount", async () => {
     const result = await convertTokenAmountViaOracle(
-      8453, "0xaaaa" as Address, 0n, "0xbbbb" as Address, "test-key",
+      8453, "0xaaaa" as Address, 0n, "0xbbbb" as Address,
     );
     expect(result).toBe(0n);
   });
@@ -163,7 +163,7 @@ describe("convertTokenAmountViaOracle", () => {
   it("returns same amount for same token", async () => {
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
     const result = await convertTokenAmountViaOracle(
-      8453, TOKEN, 1000n, TOKEN, "test-key",
+      8453, TOKEN, 1000n, TOKEN,
     );
     expect(result).toBe(1000n);
     expect(mockReadContract).not.toHaveBeenCalled();
@@ -172,7 +172,7 @@ describe("convertTokenAmountViaOracle", () => {
   it("returns same amount for ETH ↔ WETH (after normalization)", async () => {
     const WETH = "0x4200000000000000000000000000000000000006" as Address;
     const result = await convertTokenAmountViaOracle(
-      8453, WETH, 1000n, "0x0000000000000000000000000000000000000000" as Address, "test-key",
+      8453, WETH, 1000n, "0x0000000000000000000000000000000000000000" as Address,
     );
     expect(result).toBe(1000n);
     expect(mockReadContract).not.toHaveBeenCalled();
@@ -183,7 +183,7 @@ describe("convertTokenAmountViaOracle", () => {
     mockReadContract.mockResolvedValueOnce([[0n, 0n], []]);
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
     const result = await convertTokenAmountViaOracle(
-      8453, "0x0000000000000000000000000000000000000000" as Address, 1000n, TOKEN, "test-key",
+      8453, "0x0000000000000000000000000000000000000000" as Address, 1000n, TOKEN,
     );
     // tick=0 → sqrtPrice=2^96 → price=1 → amountOut=1000
     expect(result).toBe(1000n);
@@ -194,7 +194,7 @@ describe("convertTokenAmountViaOracle", () => {
     mockReadContract.mockResolvedValueOnce([[0n, 0n], []]);
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
     const result = await convertTokenAmountViaOracle(
-      8453, TOKEN, 1000n, "0x0000000000000000000000000000000000000000" as Address, "test-key",
+      8453, TOKEN, 1000n, "0x0000000000000000000000000000000000000000" as Address,
     );
     expect(result).toBe(1000n);
   });
@@ -211,7 +211,7 @@ describe("convertTokenAmountViaOracle", () => {
       [[3000n, 1000n], []], // tick = 2000
     ]);
 
-    const result = await convertTokenAmountViaOracle(8453, TOKEN_A, 1000n, TOKEN_B, "test-key");
+    const result = await convertTokenAmountViaOracle(8453, TOKEN_A, 1000n, TOKEN_B);
 
     // With tick=1000, sqrtPriceX96 > 2^96, so price > 1, result > 1000
     expect(result).toBeGreaterThan(1000n);
@@ -230,7 +230,7 @@ describe("convertTokenAmountViaOracle", () => {
     ]);
 
     await expect(
-      convertTokenAmountViaOracle(8453, TOKEN_A, 1000n, TOKEN_B, "test-key"),
+      convertTokenAmountViaOracle(8453, TOKEN_A, 1000n, TOKEN_B),
     ).rejects.toThrow("out of bounds");
   });
 
@@ -238,7 +238,7 @@ describe("convertTokenAmountViaOracle", () => {
     mockReadContract.mockResolvedValueOnce([[0n, 0n], []]);
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
     const result = await convertTokenAmountViaOracle(
-      8453, "0x0000000000000000000000000000000000000000" as Address, -500n, TOKEN, "test-key",
+      8453, "0x0000000000000000000000000000000000000000" as Address, -500n, TOKEN,
     );
     expect(result).toBe(-500n);
   });
@@ -248,7 +248,7 @@ describe("getOracleQuoteData", () => {
   it("returns same amount for same token without RPC", async () => {
     const TOKEN = "0xaaaa000000000000000000000000000000000001" as Address;
     const result = await getOracleQuoteData(
-      8453, TOKEN, 1000n, TOKEN, "test-key",
+      8453, TOKEN, 1000n, TOKEN,
     );
     expect(result.priceFeedExists).toBe(true);
     expect(result.oracleAmount).toBe(1000n);
@@ -267,7 +267,6 @@ describe("getOracleQuoteData", () => {
       "0x0000000000000000000000000000000000000000" as Address,
       1000n,
       TOKEN,
-      "test-key",
     );
 
     expect(result.priceFeedExists).toBe(true);
@@ -288,7 +287,7 @@ describe("getOracleQuoteData", () => {
     ]);
 
     const result = await getOracleQuoteData(
-      8453, TOKEN_A, 1000n, TOKEN_B, "test-key",
+      8453, TOKEN_A, 1000n, TOKEN_B,
     );
 
     expect(result.priceFeedExists).toBe(true);
@@ -308,7 +307,7 @@ describe("getOracleQuoteData", () => {
     ]);
 
     await expect(
-      getOracleQuoteData(8453, TOKEN_A, 1000n, TOKEN_B, "test-key"),
+      getOracleQuoteData(8453, TOKEN_A, 1000n, TOKEN_B),
     ).rejects.toThrow("No oracle price feed");
   });
 });
@@ -325,7 +324,7 @@ describe("hasPriceFeedForPair", () => {
     ]);
 
     const result = await hasPriceFeedForPair(
-      8453, "0xaaaa" as Address, "0xbbbb" as Address, "test-key",
+      8453, "0xaaaa" as Address, "0xbbbb" as Address,
     );
     expect(result).toBe(true);
     expect(mockMulticall).toHaveBeenCalledTimes(1);
@@ -339,7 +338,7 @@ describe("hasPriceFeedForPair", () => {
     ]);
 
     const result = await hasPriceFeedForPair(
-      8453, "0xaaaa" as Address, "0xbbbb" as Address, "test-key",
+      8453, "0xaaaa" as Address, "0xbbbb" as Address,
     );
     expect(result).toBe(false);
   });
@@ -348,7 +347,7 @@ describe("hasPriceFeedForPair", () => {
     mockReadContract.mockResolvedValueOnce({ index: 0, cardinality: 5, cardinalityNext: 5 });
 
     const result = await hasPriceFeedForPair(
-      8453, "0x0000000000000000000000000000000000000000" as Address, "0xbbbb" as Address, "test-key",
+      8453, "0x0000000000000000000000000000000000000000" as Address, "0xbbbb" as Address,
     );
     expect(result).toBe(true);
     expect(mockReadContract).toHaveBeenCalledTimes(1); // Only token checked

@@ -94,25 +94,20 @@ export const ALCHEMY_NETWORK: Record<number, string> = {
   84532: "base-sepolia",
 };
 
-/** Module-level Alchemy key removed — key is threaded from env.ALCHEMY_API_KEY
- *  through function parameters to avoid module-level mutable state. */
+/** Reads ALCHEMY_API_KEY from `process.env` at call time so tests and the Worker
+ *  can both inject it without threading a parameter through every call site. */
 
-/** Get the best RPC URL for a chain (Alchemy if available, else public) */
-export function getRpcUrl(chainId: number, alchemyKey?: string): string | undefined {
-  if (alchemyKey) {
-    const network = ALCHEMY_NETWORK[chainId];
-    if (network) {
-      return `https://${network}.g.alchemy.com/v2/${alchemyKey}`;
-    }
+/** Get the alchemy RPC URL for a chain */
+export function getRpcUrl(chainId: number): string {
+  const alchemyKey = process.env.ALCHEMY_API_KEY;
+
+  if (!alchemyKey) {
+    throw new Error(
+      "ALCHEMY_API_KEY is not configured. On-chain operations require an Alchemy RPC key.",
+    );
   }
-  return undefined; // viem will use the chain's default public RPC
-}
 
-/** Get the Alchemy network slug for a chain (e.g. "eth-mainnet", "arb-mainnet"). */
-export function getAlchemyNetworkSlug(chainId: number): string {
-  const network = ALCHEMY_NETWORK[chainId];
-  if (!network) throw new Error(`Unsupported chain ID for Alchemy: ${chainId}`);
-  return network;
+  return `https://${ALCHEMY_NETWORK[chainId]}.g.alchemy.com/v2/${alchemyKey}`;
 }
 
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as `0x${string}`;

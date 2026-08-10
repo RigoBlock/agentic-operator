@@ -6,6 +6,7 @@ export default defineConfig({
     globals: true,
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    setupFiles: ["tests/setup.ts"],
     alias: {
       "@": path.resolve(__dirname, "./src"),
       // The SDK's ESM build omits .js extensions on relative imports, which

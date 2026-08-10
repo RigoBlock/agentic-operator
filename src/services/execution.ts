@@ -40,7 +40,7 @@ import {
   type WalletCall,
 } from "./bundler.js";
 import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
-import { getClient, ALCHEMY_ORIGIN } from "./rpcClient.js";
+import { getRpcProvider, ALCHEMY_ORIGIN } from "./rpcClient.js";
 import {
   estimateTransactionGas,
   clampGasFees,
@@ -87,11 +87,7 @@ export async function prepareTransaction(
   draft: TransactionDraft,
 ): Promise<{ tx: UnsignedTransaction; warning?: string }> {
   const tx: UnsignedTransaction = { ...draft, gas: "0x0", navShieldChecked: false };
-  if (!env.ALCHEMY_API_KEY) {
-    throw new ExecutionError("No RPC key configured", "RPC_UNAVAILABLE");
-  }
-
-  const publicClient = getClient(tx.chainId, env.ALCHEMY_API_KEY);
+  const publicClient = getRpcProvider(tx.chainId);
 
   // Determine the operator/owner address for NAV shield threshold lookup.
   // If the caller didn't prove ownership, we read the on-chain owner.
@@ -99,14 +95,40 @@ export async function prepareTransaction(
   if (ctx.operatorAddress) {
     operatorAddress = ctx.operatorAddress;
   } else {
+    if (!ctx.vaultAddress || ctx.vaultAddress.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+      throw new ExecutionError(
+        "No operator address provided and no vault address configured for NAV simulation.",
+        "VAULT_NOT_ON_CHAIN",
+      );
+    }
     try {
       operatorAddress = await publicClient.readContract({
-        address: ctx.vaultAddress,
+        address: ctx.vaultAddress as Address,
         abi: RIGOBLOCK_VAULT_ABI,
         functionName: "owner",
       }) as Address;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const lower = msg.toLowerCase();
+      // A revert or "no data" response means the address is not a vault on this chain
+      // (e.g. a vault address copied from a different chain). Distinguish that from a
+      // genuine RPC outage / bad API key.
+      if (
+        lower.includes("reverted") ||
+        lower.includes("execution reverted") ||
+        lower.includes("invalid") ||
+        lower.includes("bad data") ||
+        lower.includes("returned no data") ||
+        lower.includes("no data") ||
+        lower.includes("missing revert data") ||
+        lower.includes("contract not found")
+      ) {
+        throw new ExecutionError(
+          `Vault address ${ctx.vaultAddress.slice(0, 6)}…${ctx.vaultAddress.slice(-4)} is not a valid vault on chain ${tx.chainId}. ` +
+          "The address may belong to a vault on another chain, or it may not be a vault contract.",
+          "VAULT_NOT_ON_CHAIN",
+        );
+      }
       throw new ExecutionError(
         `Could not read vault owner for NAV simulation: ${sanitizeError(msg)}`,
         "RPC_UNAVAILABLE",
@@ -148,7 +170,6 @@ export async function prepareTransaction(
       tx.data,
       txValue,
       tx.chainId,
-      env.ALCHEMY_API_KEY,
       executor,
       env.KV,
       storedNavThreshold ?? undefined,
@@ -408,7 +429,6 @@ export async function executeViaDelegation(
           agentAccount,
           tx,
           tx.chainId,
-          env.ALCHEMY_API_KEY,
           env.ALCHEMY_GAS_POLICY_ID!,
           env.KV,
         );
@@ -442,7 +462,6 @@ export async function executeViaDelegation(
             agentAccount,
             tx,
             tx.chainId,
-            env.ALCHEMY_API_KEY,
           );
           // Sponsorship failed but direct broadcast succeeded. Surface the original
           // sponsored failure reason to the caller/LLM so it knows why sponsorship
@@ -511,7 +530,6 @@ export async function executeViaDelegation(
         agentAccount,
         tx,
         tx.chainId,
-        env.ALCHEMY_API_KEY,
       );
     }
   } catch (execErr) {
@@ -577,13 +595,12 @@ async function broadcastAgentTransaction(
   agentAccount: LocalAccount,
   tx: UnsignedTransaction,
   chainId: number,
-  alchemyKey?: string,
 ): Promise<ExecutionResult> {
   try {
   const chain = getChain(chainId);
-  const rpcUrl = getRpcUrl(chainId, alchemyKey);
+  const rpcUrl = getRpcUrl(chainId);
 
-  const publicClient = getClient(chainId, alchemyKey);
+  const publicClient = getRpcProvider(chainId);
   const txValue = BigInt(tx.value);
 
   // ── Step 1: Parallelize independent pre-broadcast reads ──
@@ -779,13 +796,12 @@ async function sponsoredAgentTransaction(
   agentAccount: LocalAccount,
   tx: UnsignedTransaction,
   chainId: number,
-  alchemyKey: string,
   gasPolicyId: string,
   _kv: KVNamespace,
 ): Promise<ExecutionResult> {
   // The simulation only needs any working RPC — the actual sponsored execution
   // uses the Alchemy SDK's own transport (which supports more chains).
-  const publicClient = getClient(chainId, alchemyKey);
+  const publicClient = getRpcProvider(chainId);
   const txValue = BigInt(tx.value);
 
   // ── Step 1: Use pre-computed gas limit ──
@@ -827,7 +843,6 @@ async function sponsoredAgentTransaction(
       return await executeSponsoredCalls(
         agentAccount,
         chainId,
-        alchemyKey,
         gasPolicyId,
         calls,
         callGasLimit,
@@ -914,7 +929,7 @@ async function sponsoredAgentTransaction(
     }
     if (effectiveGasPrice) {
       const gasCostWei = gasUsed * effectiveGasPrice;
-      await recordGasSpend(_kv, agentAccount.address, chainId, gasCostWei, alchemyKey).catch((err) =>
+      await recordGasSpend(_kv, agentAccount.address, chainId, gasCostWei).catch((err) =>
         console.warn(`[execution] Failed to record sponsored gas spend: ${err instanceof Error ? err.message : String(err)}`),
       );
     }
@@ -985,11 +1000,10 @@ async function sponsoredAgentTransaction(
 export async function revoke7702Authorization(
   agentAccount: LocalAccount,
   chainId: number,
-  alchemyKey: string,
   kv: KVNamespace,
 ): Promise<Hex> {
   const chain = getChain(chainId);
-  const rpcUrl = getRpcUrl(chainId, alchemyKey);
+  const rpcUrl = getRpcUrl(chainId);
   const transport = http(rpcUrl, rpcUrl?.includes("alchemy.com")
     ? { fetchOptions: { headers: { Origin: ALCHEMY_ORIGIN } } }
     : undefined,
@@ -1036,8 +1050,7 @@ export async function checkAgentBalance(
     throw new ExecutionError("Agent wallet not found", "AGENT_WALLET_NOT_FOUND");
   }
 
-  const client = getClient(chainId, env.ALCHEMY_API_KEY);
-
+  const client = getRpcProvider(chainId);
   const balance = await client.getBalance({ address: agentAccount.address });
   const minBal = MIN_BALANCE[chainId];
   if (minBal === undefined) {
@@ -1189,8 +1202,7 @@ export async function checkPendingTxStatus(
   chainId: number,
   vaultAddress?: string,
 ): Promise<ExecutionResult | null> {
-  const alchemyKey = env.ALCHEMY_API_KEY;
-  const publicClient = getClient(chainId, alchemyKey);
+  const publicClient = getRpcProvider(chainId);
 
   // Normalize to a lowercase 0x-prefixed string for consistent KV keys.
   const normalized = hash.toLowerCase().startsWith("0x") ? hash.toLowerCase() : `0x${hash.toLowerCase()}`;
@@ -1257,7 +1269,7 @@ export async function checkPendingTxStatus(
   const callId = storedCallId || (isCallId ? normalized : undefined);
   if (callId) {
     try {
-      const sponsoredStatus = await getSponsoredCallsStatus(callId, chainId, alchemyKey);
+      const sponsoredStatus = await getSponsoredCallsStatus(callId, chainId);
       const resolvedHash = sponsoredStatus.receipts?.[0]?.transactionHash;
       if (resolvedHash) {
         const onChainReceipt = await publicClient.getTransactionReceipt({ hash: resolvedHash });

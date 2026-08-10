@@ -35,6 +35,7 @@ describe("ExecutionError", () => {
       "NAV_SHIELD_BLOCKED",
       "SPONSORED_FAILED",
       "RPC_UNAVAILABLE",
+      "VAULT_NOT_ON_CHAIN",
     ];
     for (const code of codes) {
       const err = new ExecutionError("test", code);

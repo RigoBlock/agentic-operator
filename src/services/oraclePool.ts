@@ -43,7 +43,7 @@ import {
   type Hex,
 } from "viem";
 import { getTokenDecimals } from "./vault.js";
-import { getClient } from "./rpcClient.js";
+import { getRpcProvider } from "./rpcClient.js";
 import { resolveTokenAddress, TOKEN_MAP, NATIVE_TOKEN, getNativeTokenSymbol } from "../config.js";
 import { TickMath } from "@uniswap/v3-sdk";
 import { BACKGEO_ORACLE_ABI } from "./oracleAbi.js";
@@ -169,7 +169,6 @@ export interface OraclePoolSwapResult {
  * @param amountIn - Amount to swap. For "buy" direction: chain's native token amount.
  *   For "sell" direction: ERC-20 token amount. Must be provided by the caller; there is no default.
  * @param chainId - Chain where the oracle is stale.
- * @param alchemyKey - Alchemy API key for RPC calls.
  * @param vaultAddress - Optional vault address. If provided, the transaction targets
  *   the vault adapter instead of the Universal Router.
  * @param direction - "buy" (chain's native token → ERC-20, default) or "sell" (ERC-20 → chain's native token).
@@ -178,7 +177,6 @@ export async function buildOraclePoolSwapTx(
   token: string,
   amountIn: string,
   chainId: number,
-  alchemyKey: string,
   vaultAddress?: Address,
   direction: "buy" | "sell" = "buy",
 ): Promise<OraclePoolSwapResult> {
@@ -242,7 +240,7 @@ export async function buildOraclePoolSwapTx(
 
   // Verify oracle pool is initialized and read the current spot tick in one
   // Multicall3 round-trip: getState(cardinality) + observe(tickCumulatives).
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
   let cardinality: number;
   let priceLine = "";
   try {
@@ -299,7 +297,7 @@ export async function buildOraclePoolSwapTx(
       tokenDecimals = 18;
       amountInWei = parseUnits(amountIn, 18);
     } else {
-      tokenDecimals = await getTokenDecimals(chainId, tokenAddr, alchemyKey);
+      tokenDecimals = await getTokenDecimals(chainId, tokenAddr);
       amountInWei = parseUnits(amountIn, tokenDecimals);
     }
   } catch {

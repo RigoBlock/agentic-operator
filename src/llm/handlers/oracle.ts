@@ -9,8 +9,8 @@
 import type { Env, RequestContext } from "../../types.js";
 import type { ToolResult } from "../client.js";
 
-import { getTokenDecimals } from "../../services/vault.js";
-import { getClient } from "../../services/rpcClient.js";
+import { getTokenDecimals, isVaultOnChain } from "../../services/vault.js";
+import { getRpcProvider } from "../../services/rpcClient.js";
 import { resolveTokenAddress, resolveChainId, resolveChainName, getNativeTokenSymbol, NATIVE_TOKEN } from "../../config.js";
 import { parseUnits, formatUnits, encodeFunctionData, type Address, type Hex, type Abi } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
@@ -182,8 +182,7 @@ export async function handle_refresh_oracle_feed(
   if (!ctx.operatorAddress) {
     throw new AuthError("Wallet not connected. Connect your wallet first.", 401);
   }
-
-  const tokenArg = args.token as string;
+const tokenArg = args.token as string;
   if (!tokenArg) {
     throw new Error("'token' is required. Specify the token symbol whose oracle feed is stale (e.g., 'GRG', 'USDC').");
   }
@@ -224,9 +223,9 @@ export async function handle_refresh_oracle_feed(
 
   const direction = deriveDirection(ctx.chainId, tokenArg, tokenInArg, tokenOutArg);
 
-  // Vault-dependent options (viaVault, amountOut) require ctx.vaultAddress to be on
-  // the active chain. Check this BEFORE mutating ctx.chainId to avoid leaving context
-  // in a partially-switched state if the guard throws.
+  // Vault-dependent options (viaVault, amountOut) require ctx.vaultAddress to be a
+  // valid vault on the active chain. We compute the user's explicit/default choice
+  // here, then validate it against the chain after all chain-switching is done.
   // Use the same normalization as the amountOut coercion below so that numeric 0,
   // whitespace strings, and null/undefined are all handled consistently.
   const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
@@ -238,9 +237,9 @@ export async function handle_refresh_oracle_feed(
     return String(v).trim();
   };
   const normalizedAmountOut = toDecimalString(args.amountOut);
-  // Default viaVault to true when a vault is connected on the SAME chain,
-  // unless explicitly set to false. This allows oracle refreshes on other
-  // chains without blocking the auto chain-switch.
+  // Default viaVault to true when a vault is connected, unless explicitly set to false.
+  // The active chain will be validated below; a vault address from another chain is
+  // never silently used as a vault here.
   const hasVault = ctx.vaultAddress && ctx.vaultAddress !== ZERO_ADDR;
   const viaVaultExplicit = args.viaVault === true || args.viaVault === "true" || args.viaVault === false || args.viaVault === "false";
   let viaVault: boolean;
@@ -258,6 +257,21 @@ export async function handle_refresh_oracle_feed(
     if (requestedChain !== ctx.chainId) {
       ctx.chainId = requestedChain;
       oracleChainSwitched = requestedChain;
+    }
+  }
+
+  // Validate the vault actually lives on the now-resolved chain. A connected vault
+  // address from another chain must not be silently used as a vault here.
+  if (viaVault && ctx.vaultAddress && ctx.vaultAddress !== ZERO_ADDR) {
+    const vaultOnChain = await isVaultOnChain(ctx.chainId, ctx.vaultAddress);
+    if (!vaultOnChain) {
+      if (viaVaultExplicit) {
+        throw new Error(
+          `The connected vault ${ctx.vaultAddress.slice(0, 6)}…${ctx.vaultAddress.slice(-4)} is not a valid vault on ${resolveChainName(ctx.chainId)}. ` +
+          `Use viaVault=false to refresh via your operator wallet, or switch to the chain where the vault is deployed.`,
+        );
+      }
+      viaVault = false;
     }
   }
 
@@ -281,15 +295,15 @@ export async function handle_refresh_oracle_feed(
   // If amountOut is provided instead of amount, estimate the required input
   // using the vault's on-chain BackgeoOracle (convertTokenAmount).
   if (!amountIn && amountOut) {
-    if (!ctx.vaultAddress || ctx.vaultAddress === ZERO_ADDR || !env.ALCHEMY_API_KEY) {
+    if (!viaVault || !ctx.vaultAddress || ctx.vaultAddress === ZERO_ADDR) {
       throw new Error(
-        `amountOut requires a connected vault with an active RPC key for oracle estimation. ` +
-        `Connect a vault first, or provide amount directly.`
+        `amountOut requires a connected vault on ${resolveChainName(ctx.chainId)} for oracle estimation. ` +
+        `Connect a vault on this chain, or provide amount directly.`
       );
     }
     try {
       const tokenAddr = await resolveTokenAddress(ctx.chainId, tokenArg);
-      const tokenDecimals = await getTokenDecimals(ctx.chainId, tokenAddr, env.ALCHEMY_API_KEY);
+      const tokenDecimals = await getTokenDecimals(ctx.chainId, tokenAddr);
       // For buy direction the desired output is the ERC-20 token; for sell direction
       // the desired output is the native token (always 18 decimals).
       const decimalsOut = direction === "buy" ? tokenDecimals : 18;
@@ -299,7 +313,7 @@ export async function handle_refresh_oracle_feed(
           `amountOut must be a positive value; got "${amountOut}". Provide a value greater than zero.`
         );
       }
-      const publicClient = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
+      const publicClient = getRpcProvider(ctx.chainId);
       const NATIVE_ZERO = "0x0000000000000000000000000000000000000000" as Address;
       const normalizeForOracle = (addr: string) =>
         addr.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
@@ -374,7 +388,6 @@ export async function handle_refresh_oracle_feed(
     tokenArg,
     amountIn,
     ctx.chainId,
-    env.ALCHEMY_API_KEY,
     vaultAddr,
     direction,
   );
@@ -385,8 +398,8 @@ export async function handle_refresh_oracle_feed(
   const amountInWei = result.amountInWei;
 
   // EOA path: pre-flight balance / allowance check to catch missing approvals early.
-  if (!viaVault && env.ALCHEMY_API_KEY && ctx.operatorAddress) {
-    const publicClient = getClient(ctx.chainId, env.ALCHEMY_API_KEY);
+  if (!viaVault && ctx.operatorAddress) {
+    const publicClient = getRpcProvider(ctx.chainId);
     const operator = ctx.operatorAddress as Address;
 
     // Pre-flight: for sell direction, ensure the operator has the token AND has

@@ -74,7 +74,6 @@ export async function handle_setup_delegation(
         ctx.vaultAddress as Address,
         agentInfo.address,
         buildDefaultSelectors(),
-        env.ALCHEMY_API_KEY,
       );
       if (undelegatedSelectors.length > 0 && undelegatedSelectors.length < buildDefaultSelectors().length) {
         onlySelectors = undelegatedSelectors;
@@ -184,7 +183,6 @@ export async function handle_check_delegation_status(
   env: Env,
   ctx: RequestContext,
   args: Record<string, unknown>,
-  toolName: string,
 ): Promise<ToolResult> {
   // Handle optional chain switch
   let chainSwitched: number | undefined;
@@ -217,7 +215,6 @@ export async function handle_check_delegation_status(
     ctx.vaultAddress as Address,
     walletInfo.address,
     selectors,
-    env.ALCHEMY_API_KEY,
   );
 
   const kvActive = config?.enabled && !!config.chains?.[String(ctx.chainId)];

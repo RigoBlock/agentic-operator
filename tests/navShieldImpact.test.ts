@@ -18,18 +18,18 @@ const UPDATE_SELECTOR = encodeFunctionData({
 
 import { encodeFunctionData } from "viem";
 
-// ── Hoist mocks before the module under test imports getClient / simulateCalls ──
+// ── Hoist mocks before the module under test imports getRpcProvider / simulateCalls ──
 const mockState = vi.hoisted(() => {
   const simulateCalls = vi.fn();
-  const getClient = vi.fn(() => ({ simulateCalls } as any));
+  const getRpcProvider = vi.fn(() => ({ simulateCalls } as any));
   return {
     simulateCalls,
-    getClient,
+    getRpcProvider,
   };
 });
 
 vi.mock("../src/services/rpcClient.js", () => ({
-  getClient: mockState.getClient,
+  getRpcProvider: mockState.getRpcProvider,
 }));
 
 vi.mock("viem/actions", async (importOriginal) => {
@@ -47,7 +47,6 @@ import { checkNavImpact } from "../src/services/navGuard.js";
 const VAULT = "0x1111111111111111111111111111111111111111" as `0x${string}`;
 const EXECUTOR = "0x2222222222222222222222222222222222222222" as `0x${string}`;
 const CHAIN_ID = 42161;
-const ALCHEMY_KEY = "test-key";
 const SWAP_DATA = "0xdeadbeef" as Hex;
 
 function encodeNavReturn(unitaryValue: bigint): Hex {
@@ -122,7 +121,7 @@ describe("NAV Shield impact logic", () => {
   it("allows a trade within the max NAV drop threshold", async () => {
     setupClient(10000n, 9000n);
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, ALCHEMY_KEY, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
@@ -134,7 +133,7 @@ describe("NAV Shield impact logic", () => {
   it("blocks a trade that exceeds the max NAV drop threshold", async () => {
     setupClient(10000n, 8900n);
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, ALCHEMY_KEY, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
     );
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("BLOCKED");
@@ -147,7 +146,7 @@ describe("NAV Shield impact logic", () => {
     setupClient(8000n, 8500n);
     const kv = createMockKV({ unitaryValue: "10000", recordedAt: Date.now() });
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, ALCHEMY_KEY, EXECUTOR, kv,
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, kv,
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
@@ -160,7 +159,7 @@ describe("NAV Shield impact logic", () => {
     setupClient(8000n, 7500n);
     const kv = createMockKV({ unitaryValue: "10000", recordedAt: Date.now() });
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, ALCHEMY_KEY, EXECUTOR, kv,
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, kv,
     );
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("BLOCKED");
@@ -171,7 +170,7 @@ describe("NAV Shield impact logic", () => {
   it("allows trading in an empty vault (unitaryValue = 0)", async () => {
     setupClient(0n, 0n);
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, ALCHEMY_KEY, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
@@ -180,7 +179,7 @@ describe("NAV Shield impact logic", () => {
   it("fails closed when pre-swap NAV cannot be read", async () => {
     mockSimulateCalls.mockRejectedValue(new Error("RPC timeout"));
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, ALCHEMY_KEY, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
     );
     expect(result.allowed).toBe(false);
     expect(result.verified).toBe(false);
@@ -190,7 +189,7 @@ describe("NAV Shield impact logic", () => {
   it("reports TRADE_REVERTS when the swap itself fails", async () => {
     setupClient(10000n, 10000n, true);
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, ALCHEMY_KEY, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
     );
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("TRADE_REVERTS");

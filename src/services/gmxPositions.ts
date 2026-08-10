@@ -9,7 +9,7 @@
  */
 
 import { type Address, getAddress, zeroAddress } from "viem";
-import { getClient } from "./rpcClient.js";
+import { getRpcProvider } from "./rpcClient.js";
 import { GMX_READER_ABI, GMX_ADDRESSES } from "../abi/gmx.js";
 import {
   getGmxTickers,
@@ -426,7 +426,6 @@ function buildGmxPositionFromApi(
  */
 export async function getGmxPositions(
   vaultAddress: Address,
-  alchemyKey?: string,
   useApi = true,
 ): Promise<GmxPosition[]> {
   if (useApi) {
@@ -440,7 +439,7 @@ export async function getGmxPositions(
       const marketMap = new Map(markets.map((m) => [m.marketToken.toLowerCase(), m]));
       const tickers = await getGmxTickers();
       const tickerMap = new Map(tickers.map((t) => [t.tokenAddress.toLowerCase(), t]));
-      await warmTokenDecimalsCache(tickers, alchemyKey);
+      await warmTokenDecimalsCache(tickers);
 
       const positions: GmxPosition[] = [];
       for (const position of apiPositions) {
@@ -457,7 +456,7 @@ export async function getGmxPositions(
     }
   }
 
-  return getGmxPositionsFromSdk(vaultAddress, alchemyKey);
+  return getGmxPositionsFromSdk(vaultAddress);
 }
 
 /**
@@ -472,10 +471,9 @@ export async function getGmxPositions(
  */
 async function getGmxPositionsFromSdk(
   vaultAddress: Address,
-  alchemyKey?: string,
 ): Promise<GmxPosition[]> {
-  const sdk = createGmxSdk(vaultAddress, alchemyKey);
-  const client = getClient(42161, alchemyKey);
+  const sdk = createGmxSdk(vaultAddress);
+  const client = getRpcProvider(42161);
 
   // 1. Discover the vault's actual positions first.
   const accountPositions = await client.readContract({
@@ -539,10 +537,9 @@ export async function findGmxPosition(
   vaultAddress: Address,
   marketSymbol: string,
   isLongArg: unknown,
-  alchemyKey?: string,
   collateralSymbolHint?: string,
 ): Promise<GmxPosition> {
-  const positions = await getGmxPositions(vaultAddress, alchemyKey);
+  const positions = await getGmxPositions(vaultAddress);
   const isLong = normalizeIsLong(isLongArg);
   const sym = marketSymbol.toUpperCase();
 
@@ -591,9 +588,8 @@ export async function findGmxPosition(
  */
 export async function getGmxPendingOrders(
   vaultAddress: Address,
-  alchemyKey?: string,
 ): Promise<GmxPendingOrder[]> {
-  const client = getClient(42161, alchemyKey);
+  const client = getRpcProvider(42161);
 
   const [rawOrders, markets, tickers] = await Promise.all([
     client.readContract({
@@ -649,15 +645,14 @@ export async function getGmxPendingOrders(
  */
 export async function getGmxPositionsSummary(
   vaultAddress: Address,
-  alchemyKey?: string,
 ): Promise<GmxPositionsSummary> {
   // Warm token decimals so pending-order formatting is accurate even though
   // the SDK-based position read no longer does it.
-  await warmTokenDecimalsCache(await getGmxTickers(), alchemyKey);
+  await warmTokenDecimalsCache(await getGmxTickers());
 
   const [positions, pendingOrders] = await Promise.all([
-    getGmxPositions(vaultAddress, alchemyKey),
-    getGmxPendingOrders(vaultAddress, alchemyKey),
+    getGmxPositions(vaultAddress),
+    getGmxPendingOrders(vaultAddress),
   ]);
 
   let totalNetPnl = 0;

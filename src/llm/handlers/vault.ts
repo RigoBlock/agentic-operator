@@ -15,10 +15,10 @@ export async function handle_get_vault_info(
   args: Record<string, unknown>,
   toolName: string,
 ): Promise<ToolResult> {
-  const info = await getVaultInfo(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+  const info = await getVaultInfo(ctx.chainId, ctx.vaultAddress as Address);
 
   // Fetch NAV data for richer display
-  const navInfo = await getNavData(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY)
+  const navInfo = await getNavData(ctx.chainId, ctx.vaultAddress as Address)
     .catch(() => null);
 
   const decimals = info.decimals ?? 18;
@@ -56,7 +56,6 @@ export async function handle_get_token_balance(
     ctx.chainId,
     ctx.vaultAddress as Address,
     tokenAddress as Address,
-    env.ALCHEMY_API_KEY,
   );
   const formatted = Number(balance) / 10 ** decimals;
   return { message: `Vault holds ${formatted.toFixed(6)} ${symbol}`, selfContained: true };
@@ -84,7 +83,6 @@ export async function handle_verify_bridge_arrival(
     targetChainId,
     ctx.vaultAddress as Address,
     tokenAddress as Address,
-    env.ALCHEMY_API_KEY,
   );
   const initialAmount = Number(initialBal) / 10 ** decimals;
 
@@ -99,7 +97,6 @@ export async function handle_verify_bridge_arrival(
       targetChainId,
       ctx.vaultAddress as Address,
       tokenAddress as Address,
-      env.ALCHEMY_API_KEY,
     );
     const current = Number(balance) / 10 ** decimals;
     const increase = current - initialAmount;
@@ -116,7 +113,6 @@ export async function handle_verify_bridge_arrival(
     targetChainId,
     ctx.vaultAddress as Address,
     tokenAddress as Address,
-    env.ALCHEMY_API_KEY,
   );
   const finalAmount = Number(finalBal) / 10 ** decimals;
   const totalIncrease = finalAmount - initialAmount;

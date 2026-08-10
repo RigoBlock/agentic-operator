@@ -27,7 +27,6 @@ import { BACKGEO_ORACLE } from "../src/services/oraclePool.js";
 
 const SENDER = "0xAgentWallet000000000000000000000000000000" as Address;
 const NATIVE_TOKEN_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
-const ALCHEMY_KEY = "test-key";
 const BASE_CHAIN_ID = 8453;
 const SPENDING_DECIMALS = 18;
 
@@ -127,7 +126,7 @@ describe("estimateGasCostUsd", () => {
   });
 
   it("returns 0 when gas fields are zero", async () => {
-    const cost = await estimateGasCostUsd(BASE_CHAIN_ID, makeUserOp({ maxFeePerGas: "0x0" }), ALCHEMY_KEY);
+    const cost = await estimateGasCostUsd(BASE_CHAIN_ID, makeUserOp({ maxFeePerGas: "0x0" }));
     expect(cost).toEqual({ usd: 0, rawNormalized: 0n });
   });
 
@@ -135,7 +134,7 @@ describe("estimateGasCostUsd", () => {
     // 300k gas * 100 gwei = 0.03 native; oracle says that's 60 USDC (6 dec)
     mockConvertTokenAmountViaOracle.mockResolvedValue(60n * 10n ** 6n);
 
-    const cost = await estimateGasCostUsd(BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY);
+    const cost = await estimateGasCostUsd(BASE_CHAIN_ID, makeUserOp());
 
     expect(cost).toEqual({ usd: 60, rawNormalized: 60n * 10n ** 18n });
     expect(mockConvertTokenAmountViaOracle).toHaveBeenCalledWith(
@@ -143,7 +142,6 @@ describe("estimateGasCostUsd", () => {
       NATIVE_TOKEN_ADDRESS,
       300000n * 100000000n, // totalGas * maxFeePerGas
       CROSSCHAIN_TOKENS[BASE_CHAIN_ID]!.find((t) => t.type === "USDC")!.address,
-      ALCHEMY_KEY,
     );
   });
 
@@ -151,7 +149,7 @@ describe("estimateGasCostUsd", () => {
     // BNB Chain USDC is 18 decimals; oracle returns 10 * 10^18 raw units = $10.00.
     mockConvertTokenAmountViaOracle.mockResolvedValue(10n * 10n ** 18n);
 
-    const cost = await estimateGasCostUsd(56, makeUserOp(), ALCHEMY_KEY);
+    const cost = await estimateGasCostUsd(56, makeUserOp());
 
     expect(cost).toEqual({ usd: 10, rawNormalized: 10n * 10n ** 18n });
     expect(mockConvertTokenAmountViaOracle).toHaveBeenCalledWith(
@@ -159,14 +157,13 @@ describe("estimateGasCostUsd", () => {
       NATIVE_TOKEN_ADDRESS,
       expect.any(BigInt),
       CROSSCHAIN_TOKENS[56]!.find((t) => t.type === "USDC")!.address,
-      ALCHEMY_KEY,
     );
   });
 
   it("works on Polygon where native currency is POL", async () => {
     mockConvertTokenAmountViaOracle.mockResolvedValue(15n * 10n ** 6n);
 
-    const cost = await estimateGasCostUsd(137, makeUserOp(), ALCHEMY_KEY);
+    const cost = await estimateGasCostUsd(137, makeUserOp());
 
     expect(cost).toEqual({ usd: 15, rawNormalized: 15n * 10n ** 18n });
     expect(mockConvertTokenAmountViaOracle).toHaveBeenCalledWith(
@@ -174,14 +171,13 @@ describe("estimateGasCostUsd", () => {
       NATIVE_TOKEN_ADDRESS,
       expect.any(BigInt),
       CROSSCHAIN_TOKENS[137]!.find((t) => t.type === "USDC")!.address,
-      ALCHEMY_KEY,
     );
   });
 
   it("works on Unichain", async () => {
     mockConvertTokenAmountViaOracle.mockResolvedValue(20n * 10n ** 6n);
 
-    const cost = await estimateGasCostUsd(130, makeUserOp(), ALCHEMY_KEY);
+    const cost = await estimateGasCostUsd(130, makeUserOp());
 
     expect(cost).toEqual({ usd: 20, rawNormalized: 20n * 10n ** 18n });
     expect(mockConvertTokenAmountViaOracle).toHaveBeenCalledWith(
@@ -189,18 +185,17 @@ describe("estimateGasCostUsd", () => {
       NATIVE_TOKEN_ADDRESS,
       expect.any(BigInt),
       CROSSCHAIN_TOKENS[130]!.find((t) => t.type === "USDC")!.address,
-      ALCHEMY_KEY,
     );
   });
 
   it("returns null when chain has no USDC mapping", async () => {
-    const cost = await estimateGasCostUsd(999999, makeUserOp(), ALCHEMY_KEY);
+    const cost = await estimateGasCostUsd(999999, makeUserOp());
     expect(cost).toBeNull();
   });
 
   it("returns null when oracle conversion fails", async () => {
     mockConvertTokenAmountViaOracle.mockRejectedValue(new Error("no feed"));
-    const cost = await estimateGasCostUsd(BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY);
+    const cost = await estimateGasCostUsd(BASE_CHAIN_ID, makeUserOp());
     expect(cost).toBeNull();
   });
 });
@@ -216,7 +211,7 @@ describe("checkSpendingLimit", () => {
     mockConvertTokenAmountViaOracle.mockResolvedValue(2n * 10n ** 6n); // $2.00
     const kv = makeKV();
 
-    const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
+    const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), limitRaw(5));
 
     expect(result.approved).toBe(true);
     expect(result.estimatedCost).toBe(2);
@@ -231,7 +226,7 @@ describe("checkSpendingLimit", () => {
     mockConvertTokenAmountViaOracle.mockResolvedValue(6n * 10n ** 6n); // $6.00 > $5 limit
     const kv = makeKV();
 
-    const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
+    const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), limitRaw(5));
 
     expect(result.approved).toBe(false);
     expect(result.reason).toContain("Daily gas sponsorship limit exceeded");
@@ -244,10 +239,10 @@ describe("checkSpendingLimit", () => {
     const kv = makeKV();
 
     // Simulate a previous settled transaction that already consumed $3.
-    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 3n * 10n ** 18n, ALCHEMY_KEY);
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 3n * 10n ** 18n);
 
     // A new $3 request would bring total to $6.
-    const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
+    const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), limitRaw(5));
     expect(result.approved).toBe(false);
     expect(result.reason).toContain("Daily gas sponsorship limit exceeded");
     expect(result.currentSpend).toBe(3);
@@ -259,11 +254,11 @@ describe("checkSpendingLimit", () => {
 
     // Spend $4 on 2026-06-22
     const day1 = Date.UTC(2026, 5, 22, 13, 0, 0);
-    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 4n * 10n ** 18n, ALCHEMY_KEY, day1);
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 4n * 10n ** 18n, day1);
 
     // Next day, same wallet should see $0 spent again
     const day2 = Date.UTC(2026, 5, 23, 13, 0, 0);
-    const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), ALCHEMY_KEY, limitRaw(5), day2);
+    const result = await checkSpendingLimit(kv, SENDER, BASE_CHAIN_ID, makeUserOp(), limitRaw(5), day2);
     expect(result.approved).toBe(true);
     expect(result.currentSpend).toBe(0);
   });
@@ -272,7 +267,7 @@ describe("checkSpendingLimit", () => {
     mockConvertTokenAmountViaOracle.mockResolvedValue(6n * 10n ** 6n); // $6.00
     const kv = makeKV();
 
-    const result = await checkSpendingLimit(kv, SENDER, 137, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
+    const result = await checkSpendingLimit(kv, SENDER, 137, makeUserOp(), limitRaw(5));
 
     expect(result.approved).toBe(false);
     expect(result.reason).toContain("Daily gas sponsorship limit exceeded");
@@ -283,7 +278,7 @@ describe("checkSpendingLimit", () => {
     mockConvertTokenAmountViaOracle.mockResolvedValue(6n * 10n ** 18n);
     const kv = makeKV();
 
-    const result = await checkSpendingLimit(kv, SENDER, 56, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
+    const result = await checkSpendingLimit(kv, SENDER, 56, makeUserOp(), limitRaw(5));
 
     expect(result.approved).toBe(false);
     expect(result.reason).toContain("Daily gas sponsorship limit exceeded");
@@ -292,7 +287,6 @@ describe("checkSpendingLimit", () => {
       NATIVE_TOKEN_ADDRESS,
       expect.any(BigInt),
       CROSSCHAIN_TOKENS[56]!.find((t) => t.type === "USDC")!.address,
-      ALCHEMY_KEY,
     );
   });
 
@@ -306,10 +300,10 @@ describe("checkSpendingLimit", () => {
     const kv = makeKV();
 
     // Record a settled $3 Base transaction
-    await recordGasSpend(kv, SENDER, 8453, 3n * 10n ** 18n, ALCHEMY_KEY);
+    await recordGasSpend(kv, SENDER, 8453, 3n * 10n ** 18n);
 
     // A new $3 BNB request sees $3 already spent and rejects.
-    const bnbResult = await checkSpendingLimit(kv, SENDER, 56, makeUserOp(), ALCHEMY_KEY, limitRaw(5));
+    const bnbResult = await checkSpendingLimit(kv, SENDER, 56, makeUserOp(), limitRaw(5));
     expect(bnbResult.approved).toBe(false);
     expect(bnbResult.reason).toContain("Daily gas sponsorship limit exceeded");
     // The tracker saw $3 + $3 = $6, not 3e6 + 3e18 raw units.
@@ -323,7 +317,7 @@ describe("checkSpendingLimit", () => {
     const kv = makeKV();
 
     for (let i = 0; i < 10; i++) {
-      await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 1n * 10n ** 17n, ALCHEMY_KEY); // $0.10
+      await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 1n * 10n ** 17n); // $0.10
     }
 
     const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
@@ -346,7 +340,7 @@ describe("recordGasSpend", () => {
     mockConvertTokenAmountViaOracle.mockResolvedValue(2n * 10n ** 6n); // $2.00
     const kv = makeKV();
 
-    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 2n * 10n ** 18n, ALCHEMY_KEY);
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 2n * 10n ** 18n);
 
     const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
     expect(stored).toBe(String(2n * 10n ** 18n)); // $2.00
@@ -358,8 +352,8 @@ describe("recordGasSpend", () => {
       .mockResolvedValueOnce(15n * 10n ** 5n); // $1.50
     const kv = makeKV();
 
-    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 1n * 10n ** 18n, ALCHEMY_KEY);
-    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 15n * 10n ** 17n, ALCHEMY_KEY);
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 1n * 10n ** 18n);
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 15n * 10n ** 17n);
 
     const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
     expect(stored).toBe(String(25n * 10n ** 17n)); // $2.50
@@ -367,14 +361,14 @@ describe("recordGasSpend", () => {
 
   it("ignores zero or negative gas costs", async () => {
     const kv = makeKV();
-    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 0n, ALCHEMY_KEY);
+    await recordGasSpend(kv, SENDER, BASE_CHAIN_ID, 0n);
     const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
     expect(stored).toBeNull();
   });
 
   it("warns and no-ops when the chain has no USDC mapping", async () => {
     const kv = makeKV();
-    await recordGasSpend(kv, SENDER, 999999, 1n * 10n ** 18n, ALCHEMY_KEY);
+    await recordGasSpend(kv, SENDER, 999999, 1n * 10n ** 18n);
     const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
     expect(stored).toBeNull();
   });

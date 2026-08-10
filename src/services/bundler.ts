@@ -36,7 +36,7 @@ import {
   baseSepolia as alchemyBaseSepolia,
   unichainMainnet as alchemyUnichain,
 } from "@account-kit/infra";
-import { getAlchemyNetworkSlug } from "../config.js";
+import { getRpcUrl } from "../config.js";
 
 // ── Alchemy Chain Map ────────────────────────────────────────────────
 
@@ -179,7 +179,6 @@ export function normalizeCallId(raw: unknown): { callId: string; userOpHash?: He
 export async function executeSponsoredCalls(
   agentAccount: LocalAccount,
   chainId: number,
-  alchemyKey: string,
   policyId: string,
   calls: WalletCall[],
   callGasLimit?: bigint,
@@ -193,14 +192,13 @@ export async function executeSponsoredCalls(
 
     // ── Step 2: Create smart wallet client (per SDK quickstart) ──
     const alchemyChain = getAlchemyChain(chainId);
-    // Route chain-agnostic wallet API calls (prepareCalls, sendPreparedCalls,
-    // getCallsStatus) to the chain-specific Alchemy endpoint instead of the
-    // generic api.g.alchemy.com. This fixes "Unknown network" logs and avoids
-    // cross-region routing that caused Arbitrum status polling timeouts.
-    const alchemyNetworkUrl = `https://${getAlchemyNetworkSlug(chainId)}.g.alchemy.com/v2`;
+    // Route all smart-wallet API calls (prepareCalls, sendPreparedCalls,
+    // getCallsStatus) through the chain-specific Alchemy endpoint instead of
+    // the generic api.g.alchemy.com. This gives correct chain tagging in
+    // Alchemy logs and avoids cross-region routing.
+    const alchemyNetworkUrl = getRpcUrl(chainId);
     const transport = alchemy({
-      apiKey: alchemyKey,
-      chainAgnosticUrl: alchemyNetworkUrl,
+      rpcUrl: alchemyNetworkUrl,
       fetchOptions: {
         headers: {
           Origin: "https://trader.rigoblock.com",
@@ -322,9 +320,8 @@ export async function executeSponsoredCalls(
 export async function getSponsoredCallsStatus(
   callId: string,
   chainId: number,
-  alchemyKey: string,
 ): Promise<SponsoredCallsResult> {
-  const alchemyNetworkUrl = `https://${getAlchemyNetworkSlug(chainId)}.g.alchemy.com/v2/${alchemyKey}`;
+  const alchemyNetworkUrl = getRpcUrl(chainId);
 
   const response = await fetch(alchemyNetworkUrl, {
     method: "POST",

@@ -109,8 +109,8 @@ export async function handle_fund_pool(
 
   // 1. Read pool data (base token) and NAV in parallel
   const [poolData, navData] = await Promise.all([
-    getPoolData(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY),
-    getNavData(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY),
+    getPoolData(ctx.chainId, ctx.vaultAddress as Address),
+    getNavData(ctx.chainId, ctx.vaultAddress as Address),
   ]);
 
   const baseToken = poolData.baseToken;
@@ -125,8 +125,8 @@ export async function handle_fund_pool(
     const nativeSymbols: Record<number, string> = { 56: "BNB", 137: "POL" };
     baseSymbol = nativeSymbols[ctx.chainId] || "ETH";
   } else {
-    baseDecimals = await getTokenDecimals(ctx.chainId, baseToken, env.ALCHEMY_API_KEY);
-    const tokenInfo = await getVaultTokenBalance(ctx.chainId, ctx.vaultAddress as Address, baseToken as Address, env.ALCHEMY_API_KEY);
+    baseDecimals = await getTokenDecimals(ctx.chainId, baseToken);
+    const tokenInfo = await getVaultTokenBalance(ctx.chainId, ctx.vaultAddress as Address, baseToken as Address);
     baseSymbol = tokenInfo.symbol;
   }
 

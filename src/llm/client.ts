@@ -1676,7 +1676,6 @@ export async function runSwapShield(
     sellRawBig,
     buyRawBig,
     intent.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
-    env.ALCHEMY_API_KEY,
     maxDivergencePct ?? DEFAULT_MAX_DIVERGENCE_PCT,
   );
 

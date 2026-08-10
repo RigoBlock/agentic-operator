@@ -69,7 +69,7 @@ vi.mock("../src/services/vault.js", () => ({
     symbol: "WETH",
     decimals: 18,
   }),
-  getClient: vi.fn(),
+  getRpcProvider: vi.fn(),
 }));
 
 vi.mock("../src/llm/client.js", () => ({

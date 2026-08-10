@@ -18,7 +18,8 @@ import {
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { ERC20_ABI } from "../abi/erc20.js";
 import type { VaultInfo } from "../types.js";
-import { getClient } from "./rpcClient.js";
+import { getRpcProvider } from "./rpcClient.js";
+import { ZERO_ADDRESS } from "../config.js";
 
 /** Cache token decimals: `${chainId}:${address}` → decimals */
 const decimalsCache = new Map<string, number>();
@@ -32,7 +33,6 @@ const decimalsCache = new Map<string, number>();
 export async function getTokenDecimals(
   chainId: number,
   tokenAddress: string,
-  alchemyKey?: string,
 ): Promise<number> {
   const lower = tokenAddress.toLowerCase();
 
@@ -48,7 +48,7 @@ export async function getTokenDecimals(
   const cached = decimalsCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
   try {
     const decimals = (await client.readContract({
       address: tokenAddress as Address,
@@ -87,9 +87,8 @@ export async function getTokenDecimals(
 export async function getVaultInfo(
   chainId: number,
   vaultAddress: Address,
-  alchemyKey?: string,
 ): Promise<VaultInfo> {
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
 
   try {
     // Try V4's getPool() + totalSupply in one Multicall3 round-trip.
@@ -154,9 +153,8 @@ export async function getVaultTokenBalance(
   chainId: number,
   vaultAddress: Address,
   tokenAddress: Address,
-  alchemyKey?: string,
 ): Promise<{ balance: bigint; decimals: number; symbol: string }> {
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
 
   // For native ETH
   if (
@@ -208,10 +206,9 @@ export async function getVaultTokenBalancesBulk(
   chainId: number,
   vaultAddress: Address,
   tokenAddresses: Address[],
-  alchemyKey?: string,
 ): Promise<Map<string, bigint>> {
   if (tokenAddresses.length === 0) return new Map();
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
   const results = await client.multicall({
     contracts: tokenAddresses.map((address) => ({
       address,
@@ -266,23 +263,19 @@ export function encodeVaultModifyLiquidities(
 }
 
 /**
- * Verify that a given address is the vault owner (operator).
+ * Read the owner of a vault, propagating RPC errors with a clearer message.
  */
-export async function isVaultOwner(
+async function getVaultOwner(
   chainId: number,
   vaultAddress: Address,
-  address: Address,
-  alchemyKey?: string,
-): Promise<boolean> {
-  const client = getClient(chainId, alchemyKey);
-
+): Promise<Address> {
+  const client = getRpcProvider(chainId);
   try {
-    const owner = await client.readContract({
+    return (await client.readContract({
       address: vaultAddress,
       abi: RIGOBLOCK_VAULT_ABI,
       functionName: "owner",
-    });
-    return (owner as Address).toLowerCase() === address.toLowerCase();
+    })) as Address;
   } catch (err) {
     // Provide clearer error if the RPC endpoint returned non-JSON (e.g. invalid API key)
     const msg = err instanceof Error ? err.message : String(err);
@@ -293,6 +286,41 @@ export async function isVaultOwner(
       );
     }
     throw err;
+  }
+}
+
+/**
+ * Verify that a given address is the vault owner (operator).
+ */
+export async function isVaultOwner(
+  chainId: number,
+  vaultAddress: Address,
+  address: Address,
+): Promise<boolean> {
+  const owner = await getVaultOwner(chainId, vaultAddress);
+  return owner.toLowerCase() === address.toLowerCase();
+}
+
+/**
+ * Check whether `vaultAddress` is a live Rigoblock vault on `chainId`.
+ *
+ * Returns true only when the owner() call succeeds and returns a non-zero address.
+ * RPC errors are swallowed so callers can distinguish a broken RPC from a
+ * wrong-chain / invalid vault address by checking the boolean result.
+ */
+export async function isVaultOnChain(
+  chainId: number,
+  vaultAddress: string | undefined,
+): Promise<boolean> {
+  if (!vaultAddress || vaultAddress.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+    return false;
+  }
+
+  try {
+    const owner = await getVaultOwner(chainId, vaultAddress as Address);
+    return owner.toLowerCase() !== ZERO_ADDRESS.toLowerCase();
+  } catch {
+    return false;
   }
 }
 
@@ -315,9 +343,8 @@ export interface PoolData {
 export async function getPoolData(
   chainId: number,
   vaultAddress: Address,
-  alchemyKey?: string,
 ): Promise<PoolData> {
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
 
   try {
     const [poolResult] = await client.multicall({
@@ -375,9 +402,8 @@ export interface NavData {
 export async function getNavData(
   chainId: number,
   vaultAddress: Address,
-  alchemyKey?: string,
 ): Promise<NavData> {
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
   const result = await client.readContract({
     address: vaultAddress,
     abi: RIGOBLOCK_VAULT_ABI,
@@ -417,9 +443,8 @@ export interface EffectivePoolState {
 export async function getEffectivePoolState(
   chainId: number,
   vaultAddress: Address,
-  alchemyKey?: string,
 ): Promise<EffectivePoolState> {
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
 
   // Batch updateUnitaryValue() simulation + getPool() into one Multicall3 round-trip.
   const [navResult, poolResult] = await client.multicall({

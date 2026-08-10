@@ -32,17 +32,15 @@ function loadDevVars(): Record<string, string> {
 
 const devVars = loadDevVars();
 const ZEROX_API_KEY = process.env.ZEROX_API_KEY || devVars.ZEROX_API_KEY;
-const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY || devVars.ALCHEMY_API_KEY;
 
 function env(): Env {
   return {
     ZEROX_API_KEY,
-    ALCHEMY_API_KEY,
   } as Env;
 }
 
-// Skip the entire integration block when no real 0x key is configured.
-const hasKey = Boolean(ZEROX_API_KEY);
+// Skip the entire integration block when no real 0x or Alchemy key is configured.
+const hasKey = Boolean(ZEROX_API_KEY) && Boolean(process.env.ALCHEMY_API_KEY) && process.env.ALCHEMY_API_KEY !== "test-key";
 
 describe.skipIf(!hasKey)("getZeroXQuote — live 0x API", () => {
   beforeEach(() => {

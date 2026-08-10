@@ -247,7 +247,6 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
   // 1. Read aggregated NAV across all chains
   const agg = await getAggregatedNav(
     config.vaultAddress as Address,
-    env.ALCHEMY_API_KEY,
     env.KV,
   );
 
@@ -296,7 +295,6 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
         vaultAddress: config.vaultAddress as Address,
         srcChainId: src.chainId,
         dstChainId: dst.chainId,
-        alchemyKey: env.ALCHEMY_API_KEY,
         operatorAddress: config.operatorAddress as Address,
       });
 

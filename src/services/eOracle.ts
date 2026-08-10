@@ -7,7 +7,7 @@
  */
 
 import { type Address, type Hex, encodeFunctionData } from "viem";
-import { getClient } from "./rpcClient.js";
+import { getRpcProvider } from "./rpcClient.js";
 import { normalizeTokenAddress } from "./oraclePrice.js";
 
 export const IEOracle_ABI = [
@@ -47,7 +47,6 @@ export async function estimateAmountInViaEOracle(
   tokenIn: Address,
   tokenOut: Address,
   amountOutRaw: bigint,
-  alchemyKey: string,
 ): Promise<bigint> {
   if (amountOutRaw <= 0n) {
     throw new Error("amountOut must be positive for EOracle conversion");
@@ -56,7 +55,7 @@ export async function estimateAmountInViaEOracle(
   const normalizedIn = normalizeTokenAddress(tokenIn, chainId);
   const normalizedOut = normalizeTokenAddress(tokenOut, chainId);
 
-  const client = getClient(chainId, alchemyKey);
+  const client = getRpcProvider(chainId);
   const converted = (await client.readContract({
     address: vaultAddress,
     abi: IEOracle_ABI,

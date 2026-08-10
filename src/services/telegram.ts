@@ -239,11 +239,15 @@ export function escapeHtml(text: string): string {
  * Convert LLM response text to Telegram-friendly HTML.
  * Telegram supports <b>, <i>, <a>, <code>, <pre> but NOT tables.
  * Markdown tables are converted to <pre> blocks so columns align.
+ *
+ * Raw HTML in the input is escaped FIRST so the LLM cannot inject unsupported
+ * tags (e.g. <unknown>) that make Telegram reject the message.
  */
 export function formatForTelegram(text: string): string {
-  // Convert markdown tables to <pre> blocks BEFORE escaping HTML,
-  // so the pipe characters survive and columns align in Telegram.
-  const lines = text.split("\n");
+  // Escape raw HTML special characters up front. The markdown-to-HTML conversions
+  // below will only introduce the allowed Telegram tags (<b>, <code>, <a>, <pre>).
+  const escapedText = escapeHtml(text);
+  const lines = escapedText.split("\n");
   const outLines: string[] = [];
   let tableBuffer: string[] = [];
 
@@ -311,7 +315,7 @@ export function formatForTelegram(text: string): string {
       }
     }
 
-    outLines.push(`<pre>${escapeHtml(alignedRows.join("\n"))}</pre>`);
+    outLines.push(`<pre>${alignedRows.join("\n")}</pre>`);
     tableBuffer = [];
   }
 

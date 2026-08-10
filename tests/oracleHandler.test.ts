@@ -16,17 +16,19 @@ vi.mock("../src/llm/client.js", () => ({
   estimateGas: vi.fn().mockResolvedValue("0x5208"),
 }));
 
-const { mockGetTokenDecimals, mockGetClient } = vi.hoisted(() => ({
+const { mockGetTokenDecimals, mockGetClient, mockIsVaultOnChain } = vi.hoisted(() => ({
   mockGetTokenDecimals: vi.fn(),
   mockGetClient: vi.fn(),
+  mockIsVaultOnChain: vi.fn(),
 }));
 
 vi.mock("../src/services/vault.js", () => ({
   getTokenDecimals: mockGetTokenDecimals,
+  isVaultOnChain: mockIsVaultOnChain,
 }));
 
 vi.mock("../src/services/rpcClient.js", () => ({
-  getClient: mockGetClient,
+  getRpcProvider: mockGetClient,
 }));
 
 import { handle_refresh_oracle_feed } from "../src/llm/handlers/oracle.js";
@@ -57,6 +59,21 @@ function mockCtx(chainId: number, vaultAddress?: string): RequestContext {
 describe("handle_refresh_oracle_feed native-token guard", () => {
   beforeEach(() => {
     mockBuildTx.mockReset();
+    mockGetTokenDecimals.mockReset();
+    mockGetClient.mockReset();
+    mockIsVaultOnChain.mockReset();
+    // Default: assume the connected vault address is valid on whatever chain we end up on.
+    // Tests that need a cross-chain mismatch override this per-call.
+    mockIsVaultOnChain.mockResolvedValue(true);
+    // Default RPC client for EOA-path pre-flight checks (balance / allowance).
+    // Tests that need specific RPC responses override this per-call.
+    mockGetClient.mockReturnValue({
+      multicall: vi.fn().mockResolvedValue([
+        { status: "success", result: 1000000000000000000000n },
+        { status: "success", result: 1000000000000000000000n },
+      ]),
+      getBalance: vi.fn().mockResolvedValue(1000000000000000000000n),
+    });
   });
 
   it("rejects POL as token on Polygon", async () => {
@@ -140,7 +157,7 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       "GRG",
       "10",
       137,
-      "test-alchemy",
+
       vaultAddress,
       "sell",
     );
@@ -169,7 +186,7 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       "GRG",
       "1",
       137,
-      "test-alchemy",
+
       vaultAddress,
       "buy",
     );
@@ -197,7 +214,7 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       "GRG",
       "10",
       137,
-      "test-alchemy",
+
       vaultAddress,
       "sell",
     );
@@ -243,15 +260,37 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
       "GRG",
       "10.5",
       137,
-      "test-alchemy",
+
       vaultAddress,
       "sell",
     );
   });
 
-  it("infers Polygon from POL in tokenOut when current context chain is Base", async () => {
+  it("rejects amountOut when the vault is not on the target chain", async () => {
+    mockIsVaultOnChain.mockResolvedValueOnce(false);
+
+    const vaultAddress = "0x2222222222222222222222222222222222222222";
+    await expect(
+      handle_refresh_oracle_feed(
+        mockEnv(),
+        mockCtx(8453, vaultAddress),
+        { token: "GRG", tokenIn: "GRG", tokenOut: "POL", amountOut: "1" },
+        "refresh_oracle_feed",
+      ),
+    ).rejects.toThrow(/amountOut requires a connected vault on Polygon/);
+    expect(mockBuildTx).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the operator wallet when the connected vault is not on the inferred chain", async () => {
+    mockIsVaultOnChain.mockResolvedValueOnce(false); // 0x2222… vault is not on Polygon
     mockBuildTx.mockResolvedValueOnce({
-      transaction: { to: "0xRouter", data: "0xabc", value: "0x0", gas: "0x5208" },
+      transaction: {
+        to: "0xRouter",
+        data: "0xabc",
+        value: "0x0",
+        gas: "0x5208",
+        operatorOnly: true,
+      },
       poolInfo: { currency1: "0x333", tokenSymbol: "GRG" },
       amountInWei: 1000000000000000000n,
       tokenDecimals: 18,
@@ -260,22 +299,41 @@ describe("handle_refresh_oracle_feed native-token guard", () => {
 
     const vaultAddress = "0x2222222222222222222222222222222222222222";
     const ctx = mockCtx(8453, vaultAddress);
-    await handle_refresh_oracle_feed(
+    const result = await handle_refresh_oracle_feed(
       mockEnv(),
       ctx,
-      { token: "GRG", tokenIn: "GRG", tokenOut: "POL", amount: "1", viaVault: true },
+      { token: "GRG", tokenIn: "GRG", tokenOut: "POL", amount: "1" },
       "refresh_oracle_feed",
     );
 
     // Even though the incoming context was Base, POL uniquely maps to Polygon.
+    // The Base vault address must not be used as a Polygon vault, so we fall
+    // back to the EOA/operator-wallet path.
+    expect(mockIsVaultOnChain).toHaveBeenCalledWith(137, vaultAddress);
     expect(mockBuildTx).toHaveBeenCalledWith(
       "GRG",
       "1",
       137,
-      "test-alchemy",
-      vaultAddress,
+
+      undefined,
       "sell",
     );
     expect(ctx.chainId).toBe(137);
+    expect(result.transaction).toMatchObject({ operatorOnly: true });
+  });
+
+  it("rejects explicit viaVault=true when the vault is not on the target chain", async () => {
+    mockIsVaultOnChain.mockResolvedValueOnce(false);
+
+    const vaultAddress = "0x2222222222222222222222222222222222222222";
+    await expect(
+      handle_refresh_oracle_feed(
+        mockEnv(),
+        mockCtx(8453, vaultAddress),
+        { token: "GRG", tokenIn: "GRG", tokenOut: "POL", amount: "1", viaVault: true },
+        "refresh_oracle_feed",
+      ),
+    ).rejects.toThrow(/not a valid vault on Polygon/);
+    expect(mockBuildTx).not.toHaveBeenCalled();
   });
 });

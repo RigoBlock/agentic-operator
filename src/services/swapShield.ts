@@ -92,7 +92,6 @@ export async function getOracleSwapMetrics(
   tokenOut: Address,
   amountInRaw: bigint,
   dexExpectedOutRaw: bigint,
-  alchemyKey: string,
 ): Promise<OracleSwapMetrics> {
   const zero = { priceFeedExists: false, oracleAmount: "0", deltaBps: 0 };
 
@@ -108,7 +107,6 @@ export async function getOracleSwapMetrics(
       tokenIn,
       amountInRaw,
       tokenOut,
-      alchemyKey,
     );
     if (!priceFeedExists || oracleAmount === 0n) {
       return { priceFeedExists, oracleAmount: "0", deltaBps: 0 };
@@ -133,7 +131,6 @@ export async function getOracleSwapMetrics(
  * @param amountInRaw - Raw amount of tokenIn (in native decimals, as bigint)
  * @param dexExpectedOutRaw - Raw amount of tokenOut the DEX promises (in native decimals, as bigint)
  * @param _slippageBps - Reserved for future quote-type specific handling
- * @param alchemyKey - Alchemy API key for RPC
  * @param maxDivergencePct - Maximum allowed divergence (default 5%)
  * @returns SwapShieldResult
  */
@@ -144,7 +141,6 @@ export async function checkSwapPrice(
   amountInRaw: bigint,
   dexExpectedOutRaw: bigint,
   _slippageBps: number,
-  alchemyKey: string,
   maxDivergencePct: number = DEFAULT_MAX_DIVERGENCE_PCT,
   precomputedPriceFeedExists?: boolean,
   precomputedOracleAmount?: bigint,
@@ -227,7 +223,6 @@ export async function checkSwapPrice(
         normalizedIn,
         amountInRaw,
         normalizedOut,
-        alchemyKey,
       );
       priceFeedExists = result.priceFeedExists;
       oracleAmountRaw = result.oracleAmount;

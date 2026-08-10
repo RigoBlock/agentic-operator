@@ -25,7 +25,7 @@ vi.mock("../src/config.js", () => ({
 
 vi.mock("../src/services/vault.js", () => ({
   getTokenDecimals: mockGetTokenDecimals,
-  getClient: vi.fn(),
+  getRpcProvider: vi.fn(),
 }));
 
 import { getZeroXQuote, getZeroXVaultQuote } from "../src/services/zeroXTrading.js";

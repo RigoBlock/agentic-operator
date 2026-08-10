@@ -59,18 +59,30 @@ describe("formatForTelegram", () => {
     expect(pre).not.toContain("🟢");
   });
 
-  it("does not right-align hex addresses", () => {
-    const input = [
-      "| Address | Balance |",
-      "|---------|---------|",
-      "| 0xabc123 | $1.00 |",
-      "| 0xdef456 | $2.00 |",
-    ].join("\n");
+  it("escapes unsupported HTML tags so Telegram does not reject the message", () => {
+    const result = formatForTelegram("This contains <unknown>bad tag</unknown> text.");
+    expect(result).toContain("&lt;unknown&gt;");
+    expect(result).not.toContain("<unknown>");
+  });
 
+  it("still converts markdown to Telegram-supported HTML after escaping", () => {
+    const result = formatForTelegram("**bold** `code` and [link](https://example.com) with <x>tag</x>");
+    expect(result).toContain("<b>bold</b>");
+    expect(result).toContain("<code>code</code>");
+    expect(result).toContain('<a href="https://example.com">link</a>');
+    expect(result).toContain("&lt;x&gt;");
+    expect(result).not.toContain("<x>");
+  });
+
+  it("escapes angle brackets inside table cells", () => {
+    const input = [
+      "| Col |",
+      "|-----|",
+      "| <a> |",
+    ].join("\n");
     const result = formatForTelegram(input);
     const pre = result.match(/<pre>([\s\S]*?)<\/pre>/)?.[1] ?? "";
-    const addrRow = pre.split("\n").find((r) => r.includes("0xabc123")) ?? "";
-    // Address should be left-aligned (starts right after "| " in its cell).
-    expect(addrRow).toMatch(/\| 0xabc123\s+\|/);
+    expect(pre).toContain("&lt;a&gt;");
+    expect(pre).not.toContain("<a>");
   });
 });

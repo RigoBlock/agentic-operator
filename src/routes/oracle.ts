@@ -128,7 +128,7 @@ oracle.post("/refresh", async (c) => {
   const vaultAddress = typeof rawVault === "string" ? (rawVault as Address) : undefined;
 
   try {
-    const result = await buildOraclePoolSwapTx(token, amount, chainId, c.env.ALCHEMY_API_KEY, vaultAddress, direction);
+    const result = await buildOraclePoolSwapTx(token, amount, chainId, vaultAddress, direction);
     return c.json({
       transaction: result.transaction,
       poolInfo: result.poolInfo,

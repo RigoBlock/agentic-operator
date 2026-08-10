@@ -146,7 +146,6 @@ tools.post("/", async (c) => {
         authSignature: body.authSignature || "",
         authTimestamp: body.authTimestamp || 0,
         preferredChainId: body.chainId,
-        alchemyKey: c.env.ALCHEMY_API_KEY,
       });
       operatorVerified = true;
     } else if (!c.get("x402Paid") && !isOperatorAuth) {

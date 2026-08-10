@@ -24,7 +24,7 @@ vi.mock("../src/services/vault.js", () => ({
 }));
 
 vi.mock("../src/services/rpcClient.js", () => ({
-  getClient: mockGetClient,
+  getRpcProvider: mockGetClient,
 }));
 
 vi.mock("../src/services/oraclePrice.js", () => ({
@@ -39,7 +39,6 @@ vi.mock("../src/services/delegation.js", () => ({
 const { computeNavEqualization } = await import("../src/services/crosschain.js");
 
 const VAULT = "0xEfa4bDf566aE50537A507863612638680420645C" as Address;
-const ALCHEMY_KEY = "test-key";
 const zeroAddr = "0x0000000000000000000000000000000000000000" as Address;
 
 function makeKV(): KVNamespace {
@@ -73,7 +72,7 @@ describe("computeNavEqualization", () => {
     mockGetClient.mockImplementation((chainId: number) => ({
       readContract: vi.fn().mockResolvedValue(0n),
       multicall: vi.fn(async ({ contracts }: { contracts: any[] }) => {
-        const state = await mockGetEffectivePoolState(chainId, VAULT, ALCHEMY_KEY);
+        const state = await mockGetEffectivePoolState(chainId, VAULT);
         return contracts.map((c: any, i: number) => {
           if (i === 0) {
             // updateUnitaryValue
@@ -172,7 +171,6 @@ describe("computeNavEqualization", () => {
       vaultAddress: VAULT,
       userSrcChainId: 42161,
       userDstChainId: 1,
-      alchemyKey: ALCHEMY_KEY,
     });
 
     // Global target = 129 / 61 ≈ 2.114754
@@ -225,7 +223,6 @@ describe("computeNavEqualization", () => {
       vaultAddress: VAULT,
       userSrcChainId: 42161, // user says 42161 -> 1
       userDstChainId: 1,
-      alchemyKey: ALCHEMY_KEY,
     });
 
     // 42161 is below target, 1 is above target, so direction must be swapped.

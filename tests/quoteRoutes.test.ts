@@ -387,7 +387,7 @@ describe("GET /api/quote/0x", () => {
       "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       1000000000000000000n,
       2000000000n,
-      "test-alchemy-key",
+
     );
   });
 });

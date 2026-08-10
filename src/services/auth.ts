@@ -62,8 +62,6 @@ export interface AuthParams {
   authTimestamp: number;
   /** Check this chain first before trying all others (avoids unnecessary RPC calls). */
   preferredChainId?: number;
-  /** Alchemy API key — threaded from env, not stored in module state. */
-  alchemyKey?: string;
 }
 
 /**
@@ -185,10 +183,10 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
 
   // 4. Check vault ownership — preferred chain first, then the rest in parallel.
   //    This avoids 8 parallel RPC calls when the vault is on the selected chain.
-  const { preferredChainId, alchemyKey } = params;
+  const { preferredChainId } = params;
   if (preferredChainId) {
     try {
-      const isOwner = await isVaultOwner(preferredChainId, vaultAddress as Address, operatorAddress as Address, alchemyKey);
+      const isOwner = await isVaultOwner(preferredChainId, vaultAddress as Address, operatorAddress as Address);
       if (isOwner) {
         ownershipCache.set(cacheKey, Date.now() + OWNERSHIP_CACHE_TTL_MS);
         return;
@@ -204,7 +202,7 @@ export async function verifyOperatorAuth(params: AuthParams): Promise<void> {
   );
   const ownerChecks = allChains.map(async (chain) => {
     try {
-      return await isVaultOwner(chain.id, vaultAddress as Address, operatorAddress as Address, alchemyKey);
+      return await isVaultOwner(chain.id, vaultAddress as Address, operatorAddress as Address);
     } catch {
       // Chain RPC failure or vault doesn't exist on this chain — skip
       return false;

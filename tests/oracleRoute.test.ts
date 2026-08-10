@@ -111,7 +111,7 @@ describe("POST /api/oracle/refresh", () => {
       "GRG",
       "0.001",
       8453,
-      "test-alchemy-key",
+
       undefined,
       "buy",
     );
@@ -203,7 +203,7 @@ describe("POST /api/oracle/refresh", () => {
       "GRG",
       "1.5",
       8453,
-      "test-alchemy-key",
+
       undefined,
       "sell",
     );

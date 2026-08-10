@@ -64,7 +64,6 @@ export async function handle_crosschain_transfer(
     amount,
     useNativeEth,
     shouldUnwrapOnDestination,
-    alchemyKey: env.ALCHEMY_API_KEY,
     operatorAddress: ctx.operatorAddress,
   });
 
@@ -155,7 +154,6 @@ export async function handle_crosschain_sync(
     navToleranceBps,
     useNativeEth,
     shouldUnwrapOnDestination,
-    alchemyKey: env.ALCHEMY_API_KEY,
     operatorAddress: ctx.operatorAddress,
   });
 
@@ -271,7 +269,6 @@ export async function handle_get_aggregated_nav(
 ): Promise<ToolResult> {
   const nav = await getAggregatedNav(
     ctx.vaultAddress as Address,
-    env.ALCHEMY_API_KEY,
     env.KV,
   );
 
@@ -324,7 +321,6 @@ export async function handle_get_rebalance_plan(
   const plan = await buildRebalancePlan({
     vaultAddress: ctx.vaultAddress as Address,
     targetChainId,
-    alchemyKey: env.ALCHEMY_API_KEY,
     kv: env.KV,
   });
 

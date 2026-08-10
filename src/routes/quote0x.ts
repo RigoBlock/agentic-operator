@@ -87,7 +87,6 @@ quote0x.get("/", async (c) => {
         tokenOut,
         BigInt(amountIn),
         BigInt(dexExpectedOut),
-        c.env.ALCHEMY_API_KEY,
       );
     } catch {
       enrichment = { priceFeedExists: false, deltaBps: 0, oracleAmount: "0" };

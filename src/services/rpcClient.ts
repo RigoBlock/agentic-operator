@@ -3,8 +3,12 @@
  *
  * This is intentionally not tied to vault logic: every service that needs a
  * viem PublicClient (oracle reads, execution, NAV shield, GMX, delegation, …)
- * uses `getClient` from here. Keeping it separate prevents `vault.ts` from
+ * uses `getRpcProvider` from here. Keeping it separate prevents `vault.ts` from
  * becoming the kitchen-sink dependency of the whole app.
+ *
+ * The factory takes the whole request-scoped `Env` object so callers never
+ * store the Alchemy key in module-level state; this is the correct pattern for
+ * Cloudflare Workers.
  */
 
 import { createPublicClient, http, type PublicClient } from "viem";
@@ -18,15 +22,15 @@ import { wrapFetchWithMetrics } from "./rpcMetrics.js";
  */
 export const ALCHEMY_ORIGIN = "https://trader.rigoblock.com";
 
-/** Cache clients per chainId+key to avoid recreating */
+/** Cache clients per chainId to avoid recreating them across calls. */
 const clientCache = new Map<string, PublicClient>();
 
-export function getClient(chainId: number, alchemyKey?: string): PublicClient {
-  const cacheKey = `${chainId}:${alchemyKey ? "alchemy" : "public"}`;
+export function getRpcProvider(chainId: number): PublicClient {
+  const cacheKey = `${chainId}:alchemy`;
   const existing = clientCache.get(cacheKey);
   if (existing) return existing;
   const chain = getChain(chainId);
-  const rpcUrl = getRpcUrl(chainId, alchemyKey);
+  const rpcUrl = getRpcUrl(chainId);
   const isAlchemy = rpcUrl?.includes("alchemy.com") ?? false;
 
   // Shared fetch wrapper for this client: metrics + Alchemy Origin header.

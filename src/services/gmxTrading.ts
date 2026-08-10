@@ -33,7 +33,7 @@ import {
   ARBITRUM_CHAIN_ID,
 } from "../abi/gmx.js";
 import { getVaultTokenBalance } from "./vault.js";
-import { getClient } from "./rpcClient.js";
+import { getRpcProvider } from "./rpcClient.js";
 import type { Env } from "../types.js";
 import { formatUnits } from "viem";
 
@@ -238,7 +238,6 @@ export async function findGmxMarket(
  */
 export async function warmDecimalsForAddresses(
   addresses: string[],
-  alchemyKey: string,
 ): Promise<void> {
   const ERC20_DECIMALS_ABI = [{ name: "decimals", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] }] as const;
   const unknown = addresses
@@ -246,7 +245,7 @@ export async function warmDecimalsForAddresses(
     .filter(a => STATIC_DECIMALS[a] === undefined && !tokenDecimalsCache.has(a));
   if (unknown.length === 0) return;
 
-  const client = getClient(ARBITRUM_CHAIN_ID, alchemyKey);
+  const client = getRpcProvider(ARBITRUM_CHAIN_ID);
   const results = await client.multicall({
     contracts: unknown.map(addr => ({ address: addr as Address, abi: ERC20_DECIMALS_ABI, functionName: "decimals" as const })),
     allowFailure: true,
@@ -290,7 +289,6 @@ export async function getGmxTokenPrice(
  * @param market - GMX market info (marketToken, indexToken, longToken, shortToken)
  * @param sizeDeltaUsd - Position size delta in USD (human-readable, e.g. "5000" or "-5000" for decreases)
  * @param isLong - true for long, false for short
- * @param alchemyKey - Alchemy API key for RPC
  * @param positionSizeInUsd - Existing position size in USD (human-readable, 30 decimals)
  * @param positionSizeInTokens - Existing position size in raw index tokens (bigint, e.g. from Reader)
  * @returns executionPrice (human-readable USD), priceImpactUsd (human-readable USD), and raw result fields
@@ -299,7 +297,6 @@ export async function getGmxExecutionPrice(
   market: GmxMarketInfo,
   sizeDeltaUsd: string,
   isLong: boolean,
-  alchemyKey: string,
   positionSizeInUsd?: string,
   positionSizeInTokens?: bigint,
 ): Promise<{
@@ -336,7 +333,7 @@ export async function getGmxExecutionPrice(
   const posSizeUsdRaw = positionSizeInUsd ? parseUnits(positionSizeInUsd, USD_DECIMALS) : 0n;
   const posSizeTokensRaw = positionSizeInTokens ?? 0n;
 
-  const client = getClient(ARBITRUM_CHAIN_ID, alchemyKey);
+  const client = getRpcProvider(ARBITRUM_CHAIN_ID);
 
   const result = await client.readContract({
     address: GMX_ADDRESSES.READER,
@@ -731,10 +728,8 @@ export function getGmxTokenDecimals(tokenAddress: string): number {
 /** Warm decimals for all tickers (used by get_markets display). One multicall for all. */
 export async function warmTokenDecimalsCache(
   tickers: GmxTickerPrice[],
-  alchemyKey: string | undefined,
 ): Promise<void> {
-  if (!alchemyKey) return;
-  await warmDecimalsForAddresses(tickers.map(t => t.tokenAddress), alchemyKey);
+  await warmDecimalsForAddresses(tickers.map(t => t.tokenAddress));
 }
 
 function unique<T>(arr: T[]): T[] {
@@ -792,10 +787,9 @@ const MIN_KEEPER_ETH = 1_000_000_000_000_000n; // 0.001 ETH
 
 export async function checkVaultEthForGmxKeeper(
   vaultAddress: Address,
-  alchemyKey?: string,
 ): Promise<GmxKeeperFeeStatus> {
   const { balance: ethBal } = await getVaultTokenBalance(
-    ARBITRUM_CHAIN_ID, vaultAddress, NATIVE_ZERO, alchemyKey,
+    ARBITRUM_CHAIN_ID, vaultAddress, NATIVE_ZERO,
   );
 
   return {

@@ -100,7 +100,7 @@ app.get("/api/vault", async (c) => {
   try {
     // Fast path: try the requested chain
     try {
-      const info = await getVaultInfo(preferredChain, address as Address, c.env.ALCHEMY_API_KEY);
+      const info = await getVaultInfo(preferredChain, address as Address);
       return c.json({ ...info, chainId: preferredChain });
     } catch {
       // Not found on this chain — try all others in parallel
@@ -112,7 +112,7 @@ app.get("/api/vault", async (c) => {
     const results = await mapWithConcurrencySettled(
       otherChains,
       async (ch) => {
-        const info = await getVaultInfo(ch.id, address as Address, c.env.ALCHEMY_API_KEY);
+        const info = await getVaultInfo(ch.id, address as Address);
         return { ...info, chainId: ch.id };
       },
     );

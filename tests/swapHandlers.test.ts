@@ -15,6 +15,7 @@ const {
   mockGetUniswapSwapCalldata,
   mockGetVaultTokenBalance,
   mockEncodeVaultExecute,
+  mockIsVaultOnChain,
   mockResolveSlippage,
   mockRunSwapShield,
   mockTxActionLine,
@@ -32,6 +33,7 @@ const {
   mockGetUniswapSwapCalldata: vi.fn(),
   mockGetVaultTokenBalance: vi.fn(),
   mockEncodeVaultExecute: vi.fn(),
+  mockIsVaultOnChain: vi.fn(),
   mockResolveSlippage: vi.fn().mockResolvedValue(100),
   mockRunSwapShield: vi.fn().mockResolvedValue({}),
   mockTxActionLine: vi.fn().mockReturnValue(""),
@@ -65,6 +67,7 @@ vi.mock("../src/services/vault.js", () => ({
   getVaultTokenBalance: mockGetVaultTokenBalance,
   encodeVaultExecute: mockEncodeVaultExecute,
   getTokenDecimals: vi.fn().mockResolvedValue(18),
+  isVaultOnChain: mockIsVaultOnChain,
 }));
 
 vi.mock("../src/llm/client.js", () => ({
@@ -82,7 +85,7 @@ vi.mock("../src/config.js", () => ({
 }));
 
 vi.mock("../src/services/rpcClient.js", () => ({
-  getClient: () => ({}),
+  getRpcProvider: () => ({}),
 }));
 
 import {
@@ -212,6 +215,7 @@ describe("handle_build_vault_swap", () => {
     mockGetVaultTokenBalance.mockResolvedValue({ balance: BigInt("100000000000000000000"), decimals: 18, symbol: "POL" });
     mockEncodeVaultExecute.mockReturnValue("0xencoded" as Hex);
     mockGetUniswapSwapCalldata.mockResolvedValue(makeUniswapSwapTx());
+    mockIsVaultOnChain.mockResolvedValue(true);
   });
 
   it("falls back to Uniswap when 0x reports no liquidity", async () => {
@@ -261,5 +265,21 @@ describe("handle_build_vault_swap", () => {
     expect(result.transaction?.data.toLowerCase().startsWith("0x2213bc0b")).toBe(true);
     expect(result.transaction?.value).toBe("0x0");
     expect(result.transaction?.swapMeta?.dex).toBe("0x Aggregator");
+  });
+
+  it("fails fast when the connected vault is not deployed on the active chain", async () => {
+    mockIsVaultOnChain.mockResolvedValue(false);
+    mockResolveChainName.mockReturnValue("Polygon");
+
+    await expect(
+      handle_build_vault_swap(makeEnv(), makeCtx({ chainId: 137 }), {
+        tokenIn: "POL",
+        tokenOut: "GRG",
+        amountOut: "1",
+      }, "build_vault_swap"),
+    ).rejects.toThrow(/not deployed on Polygon/);
+
+    expect(mockGetZeroXVaultQuote).not.toHaveBeenCalled();
+    expect(mockGetUniswapQuote).not.toHaveBeenCalled();
   });
 });

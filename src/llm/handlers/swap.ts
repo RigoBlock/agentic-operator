@@ -14,7 +14,7 @@ import {
   getUniswapQuote, getUniswapSwapCalldata,
 } from "../../services/uniswapTrading.js";
 import { getZeroXQuote, getZeroXVaultQuote, formatZeroXQuoteForDisplay, type ZeroXQuote } from "../../services/zeroXTrading.js";
-import { getVaultTokenBalance, encodeVaultExecute } from "../../services/vault.js";
+import { getVaultTokenBalance, encodeVaultExecute, isVaultOnChain } from "../../services/vault.js";
 import { resolveTokenAddress, getWrappedNativeAddress, getNativeTokenSymbol } from "../../config.js";
 import { TokenResolutionError } from "../../services/tokenResolver.js";
 import { encodeFunctionData, decodeFunctionData, parseUnits, formatUnits } from "viem";
@@ -143,7 +143,7 @@ async function checkExactInputBalance(
   try {
     const sellAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn);
     const { balance, decimals, symbol } = await getVaultTokenBalance(
-      ctx.chainId, ctx.vaultAddress as Address, sellAddr as Address, env.ALCHEMY_API_KEY,
+      ctx.chainId, ctx.vaultAddress as Address, sellAddr as Address,
     );
     const requestedRaw = parseUnits(intent.amountIn, decimals);
     if (requestedRaw > balance) {
@@ -175,7 +175,7 @@ async function assembleSwapTransaction(
     try {
       const sellAddr = await resolveTokenAddress(ctx.chainId, intent.tokenIn);
       const { balance, decimals, symbol } = await getVaultTokenBalance(
-        ctx.chainId, ctx.vaultAddress as Address, sellAddr as Address, env.ALCHEMY_API_KEY,
+        ctx.chainId, ctx.vaultAddress as Address, sellAddr as Address,
       );
       const requiredIn = BigInt(assembly.maxSellAmount || assembly.sellAmount);
       if (requiredIn > balance) {
@@ -390,6 +390,20 @@ export async function handle_build_vault_swap(
   }
 
   const chainName = resolveChainName(ctx.chainId);
+
+  // ── Vault / chain consistency guard ──
+  // The connected vault address may belong to a different chain (e.g. the user
+  // switched chain in chat but kept the same vault in context). Using a wrong-chain
+  // vault makes DEX quotes, balance checks and the NAV shield fail with cryptic
+  // reverts, so we fail fast with an actionable message.
+  const vaultOnChain = await isVaultOnChain(ctx.chainId, ctx.vaultAddress);
+  if (!vaultOnChain) {
+    const vault = ctx.vaultAddress as `0x${string}`;
+    throw new Error(
+      `The connected vault ${vault.slice(0, 6)}…${vault.slice(-4)} is not deployed on ${chainName}. ` +
+      `Switch to the chain where your vault is deployed, or select a vault on ${chainName}.`,
+    );
+  }
 
   // ── Fast-fail balance check for exact-input swaps ──
   await checkExactInputBalance(env, ctx, intent, chainName);

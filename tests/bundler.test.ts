@@ -87,12 +87,13 @@ describe("executeSponsoredCalls chain-specific routing", () => {
   ])("routes wallet API calls to chain-specific Alchemy endpoint for chain %i", async (chainId, slug) => {
     mockCreateSmartWalletClient.mockReturnValue(makeMockClient());
 
-    await executeSponsoredCalls(AGENT_ACCOUNT, chainId, "test-key", "policy-id", [CALL]);
+    await executeSponsoredCalls(AGENT_ACCOUNT, chainId, "policy-id", [CALL]);
 
     expect(mockAlchemyTransport).toHaveBeenCalledTimes(1);
     const alchemyConfig = mockAlchemyTransport.mock.calls[0][0];
-    expect(alchemyConfig.apiKey).toBe("test-key");
-    expect(alchemyConfig.chainAgnosticUrl).toBe(`https://${slug}.g.alchemy.com/v2`);
+    expect(alchemyConfig.rpcUrl).toBe(`https://${slug}.g.alchemy.com/v2/test-key`);
+    expect(alchemyConfig.apiKey).toBeUndefined();
+    expect(alchemyConfig.chainAgnosticUrl).toBeUndefined();
     expect(alchemyConfig.fetchOptions.headers.Origin).toBe("https://trader.rigoblock.com");
   });
 });
@@ -105,7 +106,6 @@ describe("executeSponsoredCalls gas parameter overrides", () => {
     await executeSponsoredCalls(
       AGENT_ACCOUNT,
       8453,
-      "test-key",
       "policy-id",
       [CALL],
       100_000n,
@@ -126,7 +126,7 @@ describe("executeSponsoredCalls gas parameter overrides", () => {
     const prepareCalls = vi.fn().mockResolvedValue({ prepared: true });
     mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls }));
 
-    await executeSponsoredCalls(AGENT_ACCOUNT, 8453, "test-key", "policy-id", [CALL]);
+    await executeSponsoredCalls(AGENT_ACCOUNT, 8453, "policy-id", [CALL]);
 
     const capabilities = prepareCalls.mock.calls[0][0].capabilities as Record<string, unknown>;
     expect(capabilities.gasParamsOverride).toBeUndefined();
@@ -147,7 +147,7 @@ describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
       }),
     );
 
-    const result = await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "test-key", "policy-id", [CALL]);
+    const result = await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "policy-id", [CALL]);
 
     expect(result.callId).toBe(MOCK_CALL_ID);
     expect(result.status).toBe("pending");
@@ -165,7 +165,7 @@ describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
     );
 
     await expect(
-      executeSponsoredCalls(AGENT_ACCOUNT, 42161, "test-key", "policy-id", [CALL]),
+      executeSponsoredCalls(AGENT_ACCOUNT, 42161, "policy-id", [CALL]),
     ).rejects.toThrow("Some bundler error");
   });
 
@@ -173,7 +173,7 @@ describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
     const waitForCallsStatus = vi.fn().mockResolvedValue({ status: "success", receipts: [] });
     mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ waitForCallsStatus }));
 
-    await executeSponsoredCalls(AGENT_ACCOUNT, 1, "test-key", "policy-id", [CALL]);
+    await executeSponsoredCalls(AGENT_ACCOUNT, 1, "policy-id", [CALL]);
 
     expect(waitForCallsStatus).toHaveBeenCalledWith(
       expect.objectContaining({ pollingInterval: 4_000, timeout: 30_000 }),
@@ -184,7 +184,7 @@ describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
     const waitForCallsStatus = vi.fn().mockResolvedValue({ status: "success", receipts: [] });
     mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ waitForCallsStatus }));
 
-    await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "test-key", "policy-id", [CALL]);
+    await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "policy-id", [CALL]);
 
     expect(waitForCallsStatus).toHaveBeenCalledWith(
       expect.objectContaining({ pollingInterval: 1_000, timeout: 15_000 }),
@@ -198,7 +198,7 @@ describe("executeSponsoredCalls waitForCallsStatus timeout", () => {
       makeMockClient({ sendPreparedCalls: vi.fn().mockResolvedValue({ id: oddCallId }) }),
     );
 
-    await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "test-key", "policy-id", [CALL]);
+    await executeSponsoredCalls(AGENT_ACCOUNT, 42161, "policy-id", [CALL]);
 
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining("unexpected callId length"),

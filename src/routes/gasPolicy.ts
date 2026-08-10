@@ -109,7 +109,6 @@ export function getCurrentDayBucket(now = Date.now()): string {
 export async function estimateGasCostUsd(
   chainId: number,
   userOp: Record<string, unknown>,
-  alchemyKey: string,
 ): Promise<{ usd: number; rawNormalized: bigint } | null> {
   const maxFeePerGas = parseBigInt(userOp.maxFeePerGas);
   const callGasLimit = parseBigInt(userOp.callGasLimit);
@@ -138,7 +137,6 @@ export async function estimateGasCostUsd(
       NATIVE_TOKEN_ADDRESS,
       gasCostWei,
       usdcInfo.address,
-      alchemyKey,
     );
     const rawNormalized = normalizeTo18Decimals(usdcRaw, usdcInfo.decimals);
     return { usd: parseFloat(formatUnits(rawNormalized, SPENDING_DECIMALS)), rawNormalized };
@@ -167,7 +165,6 @@ export async function checkSpendingLimit(
   sender: Address,
   chainId: number,
   userOp: Record<string, unknown>,
-  alchemyKey: string,
   limitUsdRaw: bigint,
   now?: number,
 ): Promise<{
@@ -177,7 +174,7 @@ export async function checkSpendingLimit(
   estimatedCost?: number;
   limit?: number;
 }> {
-  const estimated = await estimateGasCostUsd(chainId, userOp, alchemyKey);
+  const estimated = await estimateGasCostUsd(chainId, userOp);
   if (estimated === null) {
     console.warn(`[GasPolicy] Skipping spending limit: USD estimation unavailable for chain ${chainId}`);
     return { approved: true };
@@ -226,7 +223,6 @@ export async function recordGasSpend(
   sender: Address,
   chainId: number,
   gasCostWei: bigint,
-  alchemyKey: string,
   now?: number,
 ): Promise<void> {
   if (gasCostWei <= 0n) return;
@@ -243,7 +239,6 @@ export async function recordGasSpend(
       NATIVE_TOKEN_ADDRESS,
       gasCostWei,
       usdcInfo.address,
-      alchemyKey,
     );
     const normalized = normalizeTo18Decimals(usdcRaw, usdcInfo.decimals);
     if (normalized <= 0n) return;
@@ -340,7 +335,7 @@ gasPolicy.post("/", async (c) => {
 
       // ── 5. Per-wallet daily spending limit ──
       const spendCheck = await checkSpendingLimit(
-        c.env.KV, sender, chainIdNumber, userOp, c.env.ALCHEMY_API_KEY, gasLimitUsdRaw,
+        c.env.KV, sender, chainIdNumber, userOp, gasLimitUsdRaw,
       );
       if (!spendCheck.approved) {
         console.warn(`[GasPolicy] ✗ REJECTED: ${spendCheck.reason}`);
@@ -370,7 +365,7 @@ gasPolicy.post("/", async (c) => {
         if (targetConfig || agentWalletInfo) {
           // ── Per-wallet daily spending limit (user wallet path) ──
           const spendCheck = await checkSpendingLimit(
-            c.env.KV, sender, chainIdNumber, userOp, c.env.ALCHEMY_API_KEY, gasLimitUsdRaw,
+            c.env.KV, sender, chainIdNumber, userOp, gasLimitUsdRaw,
           );
           if (!spendCheck.approved) {
             console.warn(`[GasPolicy] ✗ REJECTED: ${spendCheck.reason}`);

@@ -71,7 +71,7 @@ import {
 } from "./crosschainConfig.js";
 import { getVaultTokenBalance, getVaultTokenBalancesBulk } from "./vault.js";
 import type { EffectivePoolState } from "./vault.js";
-import { getClient } from "./rpcClient.js";
+import { getRpcProvider } from "./rpcClient.js";
 import { convertTokenAmountViaOracle } from "./oraclePrice.js";
 import { getDelegationConfig, getActiveChains } from "./delegation.js";
 import { mapWithConcurrency, mapWithConcurrencySettled } from "./concurrency.js";
@@ -244,7 +244,6 @@ export interface RebalancePlan {
  */
 export async function getAggregatedNav(
   vaultAddress: Address,
-  alchemyKey: string,
   kv?: KVNamespace,
 ): Promise<AggregatedNav> {
   // Get delegation config to check which chains are set up
@@ -259,7 +258,7 @@ export async function getAggregatedNav(
   const chainIds = Object.keys(CROSSCHAIN_TOKENS).map(Number);
   const snapshots = await mapWithConcurrency(
     chainIds,
-    (chainId) => readChainSnapshot(vaultAddress, chainId, alchemyKey, activeChains.has(chainId)),
+    (chainId) => readChainSnapshot(vaultAddress, chainId, activeChains.has(chainId)),
   );
 
   // Any active chain that failed oracle pricing makes the global NAV unreliable.
@@ -363,7 +362,6 @@ export function sameBaseAsset(chainIdA: number, baseA: Address, chainIdB: number
 async function readChainSnapshot(
   vaultAddress: Address,
   chainId: number,
-  alchemyKey: string,
   delegationActive: boolean,
 ): Promise<ChainNavSnapshot> {
   const name = chainName(chainId);
@@ -373,7 +371,7 @@ async function readChainSnapshot(
     // the NAV sync tool uses), the actual ERC-20 totalSupply, and all bridgeable
     // token balances in parallel.
     const bridgeableTokens = CROSSCHAIN_TOKENS[chainId] || [];
-    const client = getClient(chainId, alchemyKey);
+    const client = getRpcProvider(chainId);
 
     // Build one multicall per chain: pool state (updateUnitaryValue + getPool),
     // totalSupply, and all bridgeable token balances. This replaces the previous
@@ -505,7 +503,6 @@ async function readChainSnapshot(
           state.baseToken,
           state.netTotalValue,
           usdcToken.address,
-          alchemyKey,
         );
         totalUsdcNormalized = normalizeToDecimals(totalUsdcRaw, usdcToken.decimals, 6);
       } catch (err) {
@@ -579,12 +576,10 @@ async function readChainSnapshot(
 export async function buildRebalancePlan(params: {
   vaultAddress: Address;
   targetChainId?: number;
-  alchemyKey: string;
   kv?: KVNamespace;
 }): Promise<RebalancePlan> {
   const nav = await getAggregatedNav(
     params.vaultAddress,
-    params.alchemyKey,
     params.kv,
   );
 
@@ -1097,9 +1092,8 @@ export async function simulateDepositV3ForMessage(params: {
   calldata: Hex;
   srcChainId: number;
   operatorAddress: Address;
-  alchemyKey?: string;
 }): Promise<{ recipient: Hex; message: Hex } | null> {
-  const rpcUrl = getRpcUrl(params.srcChainId, params.alchemyKey);
+  const rpcUrl = getRpcUrl(params.srcChainId);
   if (!rpcUrl) {
     console.warn("[Crosschain] No Alchemy RPC for simulation, skipping depositV3 trace");
     return null;
@@ -1218,7 +1212,6 @@ export async function buildCrosschainTransfer(params: {
   amount: string;       // human-readable
   useNativeEth?: boolean;  // true = vault wraps native ETH→WETH via sourceNativeAmount
   shouldUnwrapOnDestination?: boolean;
-  alchemyKey?: string;
   /** Operator address for depositV3 simulation (extracts destination message) */
   operatorAddress?: Address;
 }): Promise<{
@@ -1255,7 +1248,6 @@ export async function buildCrosschainTransfer(params: {
       params.srcChainId,
       params.vaultAddress,
       "0x0000000000000000000000000000000000000000" as Address,
-      params.alchemyKey,
     );
     if (ethBalance < inputAmountRaw) {
       const available = formatUnits(ethBalance, 18);
@@ -1269,7 +1261,6 @@ export async function buildCrosschainTransfer(params: {
       params.srcChainId,
       params.vaultAddress,
       inputToken.address,
-      params.alchemyKey,
     );
     if (balance < inputAmountRaw) {
       const available = formatUnits(balance, inputToken.decimals);
@@ -1315,7 +1306,6 @@ export async function buildCrosschainTransfer(params: {
       calldata,
       srcChainId: params.srcChainId,
       operatorAddress: params.operatorAddress,
-      alchemyKey: params.alchemyKey,
     });
     if (simResult) {
       // Re-quote with accurate destination fill simulation
@@ -1442,13 +1432,12 @@ export async function projectSyncNavImpact(params: {
   srcChainId: number;
   depositV3Calldata: Hex;
   operatorAddress?: Address;
-  alchemyKey?: string;
 }): Promise<{
   preUnitaryValue: string;
   postUnitaryValue: string;
   impactPct: string;
 } | undefined> {
-  const publicClient = getClient(params.srcChainId, params.alchemyKey);
+  const publicClient = getRpcProvider(params.srcChainId);
   const sender = params.operatorAddress ?? params.vaultAddress;
 
   // Pre-sync NAV
@@ -1548,7 +1537,6 @@ export async function computeNavEqualization(params: {
   /** User's intended destination chain (may be auto-swapped) */
   userDstChainId: number;
   preferredToken?: string;
-  alchemyKey?: string;
 }): Promise<NavEqualizationResult> {
   if (params.userSrcChainId === params.userDstChainId) {
     throw new Error("NAV equalization requires two different chains.");
@@ -1559,7 +1547,6 @@ export async function computeNavEqualization(params: {
   // 1. Read aggregated NAV to obtain the global unit-less target price.
   const nav = await getAggregatedNav(
     params.vaultAddress,
-    params.alchemyKey ?? "",
   );
 
   const srcSnap = nav.chains.find((s) => s.chainId === params.userSrcChainId);
@@ -1683,7 +1670,6 @@ export async function computeNavEqualization(params: {
     srcChainId,
     params.vaultAddress,
     candidates.map((c) => c.address),
-    params.alchemyKey,
   );
 
   for (const candidate of candidates) {
@@ -1732,7 +1718,6 @@ export async function computeNavEqualization(params: {
       usdcToken.address,
       bridgeUsdc,
       bestToken.address,
-      params.alchemyKey ?? "",
     );
   }
 
@@ -1756,7 +1741,6 @@ export async function computeNavEqualization(params: {
         bestToken.address,
         bridgeAmountRaw,
         usdcToken.address,
-        params.alchemyKey ?? "",
       );
     }
   }
@@ -1852,7 +1836,6 @@ export async function buildCrosschainSync(params: {
   navToleranceBps?: number;
   useNativeEth?: boolean; // true = vault wraps native ETH→WETH via sourceNativeAmount
   shouldUnwrapOnDestination?: boolean;
-  alchemyKey?: string;
   /** Operator address for depositV3 simulation (extracts destination message) */
   operatorAddress?: Address;
 }): Promise<{
@@ -1893,7 +1876,6 @@ export async function buildCrosschainSync(params: {
       userSrcChainId: params.srcChainId,
       userDstChainId: params.dstChainId,
       preferredToken: params.tokenSymbol,
-      alchemyKey: params.alchemyKey,
     });
 
     // Use the equalization results for the rest of the flow
@@ -1926,7 +1908,6 @@ export async function buildCrosschainSync(params: {
       srcChainId,
       params.vaultAddress,
       "0x0000000000000000000000000000000000000000" as Address,
-      params.alchemyKey,
     );
     if (ethBalance < inputAmountRaw) {
       const available = formatUnits(ethBalance, 18);
@@ -1940,7 +1921,6 @@ export async function buildCrosschainSync(params: {
       srcChainId,
       params.vaultAddress,
       inputToken.address,
-      params.alchemyKey,
     );
     if (balance < inputAmountRaw) {
       const available = formatUnits(balance, inputToken.decimals);
@@ -1996,7 +1976,6 @@ export async function buildCrosschainSync(params: {
       calldata,
       srcChainId,
       operatorAddress: params.operatorAddress,
-      alchemyKey: params.alchemyKey,
     });
     if (simResult) {
       quote = await getCrosschainQuote(
@@ -2054,7 +2033,6 @@ export async function buildCrosschainSync(params: {
         srcChainId,
         depositV3Calldata: calldata,
         operatorAddress: params.operatorAddress,
-        alchemyKey: params.alchemyKey,
       })
     : undefined;
 

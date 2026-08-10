@@ -40,7 +40,6 @@ interface SettingsBody {
 }
 
 async function verifyOperatorAndBuildContext(
-  env: Env,
   body: SettingsBody,
 ): Promise<RequestContext> {
   const vaultAddress = body.vaultAddress as Address;
@@ -57,7 +56,6 @@ async function verifyOperatorAndBuildContext(
     authSignature: body.authSignature,
     authTimestamp: Number(body.authTimestamp),
     preferredChainId: chainId,
-    alchemyKey: env.ALCHEMY_API_KEY,
   });
 
   return {
@@ -73,7 +71,7 @@ async function verifyOperatorAndBuildContext(
 settings.post("/slippage", async (c) => {
   try {
     const body = await c.req.json<SettingsBody & { slippage: string }>();
-    const ctx = await verifyOperatorAndBuildContext(c.env, body);
+    const ctx = await verifyOperatorAndBuildContext(body);
     const result = await handle_set_default_slippage(c.env, ctx, { slippage: body.slippage }, "set_default_slippage");
     return c.json({ ok: true, message: result.message });
   } catch (err) {
@@ -88,7 +86,7 @@ settings.post("/slippage", async (c) => {
 settings.post("/swap-shield", async (c) => {
   try {
     const body = await c.req.json<SettingsBody & { tolerance?: string; reset?: boolean }>();
-    const ctx = await verifyOperatorAndBuildContext(c.env, body);
+    const ctx = await verifyOperatorAndBuildContext(body);
     let result: { message: string };
     if (body.reset) {
       result = await handle_enable_swap_shield(c.env, ctx, {}, "enable_swap_shield");
@@ -110,7 +108,7 @@ settings.post("/swap-shield", async (c) => {
 settings.post("/nav-shield", async (c) => {
   try {
     const body = await c.req.json<SettingsBody & { threshold?: string; reset?: boolean }>();
-    const ctx = await verifyOperatorAndBuildContext(c.env, body);
+    const ctx = await verifyOperatorAndBuildContext(body);
     let result: { message: string };
     if (body.reset) {
       result = await handle_enable_nav_shield(c.env, ctx, {}, "enable_nav_shield");
@@ -139,7 +137,7 @@ settings.get("/exec-mode", async (c) => {
       authSignature: q.authSignature || "",
       authTimestamp: Number(q.authTimestamp) || 0,
     };
-    await verifyOperatorAndBuildContext(c.env, body);
+    await verifyOperatorAndBuildContext(body);
     const mode = await getExecutionModePreference(c.env.KV, body.operatorAddress);
     return c.json({ mode });
   } catch (err) {
@@ -154,7 +152,7 @@ settings.get("/exec-mode", async (c) => {
 settings.post("/exec-mode", async (c) => {
   try {
     const body = await c.req.json<SettingsBody & { mode: "autonomous" | "confirm" }>();
-    const ctx = await verifyOperatorAndBuildContext(c.env, body);
+    const ctx = await verifyOperatorAndBuildContext(body);
     if (body.mode !== "autonomous" && body.mode !== "confirm") {
       return c.json({ error: "mode must be 'autonomous' or 'confirm'" }, 400);
     }

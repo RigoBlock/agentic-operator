@@ -28,7 +28,7 @@ export async function handle_get_pool_info(
     chainId = resolveChainArg((args.chain as string).trim()).id;
   }
 
-  const activePools = await getVaultActivePools(chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+  const activePools = await getVaultActivePools(chainId, ctx.vaultAddress as Address);
   const requestedPoolId = args.poolId ? ((args.poolId as string).trim() as `0x${string}`) : undefined;
 
   const pools = requestedPoolId
@@ -200,7 +200,7 @@ export async function handle_remove_liquidity(
   let liquidityAmount = args.liquidityAmount as string | undefined;
   const tokenId = args.tokenId as string;
   if ((!liquidityAmount || !/^\d+$/.test(liquidityAmount.trim())) && tokenId) {
-    const positions = await getVaultLPPositions(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+    const positions = await getVaultLPPositions(ctx.chainId, ctx.vaultAddress as Address);
     const pos = positions.find(p => p.tokenId === tokenId);
     if (!pos) throw new Error(`LP position #${tokenId} not found. Use get_lp_positions to list your current positions.`);
     if (pos.liquidity === "0") throw new Error(`Position #${tokenId} has zero liquidity — it may already be closed.`);
@@ -254,7 +254,7 @@ export async function handle_get_lp_positions(
   }
 
   const chainName = resolveChainName(ctx.chainId);
-  const positions = await getVaultLPPositions(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+  const positions = await getVaultLPPositions(ctx.chainId, ctx.vaultAddress as Address);
 
   if (positions.length === 0) {
     return {
@@ -393,7 +393,7 @@ export async function handle_burn_position(
   // The vault's getUniV4TokenIds() tracks ALL positions (active and closed) until
   // explicitly burned. A closed position appears in getVaultLPPositions() with
   // liquidity = "0" and status = "closed". Use it to validate and get pool key.
-  const positions = await getVaultLPPositions(ctx.chainId, ctx.vaultAddress as Address, env.ALCHEMY_API_KEY);
+  const positions = await getVaultLPPositions(ctx.chainId, ctx.vaultAddress as Address);
   let pos = positions.find(p => p.tokenId === tokenId);
 
   // Fallback: if getVaultLPPositions didn't return this position (e.g. transient
@@ -414,7 +414,7 @@ export async function handle_burn_position(
     currency1 = (isC0Lower ? pos.currency1 : pos.currency0) as Address;
   } else {
     // Position not in batch results — query POSM directly
-    const directPos = await getPositionDirect(ctx.chainId, tokenId, env.ALCHEMY_API_KEY);
+    const directPos = await getPositionDirect(ctx.chainId, tokenId);
     if (!directPos) {
       throw new Error(
         `Position #${tokenId} not found — the NFT has already been burned in the PositionManager. ` +

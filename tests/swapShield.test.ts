@@ -84,7 +84,6 @@ const TOKEN_IN = "0xaaaa000000000000000000000000000000000001" as Address;
 const TOKEN_OUT = "0xbbbb000000000000000000000000000000000002" as Address;
 const OPERATOR = "0xcccc000000000000000000000000000000000003";
 const CHAIN_ID = 8453;
-const ALCHEMY_KEY = "test-key";
 
 describe("Swap Shield — checkSwapPrice", () => {
   beforeEach(() => {
@@ -101,7 +100,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,       // 1 tokenIn
       960n * 10n ** 18n,
       100,                    // 1% slippage
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(true);
@@ -121,7 +119,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       800n * 10n ** 18n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(false);
@@ -143,7 +140,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       1050n * 10n ** 18n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(true);
@@ -161,7 +157,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       1200n * 10n ** 18n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(false);
@@ -179,7 +174,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n,
       970n,
       300, // 3% slippage
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(true);
@@ -196,7 +190,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       1000n * 10n ** 18n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(true);
@@ -213,7 +206,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       1000n * 10n ** 18n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(true);
@@ -230,7 +222,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       1000n * 10n ** 18n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(true);
@@ -245,7 +236,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       0n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(false);
@@ -261,7 +251,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       -1n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(false);
@@ -276,7 +265,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       -1n,
       100n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(false);
@@ -296,7 +284,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       500n * 10n ** 18n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(true);
@@ -315,7 +302,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       1200n * 10n ** 18n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(false);
@@ -328,7 +314,7 @@ describe("Swap Shield — checkSwapPrice", () => {
   it("skips check for zero amounts", async () => {
     const result = await checkSwapPrice(
       CHAIN_ID, TOKEN_IN, TOKEN_OUT,
-      0n, 0n, 100, ALCHEMY_KEY,
+      0n, 0n, 100,
     );
 
     expect(result.allowed).toBe(true);
@@ -344,7 +330,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       1000n * 10n ** 18n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(true);
@@ -359,7 +344,7 @@ describe("Swap Shield — checkSwapPrice", () => {
 
     await checkSwapPrice(
       8453, WETH_BASE, TOKEN_OUT,
-      1n, 950n, 100, ALCHEMY_KEY,
+      1n, 950n, 100,
     );
 
     // convertTokenAmountViaOracle should be called with address(0) as the tokenIn
@@ -376,7 +361,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n * 10n ** 18n,
       1n * 10n ** 18n,
       100,
-      ALCHEMY_KEY,
     );
 
     expect(result.allowed).toBe(true);
@@ -393,7 +377,6 @@ describe("Swap Shield — checkSwapPrice", () => {
       1n,
       960n,
       100,
-      ALCHEMY_KEY,
       2, // 2% max divergence
     );
 
