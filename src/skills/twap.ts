@@ -17,7 +17,8 @@ import type { Address } from "viem";
 import type { StrategySkill, SkillToolDefinition, SkillToolResult, ProcessChatFn } from "./types.js";
 import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 import { sendMessage, escapeHtml } from "../services/telegram.js";
-import { executeTxList, formatOutcomesMarkdown, finalizeToolTransaction } from "../services/execution.js";
+import { executeTxList, formatOutcomesMarkdown } from "../services/execution.js";
+import { prepareTransaction } from "../services/transactionPrepare.js";
 import { executeToolCall } from "../llm/client.js";
 import { sanitizeError, resolveChainId, resolveChainName, resolveTokenAddress } from "../config.js";
 import { initTokenResolver } from "../services/tokenResolver.js";
@@ -511,7 +512,7 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
           throw new Error(toolResult.message || "No swap transaction produced");
         }
 
-        const { tx: finalizedTx } = await finalizeToolTransaction(env, ctx, toolResult.transaction);
+        const { tx: finalizedTx } = await prepareTransaction(env, ctx, toolResult.transaction);
         const txList = [finalizedTx];
         lastBuiltTx = finalizedTx;
 

@@ -126,6 +126,12 @@ export interface ChatRequest {
   executionMode?: ExecutionMode;
   /** When true in delegated mode, confirms the agent should execute the pending tx */
   confirmExecution?: boolean;
+  /**
+   * References a server-side stored simulation produced by a previous `/api/chat`
+   * call. Sending this back on the same `POST /api/chat` endpoint executes the
+   * exact finalized transaction without re-running the LLM.
+   */
+  operationId?: string;
   /** When true, response is streamed as SSE events instead of a single JSON blob */
   stream?: boolean;
   /** User-provided AI API key (OpenRouter, Anthropic, or OpenAI) */
@@ -187,9 +193,11 @@ export interface TransactionDraft {
 }
 
 /** An unsigned transaction returned to the frontend for operator signing.
- *  This type is only produced by the centralized finalization helper; it
- *  carries the gas limit and the NAV-shield marker. */
+ *  This type is produced by the preparation helper; it carries the executor,
+ *  gas limit, EIP-1559 fees, and the NAV-shield marker. */
 export interface UnsignedTransaction extends TransactionDraft {
+  /** Executor address — operator EOA for manual/operatorOnly txs, agent wallet for delegated txs. */
+  from: Address;
   gas: string;          // hex-encoded gas limit
   /** Pre-computed EIP-1559 max fee per gas (hex wei). Validated during
    *  preparation and reused at broadcast so the fee market is read exactly once. */
@@ -197,8 +205,7 @@ export interface UnsignedTransaction extends TransactionDraft {
   /** Pre-computed EIP-1559 max priority fee per gas (hex wei). Validated during
    *  preparation and reused at broadcast so the fee market is read exactly once. */
   maxPriorityFeePerGas: Hex;
-  /** Internal marker: NAV shield pre-check already ran for this tx build path.
-   *  This is set ONLY by the centralized finalization helper. */
+  /** Internal marker: NAV shield pre-check already ran for this tx build path. */
   navShieldChecked?: boolean;
   /** Advisory warning produced when the NAV shield simulation shows the trade itself reverts. */
   revertWarning?: string;
@@ -221,6 +228,12 @@ export interface ChatResponse {
   executionResult?: ExecutionResult;
   /** In delegated mode with multiple txs: results for each */
   executionResults?: ExecutionResult[];
+  /**
+   * Present when the response contains a finalized transaction that requires
+   * user confirmation. The frontend must send this `operationId` to the
+   * confirmation endpoint to execute the exact stored payload.
+   */
+  operationId?: string;
   /** Reasoning trace emitted by the model during processing */
   reasoning?: string;
   /** Ordered list of models that produced this output (for hallucination tracking) */

@@ -1,21 +1,13 @@
 /**
- * Execution Service — agent wallet transaction execution with gas safety.
+ * Execution Service — broadcast pre-prepared transactions from the agent wallet.
  *
- * In "delegated" mode, after the operator confirms transaction details,
- * the agent wallet sends the transaction directly to the vault contract.
- * The vault checks its internal delegation mapping to authorize the agent.
- *
- * Execution path:
- *   Agent wallet → Vault contract (msg.sender = agent wallet)
- *   Result: vault verifies agent is delegated via getDelegatedSelectors() ✓
- *
- * Gas safety mechanisms:
- *   - Transaction simulation via eth_call before broadcasting
- *   - Hard caps on maxFeePerGas and maxPriorityFeePerGas
- *   - Pre-flight balance check (refuses if balance < estimated cost)
- *   - EIP-1559 fee estimation with configurable multiplier
- *   - Automatic resubmission with bumped fees if not mined within timeout
- *   - Max resubmission attempts to prevent infinite loops
+ * This module only broadcasts. All validation, simulation, NAV shield, and gas
+ * estimation happens once during prepareTransaction() before the user confirms.
+ * On execution we only:
+ *   - load the delegated agent wallet,
+ *   - verify tx.from matches the loaded signer,
+ *   - broadcast via direct EIP-1559 tx or Alchemy-sponsored UserOp,
+ *   - wait for the receipt.
  */
 
 import {
@@ -28,12 +20,11 @@ import {
   type TransactionReceipt,
 } from "viem";
 import type { LocalAccount } from "viem/accounts";
-import type { Env, UnsignedTransaction, TransactionDraft, ExecutionResult, RequestContext } from "../types.js";
-import { getChain, getRpcUrl, sanitizeError, MIN_BALANCE, EXPLORER_TX_URL, NATIVE_TOKEN } from "../config.js";
+import type { Env, UnsignedTransaction, TransactionDraft, ExecutionResult } from "../types.js";
+import { getChain, getRpcUrl, sanitizeError, MIN_BALANCE, EXPLORER_TX_URL } from "../config.js";
 import { loadAgentWalletAccount } from "./agentWallet.js";
 import { getDelegationConfig, getChainDelegation } from "./delegation.js";
 import { recordGasSpend } from "../routes/gasPolicy.js";
-import { ALLOWED_VAULT_SELECTORS } from "../abi/rigoblockVault.js";
 import {
   executeSponsoredCalls,
   getSponsoredCallsStatus,
@@ -41,12 +32,10 @@ import {
 } from "./bundler.js";
 import { getRpcProvider, ALCHEMY_ORIGIN } from "./rpcClient.js";
 import {
-  clampGasFees,
   bumpGasFees,
   getTransactionFees,
   RESUBMIT_FEE_BUMP_PCT,
   type GasFees,
-  finalizeTransaction,
 } from "./gas.js";
 import { ExecutionError } from "./executionError.js";
 
@@ -62,47 +51,24 @@ const TX_CONFIRM_TIMEOUT_MS = 60_000;
 const FAST_CHAIN_IDS = new Set([10, 42161, 8453, 130, 56, 84532]);
 
 /**
- * Centralized transaction finalization for tool handlers.
- *
- * Handlers MUST return a `TransactionDraft` (no gas, no NAV-shield markers).
- * This function is the only place that turns a draft into a full
- * `UnsignedTransaction` with gas and a validated NAV shield.
- */
-export async function finalizeToolTransaction(
-  env: Env,
-  ctx: Pick<RequestContext, "vaultAddress" | "chainId" | "operatorAddress" | "operatorVerified" | "executionMode">,
-  draft: TransactionDraft,
-): Promise<{ tx: UnsignedTransaction; warning?: string }> {
-  return finalizeTransaction(env, ctx, draft);
-}
-
-/**
- * Execute a transaction via the agent wallet.
+ * Execute a pre-prepared transaction via the agent wallet.
  *
  * This is the ONLY public function that broadcasts transactions from the agent
- * wallet. ALL delegated transactions go through here — there is no alternative
- * code path. The caller (finalizeTransaction) is responsible for running the
- * safety stack, including the NAV shield, gas estimation, and fee caps before
- * this function is invoked. This function verifies that those safety values are
- * present; it does not re-estimate or re-simulate.
+ * wallet. ALL delegated transactions go through here.
  *
- * Safety checks (all mandatory, in order):
- * 1. Delegation config exists and is enabled
- * 2. Per-chain delegation state verified
- * 3. Transaction target == vault address (no cross-contract calls)
- * 4. Function selector in allowed whitelist
- * 5. Agent wallet loaded and matches config
- * 6. Gas limit and EIP-1559 fee values are present from finalizeTransaction
- * 7. Transaction broadcast (sponsored or direct) with gas caps
+ * The caller (prepareTransaction) has already run the full safety stack:
+ * delegation check, NAV shield, gas estimation, and EIP-1559 fee estimation.
+ * This function trusts the stored transaction and only confirms the sender can
+ * broadcast it. It does NOT re-simulate or re-validate target/selector/state.
  */
 export async function executeViaDelegation(
   env: Env,
-  txInput: TransactionDraft,
+  tx: UnsignedTransaction,
   vaultAddress: string,
   sponsoredGasOverride?: boolean,
-  requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>,
+  _requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>,
 ): Promise<ExecutionResult> {
-  // 1. Load the delegation config
+  // Load delegation config to resolve sponsorship preference and the expected agent.
   const config = await getDelegationConfig(env.KV, vaultAddress);
   if (!config || !config.enabled) {
     throw new ExecutionError(
@@ -111,40 +77,7 @@ export async function executeViaDelegation(
     );
   }
 
-  // 2. Get per-chain delegation state
-  const chainDelegation = await getChainDelegation(env.KV, vaultAddress, txInput.chainId);
-  if (!chainDelegation) {
-    throw new ExecutionError(
-      `Delegation not active on chain ${txInput.chainId}. Set up delegation on this chain first.`,
-      "DELEGATION_NOT_ON_CHAIN",
-    );
-  }
-
-  // 3. Verify the transaction target is the vault
-  if (txInput.to.toLowerCase() !== vaultAddress.toLowerCase()) {
-    throw new ExecutionError(
-      `Transaction target ${txInput.to} is not the vault ${vaultAddress}. ` +
-      `The agent can only send transactions to the delegated vault.`,
-      "TARGET_NOT_ALLOWED",
-    );
-  }
-
-  // 4. Verify the function selector is in our code-level whitelist.
-  //    We check against ALLOWED_VAULT_SELECTORS (the canonical set) rather than
-  //    the KV-stored selectors — the KV config may be stale if new selectors
-  //    were added after the initial delegation setup. The on-chain delegation
-  //    is the ultimate guard (eth_call simulation at step 7 catches unauthorized calls).
-  const selector = txInput.data.slice(0, 10) as Hex;
-  const whitelistedSelectors = Object.values(ALLOWED_VAULT_SELECTORS).map((s) => s.toLowerCase());
-  if (!whitelistedSelectors.includes(selector.toLowerCase())) {
-    throw new ExecutionError(
-      `Function selector ${selector} is not in the allowed set. ` +
-      `Only whitelisted vault functions can be called via delegation.`,
-      "METHOD_NOT_ALLOWED",
-    );
-  }
-
-  // 5. Load the agent wallet
+  // Load the agent wallet that will sign the broadcast.
   let agentAccount: LocalAccount;
   try {
     const loaded = await loadAgentWalletAccount(env.KV, vaultAddress, env);
@@ -166,42 +99,21 @@ export async function executeViaDelegation(
     );
   }
 
-  // 6. Verify agent address matches config
-  if (agentAccount.address.toLowerCase() !== config.agentAddress.toLowerCase()) {
+  // The stored transaction already encodes who must send it. Verify the loaded
+  // signer matches. This is the only execution-time identity check: whoever
+  // broadcasts must be the address in `tx.from`. For delegated mode that is the
+  // agent wallet; a future manual-execution path would load the operator EOA
+  // and apply the same check.
+  if (agentAccount.address.toLowerCase() !== tx.from.toLowerCase()) {
     throw new ExecutionError(
-      "Agent wallet address mismatch with delegation config",
-      "AGENT_WALLET_MISMATCH",
+      "Stored transaction sender does not match the wallet that will broadcast it.",
+      "SENDER_MISMATCH",
     );
   }
 
-  // 7. Validate the incoming transaction was finalized before broadcast.
-  //    Gas, NAV shield, and EIP-1559 fees must already be attached. The broadcast
-  //    path does NOT re-estimate or re-simulate; it only verifies the values exist.
-  const tx = txInput as UnsignedTransaction;
-  if (!tx.gas || tx.gas === "0x0") {
-    throw new ExecutionError(
-      "Gas limit is missing for this transaction. Rebuild the transaction to estimate gas.",
-      "GAS_ESTIMATION_FAILED",
-    );
-  }
-  if (!tx.maxFeePerGas || tx.maxFeePerGas === "0x0" || !tx.maxPriorityFeePerGas || tx.maxPriorityFeePerGas === "0x0") {
-    throw new ExecutionError(
-      "Gas fee estimate is missing for this transaction. Rebuild the transaction to estimate fees.",
-      "GAS_ESTIMATION_FAILED",
-    );
-  }
-
-  // Refuse to auto-execute a transaction that was flagged as likely reverting
-  // during prepareTransaction. The caller can still return it as unsigned calldata
-  // for manual signing.
-  if (tx.revertWarning) {
-    throw new ExecutionError(tx.revertWarning, "SIMULATION_FAILED", true);
-  }
-
-  // 7. Execute the transaction
   // Choose execution path: sponsored (ERC-4337 bundler) or direct broadcast.
-  // Priority: per-transaction override > per-chain setting > global config.
-  const chainSponsored = chainDelegation.sponsoredGas !== undefined
+  const chainDelegation = await getChainDelegation(env.KV, vaultAddress, tx.chainId);
+  const chainSponsored = chainDelegation?.sponsoredGas !== undefined
     ? chainDelegation.sponsoredGas
     : config.sponsoredGas;
   const effectiveSponsored = sponsoredGasOverride !== undefined ? sponsoredGasOverride : chainSponsored;
@@ -209,155 +121,23 @@ export async function executeViaDelegation(
 
   let result: ExecutionResult;
 
-  try {
-    if (useSponsored) {
-      // ── Sponsored path: submit as UserOperation via Alchemy bundler ──
-      // The paymaster sponsors gas, so the agent wallet doesn't need ETH.
-      // The agent EOA must have EIP-7702 authorization (auto-set on first use).
-      try {
-        result = await sponsoredAgentTransaction(
-          agentAccount,
-          tx,
-          tx.chainId,
-          env.ALCHEMY_GAS_POLICY_ID!,
-          env.KV,
-        );
-      } catch (sponsoredErr) {
-        // Simulation failure is a trade-level issue — don't mask it with sponsorship errors
-        if (sponsoredErr instanceof ExecutionError && sponsoredErr.code === "SIMULATION_FAILED") {
-          throw sponsoredErr;
-        }
-
-        const sponsoredMsg = sponsoredErr instanceof Error ? sponsoredErr.message : String(sponsoredErr);
-        const sponsoredDetails = (sponsoredErr as any)?.details
-          || (sponsoredErr as any)?.cause?.message
-          || (sponsoredErr as any)?.cause?.details
-          || "";
-        const sponsoredCode = (sponsoredErr as any)?.code
-          || (sponsoredErr as any)?.cause?.code
-          || "";
-        // Alchemy may forward the gas-policy webhook's rejection reason inside the
-        // error payload (location varies by SDK version / error shape).
-        const sponsoredReason = (sponsoredErr as any)?.reason
-          || (sponsoredErr as any)?.cause?.reason
-          || (sponsoredErr as any)?.data?.reason
-          || (sponsoredErr as any)?.cause?.data?.reason
-          || (sponsoredErr as any)?.cause?.response?.reason
-          || "";
-        const gasInfo = (sponsoredErr as any)?._gasInfo;
-
-        // Try direct broadcast (agent wallet pays gas)
-        try {
-          result = await broadcastAgentTransaction(
-            agentAccount,
-            tx,
-            tx.chainId,
-          );
-          // Sponsorship failed but direct broadcast succeeded. Surface the original
-          // sponsored failure reason to the caller/LLM so it knows why sponsorship
-          // is not being used and can decide whether to disable it.
-          const fallbackReasonText = sponsoredDetails
-            ? sanitizeError(String(sponsoredDetails))
-            : (sponsoredReason && !sponsoredDetails?.includes(String(sponsoredReason))
-                ? sanitizeError(String(sponsoredReason))
-                : sanitizeError(sponsoredMsg));
-          const codeSuffix = sponsoredCode ? ` [${sponsoredCode}]` : "";
-          result.sponsoredFallbackReason = (
-            `Sponsored execution failed${codeSuffix}: ${fallbackReasonText}. ` +
-            `Fell back to direct agent-wallet broadcast.`
-          );
-        } catch (directErr) {
-          // Both sponsored and direct failed. Build a user-facing message that explains
-          // exactly what happened and gives the user three clear choices:
-          // 1. Fund the agent wallet so direct broadcast works next time
-          // 2. Disable sponsorship on this chain so direct broadcast is the default
-          // 3. Sign this transaction manually right now
-          const token = NATIVE_TOKEN[tx.chainId] || "ETH";
-          const detailSuffix = sponsoredDetails
-            ? ` (${sanitizeError(String(sponsoredDetails))})`
-            : "";
-          const reasonSuffix = sponsoredReason && !sponsoredDetails.includes(String(sponsoredReason))
-            ? ` — Policy reason: ${sanitizeError(String(sponsoredReason))}`
-            : "";
-          const codeSuffix = sponsoredCode ? ` [${sponsoredCode}]` : "";
-
-          // Show only facts: raw error, gas params, options. No interpretation.
-          let gasBreakdown = "";
-          if (gasInfo) {
-            const parts: string[] = [];
-            if (gasInfo.callGasLimit) parts.push(`gas limit: ${gasInfo.callGasLimit}`);
-            if (gasInfo.ourMaxFeePerGasGwei) parts.push(`our maxFeePerGas: ${gasInfo.ourMaxFeePerGasGwei} gwei`);
-            if (gasInfo.ourMaxPriorityFeePerGasGwei) parts.push(`our maxPriorityFeePerGas: ${gasInfo.ourMaxPriorityFeePerGasGwei} gwei`);
-            if (gasInfo.maxCostEth) parts.push(`max cost: ${gasInfo.maxCostEth} ${token}`);
-            if (parts.length) gasBreakdown = `\n[${parts.join(" · ")}]`;
-          }
-
-          let userMsg: string;
-          if (directErr instanceof ExecutionError && directErr.code === "INSUFFICIENT_BALANCE") {
-            userMsg = (
-              `Sponsored execution failed${detailSuffix}${reasonSuffix}${codeSuffix}.${gasBreakdown}\n` +
-              `Direct broadcast also failed: agent wallet has no ${token} for gas.\n` +
-              `Options: (1) fund agent wallet ${agentAccount.address}, ` +
-              `(2) disable sponsored gas, or ` +
-              `(3) sign this transaction directly from your wallet.`
-            );
-          } else {
-            const directMsg = directErr instanceof Error ? directErr.message : String(directErr);
-            userMsg = (
-              `Sponsored execution failed${detailSuffix}${reasonSuffix}${codeSuffix}.${gasBreakdown}\n` +
-              `Direct broadcast also failed: ${sanitizeError(directMsg)}.\n` +
-              `Options: (1) fund agent wallet ${agentAccount.address}, ` +
-              `(2) disable sponsored gas, or ` +
-              `(3) sign this transaction directly from your wallet.`
-            );
-          }
-          throw new ExecutionError(userMsg, "SPONSORED_FAILED", true);
-        }
-      }
-    } else {
-      // ── Direct broadcast: agent wallet pays gas ──
-      result = await broadcastAgentTransaction(
-        agentAccount,
-        tx,
-        tx.chainId,
-      );
-    }
-  } catch (execErr) {
-    // The NAV shield already validated the transaction as the OPERATOR (vault owner),
-    // so the transaction was structurally valid at that moment. If the agent's own
-    // simulation now fails, it is MOST COMMONLY a market-level revert (e.g., GMX
-    // acceptable price moved) rather than a delegation issue. Only treat it as
-    // "agent not delegated" when the revert reason explicitly says so.
-    if (execErr instanceof ExecutionError && execErr.code === "SIMULATION_FAILED") {
-      const msg = execErr.message.toLowerCase();
-      const isDelegationIssue =
-        msg.includes("not delegated") ||
-        msg.includes("caller is not delegated") ||
-        msg.includes("unauthorized") ||
-        msg.includes("no permission") ||
-        msg.includes("only owner") ||
-        msg.includes("onlyowner") ||
-        (msg.includes("selector") && msg.includes("not delegated"));
-
-      if (isDelegationIssue) {
-        throw new ExecutionError(
-          `The agent wallet is not delegated for function selector ${selector} on-chain. ` +
-          `Update your delegation to add this function, or sign this transaction directly from your wallet.`,
-          "AGENT_NOT_DELEGATED",
-          true,
-        );
-      }
-
-      // Market-level simulation failure: preserve the real revert reason and let
-      // the user sign manually if they want to retry with updated prices.
-      throw new ExecutionError(
-        `Delegated execution simulation failed: ${execErr.message} ` +
-        `You can sign this transaction directly from your wallet to retry, or wait and try again.`,
-        "SIMULATION_FAILED",
-        true,
-      );
-    }
-    throw execErr;
+  if (useSponsored) {
+    // Sponsored path: Alchemy paymaster covers gas. Falls back to direct broadcast
+    // if sponsorship fails for any non-simulation reason.
+    result = await sponsoredAgentTransaction(
+      agentAccount,
+      tx,
+      tx.chainId,
+      env.ALCHEMY_GAS_POLICY_ID!,
+      env.KV,
+    );
+  } else {
+    // Direct broadcast: agent wallet pays gas.
+    result = await broadcastAgentTransaction(
+      agentAccount,
+      tx,
+      tx.chainId,
+    );
   }
 
   // Store pending tx in KV for async monitoring (if not yet confirmed)
@@ -416,13 +196,7 @@ async function broadcastAgentTransaction(
   // Gas was already estimated once by prepareTransaction() from the agent address
   // and includes a 25% buffer. We reuse it here to avoid a duplicate eth_estimateGas
   // on the broadcast hot path.
-  const gasLimit = BigInt(tx.gas || "0x0");
-  if (gasLimit === 0n) {
-    throw new ExecutionError(
-      "Gas limit is missing for this transaction. Rebuild the transaction to estimate gas.",
-      "GAS_ESTIMATION_FAILED",
-    );
-  }
+  const gasLimit = BigInt(tx.gas);
 
   const estimatedCost = (gasLimit * fees.maxFeePerGas) + txValue;
   if (balance < estimatedCost) {
@@ -594,111 +368,28 @@ async function sponsoredAgentTransaction(
   const publicClient = getRpcProvider(chainId);
   const txValue = BigInt(tx.value);
 
-  // ── Step 1: Use pre-computed gas limit ──
-  // Gas was already estimated once by prepareTransaction() from the agent address
-  // and includes a 25% buffer. We pass it as the callGasLimit override to prevent
-  // the bundler from underestimating complex vault adapter calls.
-  const callGasLimit = BigInt(tx.gas || "0x0");
-  if (callGasLimit === 0n) {
-    throw new ExecutionError(
-      "Gas limit is missing for this transaction. Rebuild the transaction to estimate gas.",
-      "GAS_ESTIMATION_FAILED",
-    );
-  }
-
-  // ── Step 2: Reuse the fee values attached by prepareTransaction() ──
-  // The same EIP-1559 values must be used for display and broadcast. If the
-  // transaction was not finalized through prepareTransaction(), refuse to execute.
+  // Gas and fees were already estimated by prepareTransaction(). We reuse them
+  // so execution is a single broadcast with no duplicate validation.
+  const callGasLimit = BigInt(tx.gas);
   const fees = getTransactionFees(tx, chainId);
 
-  // ── Step 3: Execute via Alchemy Smart Wallet SDK ──
   const calls: WalletCall[] = [{
     to: tx.to as Address,
     value: txValue > 0n ? (`0x${txValue.toString(16)}` as Hex) : ("0x0" as Hex),
     data: tx.data as Hex,
   }];
 
-  // Capture gas params so the caller can verify Alchemy's rejection reason.
-  const buildGasInfo = (overrideFees?: GasFees) => ({
-    callGasLimit: callGasLimit ? callGasLimit.toString() : undefined,
-    ourMaxFeePerGasGwei: formatGwei(overrideFees ? overrideFees.maxFeePerGas : fees.maxFeePerGas),
-    ourMaxPriorityFeePerGasGwei: formatGwei(overrideFees ? overrideFees.maxPriorityFeePerGas : fees.maxPriorityFeePerGas),
-    maxCostEth: callGasLimit
-      ? (Number(callGasLimit * (overrideFees ? overrideFees.maxFeePerGas : fees.maxFeePerGas)) / 1e18).toFixed(6)
-      : undefined,
-  });
+  const result = await executeSponsoredCalls(
+    agentAccount,
+    chainId,
+    gasPolicyId,
+    calls,
+    callGasLimit,
+    fees.maxFeePerGas,
+    fees.maxPriorityFeePerGas,
+  );
 
-  async function trySponsoredCalls(attemptFees: GasFees, isRetry: boolean): Promise<ReturnType<typeof executeSponsoredCalls>> {
-    try {
-      return await executeSponsoredCalls(
-        agentAccount,
-        chainId,
-        gasPolicyId,
-        calls,
-        callGasLimit,
-        attemptFees.maxFeePerGas,
-        attemptFees.maxPriorityFeePerGas,
-      );
-    } catch (err) {
-      // If the bundler rejected because our fees are too low, parse the
-      // required minimum from the error and retry once. Alchemy returns:
-      //   -32602 data fields: current_max_priority_fee, current_max_fee
-      //   -32000 message: "...must be at least 62500000"
-      if (isRetry) {
-        (err as any)._gasInfo = buildGasInfo(attemptFees);
-        throw err;
-      }
-
-      const errMsg = err instanceof Error ? err.message : String(err);
-      const errData = (err as any)?.data || (err as any)?.cause?.data;
-      const errCode = (err as any)?.code || (err as any)?.cause?.code || "";
-
-      // Parse "must be at least N" from the error message (wei units)
-      const mustBeAtLeastMatch = errMsg.match(/must be at least\s+(\d+)/i);
-      const requiredMinWei = mustBeAtLeastMatch ? BigInt(mustBeAtLeastMatch[1]) : undefined;
-
-      // Parse Alchemy -32602 data fields
-      const dataPriorityFee = errData?.current_max_priority_fee ? BigInt(errData.current_max_priority_fee) : undefined;
-      const dataMaxFee = errData?.current_max_fee ? BigInt(errData.current_max_fee) : undefined;
-
-      // Only retry when the error is explicitly fee-related (message text or
-      // Alchemy data fields). DO NOT retry on generic -32602 — Alchemy uses
-      // that code for paymaster rejections (spending limit) too.
-      const isFeeError =
-        errMsg.toLowerCase().includes("maxpriorityfeepergas") ||
-        errMsg.toLowerCase().includes("maxfeepergas") ||
-        errMsg.toLowerCase().includes("precheck failed");
-
-      if (isFeeError && (requiredMinWei || dataPriorityFee || dataMaxFee)) {
-        // Recompute fees using the bundler's minimums, then clamp to the same
-        // chain caps so a retry cannot exceed the operator's configured safety
-        // ceiling (especially on Arbitrum, where the policy is sensitive to the
-        // quoted max fee per gas).
-        const rawPriorityFee = dataPriorityFee
-          || (requiredMinWei && requiredMinWei > attemptFees.maxPriorityFeePerGas ? requiredMinWei : undefined)
-          || attemptFees.maxPriorityFeePerGas;
-        const rawMaxFee = dataMaxFee
-          || (rawPriorityFee > attemptFees.maxFeePerGas ? rawPriorityFee + (rawPriorityFee * 10n) / 100n : attemptFees.maxFeePerGas);
-
-        const retryFees = clampGasFees(
-          {
-            maxPriorityFeePerGas: rawPriorityFee,
-            maxFeePerGas: rawMaxFee,
-          },
-          chainId,
-        );
-
-        return trySponsoredCalls(retryFees, true);
-      }
-
-      (err as any)._gasInfo = buildGasInfo(attemptFees);
-      throw err;
-    }
-  }
-
-  const result = await trySponsoredCalls(fees, false);
-
-  // ── Step 3: Record actual gas spend if we have a receipt ──
+  // ── Step 2: Record actual gas spend if we have a receipt ──
   // The paymaster covered the cost, but we still track it against the operator's
   // daily sponsorship stipend so /stipend stays in sync with Alchemy.
   const receipt = result.receipts?.[0];
@@ -725,7 +416,7 @@ async function sponsoredAgentTransaction(
     }
   }
 
-  // ── Step 4: Map result to ExecutionResult ──
+  // ── Map result to ExecutionResult ──
   const explorerBase = EXPLORER_TX_URL[chainId];
 
   if (result.status === "success" && receipt) {
@@ -884,32 +575,6 @@ async function storePendingTx(kv: KVNamespace, vaultAddress: string, result: Exe
   // Store the value we will query: EVM hash if available, otherwise callId.
   const indexKey = `pending-tx-by-vault:${vaultAddress.toLowerCase()}:${result.chainId}`;
   await kv.put(indexKey, lookupValue, { expirationTtl: 3600 });
-}
-
-/**
- * Parse a JSON-stored pending transaction payload into a list of unsigned transactions.
- * Handles the formats used by both web and Telegram: a single tx, a plain array,
- * or an object with a `txs` array. Preserves gas, fee, and NAV-shield fields so a
- * finalized transaction can be reused without re-simulation.
- */
-export function parseStoredUnsignedTransactions(raw: string): UnsignedTransaction[] {
-  const parsed: Record<string, unknown> = JSON.parse(raw);
-  const rawTxs = parsed.txs ? parsed.txs : (Array.isArray(parsed) ? parsed : [parsed]);
-  return (rawTxs as Record<string, unknown>[]).map((t) => ({
-    to: t.to as Address,
-    data: t.data as `0x${string}`,
-    value: (t.value as string) || "0x0",
-    chainId: t.chainId as number,
-    gas: (t.gas as string) || "0x0",
-    maxFeePerGas: (t.maxFeePerGas as `0x${string}`) || "0x0",
-    maxPriorityFeePerGas: (t.maxPriorityFeePerGas as `0x${string}`) || "0x0",
-    description: (t.description as string) || "",
-    swapMeta: t.swapMeta as UnsignedTransaction["swapMeta"],
-    metrics: t.metrics as UnsignedTransaction["metrics"],
-    operatorOnly: !!t.operatorOnly,
-    navShieldChecked: t.navShieldChecked as boolean | undefined,
-    revertWarning: t.revertWarning as string | undefined,
-  }));
 }
 
 /** KV key for the per-vault pending transaction index. */
@@ -1119,6 +784,163 @@ export async function executeTxList(
     }
   }
   return outcomes;
+}
+
+// ── Pending simulation store (short-lived KV holding cell) ──────────────
+
+const PENDING_SIMULATION_TTL_SECONDS = 600; // 10 minutes
+
+/**
+ * Minimal broadcast payload stored server-side between "prepare" and "execute".
+ * Only the fields required to broadcast the transaction plus display helpers are
+ * kept. operatorOnly, revertWarning, and navShieldChecked are intentionally
+ * omitted — non-executable transactions are rejected before they ever reach KV.
+ */
+interface StoredTransaction {
+  from: Address;
+  to: Address;
+  data: Hex;
+  value: string; // hex-encoded wei
+  chainId: number;
+  gas: string; // hex-encoded gas limit
+  maxFeePerGas: Hex;
+  maxPriorityFeePerGas: Hex;
+  description: string;
+  swapMeta?: TransactionDraft["swapMeta"];
+  metrics?: Record<string, unknown>;
+}
+
+interface PendingSimulation {
+  operationId: string;
+  vaultAddress: string;
+  reply: string;
+  txs: StoredTransaction[];
+  createdAt: number;
+  consumed?: boolean;
+}
+
+function toStoredTransaction(tx: UnsignedTransaction): StoredTransaction {
+  return {
+    from: tx.from,
+    to: tx.to,
+    data: tx.data,
+    value: tx.value,
+    chainId: tx.chainId,
+    gas: tx.gas,
+    maxFeePerGas: tx.maxFeePerGas,
+    maxPriorityFeePerGas: tx.maxPriorityFeePerGas,
+    description: tx.description,
+    swapMeta: tx.swapMeta,
+    metrics: tx.metrics,
+  };
+}
+
+function fromStoredTransaction(tx: StoredTransaction): UnsignedTransaction {
+  return {
+    ...tx,
+    navShieldChecked: true,
+  };
+}
+
+export function getPendingSimulationKey(operationId: string): string {
+  return `pending-sim:${operationId}`;
+}
+
+function generateOperationId(): string {
+  return crypto.randomUUID();
+}
+
+/**
+ * Store a finalized, executable set of transactions and return an operationId.
+ */
+export async function storePendingSimulation(
+  kv: KVNamespace,
+  vaultAddress: string,
+  reply: string,
+  txs: UnsignedTransaction[],
+): Promise<string> {
+  const operationId = generateOperationId();
+  const stored: PendingSimulation = {
+    operationId,
+    vaultAddress: vaultAddress.toLowerCase(),
+    reply,
+    txs: txs.map(toStoredTransaction),
+    createdAt: Date.now(),
+    consumed: false,
+  };
+  await kv.put(
+    getPendingSimulationKey(operationId),
+    JSON.stringify(stored),
+    { expirationTtl: PENDING_SIMULATION_TTL_SECONDS },
+  );
+  return operationId;
+}
+
+/**
+ * Consume a pending simulation by operationId. Returns null if unknown, expired,
+ * or already consumed. Marking it consumed before returning prevents replay.
+ */
+export async function consumePendingSimulation(
+  kv: KVNamespace,
+  operationId: string,
+): Promise<PendingSimulation | null> {
+  const key = getPendingSimulationKey(operationId);
+  const raw = await kv.get(key);
+  if (!raw) return null;
+
+  let stored: PendingSimulation;
+  try {
+    stored = JSON.parse(raw) as PendingSimulation;
+  } catch {
+    return null;
+  }
+  if (stored.consumed) return null;
+
+  stored.consumed = true;
+  await kv.put(key, JSON.stringify(stored), { expirationTtl: PENDING_SIMULATION_TTL_SECONDS });
+  return stored;
+}
+
+/**
+ * Execute a previously stored simulation bundle by operation ID.
+ *
+ * This is the confirmation-path entry point: it retrieves the finalized
+ * transactions (with gas, fees, and NAV-shield already attached), marks the
+ * bundle consumed to prevent replay, and broadcasts without re-running the LLM
+ * or re-estimating gas.
+ */
+export async function executeStoredSimulation(
+  env: Env,
+  operationId: string,
+  vaultAddress: string,
+  requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>,
+  onProgress?: (index: number, total: number, outcomesSoFar: TxExecOutcome[]) => Promise<void>,
+): Promise<TxExecOutcome[]> {
+  const stored = await consumePendingSimulation(env.KV, operationId);
+  if (!stored) {
+    throw new ExecutionError(
+      `Operation ${operationId} is unknown, expired, or already executed. Please request a fresh quote.`,
+      "OPERATION_NOT_FOUND",
+      true,
+    );
+  }
+
+  // Defense in depth: the stored vault must match the caller's vault.
+  if (stored.vaultAddress.toLowerCase() !== vaultAddress.toLowerCase()) {
+    throw new ExecutionError(
+      "Stored operation does not match the requested vault.",
+      "VAULT_MISMATCH",
+      true,
+    );
+  }
+
+  return executeTxList(
+    env,
+    stored.txs.map(fromStoredTransaction),
+    vaultAddress,
+    onProgress,
+    requestCache,
+  );
 }
 
 /**

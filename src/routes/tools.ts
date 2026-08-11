@@ -13,7 +13,12 @@
 import { Hono } from "hono";
 import type { Env, AppVariables, RequestContext, ExecutionMode, UnsignedTransaction } from "../types.js";
 import { executeToolCall, TOOL_NAME_ALIASES, OPERATOR_VERIFIED_TOOLS } from "../llm/client.js";
-import { executeTxList, formatOutcomesMarkdown, finalizeToolTransaction } from "../services/execution.js";
+import {
+  executeStoredSimulation,
+  formatOutcomesMarkdown,
+} from "../services/execution.js";
+import { prepareTransaction } from "../services/transactionPrepare.js";
+import { runTransactionFlow } from "../services/transactionFlow.js";
 import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS } from "../llm/tools.js";
 import { getSkillTools } from "../skills/index.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
@@ -98,20 +103,16 @@ tools.get("/", async (c) => {
 
 tools.post("/", async (c) => {
   try {
-    const toolName = c.req.query("toolName");
-    if (!toolName) {
-      return c.json({ error: "toolName query parameter is required" }, 400);
-    }
-
     let body: {
-      arguments: Record<string, unknown>;
+      arguments?: Record<string, unknown>;
       vaultAddress?: string;
-      chainId: number;
+      chainId?: number;
       operatorAddress?: string;
       authSignature?: string;
       authTimestamp?: number;
       executionMode?: ExecutionMode;
       confirmExecution?: boolean;
+      operationId?: string;
     };
     try {
       const parsedBody: unknown = await c.req.json();
@@ -121,10 +122,6 @@ tools.post("/", async (c) => {
       body = parsedBody as typeof body;
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
-    }
-
-    if (!body.arguments || typeof body.arguments !== "object") {
-      return c.json({ error: "arguments object is required" }, 400);
     }
 
     if (!body.chainId) {
@@ -152,6 +149,43 @@ tools.post("/", async (c) => {
       throw new AuthError("Authentication required", 401);
     }
 
+    // ── Stored-operation confirmation shortcut ──
+    // If the caller sends an operationId, execute the stored simulation directly
+    // without re-running the tool. This prevents parameter/calldata drift between
+    // build and broadcast.
+    if (body.operationId) {
+      if (!body.vaultAddress) {
+        return c.json({ error: "vaultAddress is required to confirm a stored operation" }, 400);
+      }
+      if (!operatorVerified) {
+        throw new AuthError("Authentication required", 401);
+      }
+      const requestEnv: Env = { ...c.env, requestCache: new Map() };
+      const outcomes = await executeStoredSimulation(
+        requestEnv,
+        body.operationId,
+        body.vaultAddress,
+        requestEnv.requestCache,
+      );
+      const results = outcomes.filter((o) => o.result).map((o) => o.result!);
+      const message = formatOutcomesMarkdown(outcomes);
+      return c.json({
+        tool: "confirm",
+        message,
+        executionResult: results.length === 1 ? results[0] : undefined,
+        executionResults: results.length > 1 ? results : undefined,
+      });
+    }
+
+    const toolName = c.req.query("toolName");
+    if (!toolName) {
+      return c.json({ error: "toolName query parameter is required" }, 400);
+    }
+
+    if (!body.arguments || typeof body.arguments !== "object") {
+      return c.json({ error: "arguments object is required" }, 400);
+    }
+
     // x402 agents (non-browser, no operator auth) are allowed to call vault-tx tools in manual mode.
     // They receive unsigned calldata and sign it themselves. executeToolCall enforces the per-tool
     // auth checks (OPERATOR_VERIFIED_TOOLS, browser gate) — no early rejection needed here.
@@ -173,37 +207,51 @@ tools.post("/", async (c) => {
 
     // Finalize any produced transaction (gas + NAV shield) before returning or executing.
     if (result.transaction) {
-      const { tx: finalizedTx, warning } = await finalizeToolTransaction(c.env, ctx, result.transaction);
+      const { tx: finalizedTx, warning } = await prepareTransaction(c.env, ctx, result.transaction);
       result.transaction = finalizedTx;
       if (warning) result.message += "\n" + warning;
     }
 
-    // ── Delegated execution: auto-execute only when confirmExecution is set ──
-    // Mirrors /api/chat behaviour: delegated mode alone returns unsigned calldata.
-    // Auto-execution requires an explicit confirmExecution=true so the caller has
-    // reviewed the parameters and chosen to broadcast.
-    if (executionMode === "delegated" && body.confirmExecution && result.transaction) {
-      const txList = result.transaction ? [result.transaction] : [];
-      const executableTxs = txList.filter(tx => !tx.operatorOnly);
-      const outcomes = executableTxs.length > 0
-        ? await executeTxList(c.env, executableTxs as UnsignedTransaction[], resolvedVaultAddress)
-        : [];
-      const results = outcomes.filter(o => o.result).map(o => o.result!);
-      const hasFallback = outcomes.some(o => o.fallbackToManual);
+    // ── Delegated execution ──
+    // Uses the same TransactionFlow engine as chat and Telegram. confirmExecution=true
+    // auto-executes; otherwise the executable bundle is stored server-side and an
+    // operationId is returned for a follow-up POST with the same toolName and operationId.
+    let operationId: string | undefined;
+    if (executionMode === "delegated" && result.transaction) {
+      const txList = [result.transaction];
+      const flowResult = await runTransactionFlow(
+        c.env,
+        body.operatorAddress || "",
+        resolvedVaultAddress,
+        txList as UnsignedTransaction[],
+        result.message,
+        {
+          requestConfirmation: async () => { /* no-op for direct tool response */ },
+        },
+        body.confirmExecution ? "autonomous" : undefined,
+      );
 
-      if (results.length === 1) {
-        result.executionResult = results[0];
-        if (!hasFallback && !results[0].reverted) {
-          result.transaction = undefined;
+      if (flowResult.kind === "executed") {
+        const outcomes = flowResult.outcomes!;
+        const results = outcomes.filter((o) => o.result).map((o) => o.result!);
+        const hasFallback = outcomes.some((o) => o.fallbackToManual);
+        if (results.length === 1) {
+          result.executionResult = results[0];
+          if (!hasFallback && !results[0].reverted) {
+            result.transaction = undefined;
+          }
         }
+        result.message = formatOutcomesMarkdown(outcomes);
+      } else if (flowResult.kind === "pending_confirmation") {
+        operationId = flowResult.operationId;
       }
-      result.message = formatOutcomesMarkdown(outcomes);
     }
 
     return c.json({
       tool: canonicalName,
       message: result.message,
       transaction: result.transaction,
+      operationId,
       chainSwitch: result.chainSwitch,
       suggestions: result.suggestions,
       metadata: result.metadata,

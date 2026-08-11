@@ -456,7 +456,13 @@ delegation.post("/execute", async (c) => {
       }, 400);
     }
 
+    const delegationConfig = await getDelegationConfig(c.env.KV, body.vaultAddress);
+    if (!delegationConfig || !delegationConfig.enabled) {
+      throw new ExecutionError("Delegation not configured. Set up delegation on the vault first.", "DELEGATION_NOT_CONFIGURED");
+    }
+
     tx = {
+      from: delegationConfig.agentAddress,
       to: body.transaction.to as Address,
       data: body.transaction.data as Hex,
       value: body.transaction.value || "0x0",
@@ -484,9 +490,11 @@ delegation.post("/execute", async (c) => {
         AGENT_NOT_DELEGATED: 403,
         SIMULATION_FAILED: 422,
         NAV_SHIELD_BLOCKED: 422,
+        NAV_SHIELD_INCOMPLETE: 422,
         INSUFFICIENT_BALANCE: 422,
         AGENT_WALLET_NOT_FOUND: 500,
         AGENT_WALLET_MISMATCH: 500,
+        SENDER_MISMATCH: 500,
         AGENT_WALLET_ERROR: 502,
         GAS_ESTIMATION_FAILED: 502,
         SPONSORED_FAILED: 502,

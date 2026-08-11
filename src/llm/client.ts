@@ -32,7 +32,7 @@ import {
 } from "../services/swapShield.js";
 import { TOOL_HANDLER_REGISTRY } from "./handlers/index.js";
 import { decodeRevertData, extractRevertData, getRevertDataFromError } from "../services/errorDecoder.js";
-import { finalizeToolTransaction } from "../services/execution.js";
+import { prepareTransaction } from "../services/transactionPrepare.js";
 
 // Known on-chain error selectors for Rigoblock pool / Across bridge contracts.
 // These appear as 4-byte hex prefixes in "execution reverted" messages.
@@ -947,7 +947,7 @@ ${executionModeNote}${contextDocsBlock}`;
       let fastPathReply = toolResult.message;
       let finalizedTransaction: UnsignedTransaction | undefined;
       if (toolResult.transaction) {
-        const { tx, warning } = await finalizeToolTransaction(env, ctx, toolResult.transaction);
+        const { tx, warning } = await prepareTransaction(env, ctx, toolResult.transaction);
         finalizedTransaction = tx;
         if (warning) fastPathReply += '\n' + warning;
       }
@@ -1091,7 +1091,7 @@ ${executionModeNote}${contextDocsBlock}`;
             // Finalize immediately: gas estimation + NAV shield run exactly once
             // per transaction, and every entry in pendingTransactions is a real
             // UnsignedTransaction that can be returned or broadcast safely.
-            const { tx: finalizedTx, warning } = await finalizeToolTransaction(env, ctx, toolResult.transaction);
+            const { tx: finalizedTx, warning } = await prepareTransaction(env, ctx, toolResult.transaction);
             pendingTransactions.push(finalizedTx);
             if (warning) result += '\n' + warning;
           }

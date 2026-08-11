@@ -34,7 +34,12 @@ import {
 import { getDelegationConfig, getActiveChains } from "../services/delegation.js";
 import { getAgentWalletInfo } from "../services/agentWallet.js";
 import { getCurrentDayBucket, DEFAULT_GAS_SPENDING_LIMIT_USD, GAS_SPEND_KEY } from "./gasPolicy.js";
-import { executeTxList, checkPendingTxStatus, parseStoredUnsignedTransactions, type TxExecOutcome } from "../services/execution.js";
+import {
+  executeTxList,
+  executeStoredSimulation,
+  checkPendingTxStatus,
+  type TxExecOutcome,
+} from "../services/execution.js";
 import { ExecutionError } from "../services/executionError.js";
 import {
   runTransactionFlow,
@@ -1197,37 +1202,58 @@ async function handleMessage(
           }
         }
       } else {
-        // 🔔 Confirm mode (default) — show Execute/Cancel buttons for every ready tx
-        const tradeCount = txList.length > 1 ? `${txList.length} trades` : "trade";
-        const execLabel = txList.length > 1 ? "Execute All" : "Execute";
-        const replyText = response.reply ?? "";
-        const hasWarning = hasSafetyWarning(replyText);
-        const confirmIcon = hasWarning ? "⚠️" : "🔔";
-        const execIcon = hasWarning ? "⚠️" : "✅";
-        const confirmParts = [
-          formatForTelegram(stripToolPrefix(cleanedReply)),
-          `\n${confirmIcon} <b>${tradeCount.charAt(0).toUpperCase() + tradeCount.slice(1)} ready${hasWarning ? " with warning" : ""}.</b>\nTap ${execIcon} ${execLabel} to confirm or ❌ Cancel.`,
-          ...buildMetricsLines(),
-          delegationWarning,
-        ].filter(Boolean);
-        const fullReply = confirmParts.join("\n\n");
-        const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
-        const keyboard: TgInlineKeyboardMarkup = {
-          inline_keyboard: [
-            [
-              { text: `${execIcon} ${execLabel}`, callback_data: `exec:${userId}` },
-              { text: "❌ Cancel", callback_data: `cancel:${userId}` },
+        // 🔔 Confirm mode (default) — use the unified flow engine to store the
+        // executable simulation server-side, then show Execute/Cancel buttons.
+        const flowResult = await runTransactionFlow(
+          requestEnv,
+          operatorAddress,
+          vault.address,
+          txList,
+          response.reply,
+          {
+            requestConfirmation: async () => { /* Telegram renders its own buttons below */ },
+          },
+          "confirm",
+          requestEnv.requestCache,
+        );
+
+        if (flowResult.kind === "pending_confirmation") {
+          const pendingTxs = flowResult.transactions ?? [];
+          const tradeCount = pendingTxs.length > 1 ? `${pendingTxs.length} trades` : "trade";
+          const execLabel = pendingTxs.length > 1 ? "Execute All" : "Execute";
+          const replyText = flowResult.reply ?? "";
+          const hasWarning = hasSafetyWarning(replyText);
+          const confirmIcon = hasWarning ? "⚠️" : "🔔";
+          const execIcon = hasWarning ? "⚠️" : "✅";
+          const confirmParts = [
+            formatForTelegram(stripToolPrefix(cleanedReply)),
+            `\n${confirmIcon} <b>${tradeCount.charAt(0).toUpperCase() + tradeCount.slice(1)} ready${hasWarning ? " with warning" : ""}.</b>\nTap ${execIcon} ${execLabel} to confirm or ❌ Cancel.`,
+            ...buildMetricsLines(),
+            delegationWarning,
+          ].filter(Boolean);
+          const fullReply = confirmParts.join("\n\n");
+          const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
+          const keyboard: TgInlineKeyboardMarkup = {
+            inline_keyboard: [
+              [
+                { text: `${execIcon} ${execLabel}`, callback_data: `exec:${userId}` },
+                { text: "❌ Cancel", callback_data: `cancel:${userId}` },
+              ],
             ],
-          ],
-        };
-        const sent = await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
-        const messageId = sent?.message_id;
-        if (messageId) {
-          await env.KV.put(pendingTxKey(userId, messageId), JSON.stringify({ txs: txList, createdAt: Date.now(), messageId }), {
-            expirationTtl: 120,
-          });
+          };
+          const sent = await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
+          const messageId = sent?.message_id;
+          if (messageId && flowResult.operationId) {
+            await env.KV.put(
+              pendingTxKey(userId, messageId),
+              JSON.stringify({ operationId: flowResult.operationId, createdAt: Date.now(), messageId }),
+              { expirationTtl: 120 },
+            );
+          }
         }
 
+        // Any executed outcomes would only happen in autonomous mode; confirm mode
+        // never returns outcomes from runTransactionFlow.
       }
     } else {
       const fullReply = replyParts.join("\n\n") || "Done.";
@@ -1365,9 +1391,18 @@ async function handleCallbackQuery(
   if (data.startsWith("exec:")) {
     await answerCallbackQuery(token, query.id, "Executing…");
 
-    // The pending transaction is bound to the message the user tapped. This
-    // prevents a stale shared KV entry from causing the wrong transaction to
-    // be executed when multiple confirm-mode messages exist.
+    // The active vault is required for execution; the stored simulation is keyed
+    // to this vault.
+    const user = await getTelegramUser(env.KV, userId);
+    const vault = user?.vaults[user.activeVaultIndex];
+    if (!vault) {
+      await editMessageText(token, chatId, messageId, "No active vault. Use <code>/pools</code> to select one.");
+      return;
+    }
+
+    // The pending transaction is bound to the message the user tapped. The KV
+    // entry now stores only the operationId; the finalized transaction bundle is
+    // retrieved from the shared simulation store on execution.
     const txKey = pendingTxKey(userId, messageId);
     const raw = await env.KV.get(txKey);
     if (!raw) {
@@ -1375,32 +1410,30 @@ async function handleCallbackQuery(
       return;
     }
 
-    // Parse stored transactions. These were already finalized before storage, so
-    // the shared parser preserves gas, fees, and NAV-shield fields so
-    // executeViaDelegation reuses the result instead of running the simulation again.
-    const storedWrapper = JSON.parse(raw) as { txs?: unknown[]; createdAt?: number; messageId?: number };
-    // Defense-in-depth: reject if the stored entry belongs to a different message.
+    const storedWrapper = JSON.parse(raw) as { operationId?: string; createdAt?: number; messageId?: number };
     if (storedWrapper.messageId != null && storedWrapper.messageId !== messageId) {
       await editMessageText(token, chatId, messageId, "⏰ Trade expired. Please request a new quote.");
       return;
     }
-    const txList = parseStoredUnsignedTransactions(raw);
+    if (!storedWrapper.operationId) {
+      await editMessageText(token, chatId, messageId, "⏰ Trade expired. Please request a new quote.");
+      return;
+    }
+
+    const operationId = storedWrapper.operationId;
     const storedAt: number | undefined = storedWrapper.createdAt;
 
     // Warn if the quote is likely stale (>90s old)
     const ageMs = storedAt ? Date.now() - storedAt : undefined;
     const isLikelyStale = ageMs !== undefined && ageMs > 90_000;
-    const hasSwaps = txList.some(tx => tx.swapMeta);
 
-    // Delete pending txs
+    // Delete pending reference. The simulation store itself is consumed by
+    // executeStoredSimulation, preventing replay.
     await env.KV.delete(txKey);
 
-    // Update message to show "executing…"
-    const progressLabel = txList.length > 1 ? `Executing ${txList.length} trades…` : "Executing trade…";
-    await editMessageText(token, chatId, messageId, `⏳ ${progressLabel}`);
-
-    // The vault address is always tx.to (validated by executeViaDelegation)
-    const vaultAddress = txList[0].to;
+    // We don't know the vault address or tx count until we load the bundle.
+    // Start with a generic progress message.
+    await editMessageText(token, chatId, messageId, "⏳ Executing trade…");
 
     // Keep the user informed during long mainnet sponsorship polling. For a
     // single transaction, update the elapsed time every 5 seconds. After 30s
@@ -1409,8 +1442,31 @@ async function handleCallbackQuery(
     let executionComplete = false;
     let pendingPoller: Promise<void> | undefined;
     try {
+      const requestEnv: Env = { ...env, requestCache: new Map() };
       const executionStart = Date.now();
-      if (txList.length === 1) {
+      let totalTxs = 0;
+
+      const outcomes = await executeStoredSimulation(
+        requestEnv,
+        operationId,
+        vault.address,
+        requestEnv.requestCache,
+        async (idx, total, soFar) => {
+          if (total > 1) {
+            const done = soFar.length > 0 ? "\n\n" + formatTelegramOutcomes(soFar) : "";
+            await editMessageText(
+              token, chatId, messageId,
+              `⏳ Executing trade ${idx + 1} of ${total}…${done}`,
+            ).catch(() => {});
+          }
+        },
+      );
+
+      totalTxs = outcomes.length;
+      const txList = outcomes.map(o => o.tx);
+      const hasSwaps = txList.some(tx => tx.swapMeta);
+
+      if (totalTxs === 1) {
         progressTimer = setInterval(() => {
           if (executionComplete) return;
           const elapsedSec = Math.round((Date.now() - executionStart) / 1000);
@@ -1419,22 +1475,11 @@ async function handleCallbackQuery(
             : `⏳ Executing trade… (${elapsedSec}s)`;
           editMessageText(token, chatId, messageId, text).catch(() => {});
         }, 5_000);
+      } else if (totalTxs > 1) {
+        const progressLabel = `Executing ${totalTxs} trades…`;
+        await editMessageText(token, chatId, messageId, `⏳ ${progressLabel}`);
       }
 
-      const outcomes = await executeTxList(env, txList, vaultAddress, async (idx, total, soFar) => {
-        if (total > 1) {
-          const done = soFar.length > 0 ? "\n\n" + formatTelegramOutcomes(soFar) : "";
-          await editMessageText(
-            token, chatId, messageId,
-            `⏳ Executing trade ${idx + 1} of ${total}…${done}`,
-          ).catch(() => {});
-        }
-      });
-
-      // Stop the progress timer before editing the final message. A callback
-      // already queued by setInterval can still run after clearInterval, so we
-      // also guard with executionComplete to prevent it from overwriting the
-      // final outcome message.
       executionComplete = true;
       if (progressTimer) clearInterval(progressTimer);
 
@@ -1458,10 +1503,10 @@ async function handleCallbackQuery(
       // Build the summary we have so far.
       const resultLines = formatTelegramOutcomes([...finalOutcomes, ...pendingOutcomes]);
       const header = allFinalSuccess && !hasErrors && pendingOutcomes.length === 0
-        ? (txList.length > 1 ? `✅ <b>All ${txList.length} trades confirmed</b>` : "✅ <b>Trade confirmed</b>")
+        ? (totalTxs > 1 ? `✅ <b>All ${totalTxs} trades confirmed</b>` : "✅ <b>Trade confirmed</b>")
         : hasErrors
           ? "⚠️ <b>Some trades failed</b>"
-          : (txList.length > 1 ? `⏳ <b>${txList.length} trades submitted</b>` : "⏳ <b>Trade submitted</b>");
+          : (totalTxs > 1 ? `⏳ <b>${totalTxs} trades submitted</b>` : "⏳ <b>Trade submitted</b>");
       const finalMsg = `${header}\n\n${resultLines}${staleHint}`;
       const truncated = finalMsg.length > 4000 ? finalMsg.slice(0, 3990) + "…" : finalMsg;
       await editMessageText(token, chatId, messageId, truncated);
@@ -1472,17 +1517,14 @@ async function handleCallbackQuery(
         env.KV,
         userId,
         allFinalSuccess && pendingOutcomes.length === 0
-          ? (txList.length > 1 ? `All ${txList.length} trades confirmed.` : "Trade confirmed.")
+          ? (totalTxs > 1 ? `All ${totalTxs} trades confirmed.` : "Trade confirmed.")
           : hasErrors
             ? "Some trades failed."
             : "Trade submitted — waiting for on-chain confirmation.",
       );
 
       // For pending sponsored transactions, keep polling in the background and
-      // update the Telegram message once they land. This handles the common case
-      // where Alchemy's waitForCallsStatus times out before mainnet confirmation.
-      // We return this promise so handleUpdate can await it inside the webhook's
-      // executionCtx.waitUntil, keeping the Worker alive for the full poll window.
+      // update the Telegram message once they land.
       if (pendingOutcomes.length > 0) {
         pendingPoller = pollPendingTelegramTxs(env, token, chatId, messageId, pendingOutcomes, userId, staleHint).catch(err =>
           console.error("[telegram] Background pending-tx polling failed:", err),
@@ -1491,7 +1533,7 @@ async function handleCallbackQuery(
     } catch (execErr) {
       executionComplete = true;
       if (progressTimer) clearInterval(progressTimer);
-      console.error("[telegram] executeTxList error:", execErr);
+      console.error("[telegram] executeStoredSimulation error:", execErr);
       const rawMsg = execErr instanceof Error ? execErr.message : String(execErr);
       const safeMsg = sanitizeError(rawMsg);
       const fallbackToManual = execErr instanceof ExecutionError ? execErr.fallbackToManual : false;

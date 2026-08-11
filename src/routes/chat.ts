@@ -11,14 +11,14 @@
  *     operator confirms the trade details (vault checks delegation mapping)
  */
 
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode, StreamEvent, ChatMessage } from "../types.js";
 import { processChat } from "../llm/client.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { SETTLEMENT_OVERRIDES_HEADER } from "@x402/core/server";
 
 import { sanitizeError } from "../config.js";
-import { formatOutcomesMarkdown } from "../services/execution.js";
+import { formatOutcomesMarkdown, executeStoredSimulation } from "../services/execution.js";
 import { ExecutionError } from "../services/executionError.js";
 import { runTransactionFlow, type ExecutionHooks, type ExecutionModePreference } from "../services/transactionFlow.js";
 import type { Address } from "viem";
@@ -54,6 +54,66 @@ function estimateInferenceCost(
 
 const chat = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
+/** Regex matching assistant messages that advertised a pending transaction. */
+const PENDING_TX_MESSAGE_PATTERN = /🔔 .*ready\.|Tap ✅ Execute|Trade ready|Transaction ready|prepared.*awaiting confirmation|awaiting confirmation/i;
+
+/**
+ * Discard stale pending-transaction advertisements from the conversation history.
+ * When a user sends a new request instead of confirming a previous one, the old
+ * prepared transaction is no longer relevant. Replacing the last such assistant
+ * turn prevents the model from asking "do you want the old or new one?" and from
+ * reusing stale calldata.
+ */
+function sanitizePendingTransactionMessages(messages: ChatMessage[]): { messages: ChatMessage[]; staleTxNote?: string } {
+  const result = [...messages];
+  let staleTxNote: string | undefined;
+  for (let i = result.length - 1; i >= 0; i--) {
+    if (result[i].role === "assistant" && PENDING_TX_MESSAGE_PATTERN.test(result[i].content as string)) {
+      result[i] = {
+        ...result[i],
+        content: "A transaction was prepared but not executed; it has been discarded because the user sent a new request.",
+      };
+      staleTxNote = "The user's previous prepared transaction has been discarded. Treat this as a fresh request.";
+      break;
+    }
+  }
+  return { messages: result, staleTxNote };
+}
+
+/**
+ * Shared auth gate for POST /api/chat.
+ * Returns true when the caller has proven vault ownership, either via the
+ * x402 operator-auth middleware (browser) or by providing a valid EIP-191
+ * signature in the request body.
+ */
+async function authenticateChatOperator(
+  c: Context<{ Bindings: Env; Variables: AppVariables }>,
+  body: {
+    operatorAddress?: string;
+    authSignature?: string;
+    authTimestamp?: number;
+    vaultAddress?: string;
+    chainId: number;
+  },
+): Promise<boolean> {
+  const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
+  const isBrowserRequest = c.get("operatorAuthVerified") ?? false;
+  let operatorVerified = isBrowserRequest;
+
+  if (hasAuthCredentials) {
+    await verifyOperatorAuth({
+      operatorAddress: body.operatorAddress || "",
+      vaultAddress: body.vaultAddress,
+      authSignature: body.authSignature || "",
+      authTimestamp: body.authTimestamp || 0,
+      preferredChainId: body.chainId,
+    });
+    operatorVerified = true;
+  }
+
+  return operatorVerified;
+}
+
 chat.post("/", async (c) => {
   try {
     const body = await c.req.json<ChatRequest>();
@@ -68,6 +128,45 @@ chat.post("/", async (c) => {
     const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
     const resolvedVaultAddress: Address = (body.vaultAddress || ZERO_ADDRESS) as Address;
 
+    // ── Stored-operation confirmation shortcut ──
+    // If the frontend sends an operationId, execute the stored simulation directly
+    // without re-running the LLM. This prevents prompt-injection attacks from
+    // altering calldata between review and execution.
+    if (body.operationId) {
+      if (!body.vaultAddress) {
+        return c.json({ error: "vaultAddress is required to confirm a stored operation" }, 400);
+      }
+      const operatorVerified = await authenticateChatOperator(c, body);
+      if (!operatorVerified) {
+        throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
+      }
+      try {
+        const requestEnv: Env = { ...c.env, requestCache: new Map() };
+        const outcomes = await executeStoredSimulation(
+          requestEnv,
+          body.operationId,
+          body.vaultAddress,
+          requestEnv.requestCache,
+        );
+        const results = outcomes.filter((o) => o.result).map((o) => o.result!);
+        const hasFallback = outcomes.some((o) => o.fallbackToManual);
+        const response: ChatResponse = { reply: formatOutcomesMarkdown(outcomes) };
+        if (results.length === 1) {
+          response.executionResult = results[0];
+        } else if (results.length > 1) {
+          response.executionResults = results;
+        }
+        return c.json(response);
+      } catch (err) {
+        if (err instanceof AuthError) {
+          return c.json({ error: err.message }, err.status as 401 | 403);
+        }
+        console.error("[chat] Confirm error:", err);
+        const message = sanitizeError(err instanceof Error ? err.message : "Internal error");
+        return c.json({ error: message }, 500);
+      }
+    }
+
     // ── Auth gate ──
     // x402 payment = API access fee (external agents). Operator auth = vault authorization.
     // operatorAuthVerified = operator signature verified by x402 middleware (skips payment).
@@ -81,20 +180,9 @@ chat.post("/", async (c) => {
     //
     // Delegated execution and vault-tx tool execution ALWAYS require proven vault
     // ownership (operatorVerified).
-    const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
-    const isBrowserRequest = c.get("operatorAuthVerified") ?? false;
-    let operatorVerified = isBrowserRequest;
+    const operatorVerified = await authenticateChatOperator(c, body);
 
-    if (hasAuthCredentials) {
-      await verifyOperatorAuth({
-        operatorAddress: body.operatorAddress || "",
-        vaultAddress: body.vaultAddress,
-        authSignature: body.authSignature || "",
-        authTimestamp: body.authTimestamp || 0,
-        preferredChainId: body.chainId,
-      });
-      operatorVerified = true;
-    } else if (!c.get("x402Paid") && !isBrowserRequest) {
+    if (!operatorVerified && !c.get("x402Paid")) {
       throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
     }
 
@@ -133,7 +221,18 @@ chat.post("/", async (c) => {
     }
 
     // Keep only the last 10 messages to prevent context pollution.
-    const messages = allMessages.slice(-10);
+    let messages = allMessages.slice(-10);
+
+    // Discard any stale pending-transcription advertisement in the conversation
+    // history. If the user sends a new request instead of confirming the previous
+    // prepared transaction, the old quote is no longer relevant.
+    const sanitized = sanitizePendingTransactionMessages(messages);
+    messages = sanitized.messages;
+    const contextDocs = sanitized.staleTxNote
+      ? [...(body.contextDocs || []), sanitized.staleTxNote]
+      : body.contextDocs;
+
+    const isBrowserRequest = c.get("operatorAuthVerified") ?? false;
 
     const ctx: RequestContext = {
       vaultAddress: resolvedVaultAddress,
@@ -145,7 +244,7 @@ chat.post("/", async (c) => {
       aiApiKey: body.aiApiKey,
       aiModel: body.aiModel,
       aiBaseUrl: body.aiBaseUrl,
-      contextDocs: body.contextDocs,
+      contextDocs,
       slippageBps: body.slippageBps,
     };
 
@@ -218,8 +317,12 @@ chat.post("/", async (c) => {
                     }
                   }
                   response.reply = formatOutcomesMarkdown(outcomes);
+                } else if (flowResult.kind === "pending_confirmation") {
+                  if (flowResult.operationId) {
+                    response.operationId = flowResult.operationId;
+                  }
+                  response.reply = flowResult.reply;
                 }
-                // kind === "pending_confirmation": transactions remain in response.reply/transactions
               }
             }
 
@@ -296,8 +399,12 @@ chat.post("/", async (c) => {
           }
 
           response.reply = formatOutcomesMarkdown(outcomes);
+        } else if (flowResult.kind === "pending_confirmation") {
+          if (flowResult.operationId) {
+            response.operationId = flowResult.operationId;
+          }
+          response.reply = flowResult.reply;
         }
-        // kind === "pending_confirmation": transactions remain in response for the frontend
       }
     }
 

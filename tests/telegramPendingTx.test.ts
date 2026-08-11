@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { pendingTxKey, deleteAllPendingTxKeys } from "../src/routes/telegram.js";
-import { parseStoredUnsignedTransactions } from "../src/services/execution.js";
 import type { KVNamespace } from "@cloudflare/workers-types";
 
 function makeKV(): KVNamespace {
@@ -28,8 +27,8 @@ describe("Telegram pending transaction key binding", () => {
 
   it("deleteAllPendingTxKeys removes message-bound keys and returns their message ids", async () => {
     const kv = makeKV();
-    await kv.put(pendingTxKey(123456, 10), JSON.stringify({ txs: [], createdAt: 1, messageId: 10 }));
-    await kv.put(pendingTxKey(123456, 20), JSON.stringify({ txs: [], createdAt: 2, messageId: 20 }));
+    await kv.put(pendingTxKey(123456, 10), JSON.stringify({ operationId: "op-10", createdAt: 1, messageId: 10 }));
+    await kv.put(pendingTxKey(123456, 20), JSON.stringify({ operationId: "op-20", createdAt: 2, messageId: 20 }));
 
     const entries = await deleteAllPendingTxKeys(kv, 123456);
     expect(entries.map(e => e.messageId).sort()).toEqual([10, 20]);
@@ -39,83 +38,10 @@ describe("Telegram pending transaction key binding", () => {
 
   it("deleteAllPendingTxKeys removes the legacy shared key for backward compatibility", async () => {
     const kv = makeKV();
-    await kv.put("tg-pending-tx:123456", JSON.stringify({ txs: [], createdAt: 1, messageId: 5 }));
+    await kv.put("tg-pending-tx:123456", JSON.stringify({ operationId: "op-legacy", createdAt: 1, messageId: 5 }));
 
     const entries = await deleteAllPendingTxKeys(kv, 123456);
     expect(entries.map(e => e.messageId)).toContain(5);
     expect(await kv.get("tg-pending-tx:123456")).toBeNull();
-  });
-});
-
-describe("parseStoredUnsignedTransactions", () => {
-  const baseTx = {
-    to: "0x1111111111111111111111111111111111111111",
-    data: "0x1234abcd",
-    value: "0x0",
-    chainId: 8453,
-    gas: "0x1f400",
-    maxFeePerGas: "0x9502f9000",
-    maxPriorityFeePerGas: "0x59682f00",
-    description: "Swap 30 GRG for ETH",
-    swapMeta: {
-      sellAmount: "30",
-      sellToken: "GRG",
-      buyAmount: "0.004641",
-      buyToken: "ETH",
-      price: "1 GRG = 0.0001547 ETH",
-      dex: "0x Aggregator",
-    },
-    navShieldChecked: true,
-  };
-
-  it("round-trips a finalized transaction including gas, fees, and nav shield flag", () => {
-    const raw = JSON.stringify({ txs: [baseTx], createdAt: Date.now(), messageId: 42 });
-    const txs = parseStoredUnsignedTransactions(raw);
-
-    expect(txs).toHaveLength(1);
-    const tx = txs[0];
-    expect(tx.gas).toBe(baseTx.gas);
-    expect(tx.maxFeePerGas).toBe(baseTx.maxFeePerGas);
-    expect(tx.maxPriorityFeePerGas).toBe(baseTx.maxPriorityFeePerGas);
-    expect(tx.navShieldChecked).toBe(true);
-    expect(tx.swapMeta).toEqual(baseTx.swapMeta);
-  });
-
-  it("parses a plain array of transactions", () => {
-    const raw = JSON.stringify([baseTx]);
-    const txs = parseStoredUnsignedTransactions(raw);
-    expect(txs).toHaveLength(1);
-    expect(txs[0].maxFeePerGas).toBe(baseTx.maxFeePerGas);
-  });
-
-  it("parses a single transaction object", () => {
-    const raw = JSON.stringify(baseTx);
-    const txs = parseStoredUnsignedTransactions(raw);
-    expect(txs).toHaveLength(1);
-    expect(txs[0].maxPriorityFeePerGas).toBe(baseTx.maxPriorityFeePerGas);
-  });
-
-  it("fills in zeroed fee defaults for legacy stored transactions missing fees", () => {
-    const legacy = { ...baseTx, maxFeePerGas: undefined, maxPriorityFeePerGas: undefined };
-    const raw = JSON.stringify({ txs: [legacy] });
-    const txs = parseStoredUnsignedTransactions(raw);
-    expect(txs[0].maxFeePerGas).toBe("0x0");
-    expect(txs[0].maxPriorityFeePerGas).toBe("0x0");
-  });
-
-  it("fills zeroed defaults for a draft transaction missing gas and fees", () => {
-    const draft = {
-      to: "0x1111111111111111111111111111111111111111",
-      data: "0x1234abcd",
-      value: "0x0",
-      chainId: 8453,
-      description: "Swap 30 GRG for ETH",
-    };
-    const raw = JSON.stringify({ txs: [draft] });
-    const txs = parseStoredUnsignedTransactions(raw);
-    expect(txs).toHaveLength(1);
-    expect(txs[0].gas).toBe("0x0");
-    expect(txs[0].maxFeePerGas).toBe("0x0");
-    expect(txs[0].maxPriorityFeePerGas).toBe("0x0");
   });
 });

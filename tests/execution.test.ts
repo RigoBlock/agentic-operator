@@ -29,7 +29,7 @@ describe("ExecutionError", () => {
       "METHOD_NOT_ALLOWED",
       "AGENT_NOT_DELEGATED",
       "AGENT_WALLET_NOT_FOUND",
-      "AGENT_WALLET_MISMATCH",
+      "SENDER_MISMATCH",
       "SIMULATION_FAILED",
       "INSUFFICIENT_BALANCE",
       "GAS_ESTIMATION_FAILED",

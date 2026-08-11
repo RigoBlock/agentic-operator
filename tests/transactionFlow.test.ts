@@ -7,9 +7,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const { mockExecuteTxList } = vi.hoisted(() => ({ mockExecuteTxList: vi.fn() }));
-vi.mock("../src/services/execution.js", () => ({
-  executeTxList: mockExecuteTxList,
-}));
+vi.mock("../src/services/execution.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/services/execution.js")>();
+  return {
+    ...actual,
+    executeTxList: mockExecuteTxList,
+  };
+});
 
 import {
   getExecutionModePreference,
@@ -41,14 +45,16 @@ function makeEnv(kv: KVNamespace): Env {
 
 function makeTx(overrides?: Partial<UnsignedTransaction>): UnsignedTransaction {
   return {
+    from: "0x2222222222222222222222222222222222222222",
     to: "0x1111111111111111111111111111111111111111",
     data: "0x",
     value: "0x0",
     chainId: 8453,
-    gas: "0x0",
-    maxFeePerGas: "0x0",
-    maxPriorityFeePerGas: "0x0",
+    gas: "0x5208",
+    maxFeePerGas: "0x1",
+    maxPriorityFeePerGas: "0x1",
     description: "test tx",
+    navShieldChecked: true,
     ...overrides,
   };
 }
@@ -72,6 +78,28 @@ describe("execution-mode preference KV helpers", () => {
     expect(await getExecutionModePreference(kv, OPERATOR)).toBe("confirm");
   });
 
+  it("allows maxPriorityFeePerGas=0x0 (Arbitrum has no priority fee)", async () => {
+    const kv = createMockKV();
+    await setExecutionModePreference(kv, OPERATOR, "confirm");
+
+    const tx = makeTx({
+      chainId: 42161,
+      maxPriorityFeePerGas: "0x0",
+      description: "Arbitrum tx",
+    });
+
+    const result = await runTransactionFlow(
+      makeEnv(kv),
+      OPERATOR,
+      VAULT,
+      [tx],
+      "Ready",
+      { requestConfirmation: async () => {} },
+    );
+
+    expect(result.kind).toBe("pending_confirmation");
+  });
+
   it("uses a single lowercased KV key", async () => {
     const kv = createMockKV();
     await setExecutionModePreference(kv, OPERATOR.toUpperCase(), "autonomous");
@@ -85,7 +113,7 @@ describe("runTransactionFlow", () => {
     mockExecuteTxList.mockReset();
   });
 
-  it("returns pending_confirmation with the same transactions in confirm mode", async () => {
+  it("returns pending_confirmation with stored executable transactions in confirm mode", async () => {
     const kv = createMockKV();
     await setExecutionModePreference(kv, OPERATOR, "confirm");
     const txs = [makeTx()];
@@ -106,8 +134,43 @@ describe("runTransactionFlow", () => {
 
     expect(result.kind).toBe("pending_confirmation");
     expect(result.transactions).toEqual(txs);
+    expect(result.operationId).toBeDefined();
     expect(requested).toEqual(txs);
     expect(mockExecuteTxList).not.toHaveBeenCalled();
+
+    // Verify the simulation was stored in KV and is consumable.
+    const storedRaw = await kv.get(`pending-sim:${result.operationId}`);
+    expect(storedRaw).not.toBeNull();
+    const stored = JSON.parse(storedRaw!);
+    expect(stored.vaultAddress).toBe(VAULT);
+    expect(stored.txs).toHaveLength(1);
+  });
+
+  it("throws early for non-executable transactions in confirm mode", async () => {
+    const kv = createMockKV();
+    await setExecutionModePreference(kv, OPERATOR, "confirm");
+
+    const cases = [
+      { tx: makeTx({ operatorOnly: true, description: "operator only" }), reason: /owner.*sign/i },
+      { tx: makeTx({ revertWarning: "would revert", description: "revert warning" }), reason: /simulation failed/i },
+      { tx: makeTx({ gas: "0x0", description: "no gas" }), reason: /missing a gas limit/i },
+      { tx: makeTx({ maxFeePerGas: "0x0", description: "no max fee" }), reason: /missing a max fee per gas/i },
+      { tx: makeTx({ maxPriorityFeePerGas: "" as `0x${string}`, description: "no priority fee" }), reason: /missing a max priority fee per gas/i },
+      { tx: makeTx({ navShieldChecked: false, description: "no nav shield" }), reason: /NAV-shield verification/i },
+    ];
+
+    for (const { tx, reason } of cases) {
+      await expect(
+        runTransactionFlow(
+          makeEnv(kv),
+          OPERATOR,
+          VAULT,
+          [tx],
+          "Ready",
+          { requestConfirmation: async () => {} },
+        ),
+      ).rejects.toThrow(reason);
+    }
   });
 
   it("executes non-operatorOnly transactions in autonomous mode", async () => {

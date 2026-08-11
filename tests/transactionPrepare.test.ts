@@ -1,5 +1,5 @@
 /**
- * finalizeTransaction tests — focused on gas estimation when the NAV shield
+ * prepareTransaction tests — focused on gas estimation when the NAV shield
  * is disabled or unverified.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -8,7 +8,6 @@ import type { Address, Hex } from "viem";
 const mockGetRpcProvider = vi.hoisted(() => vi.fn());
 const mockEstimateGas = vi.hoisted(() => vi.fn());
 const mockEstimateFeesPerGas = vi.hoisted(() => vi.fn());
-const mockReadContract = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/services/rpcClient.js", () => ({
   getRpcProvider: mockGetRpcProvider,
@@ -19,7 +18,7 @@ vi.mock("../src/services/delegation.js", () => ({
   getChainDelegation: vi.fn(),
 }));
 
-const { finalizeTransaction } = await import("../src/services/gas.js");
+const { prepareTransaction } = await import("../src/services/transactionPrepare.js");
 
 const VAULT = "0x1111111111111111111111111111111111111111" as Address;
 const OPERATOR = "0x2222222222222222222222222222222222222222" as Address;
@@ -39,6 +38,8 @@ function makeKV(navShieldValue: string | null): KVNamespace {
   } as unknown as KVNamespace;
 }
 
+const mockReadContract = vi.hoisted(() => vi.fn());
+
 function makePublicClient() {
   return {
     chain: { id: CHAIN_ID, name: "Base" },
@@ -48,7 +49,7 @@ function makePublicClient() {
   };
 }
 
-describe("finalizeTransaction with NAV shield disabled", () => {
+describe("prepareTransaction with NAV shield disabled", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockEstimateGas.mockResolvedValue(100_000n);
@@ -69,7 +70,7 @@ describe("finalizeTransaction with NAV shield disabled", () => {
       description: "Oracle refresh",
     };
 
-    const result = await finalizeTransaction(
+    const result = await prepareTransaction(
       { KV: makeKV("0") } as any,
       {
         vaultAddress: VAULT,
@@ -81,6 +82,7 @@ describe("finalizeTransaction with NAV shield disabled", () => {
       draft,
     );
 
+    expect(result.tx.from).toBe(OPERATOR);
     expect(result.tx.gas).not.toBe("0x0");
     expect(result.tx.maxFeePerGas).not.toBe("0x0");
     expect(result.tx.maxPriorityFeePerGas).not.toBe("0x0");
@@ -100,7 +102,7 @@ describe("finalizeTransaction with NAV shield disabled", () => {
       description: "First deposit",
     };
 
-    const result = await finalizeTransaction(
+    const result = await prepareTransaction(
       { KV: makeKV(null) } as any,
       {
         vaultAddress: VAULT,
@@ -112,6 +114,7 @@ describe("finalizeTransaction with NAV shield disabled", () => {
       draft,
     );
 
+    expect(result.tx.from).toBe(OPERATOR);
     expect(result.tx.gas).not.toBe("0x0");
     expect(result.tx.maxFeePerGas).not.toBe("0x0");
     expect(result.tx.maxPriorityFeePerGas).not.toBe("0x0");

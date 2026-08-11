@@ -13,7 +13,8 @@
 
 import type { Env, UnsignedTransaction } from "../types.js";
 import type { TxExecOutcome } from "./execution.js";
-import { executeTxList } from "./execution.js";
+import { executeTxList, storePendingSimulation } from "./execution.js";
+import { ExecutionError } from "./executionError.js";
 
 export type ExecutionModePreference = "autonomous" | "confirm";
 
@@ -23,6 +24,12 @@ export interface TransactionFlowResult {
   outcomes?: TxExecOutcome[];
   /** Present when kind === "pending_confirmation". */
   transactions?: UnsignedTransaction[];
+  /**
+   * Present when kind === "pending_confirmation". The frontend/Telegram must
+   * send this operationId back (with confirmExecution:true) to execute the exact
+   * stored simulation without re-running the LLM.
+   */
+  operationId?: string;
   /** Human-facing summary or confirmation prompt. */
   reply: string;
 }
@@ -65,6 +72,82 @@ export async function setExecutionModePreference(
   mode: ExecutionModePreference,
 ): Promise<void> {
   await kv.put(getOperatorExecModeKey(operatorAddress), mode);
+}
+
+/**
+ * Ensure every transaction is executable via delegation. Non-executable
+ * results (operatorOnly, failed simulation, missing gas/fees, or skipped NAV
+ * shield) are rejected here so the chat can surface a clear error instead of
+ * confusing "gas missing" failures later.
+ */
+function assertExecutableTransactions(txs: UnsignedTransaction[]): void {
+  for (const tx of txs) {
+    const label = tx.description || "Transaction";
+
+    // Pre-validate each executable field individually so callers get a clear
+    // error and we can diagnose which step failed in production.
+    // NOTE: maxPriorityFeePerGas may legitimately be 0x0 on chains like Arbitrum
+    // that do not use priority fees. We only check that the field is present.
+    const missingGas = !tx.gas || tx.gas === "0x0";
+    const missingMaxFee = !tx.maxFeePerGas || tx.maxFeePerGas === "0x0";
+    const missingPriorityFee = !tx.maxPriorityFeePerGas;
+    const missingNav = !tx.navShieldChecked;
+
+    if (missingGas || missingMaxFee || missingPriorityFee || missingNav) {
+      console.error(
+        `[transactionFlow] Pre-validation failed for "${label}": ` +
+        `gas=${tx.gas}, maxFeePerGas=${tx.maxFeePerGas}, maxPriorityFeePerGas=${tx.maxPriorityFeePerGas}, navShieldChecked=${tx.navShieldChecked}`
+      );
+    }
+
+    if (tx.operatorOnly) {
+      throw new ExecutionError(
+        `"${label}" requires the vault owner to sign directly from their wallet.`,
+        "OPERATOR_ONLY",
+        true,
+      );
+    }
+
+    if (tx.revertWarning) {
+      throw new ExecutionError(
+        `"${label}" simulation failed: ${tx.revertWarning}`,
+        "SIMULATION_FAILED",
+        true,
+      );
+    }
+
+    if (!tx.gas || tx.gas === "0x0") {
+      throw new ExecutionError(
+        `"${label}" is missing a gas limit. The preparation step failed to estimate gas.`,
+        "GAS_ESTIMATION_FAILED",
+        true,
+      );
+    }
+
+    if (!tx.maxFeePerGas || tx.maxFeePerGas === "0x0") {
+      throw new ExecutionError(
+        `"${label}" is missing a max fee per gas. The preparation step failed to estimate fees.`,
+        "GAS_ESTIMATION_FAILED",
+        true,
+      );
+    }
+
+    if (!tx.maxPriorityFeePerGas) {
+      throw new ExecutionError(
+        `"${label}" is missing a max priority fee per gas. The preparation step failed to estimate fees.`,
+        "GAS_ESTIMATION_FAILED",
+        true,
+      );
+    }
+
+    if (!tx.navShieldChecked) {
+      throw new ExecutionError(
+        `"${label}" has not passed NAV-shield verification. The preparation step skipped the NAV check.`,
+        "NAV_SHIELD_INCOMPLETE",
+        true,
+      );
+    }
+  }
 }
 
 /**
@@ -119,7 +202,17 @@ export async function runTransactionFlow(
     return { kind: "executed", outcomes, reply: baseReply };
   }
 
-  // Confirm mode: hand off to the channel hook. The engine does not execute.
+  // Confirm mode: reject non-executable txs early, store the executable bundle
+  // in KV, and return an operationId for the confirmation step.
+  assertExecutableTransactions(transactions);
+
+  const operationId = await storePendingSimulation(
+    env.KV,
+    vaultAddress,
+    baseReply,
+    transactions,
+  );
+
   await hooks.requestConfirmation(transactions, { reply: baseReply });
-  return { kind: "pending_confirmation", transactions, reply: baseReply };
+  return { kind: "pending_confirmation", transactions, operationId, reply: baseReply };
 }

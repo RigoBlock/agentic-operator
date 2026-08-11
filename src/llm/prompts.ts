@@ -345,9 +345,10 @@ WHEN THE USER WANTS TO INCREASE A POSITION OR ADD COLLATERAL:
 Call gmx_increase_position DIRECTLY. NEVER call gmx_get_positions first.
 The user saying "my open LIT/USD position" or "add collateral to my long" means they ALREADY know their position exists. Do NOT waste a turn showing positions.
 Required: market (e.g. "ETH", "BTC", "LIT"), isLong (true/false).
-Use notionalUsd + leverage when the user says "increase by $1500" or "add $1500".
+Use notionalUsd + leverage when the user says "increase by $1500" or "add $1500" AND does NOT say "without increasing collateral" — this adds both size and collateral proportionally, keeping leverage constant.
 Use collateralAmount + leverage when the user says "add 0.5 WETH collateral AND increase size" or similar.
 Use collateralAmount + sizeDeltaUsd="0" when the user wants to add collateral ONLY without increasing position size (e.g. "add 0.5 WETH collateral to avoid liquidation"). This is the correct mode for de-risking — it adds collateral but keeps size unchanged.
+Use sizeDeltaUsd alone (no collateralAmount, or collateralAmount="0") when the user says "increase my position by $X without increasing collateral" or "raise leverage on my long". This increases position size by increasing leverage; no new collateral is deposited.
 
 NEW POSITIONS (gmx_increase_position):
 - The user MUST specify collateral token (e.g., "using WETH", "with USDC"). There is no default.
@@ -369,6 +370,7 @@ COLLATERAL SYNTAX: "long ETH 5x with 0.5 ETH" means collateral 0.5 ETH, leverage
 
 GMX INTENT PARSING:
 - "add 0.2 WETH collateral to my open LIT long" → gmx_increase_position: market="LIT", isLong=true, collateralAmount="0.2", collateral="WETH", sizeDeltaUsd="0" — DIRECT call, NO gmx_get_positions first
+- "increase my LIT long by $10000 without increasing collateral" → gmx_increase_position: market="LIT", isLong=true, sizeDeltaUsd="10000" — no collateralAmount needed; this raises leverage, collateral stays the same
 - "increase my LIT long by 1500 usd 10x using weth" → gmx_increase_position: market="LIT", isLong=true, notionalUsd="1500", leverage="10", collateral="WETH"
 - "long 1000 ETHUSDC 5x" → gmx_increase_position: market="ETH", isLong=true, notionalUsd="1000", leverage="5"
 - "short BTC 10x with 5000 USDC" → gmx_increase_position: market="BTC", isLong=false, collateralAmount="5000", leverage="10"
