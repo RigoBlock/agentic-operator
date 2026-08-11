@@ -140,6 +140,23 @@ describe("Settings routes", () => {
     expect(body.message).toContain("15%");
   });
 
+  it("disables NAV-shield via /api/settings/nav-shield with threshold 0", async () => {
+    const app = createApp();
+    const res = await app.request(
+      "/api/settings/nav-shield",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...baseBody, threshold: "0" }),
+      },
+      { KV: createMockKV(), ALCHEMY_API_KEY: "test" },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.ok).toBe(true);
+    expect(body.message).toContain("disabled");
+  });
+
   it("resets NAV-shield via /api/settings/nav-shield", async () => {
     const app = createApp();
     const res = await app.request(

@@ -29,26 +29,26 @@ import {
 } from "viem";
 import type { LocalAccount } from "viem/accounts";
 import type { Env, UnsignedTransaction, TransactionDraft, ExecutionResult, RequestContext } from "../types.js";
-import { getChain, getRpcUrl, sanitizeError, ZERO_ADDRESS, MIN_BALANCE, EXPLORER_TX_URL, NATIVE_TOKEN } from "../config.js";
+import { getChain, getRpcUrl, sanitizeError, MIN_BALANCE, EXPLORER_TX_URL, NATIVE_TOKEN } from "../config.js";
 import { loadAgentWalletAccount } from "./agentWallet.js";
 import { getDelegationConfig, getChainDelegation } from "./delegation.js";
 import { recordGasSpend } from "../routes/gasPolicy.js";
-import { ALLOWED_VAULT_SELECTORS, RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
+import { ALLOWED_VAULT_SELECTORS } from "../abi/rigoblockVault.js";
 import {
   executeSponsoredCalls,
   getSponsoredCallsStatus,
   type WalletCall,
 } from "./bundler.js";
-import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
 import { getRpcProvider, ALCHEMY_ORIGIN } from "./rpcClient.js";
 import {
-  estimateTransactionGas,
   clampGasFees,
   bumpGasFees,
   getTransactionFees,
   RESUBMIT_FEE_BUMP_PCT,
   type GasFees,
+  finalizeTransaction,
 } from "./gas.js";
+import { ExecutionError } from "./executionError.js";
 
 // ── Gas Safety Configuration ──────────────────────────────────────────
 
@@ -62,178 +62,6 @@ const TX_CONFIRM_TIMEOUT_MS = 60_000;
 const FAST_CHAIN_IDS = new Set([10, 42161, 8453, 130, 56, 84532]);
 
 /**
- * Type guard: a transaction is "prepared" only when it has a non-zero gas limit
- * AND the internal `prepared` marker set by finalizeToolTransaction().
- */
-function isPreparedTransaction(tx: TransactionDraft): tx is UnsignedTransaction & { prepared: true } {
-  const maybe = tx as Partial<UnsignedTransaction>;
-  return !!maybe.gas && maybe.gas !== "0x0" && maybe.prepared === true;
-}
-
-/**
- * Shared transaction finalizer: run the NAV shield and estimate gas.
- *
- * For vault-targeted transactions, the NAV shield simulates the swap via
- * eth_simulateV1 and validates the post-swap unitary value does not drop
- * more than the allowed threshold. Gas is then estimated independently with
- * eth_estimateGas from the executor address, so every transaction (vault or
- * not) uses a real gas estimate.
- *
- * Non-vault transactions skip the NAV shield but still estimate gas and fees.
- */
-export async function prepareTransaction(
-  env: Env,
-  ctx: Pick<RequestContext, "vaultAddress" | "chainId" | "operatorAddress" | "operatorVerified" | "executionMode">,
-  draft: TransactionDraft,
-): Promise<{ tx: UnsignedTransaction; warning?: string }> {
-  const tx: UnsignedTransaction = { ...draft, gas: "0x0", navShieldChecked: false };
-  const publicClient = getRpcProvider(tx.chainId);
-
-  // Determine the operator/owner address for NAV shield threshold lookup.
-  // If the caller didn't prove ownership, we read the on-chain owner.
-  let operatorAddress: Address;
-  if (ctx.operatorAddress) {
-    operatorAddress = ctx.operatorAddress;
-  } else {
-    if (!ctx.vaultAddress || ctx.vaultAddress.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
-      throw new ExecutionError(
-        "No operator address provided and no vault address configured for NAV simulation.",
-        "VAULT_NOT_ON_CHAIN",
-      );
-    }
-    try {
-      operatorAddress = await publicClient.readContract({
-        address: ctx.vaultAddress as Address,
-        abi: RIGOBLOCK_VAULT_ABI,
-        functionName: "owner",
-      }) as Address;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const lower = msg.toLowerCase();
-      // A revert or "no data" response means the address is not a vault on this chain
-      // (e.g. a vault address copied from a different chain). Distinguish that from a
-      // genuine RPC outage / bad API key.
-      if (
-        lower.includes("reverted") ||
-        lower.includes("execution reverted") ||
-        lower.includes("invalid") ||
-        lower.includes("bad data") ||
-        lower.includes("returned no data") ||
-        lower.includes("no data") ||
-        lower.includes("missing revert data") ||
-        lower.includes("contract not found")
-      ) {
-        throw new ExecutionError(
-          `Vault address ${ctx.vaultAddress.slice(0, 6)}…${ctx.vaultAddress.slice(-4)} is not a valid vault on chain ${tx.chainId}. ` +
-          "The address may belong to a vault on another chain, or it may not be a vault contract.",
-          "VAULT_NOT_ON_CHAIN",
-        );
-      }
-      throw new ExecutionError(
-        `Could not read vault owner for NAV simulation: ${sanitizeError(msg)}`,
-        "RPC_UNAVAILABLE",
-      );
-    }
-  }
-
-  // Determine the transaction executor (sender for simulation / gas estimation).
-  let executor: Address;
-  if (tx.operatorOnly || ctx.executionMode === "manual") {
-    executor = operatorAddress;
-  } else {
-    // Delegated mode: simulate from the agent address without loading the private key.
-    const config = await getDelegationConfig(env.KV, ctx.vaultAddress);
-    if (!config || !config.enabled) {
-      throw new ExecutionError(
-        "Delegation not configured. Set up delegation on the vault first.",
-        "DELEGATION_NOT_CONFIGURED",
-      );
-    }
-    executor = config.agentAddress;
-  }
-
-  const txValue = BigInt(tx.value || "0x0");
-
-  // NAV shield only applies when the transaction targets the vault itself.
-  const isVaultTarget = !!ctx.vaultAddress &&
-    ctx.vaultAddress.toLowerCase() !== ZERO_ADDRESS &&
-    tx.to.toLowerCase() === ctx.vaultAddress.toLowerCase();
-
-  if (isVaultTarget) {
-    // Read operator's custom NAV shield threshold (falls back to default 10%).
-    const storedNavThreshold = env.KV
-      ? await getNavShieldThreshold(env.KV, operatorAddress)
-      : null;
-
-    const navResult = await checkNavImpact(
-      ctx.vaultAddress as Address,
-      tx.data,
-      txValue,
-      tx.chainId,
-      executor,
-      env.KV,
-      storedNavThreshold ?? undefined,
-    );
-
-    if (!navResult.allowed) {
-      if (navResult.code === "TRADE_REVERTS") {
-        // Advisory warning for manual signing; auto-execution will refuse later.
-        const warning = `⚠️ Simulation warning: ${navResult.reason || "transaction may revert on-chain"} — verify token approvals and vault adapter support before signing.`;
-        tx.revertWarning = warning;
-        tx.navShieldChecked = true;
-        return { tx, warning };
-      }
-      throw new ExecutionError(
-        navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
-        "NAV_SHIELD_BLOCKED",
-      );
-    }
-
-    tx.navShieldChecked = true;
-
-    if (navResult.code === "UNVERIFIED") {
-      return {
-        tx,
-        warning: `⚠️ NAV verification unavailable — could not measure NAV impact atomically (${navResult.reason || "multicall simulation failed"}). Proceeding with gas estimate only.`,
-      };
-    }
-  }
-
-  // Estimate gas units and EIP-1559 fees directly from the executor for every transaction.
-  let gasEstimate: bigint;
-  let fees: GasFees;
-  try {
-    const result = await estimateTransactionGas(
-      publicClient,
-      tx.chainId,
-      { account: executor, to: tx.to, data: tx.data, value: txValue },
-    );
-    gasEstimate = result.gas;
-    fees = result.fees;
-  } catch (estErr) {
-    const msg = estErr instanceof Error ? estErr.message : String(estErr);
-    if (msg.toLowerCase().includes("gas estimation failed")) {
-      throw new ExecutionError(`Gas estimation failed: ${sanitizeError(msg)}`, "GAS_ESTIMATION_FAILED");
-    }
-    throw new ExecutionError(
-      sanitizeError(msg) || "Transaction simulation failed — the transaction would revert on-chain.",
-      "SIMULATION_FAILED",
-    );
-  }
-
-  tx.gas = `0x${(gasEstimate + (gasEstimate * 25n) / 100n).toString(16)}`;
-  tx.maxFeePerGas = `0x${fees.maxFeePerGas.toString(16)}` as Hex;
-  tx.maxPriorityFeePerGas = `0x${fees.maxPriorityFeePerGas.toString(16)}` as Hex;
-
-  // Non-vault transactions are not subject to the NAV shield.
-  if (!isVaultTarget) {
-    tx.navShieldChecked = true;
-  }
-
-  return { tx };
-}
-
-/**
  * Centralized transaction finalization for tool handlers.
  *
  * Handlers MUST return a `TransactionDraft` (no gas, no NAV-shield markers).
@@ -245,9 +73,7 @@ export async function finalizeToolTransaction(
   ctx: Pick<RequestContext, "vaultAddress" | "chainId" | "operatorAddress" | "operatorVerified" | "executionMode">,
   draft: TransactionDraft,
 ): Promise<{ tx: UnsignedTransaction; warning?: string }> {
-  const result = await prepareTransaction(env, ctx, draft);
-  result.tx.prepared = true;
-  return result;
+  return finalizeTransaction(env, ctx, draft);
 }
 
 /**
@@ -255,8 +81,10 @@ export async function finalizeToolTransaction(
  *
  * This is the ONLY public function that broadcasts transactions from the agent
  * wallet. ALL delegated transactions go through here — there is no alternative
- * code path. The NAV shield runs unconditionally before broadcast; it cannot
- * be skipped, disabled, or bypassed.
+ * code path. The caller (finalizeTransaction) is responsible for running the
+ * safety stack, including the NAV shield, gas estimation, and fee caps before
+ * this function is invoked. This function verifies that those safety values are
+ * present; it does not re-estimate or re-simulate.
  *
  * Safety checks (all mandatory, in order):
  * 1. Delegation config exists and is enabled
@@ -264,7 +92,7 @@ export async function finalizeToolTransaction(
  * 3. Transaction target == vault address (no cross-contract calls)
  * 4. Function selector in allowed whitelist
  * 5. Agent wallet loaded and matches config
- * 6. **NAV SHIELD** — simulates trade impact on vault unit price (MANDATORY)
+ * 6. Gas limit and EIP-1559 fee values are present from finalizeTransaction
  * 7. Transaction broadcast (sponsored or direct) with gas caps
  */
 export async function executeViaDelegation(
@@ -346,60 +174,22 @@ export async function executeViaDelegation(
     );
   }
 
-  // ══════════════════════════════════════════════════════════════════════
-  // ██ NAV SHIELD + GAS — MANDATORY (must NEVER be skipped, disabled, or bypassed) ██
-  // Simulates multicall([tx, updateUnitaryValue]) as the OPERATOR (vault owner).
-  // If NAV drops > threshold → transaction BLOCKED, never broadcast.
-  //
-  // IMPORTANT: Simulation uses the OPERATOR address (vault owner), not the agent.
-  // Reason: `multicall` is intentionally NOT in the agent's delegated selectors
-  // (delegating multicall would let the agent compose arbitrary vault calls).
-  // The operator is the vault owner, always authorized for any selector, so the
-  // multicall simulation succeeds. The actual trade is still sent by the agent
-  // wallet using only its whitelisted selectors (execute, modifyLiquidities, etc.).
-  //
-  // Uses updateUnitaryValue() (the actual contract NAV algorithm) instead of
-  // getNavDataView() to avoid an ENavView edge case where the view incorrectly
-  // returns unitaryValue=0 when the actual contract preserves the stored value.
-  //
-  // If the transaction was already finalized upstream (e.g. by processChat via
-  // prepareTransaction), we reuse its gas and NAV result instead of running the
-  // simulation again. This removes the duplicate eth_estimateGas + NAV check that
-  // previously ran in handlers and again at broadcast time.
-
-  // Only reuse a previously finalized transaction if it carries the internal
-  // `prepared` marker set by finalizeToolTransaction(). External callers cannot
-  // forge this marker through JSON because the field is stripped/ignored at the
-  // route boundary; any transaction without it is re-finalized here.
-  let finalizedTx: UnsignedTransaction;
-  if (!isPreparedTransaction(txInput)) {
-    try {
-      finalizedTx = (await prepareTransaction(
-        env,
-        {
-          vaultAddress: txInput.to,
-          chainId: txInput.chainId,
-          operatorAddress: config.operatorAddress,
-          operatorVerified: false,
-          executionMode: "delegated",
-        },
-        txInput,
-      )).tx;
-    } catch (prepErr) {
-      if (prepErr instanceof ExecutionError) throw prepErr;
-      const msg = prepErr instanceof Error ? prepErr.message : String(prepErr);
-      throw new ExecutionError(
-        `Transaction preparation failed: ${sanitizeError(msg)}`,
-        "SIMULATION_FAILED",
-        true,
-      );
-    }
-  } else {
-    finalizedTx = txInput as UnsignedTransaction;
+  // 7. Validate the incoming transaction was finalized before broadcast.
+  //    Gas, NAV shield, and EIP-1559 fees must already be attached. The broadcast
+  //    path does NOT re-estimate or re-simulate; it only verifies the values exist.
+  const tx = txInput as UnsignedTransaction;
+  if (!tx.gas || tx.gas === "0x0") {
+    throw new ExecutionError(
+      "Gas limit is missing for this transaction. Rebuild the transaction to estimate gas.",
+      "GAS_ESTIMATION_FAILED",
+    );
   }
-
-  // From here on we operate on a fully finalized UnsignedTransaction.
-  const tx: UnsignedTransaction = finalizedTx;
+  if (!tx.maxFeePerGas || tx.maxFeePerGas === "0x0" || !tx.maxPriorityFeePerGas || tx.maxPriorityFeePerGas === "0x0") {
+    throw new ExecutionError(
+      "Gas fee estimate is missing for this transaction. Rebuild the transaction to estimate fees.",
+      "GAS_ESTIMATION_FAILED",
+    );
+  }
 
   // Refuse to auto-execute a transaction that was flagged as likely reverting
   // during prepareTransaction. The caller can still return it as unsigned calldata
@@ -1111,15 +901,14 @@ export function parseStoredUnsignedTransactions(raw: string): UnsignedTransactio
     value: (t.value as string) || "0x0",
     chainId: t.chainId as number,
     gas: (t.gas as string) || "0x0",
-    maxFeePerGas: t.maxFeePerGas as `0x${string}` | undefined,
-    maxPriorityFeePerGas: t.maxPriorityFeePerGas as `0x${string}` | undefined,
+    maxFeePerGas: (t.maxFeePerGas as `0x${string}`) || "0x0",
+    maxPriorityFeePerGas: (t.maxPriorityFeePerGas as `0x${string}`) || "0x0",
     description: (t.description as string) || "",
     swapMeta: t.swapMeta as UnsignedTransaction["swapMeta"],
     metrics: t.metrics as UnsignedTransaction["metrics"],
     operatorOnly: !!t.operatorOnly,
     navShieldChecked: t.navShieldChecked as boolean | undefined,
     revertWarning: t.revertWarning as string | undefined,
-    prepared: (t.prepared as true) ?? true,
   }));
 }
 
@@ -1288,20 +1077,8 @@ export async function checkPendingTxStatus(
   return null;
 }
 
-/**
- * Custom error with error code for the API.
- */
-export class ExecutionError extends Error {
-  code: string;
-  /** When true, the caller should allow the user to sign the transaction manually. */
-  fallbackToManual?: boolean;
-  constructor(message: string, code: string, fallbackToManual?: boolean) {
-    super(message);
-    this.name = "ExecutionError";
-    this.code = code;
-    this.fallbackToManual = fallbackToManual;
-  }
-}
+export { ExecutionError } from "./executionError.js";
+
 
 // ── Shared multi-tx execution helper ──────────────────────────────────
 
@@ -1323,7 +1100,7 @@ export interface TxExecOutcome {
  */
 export async function executeTxList(
   env: Env,
-  txList: TransactionDraft[],
+  txList: UnsignedTransaction[],
   vaultAddress: string,
   onProgress?: (index: number, total: number, outcomesSoFar: TxExecOutcome[]) => Promise<void>,
   requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>,

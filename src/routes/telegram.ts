@@ -29,11 +29,13 @@ import {
   handle_enable_swap_shield,
   handle_set_nav_shield_threshold,
   handle_enable_nav_shield,
+  disable_nav_shield,
 } from "../llm/handlers/settings.js";
 import { getDelegationConfig, getActiveChains } from "../services/delegation.js";
 import { getAgentWalletInfo } from "../services/agentWallet.js";
 import { getCurrentDayBucket, DEFAULT_GAS_SPENDING_LIMIT_USD, GAS_SPEND_KEY } from "./gasPolicy.js";
-import { executeTxList, checkPendingTxStatus, ExecutionError, parseStoredUnsignedTransactions, type TxExecOutcome } from "../services/execution.js";
+import { executeTxList, checkPendingTxStatus, parseStoredUnsignedTransactions, type TxExecOutcome } from "../services/execution.js";
+import { ExecutionError } from "../services/executionError.js";
 import {
   runTransactionFlow,
   getExecutionModePreference,
@@ -774,11 +776,16 @@ async function handleMessage(
             const value = args.join(" ").trim().toLowerCase();
             if (!value) {
               await sendMessage(token, chatId,
-                "Usage: <code>/navshield 15%</code> or <code>/navshield reset</code>\nValid range: 1% – 100%. The override lasts 10 minutes.");
+                "Usage:\n" +
+                "• <code>/navshield 15%</code> — set temporary threshold (1%–100%)\n" +
+                "• <code>/navshield disable</code> or <code>/navshield off</code> — temporarily disable for 10 minutes\n" +
+                "• <code>/navshield reset</code> — restore default (10%)");
               return;
             }
             if (value === "reset") {
               result = await handle_enable_nav_shield(env, settingsCtx, {}, "enable_nav_shield");
+            } else if (value === "off" || value === "disable" || value === "0" || value === "0%") {
+              result = await disable_nav_shield(env, settingsCtx, {}, "disable_nav_shield");
             } else {
               result = await handle_set_nav_shield_threshold(env, settingsCtx, { threshold: value }, "set_nav_shield_threshold");
             }

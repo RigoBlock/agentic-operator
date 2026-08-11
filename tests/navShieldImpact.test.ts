@@ -212,4 +212,15 @@ describe("NAV Shield impact logic", () => {
     expect(result.reason).toContain("would revert on-chain");
   });
 
+  it("skips simulation when the operator has disabled the NAV shield", async () => {
+    const result = await checkNavImpact(
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(), 0n,
+    );
+    expect(result.allowed).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("DISABLED");
+    expect(result.reason).toContain("disabled");
+    expect(mockSimulateCalls).not.toHaveBeenCalled();
+  });
+
 });

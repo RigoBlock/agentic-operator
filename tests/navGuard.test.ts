@@ -9,10 +9,12 @@ import {
   DEFAULT_MAX_NAV_DROP_PCT,
   MIN_NAV_DROP_PCT,
   MAX_NAV_DROP_PCT,
+  DISABLED_NAV_DROP_PCT,
 } from "../src/services/navGuard.js";
 import {
   handle_set_nav_shield_threshold,
   handle_enable_nav_shield,
+  disable_nav_shield,
   handle_set_default_slippage,
   handle_set_swap_shield_tolerance,
   handle_enable_swap_shield,
@@ -79,9 +81,8 @@ describe("NAV Shield — threshold storage", () => {
     expect(threshold).toBe(15n);
   });
 
-  it("rejects threshold below minimum", async () => {
-    await expect(setNavShieldThreshold(kv, OPERATOR, 0n)).rejects.toThrow("must be between");
-    await expect(setNavShieldThreshold(kv, OPERATOR, MIN_NAV_DROP_PCT - 1n)).rejects.toThrow("must be between");
+  it("rejects negative threshold", async () => {
+    await expect(setNavShieldThreshold(kv, OPERATOR, -1n)).rejects.toThrow("must be between");
   });
 
   it("rejects threshold above maximum", async () => {
@@ -97,15 +98,26 @@ describe("NAV Shield — threshold storage", () => {
     expect(await getNavShieldThreshold(kv, OPERATOR)).toBeNull();
   });
 
-  it("rejects out-of-range stored payloads", async () => {
+  it("accepts 0 as the disabled sentinel in storage", async () => {
     await (kv.put as any)(`nav-shield-pct:${OPERATOR.toLowerCase()}`, "0");
-    expect(await getNavShieldThreshold(kv, OPERATOR)).toBeNull();
+    expect(await getNavShieldThreshold(kv, OPERATOR)).toBe(0n);
+  });
 
+  it("rejects out-of-range stored payloads", async () => {
     await (kv.put as any)(`nav-shield-pct:${OPERATOR.toLowerCase()}`, "101");
     expect(await getNavShieldThreshold(kv, OPERATOR)).toBeNull();
   });
 
+  it("stores and retrieves disabled threshold (0)", async () => {
+    await setNavShieldThreshold(kv, OPERATOR, DISABLED_NAV_DROP_PCT);
+    const threshold = await getNavShieldThreshold(kv, OPERATOR);
+    expect(threshold).toBe(0n);
+  });
+
   it("accepts boundary values", async () => {
+    await setNavShieldThreshold(kv, OPERATOR, DISABLED_NAV_DROP_PCT);
+    expect(await getNavShieldThreshold(kv, OPERATOR)).toBe(DISABLED_NAV_DROP_PCT);
+
     await setNavShieldThreshold(kv, OPERATOR, MIN_NAV_DROP_PCT);
     expect(await getNavShieldThreshold(kv, OPERATOR)).toBe(MIN_NAV_DROP_PCT);
 
@@ -117,6 +129,7 @@ describe("NAV Shield — threshold storage", () => {
     expect(DEFAULT_MAX_NAV_DROP_PCT).toBe(10n);
     expect(MIN_NAV_DROP_PCT).toBe(1n);
     expect(MAX_NAV_DROP_PCT).toBe(100n);
+    expect(DISABLED_NAV_DROP_PCT).toBe(0n);
   });
 });
 
@@ -148,6 +161,29 @@ describe("Settings — operator-only restriction", () => {
     const result = await handle_set_nav_shield_threshold(env, ctx, { threshold: "25" }, "set_nav_shield_threshold");
     expect(result.message).toContain("25%");
     expect(result.message).toContain("10 minutes");
+  });
+
+  it("disallows disabling NAV shield through the LLM threshold handler", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ isBrowserRequest: true });
+    await expect(
+      handle_set_nav_shield_threshold(env, ctx, { threshold: "0" }, "set_nav_shield_threshold"),
+    ).rejects.toThrow("Invalid threshold value");
+    await expect(
+      handle_set_nav_shield_threshold(env, ctx, { threshold: "off" }, "set_nav_shield_threshold"),
+    ).rejects.toThrow("Invalid threshold format");
+    await expect(
+      handle_set_nav_shield_threshold(env, ctx, { threshold: "disable" }, "set_nav_shield_threshold"),
+    ).rejects.toThrow("Invalid threshold format");
+  });
+
+  it("allows direct disable via the dedicated helper", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ isBrowserRequest: true });
+    const result = await disable_nav_shield(env, ctx, {}, "disable_nav_shield");
+    expect(result.message).toContain("disabled");
+    expect(result.message).toContain("10 minutes");
+    expect(await getNavShieldThreshold(kv, OPERATOR)).toBe(0n);
   });
 
   it("returns a friendly NAV shield confirmation message", async () => {
@@ -267,6 +303,8 @@ describe("Settings fast-path parsers", () => {
       name: "set_nav_shield_threshold",
       args: { threshold: "7%" },
     });
+    expect(tryFastPathNavShieldThreshold("disable nav shield")).toBeNull();
+    expect(tryFastPathNavShieldThreshold("nav shield off")).toBeNull();
     expect(tryFastPathNavShieldThreshold("random message")).toBeNull();
   });
 

@@ -46,6 +46,8 @@ function makeTx(overrides?: Partial<UnsignedTransaction>): UnsignedTransaction {
     value: "0x0",
     chainId: 8453,
     gas: "0x0",
+    maxFeePerGas: "0x0",
+    maxPriorityFeePerGas: "0x0",
     description: "test tx",
     ...overrides,
   };

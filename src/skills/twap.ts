@@ -17,7 +17,7 @@ import type { Address } from "viem";
 import type { StrategySkill, SkillToolDefinition, SkillToolResult, ProcessChatFn } from "./types.js";
 import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 import { sendMessage, escapeHtml } from "../services/telegram.js";
-import { executeTxList, formatOutcomesMarkdown } from "../services/execution.js";
+import { executeTxList, formatOutcomesMarkdown, finalizeToolTransaction } from "../services/execution.js";
 import { executeToolCall } from "../llm/client.js";
 import { sanitizeError, resolveChainId, resolveChainName, resolveTokenAddress } from "../config.js";
 import { initTokenResolver } from "../services/tokenResolver.js";
@@ -507,12 +507,13 @@ async function runDueTwapOrders(env: Env, _processChat: ProcessChatFn): Promise<
 
         const toolResult = await executeToolCall(env, ctx, "build_vault_swap", toolArgs);
 
-        const txList = toolResult.transaction ? [toolResult.transaction] : [];
-        lastBuiltTx = txList[0];
-
-        if (txList.length === 0) {
+        if (!toolResult.transaction) {
           throw new Error(toolResult.message || "No swap transaction produced");
         }
+
+        const { tx: finalizedTx } = await finalizeToolTransaction(env, ctx, toolResult.transaction);
+        const txList = [finalizedTx];
+        lastBuiltTx = finalizedTx;
 
         const outcomes = await executeTxList(env, txList, order.vaultAddress);
           const hasFailure = outcomes.some((o) => o.error || o.result?.reverted);

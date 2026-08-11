@@ -161,24 +161,22 @@ export async function handle_set_nav_shield_threshold(
 ): Promise<ToolResult> {
   ensureOperatorOnly(ctx, toolName);
 
-  const raw = String(args.threshold ?? "").trim();
+  const raw = String(args.threshold ?? "").trim().toLowerCase();
   let pct: bigint;
-  const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
-  const plainMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)$/);
-  if (percentMatch) {
-    const num = parseFloat(percentMatch[1]);
-    if (isNaN(num) || num <= 0) {
-      throw new Error("Invalid threshold value. Provide a positive number (e.g., '15%' or '15').");
-    }
-    pct = BigInt(Math.round(num));
-  } else if (plainMatch) {
-    const num = parseFloat(plainMatch[1]);
-    if (isNaN(num) || num <= 0) {
-      throw new Error("Invalid threshold value. Provide a positive number (e.g., '15%' or '15').");
-    }
-    pct = BigInt(Math.round(num));
-  } else {
-    throw new Error("Invalid threshold format. Use a number like '15%' or '15'.");
+  const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%?$/i);
+  if (!percentMatch) {
+    throw new Error("Invalid threshold format. Use a number like '15%' or '15' (1%–100%).");
+  }
+  const num = parseFloat(percentMatch[1]);
+  if (isNaN(num) || num <= 0) {
+    throw new Error("Invalid threshold value. Provide a positive number between 1% and 100%.");
+  }
+  pct = BigInt(Math.round(num));
+  if (pct < MIN_NAV_DROP_PCT || pct > MAX_NAV_DROP_PCT) {
+    throw new Error(
+      `NAV shield threshold must be between ${Number(MIN_NAV_DROP_PCT)}% and ${Number(MAX_NAV_DROP_PCT)}%. ` +
+      `Received: ${Number(pct)}%`,
+    );
   }
 
   await setNavShieldThreshold(env.KV, ctx.operatorAddress!, pct);
@@ -187,6 +185,30 @@ export async function handle_set_nav_shield_threshold(
       `🛡️ NAV Shield temporarily set to ${Number(pct)}% for 10 minutes. ` +
       `Any trade that would drop your pool's unit price by more than ${Number(pct)}% will be blocked.\n\n` +
       `This override applies to all your vaults on every chain and auto-resets to the default ${Number(DEFAULT_MAX_NAV_DROP_PCT)}%. ` +
+      `Say "reset NAV shield to default" to restore it immediately.`
+    ),
+  };
+}
+
+/**
+ * Temporarily disable the NAV shield for 10 minutes. This is intentionally NOT
+ * exposed as an LLM tool — it may only be invoked by direct human action from
+ * the web settings panel or the Telegram /navshield command.
+ */
+export async function disable_nav_shield(
+  env: Env,
+  ctx: RequestContext,
+  _args: Record<string, unknown>,
+  toolName: string,
+): Promise<ToolResult> {
+  ensureOperatorOnly(ctx, toolName);
+
+  await setNavShieldThreshold(env.KV, ctx.operatorAddress!, 0n);
+  return {
+    message: (
+      `🛡️ NAV Shield temporarily disabled for 10 minutes. ` +
+      `Vault unit-price checks will be skipped until the override expires.\n\n` +
+      `It will re-enable automatically at the default ${Number(DEFAULT_MAX_NAV_DROP_PCT)}% threshold. ` +
       `Say "reset NAV shield to default" to restore it immediately.`
     ),
   };

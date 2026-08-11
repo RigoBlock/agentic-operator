@@ -66,16 +66,14 @@ describe("parseStoredUnsignedTransactions", () => {
       dex: "0x Aggregator",
     },
     navShieldChecked: true,
-    prepared: true,
   };
 
-  it("round-trips a finalized transaction including gas, fees, and prepared flag", () => {
+  it("round-trips a finalized transaction including gas, fees, and nav shield flag", () => {
     const raw = JSON.stringify({ txs: [baseTx], createdAt: Date.now(), messageId: 42 });
     const txs = parseStoredUnsignedTransactions(raw);
 
     expect(txs).toHaveLength(1);
     const tx = txs[0];
-    expect(tx.prepared).toBe(true);
     expect(tx.gas).toBe(baseTx.gas);
     expect(tx.maxFeePerGas).toBe(baseTx.maxFeePerGas);
     expect(tx.maxPriorityFeePerGas).toBe(baseTx.maxPriorityFeePerGas);
@@ -87,20 +85,37 @@ describe("parseStoredUnsignedTransactions", () => {
     const raw = JSON.stringify([baseTx]);
     const txs = parseStoredUnsignedTransactions(raw);
     expect(txs).toHaveLength(1);
-    expect(txs[0].prepared).toBe(true);
+    expect(txs[0].maxFeePerGas).toBe(baseTx.maxFeePerGas);
   });
 
   it("parses a single transaction object", () => {
     const raw = JSON.stringify(baseTx);
     const txs = parseStoredUnsignedTransactions(raw);
     expect(txs).toHaveLength(1);
-    expect(txs[0].prepared).toBe(true);
+    expect(txs[0].maxPriorityFeePerGas).toBe(baseTx.maxPriorityFeePerGas);
   });
 
-  it("falls back to prepared=true for legacy stored transactions that have gas", () => {
-    const legacy = { ...baseTx, prepared: undefined };
+  it("fills in zeroed fee defaults for legacy stored transactions missing fees", () => {
+    const legacy = { ...baseTx, maxFeePerGas: undefined, maxPriorityFeePerGas: undefined };
     const raw = JSON.stringify({ txs: [legacy] });
     const txs = parseStoredUnsignedTransactions(raw);
-    expect(txs[0].prepared).toBe(true);
+    expect(txs[0].maxFeePerGas).toBe("0x0");
+    expect(txs[0].maxPriorityFeePerGas).toBe("0x0");
+  });
+
+  it("fills zeroed defaults for a draft transaction missing gas and fees", () => {
+    const draft = {
+      to: "0x1111111111111111111111111111111111111111",
+      data: "0x1234abcd",
+      value: "0x0",
+      chainId: 8453,
+      description: "Swap 30 GRG for ETH",
+    };
+    const raw = JSON.stringify({ txs: [draft] });
+    const txs = parseStoredUnsignedTransactions(raw);
+    expect(txs).toHaveLength(1);
+    expect(txs[0].gas).toBe("0x0");
+    expect(txs[0].maxFeePerGas).toBe("0x0");
+    expect(txs[0].maxPriorityFeePerGas).toBe("0x0");
   });
 });

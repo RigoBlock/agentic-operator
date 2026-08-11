@@ -33,7 +33,8 @@ import {
 } from "../services/delegation.js";
 import { getAgentWalletInfo, syncAgentWallet, deleteAgentWallet } from "../services/agentWallet.js";
 import { SUPPORTED_CHAINS } from "../config.js";
-import { checkAgentBalance, checkPendingTxStatus, executeViaDelegation, ExecutionError } from "../services/execution.js";
+import { checkAgentBalance, checkPendingTxStatus, executeViaDelegation } from "../services/execution.js";
+import { ExecutionError } from "../services/executionError.js";
 import { sanitizeError } from "../config.js";
 import { getTelegramUser, getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 import { getVaultInfo } from "../services/vault.js";
@@ -418,6 +419,8 @@ delegation.post("/execute", async (c) => {
       value: string;
       chainId: number;
       gas?: string;
+      maxFeePerGas?: `0x${string}`;
+      maxPriorityFeePerGas?: `0x${string}`;
       description?: string;
     };
     /** Optional per-transaction override for sponsored gas */
@@ -459,11 +462,10 @@ delegation.post("/execute", async (c) => {
       value: body.transaction.value || "0x0",
       chainId: body.transaction.chainId || body.chainId,
       gas: body.transaction.gas || "0x0",
+      maxFeePerGas: body.transaction.maxFeePerGas || "0x0",
+      maxPriorityFeePerGas: body.transaction.maxPriorityFeePerGas || "0x0",
       description: body.transaction.description || "",
     };
-    // Do not trust NAV-shield or prepared markers from the client; re-finalize here.
-    tx.prepared = undefined;
-    tx.navShieldChecked = undefined;
     if (!tx) throw new Error("Transaction not built");
 
     const result = await executeViaDelegation(c.env, tx, body.vaultAddress, body.sponsoredGas);

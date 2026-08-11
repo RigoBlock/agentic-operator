@@ -23,6 +23,7 @@ import {
   handle_enable_swap_shield,
   handle_set_nav_shield_threshold,
   handle_enable_nav_shield,
+  disable_nav_shield,
 } from "../llm/handlers/settings.js";
 import {
   getExecutionModePreference,
@@ -113,7 +114,12 @@ settings.post("/nav-shield", async (c) => {
     if (body.reset) {
       result = await handle_enable_nav_shield(c.env, ctx, {}, "enable_nav_shield");
     } else if (body.threshold) {
-      result = await handle_set_nav_shield_threshold(c.env, ctx, { threshold: body.threshold }, "set_nav_shield_threshold");
+      const threshold = body.threshold.trim().toLowerCase();
+      if (threshold === "0" || threshold === "0%" || threshold === "off" || threshold === "disable") {
+        result = await disable_nav_shield(c.env, ctx, {}, "disable_nav_shield");
+      } else {
+        result = await handle_set_nav_shield_threshold(c.env, ctx, { threshold: body.threshold }, "set_nav_shield_threshold");
+      }
     } else {
       return c.json({ error: "Provide 'threshold' or 'reset: true'" }, 400);
     }

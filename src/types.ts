@@ -160,8 +160,8 @@ export interface ToolCallResult {
  * Transaction draft produced by tool handlers.
  *
  * Handlers MUST NOT set gas limits or claim NAV-shield checks. A centralized
- * finalization step adds gas, runs the NAV shield, and marks the transaction
- * as prepared before it is returned to the frontend or broadcast.
+ * finalization step adds gas, runs the NAV shield, and returns a full
+ * `UnsignedTransaction` before it is returned to the frontend or broadcast.
  */
 export interface TransactionDraft {
   to: Address;
@@ -193,17 +193,15 @@ export interface UnsignedTransaction extends TransactionDraft {
   gas: string;          // hex-encoded gas limit
   /** Pre-computed EIP-1559 max fee per gas (hex wei). Validated during
    *  preparation and reused at broadcast so the fee market is read exactly once. */
-  maxFeePerGas?: Hex;
+  maxFeePerGas: Hex;
   /** Pre-computed EIP-1559 max priority fee per gas (hex wei). Validated during
    *  preparation and reused at broadcast so the fee market is read exactly once. */
-  maxPriorityFeePerGas?: Hex;
+  maxPriorityFeePerGas: Hex;
   /** Internal marker: NAV shield pre-check already ran for this tx build path.
    *  This is set ONLY by the centralized finalization helper. */
   navShieldChecked?: boolean;
   /** Advisory warning produced when the NAV shield simulation shows the trade itself reverts. */
   revertWarning?: string;
-  /** Internal marker: transaction has been finalized (gas + NAV shield) by the engine. */
-  prepared?: true;
 }
 
 export interface ChatResponse {

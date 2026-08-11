@@ -6,7 +6,8 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { parseGwei, type PublicClient } from "viem";
-import { ExecutionError, formatOutcomesMarkdown } from "../src/services/execution.js";
+import { formatOutcomesMarkdown } from "../src/services/execution.js";
+import { ExecutionError } from "../src/services/executionError.js";
 import { estimateGasFees } from "../src/services/gas.js";
 import { handle_check_pending_tx } from "../src/llm/handlers/delegation.js";
 import type { Env, RequestContext } from "../src/types.js";

@@ -29,13 +29,16 @@
  * Since eth_call can simulate non-view functions, we use updateUnitaryValue()
  * to get the correct result matching actual contract behavior.
  *
- * ## The NAV shield must NEVER be skipped
+ * ## The NAV shield can be temporarily disabled by the operator
  *
  * The NAV shield is the user's primary protection against rogue transactions.
- * When it produces incorrect results (e.g. blocking a valid bridge), the fix
- * must be in correcting the root cause (switching to updateUnitaryValue,
- * adjusting thresholds), not in skipping the shield. No code path, flag,
- * env var, or config may disable the NAV shield.
+ * It is enabled by default and should normally never be skipped. However, an
+ * authenticated operator may temporarily disable it (e.g. to work around a
+ * contract-level oracle bug that makes the NAV simulation revert). The disable
+ * override uses the same 10-minute TTL as threshold overrides so a forgotten
+ * setting cannot leave vaults under-protected. External agents and prompt
+ * injections cannot disable the shield because they never receive
+ * `operatorVerified = true`.
  *
  * This shield runs BEFORE the transaction is broadcast (both sponsored
  * and direct paths), so it's entirely server-side and outside the agent's
@@ -73,11 +76,14 @@ import type { Env } from "../types.js";
 /** Default maximum allowed NAV drop per transaction (10%) — used for swaps */
 export const DEFAULT_MAX_NAV_DROP_PCT = 10n;
 
-/** Minimum configurable NAV drop threshold (1%) */
+/** Minimum configurable NAV drop threshold (1%). 0 is reserved as a sentinel for "disabled". */
 export const MIN_NAV_DROP_PCT = 1n;
 
 /** Maximum configurable NAV drop threshold (100%) */
 export const MAX_NAV_DROP_PCT = 100n;
+
+/** Sentinel value: NAV shield disabled by operator. Stored in KV as "0". */
+export const DISABLED_NAV_DROP_PCT = 0n;
 
 /** KV key prefix for per-operator NAV shield threshold override */
 const NAV_SHIELD_PREFIX = "nav-shield-pct:";
@@ -92,7 +98,8 @@ const NAV_SHIELD_TTL = 600;
 
 /**
  * Get the operator's stored NAV shield threshold from KV.
- * Returns null if not set (caller should use DEFAULT_MAX_NAV_DROP_PCT).
+ * Returns `null` if not set (caller should use DEFAULT_MAX_NAV_DROP_PCT).
+ * Returns `0n` if the operator has temporarily disabled the NAV shield.
  */
 export async function getNavShieldThreshold(
   kv: KVNamespace,
@@ -102,22 +109,24 @@ export async function getNavShieldThreshold(
   if (!raw) return null;
   if (!/^\d+$/.test(raw)) return null;
   const val = BigInt(raw);
-  if (val < MIN_NAV_DROP_PCT || val > MAX_NAV_DROP_PCT) return null;
+  // 0 is the explicit "disabled" sentinel; negatives and >100 are invalid.
+  if (val < 0n || val > MAX_NAV_DROP_PCT) return null;
   return val;
 }
 
 /**
- * Temporarily set a higher NAV shield threshold (10-minute TTL).
- * The threshold automatically resets to the default after TTL expiry.
+ * Temporarily set a higher NAV shield threshold, or disable the shield entirely
+ * by passing `0n` (10-minute TTL).
+ * The override automatically resets to the default after TTL expiry.
  */
 export async function setNavShieldThreshold(
   kv: KVNamespace,
   operatorAddress: string,
   pct: bigint,
 ): Promise<void> {
-  if (pct < MIN_NAV_DROP_PCT || pct > MAX_NAV_DROP_PCT) {
+  if (pct < 0n || pct > MAX_NAV_DROP_PCT) {
     throw new Error(
-      `NAV shield threshold must be between ${Number(MIN_NAV_DROP_PCT)}% and ${Number(MAX_NAV_DROP_PCT)}%. ` +
+      `NAV shield threshold must be between ${Number(MIN_NAV_DROP_PCT)}% and ${Number(MAX_NAV_DROP_PCT)}%, or 0 to disable. ` +
       `Received: ${Number(pct)}%`,
     );
   }
@@ -177,9 +186,10 @@ export interface NavShieldResult {
    *  - 'BLOCKED'       — NAV would drop more than the threshold
    *  - 'TRADE_REVERTS' — the swap itself reverts on-chain (not a NAV issue)
    *  - 'UNVERIFIED'    — multicall simulation failed but swap is valid; NAV unknown
+   *  - 'DISABLED'      — operator intentionally disabled the NAV shield temporarily
    *  - undefined       — allowed, NAV verified OK
    */
-  code?: 'BLOCKED' | 'TRADE_REVERTS' | 'UNVERIFIED';
+  code?: 'BLOCKED' | 'TRADE_REVERTS' | 'UNVERIFIED' | 'DISABLED';
 }
 
 /** @deprecated Use NavShieldResult */
@@ -404,6 +414,46 @@ export async function checkNavImpact(
   maxDropPct: bigint = DEFAULT_MAX_NAV_DROP_PCT,
 ): Promise<NavShieldResult> {
   const publicClient = getRpcProvider(chainId);
+
+  // Operator has explicitly disabled the NAV shield temporarily. Skip all
+  // simulation and return an allowed result so execution can proceed without the
+  // NAV updateUnitaryValue call.
+  if (maxDropPct === 0n) {
+    return {
+      allowed: true,
+      verified: false,
+      code: 'DISABLED',
+      preNavUnitaryValue: "0",
+      postNavUnitaryValue: "0",
+      dropPct: "0",
+      impactPct: "0",
+      reason: "NAV shield temporarily disabled by operator. It will re-enable automatically in 10 minutes.",
+    };
+  }
+
+  // First deposit: no outstanding shares means no unitary value to protect.
+  try {
+    const totalSupply = await publicClient.readContract({
+      address: vaultAddress,
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "totalSupply",
+    });
+    if (totalSupply === 0n) {
+      return {
+        allowed: true,
+        verified: false,
+        code: 'UNVERIFIED',
+        preNavUnitaryValue: "0",
+        postNavUnitaryValue: "0",
+        dropPct: "0",
+        impactPct: "0",
+        reason: "no outstanding shares — first deposit, skipping NAV shield.",
+      };
+    }
+  } catch (err) {
+    // If totalSupply cannot be read, fall through to simulation and let it fail closed.
+    console.warn("[NavShield] totalSupply read failed (falling through):", err);
+  }
 
   try {
     const updateNavCalldata = encodeFunctionData({

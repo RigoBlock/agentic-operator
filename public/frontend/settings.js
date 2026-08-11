@@ -326,10 +326,15 @@ function getNavShieldPct() {
   const stored = localStorage.getItem(navShieldKey());
   if (!stored) return DEFAULT_NAV_SHIELD_PCT;
   const parsed = parseInt(stored, 10);
-  if (!Number.isFinite(parsed) || parsed < MIN_NAV_SHIELD_PCT || parsed > MAX_NAV_SHIELD_PCT) {
+  // 0 is the explicit disabled sentinel; anything else outside 1-100 falls back to default.
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > MAX_NAV_SHIELD_PCT || (parsed > 0 && parsed < MIN_NAV_SHIELD_PCT)) {
     return DEFAULT_NAV_SHIELD_PCT;
   }
   return parsed;
+}
+
+function isNavShieldDisabled() {
+  return getNavShieldPct() === 0;
 }
 
 async function onNavShieldThresholdChange() {
@@ -338,12 +343,14 @@ async function onNavShieldThresholdChange() {
   if (isNaN(pct) || pct < MIN_NAV_SHIELD_PCT || pct > MAX_NAV_SHIELD_PCT) {
     alert(`NAV Shield threshold must be between ${MIN_NAV_SHIELD_PCT}% and ${MAX_NAV_SHIELD_PCT}%.`);
     input.value = String(getNavShieldPct());
+    updateNavShieldUiState(isNavShieldDisabled());
     return;
   }
 
   if (!connectedAddress || !vaultInput.value.trim()) {
     appendMessage('system', 'Connect a wallet and enter a vault address before changing NAV Shield threshold.');
     input.value = String(getNavShieldPct());
+    updateNavShieldUiState(isNavShieldDisabled());
     return;
   }
 
@@ -367,11 +374,12 @@ async function onNavShieldThresholdChange() {
     }
 
     localStorage.setItem(navShieldKey(), String(pct));
-    document.getElementById('nav-shield-reset').style.display = 'inline-block';
+    updateNavShieldUiState(false);
     appendMessage('system', `NAV Shield threshold set to ${pct}%.`);
   } catch (err) {
     appendMessage('system', `Failed to set NAV shield threshold: ${err instanceof Error ? err.message : String(err)}`);
     input.value = String(getNavShieldPct());
+    updateNavShieldUiState(isNavShieldDisabled());
   } finally {
     input.disabled = false;
   }
@@ -405,12 +413,69 @@ async function resetNavShieldThreshold() {
 
     input.value = String(DEFAULT_NAV_SHIELD_PCT);
     localStorage.removeItem(navShieldKey());
-    document.getElementById('nav-shield-reset').style.display = 'none';
+    updateNavShieldUiState(false);
     appendMessage('system', 'NAV Shield threshold reset to default (10%).');
   } catch (err) {
     appendMessage('system', `Failed to reset NAV shield threshold: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     input.disabled = false;
+  }
+}
+
+async function disableNavShieldThreshold() {
+  if (!connectedAddress || !vaultInput.value.trim()) {
+    appendMessage('system', 'Connect a wallet and enter a vault address before disabling NAV Shield.');
+    return;
+  }
+
+  const input = document.getElementById('nav-shield-threshold');
+  input.disabled = true;
+  try {
+    const res = await fetch('/api/settings/nav-shield', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        threshold: '0',
+        vaultAddress: vaultInput.value.trim(),
+        chainId: currentChainId,
+        operatorAddress: connectedAddress,
+        authSignature, authTimestamp,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    localStorage.setItem(navShieldKey(), '0');
+    input.value = '0';
+    updateNavShieldUiState(true);
+    appendMessage('system', 'NAV Shield temporarily disabled for 10 minutes. It will reset to 10% automatically.');
+  } catch (err) {
+    appendMessage('system', `Failed to disable NAV shield: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    input.disabled = false;
+  }
+}
+
+function updateNavShieldUiState(disabled) {
+  const input = document.getElementById('nav-shield-threshold');
+  const resetBtn = document.getElementById('nav-shield-reset');
+  const disableBtn = document.getElementById('nav-shield-disable');
+  const status = document.getElementById('nav-shield-status');
+  if (disabled) {
+    resetBtn.style.display = 'inline-block';
+    disableBtn.style.display = 'none';
+    status.style.display = 'inline';
+    status.textContent = 'Disabled — resets in 10 min';
+    input.style.color = 'var(--error)';
+  } else {
+    resetBtn.style.display = input.value !== String(DEFAULT_NAV_SHIELD_PCT) ? 'inline-block' : 'none';
+    disableBtn.style.display = 'inline-block';
+    status.style.display = 'none';
+    status.textContent = '';
+    input.style.color = '';
   }
 }
 
@@ -446,7 +511,7 @@ function restoreTradeSettings() {
   // Restore NAV shield threshold
   const navPct = getNavShieldPct();
   document.getElementById('nav-shield-threshold').value = String(navPct);
-  document.getElementById('nav-shield-reset').style.display = navPct !== DEFAULT_NAV_SHIELD_PCT ? 'inline-block' : 'none';
+  updateNavShieldUiState(navPct === 0);
 }
 
 function toggleTestnet() {
@@ -481,7 +546,8 @@ export {
   slippageKey, slippageOverrideKey, shieldKey, shieldToleranceKey, navShieldKey,
   getSlippageBps, onSlippageChange,
   onSwapShieldToleranceChange, resetSwapShieldTolerance,
-  getNavShieldPct, onNavShieldThresholdChange, resetNavShieldThreshold,
+  getNavShieldPct, onNavShieldThresholdChange, resetNavShieldThreshold, disableNavShieldThreshold,
+  updateNavShieldUiState, isNavShieldDisabled,
   startShieldTimer, restoreTradeSettings,
   toggleTestnet, applyTestnetState, updateChainDisplay,
   loadAiSettings, saveAiSettings, openSettings, toggleAiSettings,

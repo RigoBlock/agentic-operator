@@ -198,4 +198,32 @@ describe("Telegram /navshield command", () => {
     expect(resetMsg).toBeDefined();
     expect(await getNavShieldThreshold(kv, op)).toBeNull();
   });
+
+  it("disables NAV shield on /navshield off", async () => {
+    await createPairedUser(kv);
+    const op = "0xA0F9C380ad1E1be09046319fd907335B2B452B37";
+
+    const app = new Hono<{ Bindings: { KV: KVNamespace; TELEGRAM_BOT_TOKEN: string } }>();
+    app.route("/api/telegram", telegram);
+
+    const { executionCtx, flush } = makeExecutionCtx();
+    const res = await app.request(
+      "/api/telegram/webhook",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(makeWebhookUpdate("/navshield off")),
+      },
+      { KV: kv, TELEGRAM_BOT_TOKEN: "test-token" } as any,
+      executionCtx as any,
+    );
+
+    expect(res.status).toBe(200);
+    await flush();
+
+    const navMsg = sentMessages.find((m) => m.text.includes("disabled"));
+    expect(navMsg).toBeDefined();
+    expect(navMsg!.text).toContain("10 minutes");
+    expect(await getNavShieldThreshold(kv, op)).toBe(0n);
+  });
 });

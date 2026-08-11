@@ -62,6 +62,17 @@ describe("tryFastPathOracleRefresh", () => {
     });
   });
 
+  it("detects 'sync usdc oracle price feed on polygon by selling 0.5 pol'", () => {
+    const result = tryFastPathOracleRefresh(
+      "sync usdc oracle price feed on polygon by selling 0.5 pol",
+      137,
+    );
+    expect(result).toEqual({
+      name: "refresh_oracle_feed",
+      args: { token: "USDC", tokenIn: "POL", tokenOut: "USDC", amount: "0.5" },
+    });
+  });
+
   it("falls through when no amount is present", () => {
     const result = tryFastPathOracleRefresh(
       "sync grg price feed on polygon",
@@ -76,5 +87,13 @@ describe("tryFastPathOracleRefresh", () => {
       137,
     );
     expect(result).toBeNull();
+  });
+
+  it("does not capture 'PRICE' or 'ORACLE' as the token from 'sync usdc oracle price feed'", () => {
+    const result = tryFastPathOracleRefresh(
+      "sync usdc oracle price feed on polygon by selling 0.5 pol",
+      137,
+    );
+    expect(result?.args.token).toBe("USDC");
   });
 });

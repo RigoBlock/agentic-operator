@@ -18,7 +18,8 @@ import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { SETTLEMENT_OVERRIDES_HEADER } from "@x402/core/server";
 
 import { sanitizeError } from "../config.js";
-import { formatOutcomesMarkdown, ExecutionError } from "../services/execution.js";
+import { formatOutcomesMarkdown } from "../services/execution.js";
+import { ExecutionError } from "../services/executionError.js";
 import { runTransactionFlow, type ExecutionHooks, type ExecutionModePreference } from "../services/transactionFlow.js";
 import type { Address } from "viem";
 

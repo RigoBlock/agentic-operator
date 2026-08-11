@@ -7,7 +7,14 @@
  */
 
 import { parseGwei, formatGwei, type PublicClient, type Chain, type Hex, type Address } from "viem";
+import type { Env, RequestContext, TransactionDraft, UnsignedTransaction } from "../types.js";
+import { sanitizeError, ZERO_ADDRESS } from "../config.js";
+import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
+import { getDelegationConfig, getChainDelegation } from "./delegation.js";
+import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
+import { getRpcProvider } from "./rpcClient.js";
 import { decodeRevertData, getRevertDataFromError, extractRevertData } from "./errorDecoder.js";
+import { ExecutionError } from "./executionError.js";
 
 /**
  * Hard caps on gas fees to protect agent wallet balances and the paymaster.
@@ -280,31 +287,181 @@ function parseSimulationRevert(raw: string): string | null {
 }
 
 /**
- * Estimate gas units and EIP-1559 fees for a single transaction in parallel.
+ * Shared transaction finalizer: run the NAV shield and estimate gas.
  *
- * Wraps `eth_estimateGas` and catches simulation reverts, decoding the revert
- * reason via errorDecoder.js and parseSimulationRevert when possible so callers
- * receive a user-friendly error message. Fee estimation is clamped to the chain
- * caps defined in GAS_CAPS.
+ * This is the single place that turns a `TransactionDraft` into a full
+ * `UnsignedTransaction`. For vault-targeted transactions, the NAV shield simulates
+ * the swap via eth_simulateV1 and validates the post-swap unitary value does not
+ * drop more than the allowed threshold. The operator may temporarily disable the
+ * shield; in that case simulation is skipped but gas and fees are still estimated.
+ * Gas units and EIP-1559 fees are estimated from the executor address in one
+ * parallel pass, so every transaction (vault or not) leaves here with a real gas
+ * estimate and bounded fees.
+ *
+ * Throws on any missing or invalid estimate; there is no fallback.
  */
-export async function estimateTransactionGas(
-  publicClient: PublicClient,
-  chainId: number,
-  tx: { account: Address; to: Address; data: Hex; value: bigint },
-): Promise<{ gas: bigint; fees: GasFees }> {
-  // Run both in parallel to save RPC calls.
-  const [gas, fees] = await Promise.all([
-    publicClient.estimateGas(tx).catch((err: unknown) => {
+export async function finalizeTransaction(
+  env: Env,
+  ctx: Pick<RequestContext, "vaultAddress" | "chainId" | "operatorAddress" | "operatorVerified" | "executionMode">,
+  draft: TransactionDraft,
+): Promise<{ tx: UnsignedTransaction; warning?: string }> {
+  const tx: UnsignedTransaction = {
+    ...draft,
+    gas: "0x0",
+    maxFeePerGas: "0x0",
+    maxPriorityFeePerGas: "0x0",
+    navShieldChecked: false,
+  };
+  const publicClient = getRpcProvider(tx.chainId);
+
+  // Determine the operator/owner address for NAV shield threshold lookup.
+  // If the caller didn't prove ownership, we read the on-chain owner.
+  let operatorAddress: Address;
+  if (ctx.operatorAddress) {
+    operatorAddress = ctx.operatorAddress;
+  } else {
+    if (!ctx.vaultAddress || ctx.vaultAddress.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+      throw new ExecutionError(
+        "No operator address provided and no vault address configured for NAV simulation.",
+        "VAULT_NOT_ON_CHAIN",
+      );
+    }
+    try {
+      operatorAddress = await publicClient.readContract({
+        address: ctx.vaultAddress as Address,
+        abi: RIGOBLOCK_VAULT_ABI,
+        functionName: "owner",
+      }) as Address;
+    } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const revertData = getRevertDataFromError(err);
-      const decodedRevert = revertData ? decodeRevertData(revertData) : null;
-      const friendly = decodedRevert || parseSimulationRevert(msg);
-      if (friendly || msg.toLowerCase().includes("reverted") || msg.toLowerCase().includes("revert")) {
-        throw new Error(`Transaction simulation failed — the transaction would revert on-chain.${friendly ? ` ${friendly}` : ""}`);
+      const lower = msg.toLowerCase();
+      if (
+        lower.includes("reverted") ||
+        lower.includes("execution reverted") ||
+        lower.includes("invalid") ||
+        lower.includes("bad data") ||
+        lower.includes("returned no data") ||
+        lower.includes("no data") ||
+        lower.includes("missing revert data") ||
+        lower.includes("contract not found")
+      ) {
+        throw new ExecutionError(
+          `Vault address ${ctx.vaultAddress.slice(0, 6)}…${ctx.vaultAddress.slice(-4)} is not a valid vault on chain ${tx.chainId}. ` +
+          "The address may belong to a vault on another chain, or it may not be a vault contract.",
+          "VAULT_NOT_ON_CHAIN",
+        );
       }
-      throw new Error(`Gas estimation failed: ${msg}`);
-    }),
-    estimateGasFees(publicClient, chainId),
-  ]);
-  return { gas, fees };
+      throw new ExecutionError(
+        `Could not read vault owner for NAV simulation: ${sanitizeError(msg)}`,
+        "RPC_UNAVAILABLE",
+      );
+    }
+  }
+
+  // Determine the transaction executor (sender for simulation / gas estimation).
+  let executor: Address;
+  if (tx.operatorOnly || ctx.executionMode === "manual") {
+    executor = operatorAddress;
+  } else {
+    const config = await getDelegationConfig(env.KV, ctx.vaultAddress!);
+    if (!config || !config.enabled) {
+      throw new ExecutionError(
+        "Delegation not configured. Set up delegation on the vault first.",
+        "DELEGATION_NOT_CONFIGURED",
+      );
+    }
+    executor = config.agentAddress;
+  }
+
+  const txValue = BigInt(tx.value || "0x0");
+
+  // NAV shield only applies when the transaction targets the vault itself.
+  const isVaultTarget = !!ctx.vaultAddress &&
+    ctx.vaultAddress.toLowerCase() !== ZERO_ADDRESS &&
+    tx.to.toLowerCase() === ctx.vaultAddress.toLowerCase();
+
+  let navShieldWarning: string | undefined;
+  if (isVaultTarget) {
+    const storedNavThreshold = env.KV
+      ? await getNavShieldThreshold(env.KV, operatorAddress)
+      : null;
+
+    const navResult = await checkNavImpact(
+      ctx.vaultAddress as Address,
+      tx.data,
+      txValue,
+      tx.chainId,
+      executor,
+      env.KV,
+      storedNavThreshold ?? undefined,
+    );
+
+    if (!navResult.allowed) {
+      if (navResult.code === "TRADE_REVERTS") {
+        const warning = `⚠️ Simulation warning: ${navResult.reason || "transaction may revert on-chain"} — verify token approvals and vault adapter support before signing.`;
+        tx.revertWarning = warning;
+        tx.navShieldChecked = true;
+        return { tx, warning };
+      }
+      throw new ExecutionError(
+        navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
+        "NAV_SHIELD_BLOCKED",
+      );
+    }
+
+    // When the operator intentionally disabled the NAV shield, proceed without a
+    // warning so the execution UI stays normal (they were already warned once).
+    // For other unverified cases, keep the warning but still estimate gas.
+    if (navResult.code === "UNVERIFIED") {
+      navShieldWarning = `⚠️ NAV verification unavailable — could not measure NAV impact atomically (${navResult.reason || "multicall simulation failed"}). Proceeding with gas estimate only.`;
+    }
+
+    tx.navShieldChecked = true;
+  }
+
+  // Estimate gas units and EIP-1559 fees directly from the executor for every transaction.
+  // We use estimateGas (eth_estimateGas) because the agent builds raw calldata, not a
+  // specific contract function with ABI. This single call both validates that the
+  // transaction succeeds and returns the gas limit.
+  let gasEstimate: bigint;
+  let fees: GasFees;
+  try {
+    [gasEstimate, fees] = await Promise.all([
+      publicClient.estimateGas({ account: executor, to: tx.to, data: tx.data, value: txValue }),
+      estimateGasFees(publicClient, tx.chainId),
+    ]);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const lower = msg.toLowerCase();
+
+    // Reverts from eth_estimateGas are trade-level simulation failures.
+    const isRevert =
+      lower.includes("reverted") ||
+      lower.includes("execution reverted") ||
+      lower.includes("would revert");
+
+    if (isRevert) {
+      const revertData = getRevertDataFromError(err);
+      const decoded = revertData ? decodeRevertData(revertData) : null;
+      const friendly = decoded || parseSimulationRevert(msg);
+      throw new ExecutionError(
+        `Transaction simulation failed — the transaction would revert on-chain.${friendly ? ` ${friendly}` : ""}`,
+        "SIMULATION_FAILED",
+      );
+    }
+
+    // Anything else (RPC error, timeout, invalid fee market) is a gas-estimation failure.
+    throw new ExecutionError(`Gas estimation failed: ${sanitizeError(msg)}`, "GAS_ESTIMATION_FAILED");
+  }
+
+  tx.gas = `0x${(gasEstimate + (gasEstimate * 25n) / 100n).toString(16)}`;
+  tx.maxFeePerGas = `0x${fees.maxFeePerGas.toString(16)}` as Hex;
+  tx.maxPriorityFeePerGas = `0x${fees.maxPriorityFeePerGas.toString(16)}` as Hex;
+
+  // Non-vault transactions are not subject to the NAV shield.
+  if (!isVaultTarget) {
+    tx.navShieldChecked = true;
+  }
+
+  return { tx, ...(navShieldWarning ? { warning: navShieldWarning } : {}) };
 }

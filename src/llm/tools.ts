@@ -1250,7 +1250,9 @@ export const TOOL_DEFINITIONS = [
       description:
         "Temporarily set the NAV Shield maximum allowed loss threshold (1%–100%) for 10 minutes. " +
         "The default is 10%. Trades that would reduce the vault's unit price by more than " +
-        "this threshold are blocked. The override auto-resets to the default after 10 minutes.",
+        "this threshold are blocked. The override auto-resets to the default after 10 minutes. " +
+        "To disable the NAV shield entirely, use the web settings panel or Telegram /navshield; " +
+        "it cannot be disabled through chat.",
       parameters: {
         type: "object",
         properties: {

@@ -1969,6 +1969,9 @@ export function tryFastPathSwapShieldToggle(msg: string): FastPathResult | null 
 /**
  * Detect NAV shield threshold commands like:
  *   "set nav shield to 15%" / "nav shield threshold 20%" / "nav shield 15%"
+ *
+ * Disable commands are intentionally NOT routed through this fast-path; the NAV
+ * shield may only be disabled via the web settings panel or Telegram /navshield.
  */
 export function tryFastPathNavShieldThreshold(msg: string): FastPathResult | null {
   const m = msg.toLowerCase().trim();
@@ -2147,13 +2150,17 @@ function tryFastPathCapabilityQuestion(msg: string): string | null {
 export function tryFastPathOracleRefresh(msg: string, chainId: number): FastPathResult | null {
   const lower = msg.toLowerCase();
 
-  // Detect the ERC-20 whose feed is being refreshed.
+  // Detect the ERC-20 whose feed is being refreshed. Be strict so phrases like
+  // "sync usdc oracle price feed" don't accidentally resolve to "PRICE" or "ORACLE".
   let token: string | undefined;
-  const m1 = msg.match(/sync\s+(\w+)\s+price feed/i);
-  const m2 = msg.match(/(?:refresh|update|fix)\s+(?:oracle|price feed|twap|divergence)\s+(?:for\s+)?(\w+)/i);
-  const m3 = msg.match(/(?:oracle|price feed|twap)\s+(?:for\s+)?(\w+)/i);
+  const m1 = msg.match(/sync\s+(\w+)(?:\s+oracle)?\s+(?:price feed|twap|oracle)/i);
+  const m2 = msg.match(/(?:refresh|update|fix|sync)\s+(?:oracle\s+)?(?:price feed|twap|oracle|divergence)\s+for\s+(\w+)/i);
+  const m3 = msg.match(/(?:oracle|price feed|twap)\s+for\s+(\w+)/i);
   token = (m1?.[1] || m2?.[1] || m3?.[1])?.toUpperCase();
-  if (!token) return null;
+
+  // Reject common filler words that can be captured by loose regexes.
+  const invalidTokens = new Set(["PRICE", "FEED", "ORACLE", "TWAP", "DIVERGENCE", "FOR", "ON", "BY", "WITH", "USING", "THE", "A", "AN", "OF", "AND"]);
+  if (!token || invalidTokens.has(token)) return null;
 
   const nativeSymbol = getNativeTokenSymbol(chainId).toUpperCase();
   const isNative = (sym: string) => {
@@ -2331,6 +2338,29 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
 // ── Fast-path: GMX commands ──────────────────────────────────────────
 // Regex-matches well-structured GMX commands to bypass the LLM entirely.
 
+// Common words that should never be treated as a market symbol in the flexible
+// "increase by N ... position" pattern.
+const GMX_MARKET_STOPWORDS = new Set([
+  "INCREASE", "ADD", "BY", "USD", "USDC", "USDT", "LONG", "SHORT", "POSITION",
+  "GMX", "ON", "USING", "TO", "MY", "THE", "WITHOUT", "ADDING", "INCREASING",
+  "NEW", "COLLATERAL", "ALL", "PERPS", "MARKETS", "SHOW", "LIST", "GET", "CHECK",
+]);
+
+/**
+ * Extract a likely market symbol from a GMX command.
+ * Prefers uppercase tokens (e.g., LIT, LIT/USD) and ignores common stopwords.
+ */
+function extractGmxMarketSymbol(m: string): string | null {
+  const upperMatches = [...m.matchAll(/\b([A-Z]{2,8})(?:\/USD[CT]?)?\b/g)];
+  for (const match of upperMatches) {
+    const sym = match[1].toUpperCase();
+    if (!GMX_MARKET_STOPWORDS.has(sym)) {
+      return sym;
+    }
+  }
+  return null;
+}
+
 /**
  * Detect "increase position" commands that should route directly to gmx_increase_position
  * without any intermediate get_markets / get_positions calls.
@@ -2338,25 +2368,58 @@ export function tryFastPathSwap(msg: string): FastPathResult | null {
  * Patterns:
  *   "increase [by] 1500 usd [LIT] [10x] position"
  *   "increase [by] 1500 usd [LIT/USD] [10x] position [on gmx] [using WETH]"
+ *   "increase [my] [long|short] LIT [gmx] position [by] 1500 usd [without adding collateral]"
  *   "add 1500 usd to [LIT] [long] position"
  *   "add to [LIT] position [1500 usd] [10x]"
  */
-function tryFastPathGmxIncrease(msg: string): FastPathResult | null {
+export function tryFastPathGmxIncrease(msg: string): FastPathResult | null {
   const m = msg.trim();
 
-  // "increase [by] N usd [long|short] [MARKET] [Nx] position [on gmx] [using COLLATERAL]"
+  // Phrases like "without adding/increasing/new collateral" mean the user wants to
+  // increase position size without depositing more collateral (leverage rises).
+  // In GMX terms this is sizeDeltaUsd with collateralAmount='0'.
+  const noCollateralPhrase = /\bwithout\s+(?:adding|increasing|new)\s+(?:new\s+)?collateral\b/i.test(m);
+
+  // Pattern A: "increase [my] [long|short] MARKET [gmx] position [by] N usd [without adding collateral]"
+  const posFirstMatch = m.match(
+    /^(?:increase|add(?:\s+to)?)\b(?:\s+(?:my|the))?\s+(long|short)\s+([A-Z]{2,8}(?:\/USD[CT]?)?)\s+(?:gmx\s+)?position\s+(?:by\s+)?([\d.,]+)\s*(?:usd|usdc|usdt)?\b/i,
+  );
+  if (posFirstMatch) {
+    const amount = posFirstMatch[3].replace(/,/g, "");
+    const args: Record<string, unknown> = {
+      market: posFirstMatch[2].toUpperCase().replace(/\/USD[CT]?$/i, ""),
+      isLong: posFirstMatch[1].toLowerCase() === "long",
+      sizeDeltaUsd: amount,
+    };
+    if (noCollateralPhrase) {
+      args.collateralAmount = "0";
+    }
+
+    const leverageMatch = m.match(/(\d+(?:\.\d+)?)\s*x/);
+    if (leverageMatch) args.leverage = leverageMatch[1];
+
+    const collateralMatch = m.match(/using\s+(\w+)/i);
+    if (collateralMatch) args.collateral = collateralMatch[1].toUpperCase();
+
+    return { name: "gmx_increase_position", args };
+  }
+
+  // Pattern B: "increase [by] N usd [long|short] [MARKET] [Nx] position [on gmx] [using COLLATERAL]"
   // Word order is flexible — some users say "long LIT/USD", others say "LIT/USD long".
   const incMatch = m.match(
     /^(?:increase|add)(?:\s+by)?\s+([\d.,]+)\s+(?:usd|usdc|usdt)?\b.*\bposition\b/i,
   );
   if (incMatch) {
-    const args: Record<string, unknown> = {
-      notionalUsd: incMatch[1].replace(/,/g, ""),
-    };
+    const amount = incMatch[1].replace(/,/g, "");
+    const args: Record<string, unknown> = noCollateralPhrase
+      ? { sizeDeltaUsd: amount, collateralAmount: "0" }
+      : { notionalUsd: amount };
 
-    // Extract market symbol — look for a token symbol before or after direction
-    const marketMatch = m.match(/\b([A-Z]{2,8})(?:\/USD[CT]?)?\b/i);
-    if (marketMatch) args.market = marketMatch[1].toUpperCase();
+    // Extract market symbol — look for a token symbol before or after direction.
+    // Uppercase symbols are preferred so we don't accidentally capture the verb
+    // ("increase" / "add") or the word "position".
+    const market = extractGmxMarketSymbol(m);
+    if (market) args.market = market;
 
     // Extract leverage: "10x", "5.5x"
     const leverageMatch = m.match(/(\d+(?:\.\d+)?)\s*x/);

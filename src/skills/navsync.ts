@@ -21,7 +21,7 @@ import type { Address } from "viem";
 import type { StrategySkill, SkillToolDefinition, SkillToolResult } from "./types.js";
 import { getTelegramUserIdByAddress } from "../services/telegramPairing.js";
 import { sendMessage, escapeHtml } from "../services/telegram.js";
-import { executeTxList, formatOutcomesMarkdown } from "../services/execution.js";
+import { executeTxList, formatOutcomesMarkdown, finalizeToolTransaction } from "../services/execution.js";
 import { formatUnits } from "viem";
 import { sanitizeError, resolveChainName } from "../config.js";
 import { getAggregatedNav } from "../services/crosschain.js";
@@ -306,7 +306,16 @@ async function executeNavSync(env: Env, config: NavSyncConfig): Promise<void> {
         description: result.description,
       };
 
-      const [outcome] = await executeTxList(env, [tx], config.vaultAddress);
+      const ctx: Pick<RequestContext, "vaultAddress" | "chainId" | "operatorAddress" | "operatorVerified" | "executionMode"> = {
+        vaultAddress: config.vaultAddress as Address,
+        chainId: src.chainId,
+        operatorAddress: config.operatorAddress as Address,
+        operatorVerified: false,
+        executionMode: "delegated",
+      };
+      const { tx: finalizedTx } = await finalizeToolTransaction(env, ctx, tx);
+
+      const [outcome] = await executeTxList(env, [finalizedTx], config.vaultAddress);
       const srcName = resolveChainName(src.chainId);
       const dstName = resolveChainName(dst.chainId);
 

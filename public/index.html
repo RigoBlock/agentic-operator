@@ -108,12 +108,14 @@
           </div>
           <!-- NAV Shield -->
           <div class="trading-param">
-            <label>NAV Shield <span class="tooltip" data-tooltip="Maximum allowed vault unit-price drop per trade. Default 10%, configurable 1% – 100%. Persistent setting.">ⓘ</span></label>
+            <label>NAV Shield <span class="tooltip" data-tooltip="Maximum allowed vault unit-price drop per trade. Default 10%, configurable 1% – 100%. Use the Disable button to temporarily bypass the shield for 10 minutes (e.g. during a contract oracle bug).">ⓘ</span></label>
             <div class="param-input-wrap">
               <input id="nav-shield-threshold" type="number" min="1" max="100" step="1" value="10" onchange="onNavShieldThresholdChange()" />
               <span>%</span>
               <button id="nav-shield-reset" class="saved-vaults-btn" onclick="resetNavShieldThreshold()" style="display: none;">Reset</button>
+              <button id="nav-shield-disable" class="saved-vaults-btn" onclick="disableNavShieldThreshold()" style="color: var(--error); border-color: var(--error); background: rgba(248,81,73,0.08);">Disable</button>
             </div>
+            <span id="nav-shield-status" style="display: none; font-size: 11px; color: var(--warn);"></span>
           </div>
         </div>
       </div>

@@ -60,7 +60,8 @@ import {
   slippageKey, slippageOverrideKey, shieldKey, shieldToleranceKey, navShieldKey,
   getSlippageBps, onSlippageChange, onSwapShieldToleranceChange,
   resetSwapShieldTolerance, getNavShieldPct, onNavShieldThresholdChange,
-  resetNavShieldThreshold, startShieldTimer, restoreTradeSettings,
+  resetNavShieldThreshold, disableNavShieldThreshold, updateNavShieldUiState, isNavShieldDisabled,
+  startShieldTimer, restoreTradeSettings,
   toggleTestnet, applyTestnetState, updateChainDisplay,
   loadAiSettings, saveAiSettings, openSettings, toggleAiSettings,
   onAiProviderChange, getAiRequestParams,
@@ -136,6 +137,7 @@ window.onSwapShieldToleranceChange = onSwapShieldToleranceChange;
 window.resetSwapShieldTolerance = resetSwapShieldTolerance;
 window.onNavShieldThresholdChange = onNavShieldThresholdChange;
 window.resetNavShieldThreshold = resetNavShieldThreshold;
+window.disableNavShieldThreshold = disableNavShieldThreshold;
 window.restoreTradeSettings = restoreTradeSettings;
 window.updateChainDisplay = updateChainDisplay;
 

@@ -11,7 +11,7 @@
  */
 
 import { Hono } from "hono";
-import type { Env, AppVariables, RequestContext, ExecutionMode } from "../types.js";
+import type { Env, AppVariables, RequestContext, ExecutionMode, UnsignedTransaction } from "../types.js";
 import { executeToolCall, TOOL_NAME_ALIASES, OPERATOR_VERIFIED_TOOLS } from "../llm/client.js";
 import { executeTxList, formatOutcomesMarkdown, finalizeToolTransaction } from "../services/execution.js";
 import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS } from "../llm/tools.js";
@@ -186,7 +186,7 @@ tools.post("/", async (c) => {
       const txList = result.transaction ? [result.transaction] : [];
       const executableTxs = txList.filter(tx => !tx.operatorOnly);
       const outcomes = executableTxs.length > 0
-        ? await executeTxList(c.env, executableTxs, resolvedVaultAddress)
+        ? await executeTxList(c.env, executableTxs as UnsignedTransaction[], resolvedVaultAddress)
         : [];
       const results = outcomes.filter(o => o.result).map(o => o.result!);
       const hasFallback = outcomes.some(o => o.fallbackToManual);
