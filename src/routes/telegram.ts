@@ -1001,8 +1001,10 @@ async function handleMessage(
 
   // Neutralize the last assistant turn if it advertised a pending transaction,
   // so the model doesn't ask the user about a stale confirmation state.
+  // The stored summary says "Awaiting user confirmation (tap Execute)" — match
+  // that as well as the Telegram message text with the emoji button.
   for (let i = conv.messages.length - 1; i >= 0; i--) {
-    if (conv.messages[i].role === "assistant" && /🔔 .*ready\.|Tap ✅ Execute|Trade ready/i.test(conv.messages[i].content)) {
+    if (conv.messages[i].role === "assistant" && /🔔 .*ready\.|Tap ✅ Execute|Trade ready|Awaiting user confirmation|tap Execute/i.test(conv.messages[i].content)) {
       conv.messages[i].content = "A transaction was prepared but not executed; it has been discarded because the user sent a new request.";
       staleTxNote = "The user's previous prepared transaction has been discarded. Treat this as a fresh request.";
       break;
@@ -1708,7 +1710,7 @@ async function updatePendingAssistantMessage(
   const conv = await getConversation(kv, userId);
   if (!conv) return;
   for (let i = conv.messages.length - 1; i >= 0; i--) {
-    if (conv.messages[i].role === "assistant" && /🔔 .*ready\.|Tap ✅ Execute|Trade ready/i.test(conv.messages[i].content)) {
+    if (conv.messages[i].role === "assistant" && /🔔 .*ready\.|Tap ✅ Execute|Trade ready|Awaiting user confirmation|tap Execute/i.test(conv.messages[i].content)) {
       conv.messages[i].content = replacement;
       break;
     }

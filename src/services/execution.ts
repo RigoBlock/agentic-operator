@@ -368,8 +368,11 @@ async function sponsoredAgentTransaction(
   const publicClient = getRpcProvider(chainId);
   const txValue = BigInt(tx.value);
 
-  // Gas and fees were already estimated by prepareTransaction(). We reuse them
-  // so execution is a single broadcast with no duplicate validation.
+  // Gas and fees were already estimated by prepareTransaction() with our caps.
+  // We pass them through so the sponsored path uses the same bounds as direct
+  // broadcast. If Alchemy rejects the fee parameters (e.g. they became stale while
+  // the user was reviewing), we retry once without fee overrides so Alchemy can
+  // estimate fresh UserOp fees — but only as a fallback, never as the default.
   const callGasLimit = BigInt(tx.gas);
   const fees = getTransactionFees(tx, chainId);
 
@@ -379,15 +382,33 @@ async function sponsoredAgentTransaction(
     data: tx.data as Hex,
   }];
 
-  const result = await executeSponsoredCalls(
-    agentAccount,
-    chainId,
-    gasPolicyId,
-    calls,
-    callGasLimit,
-    fees.maxFeePerGas,
-    fees.maxPriorityFeePerGas,
-  );
+  let result: Awaited<ReturnType<typeof executeSponsoredCalls>>;
+  try {
+    result = await executeSponsoredCalls(
+      agentAccount,
+      chainId,
+      gasPolicyId,
+      calls,
+      callGasLimit,
+      fees.maxFeePerGas,
+      fees.maxPriorityFeePerGas,
+    );
+  } catch (firstErr) {
+    const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+    const isFeeRejection = /invalid parameters|fee too low|underpriced|max fee per gas/i.test(firstMsg);
+    if (!isFeeRejection) throw firstErr;
+
+    console.warn(
+      `[execution] Sponsored call rejected with stored fees (${formatGwei(fees.maxFeePerGas)} / ${formatGwei(fees.maxPriorityFeePerGas)} gwei), retrying without fee overrides: ${sanitizeError(firstMsg)}`,
+    );
+    result = await executeSponsoredCalls(
+      agentAccount,
+      chainId,
+      gasPolicyId,
+      calls,
+      callGasLimit,
+    );
+  }
 
   // ── Step 2: Record actual gas spend if we have a receipt ──
   // The paymaster covered the cost, but we still track it against the operator's
