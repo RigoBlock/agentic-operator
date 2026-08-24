@@ -11,11 +11,24 @@ import type { Address, Hex } from "viem";
 export type ExecutionMode = "manual" | "delegated";
 
 // ── Hono context variables (set by middleware, read by routes) ─────────
+export type VerifiedOperatorAuth = {
+  address: string;
+  signature: string;
+  timestamp: number;
+};
+
 export type AppVariables = {
   /** Set to true by x402 middleware when payment is verified */
   x402Paid?: boolean;
   /** Set to true by x402 middleware when operator signature is verified (skips payment) */
   operatorAuthVerified?: boolean;
+  /**
+   * When operatorAuthVerified is true, this carries the verified operator address
+   * and the signature/timestamp that proved it. Routes that need vault ownership
+   * must use these values to call verifyOperatorAuth for the request-specific
+   * vaultAddress, rather than trusting the boolean flag alone.
+   */
+  operatorAuth?: VerifiedOperatorAuth;
 };
 
 // ── Environment bindings ──────────────────────────────────────────────

@@ -82,9 +82,18 @@ function sanitizePendingTransactionMessages(messages: ChatMessage[]): { messages
 
 /**
  * Shared auth gate for POST /api/chat.
- * Returns true when the caller has proven vault ownership, either via the
- * x402 operator-auth middleware (browser) or by providing a valid EIP-191
- * signature in the request body.
+ * Returns the verified operator address and a boolean indicating whether the
+ * caller has proven ownership of the request's vault.
+ *
+ * Two proof paths are accepted:
+ *   1. Body auth: operatorAddress + authSignature + authTimestamp for the
+ *      specific vaultAddress in the body.
+ *   2. Header auth: X-Operator-Address + X-Auth-Signature + X-Auth-Timestamp
+ *      verified by the x402 middleware. The middleware only checks that the
+ *      signature is valid for the header address; ownership of the request's
+ *      vaultAddress must still be verified here.
+ *
+ * A valid x402 payment alone (external agent) does NOT grant operatorVerified.
  */
 async function authenticateChatOperator(
   c: Context<{ Bindings: Env; Variables: AppVariables }>,
@@ -95,12 +104,11 @@ async function authenticateChatOperator(
     vaultAddress?: string;
     chainId: number;
   },
-): Promise<boolean> {
-  const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
-  const isBrowserRequest = c.get("operatorAuthVerified") ?? false;
-  let operatorVerified = isBrowserRequest;
+): Promise<{ operatorVerified: boolean; operatorAddress?: string }> {
+  const hasBodyAuth = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
+  const headerAuth = c.get("operatorAuth");
 
-  if (hasAuthCredentials) {
+  if (hasBodyAuth) {
     await verifyOperatorAuth({
       operatorAddress: body.operatorAddress || "",
       vaultAddress: body.vaultAddress,
@@ -108,10 +116,27 @@ async function authenticateChatOperator(
       authTimestamp: body.authTimestamp || 0,
       preferredChainId: body.chainId,
     });
-    operatorVerified = true;
+    return { operatorVerified: true, operatorAddress: body.operatorAddress };
   }
 
-  return operatorVerified;
+  if (headerAuth && body.vaultAddress) {
+    await verifyOperatorAuth({
+      operatorAddress: headerAuth.address,
+      vaultAddress: body.vaultAddress,
+      authSignature: headerAuth.signature,
+      authTimestamp: headerAuth.timestamp,
+      preferredChainId: body.chainId,
+    });
+    return { operatorVerified: true, operatorAddress: headerAuth.address };
+  }
+
+  // Valid header auth but no vault supplied, or x402-paid external agent.
+  // Expose the verified header address (if any) for identity, but do NOT grant
+  // operatorVerified without an ownership check.
+  return {
+    operatorVerified: false,
+    operatorAddress: headerAuth?.address ?? body.operatorAddress,
+  };
 }
 
 chat.post("/", async (c) => {
@@ -136,7 +161,7 @@ chat.post("/", async (c) => {
       if (!body.vaultAddress) {
         return c.json({ error: "vaultAddress is required to confirm a stored operation" }, 400);
       }
-      const operatorVerified = await authenticateChatOperator(c, body);
+      const { operatorVerified } = await authenticateChatOperator(c, body);
       if (!operatorVerified) {
         throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
       }
@@ -171,18 +196,21 @@ chat.post("/", async (c) => {
     // x402 payment = API access fee (external agents). Operator auth = vault authorization.
     // operatorAuthVerified = operator signature verified by x402 middleware (skips payment).
     //
-    //   x402 + no auth                  → manual mode (unsigned tx data)
-    //   x402 + auth (owner)             → manual or delegated
-    //   operatorAuthVerified + no auth  → manual mode (unsigned tx data)
-    //   operatorAuthVerified + auth     → manual or delegated
-    //   auth only, non-owner            → 403
-    //   no x402, no operatorAuth        → 401
+    //   x402 + no operator auth              → manual mode (unsigned tx data)
+    //   x402 + operator auth (owner)         → manual or delegated
+    //   operatorAuthVerified + owner         → manual or delegated
+    //   operatorAuthVerified + non-owner   → manual mode only (verified identity, but no
+    //                                          ownership of this vault; delegated/operator-only
+    //                                          tools are blocked downstream)
+    //   no x402, no operatorAuth             → 401
     //
     // Delegated execution and vault-tx tool execution ALWAYS require proven vault
     // ownership (operatorVerified).
-    const operatorVerified = await authenticateChatOperator(c, body);
+    const headerAuth = c.get("operatorAuth");
+    const { operatorVerified, operatorAddress: verifiedOperatorAddress } = await authenticateChatOperator(c, body);
 
-    if (!operatorVerified && !c.get("x402Paid")) {
+    const hasVerifiedIdentity = operatorVerified || !!headerAuth || !!c.get("x402Paid");
+    if (!hasVerifiedIdentity) {
       throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
     }
 
@@ -237,7 +265,7 @@ chat.post("/", async (c) => {
     const ctx: RequestContext = {
       vaultAddress: resolvedVaultAddress,
       chainId: body.chainId,
-      operatorAddress: body.operatorAddress as Address | undefined,
+      operatorAddress: (verifiedOperatorAddress ?? body.operatorAddress) as Address | undefined,
       operatorVerified,
       isBrowserRequest,
       executionMode,

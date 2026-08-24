@@ -33,8 +33,16 @@ function createMockKV(): KVNamespace {
 function createApp(kv?: KVNamespace) {
   const app = new Hono<{ Bindings: { KV: KVNamespace }; Variables: Record<string, unknown> }>();
   app.use("*", createX402Middleware());
-  app.post("/api/chat", (c) => c.json({ auth: c.get("operatorAuthVerified") ?? false }));
-  app.get("/api/quote", (c) => c.json({ auth: c.get("operatorAuthVerified") ?? false }));
+  app.post("/api/chat", (c) =>
+    c.json({
+      auth: c.get("operatorAuthVerified") ?? false,
+      opAuth: c.get("operatorAuth"),
+    }));
+  app.get("/api/quote", (c) =>
+    c.json({
+      auth: c.get("operatorAuthVerified") ?? false,
+      opAuth: c.get("operatorAuth"),
+    }));
   app.post("/api/unlisted", (c) => c.json({ ok: true }));
   return { app, env: { KV: kv ?? createMockKV() } };
 }
@@ -47,6 +55,7 @@ describe("operator signature bypass", () => {
   it("sets operatorAuthVerified for protected POST route with valid headers", async () => {
     mockVerifySig.mockResolvedValue(true);
     const { app, env } = createApp();
+    const ts = Date.now();
     const res = await app.request(
       "/api/chat",
       {
@@ -54,7 +63,7 @@ describe("operator signature bypass", () => {
         headers: {
           "x-operator-address": "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
           "x-auth-signature": "0x123",
-          "x-auth-timestamp": String(Date.now()),
+          "x-auth-timestamp": String(ts),
         },
       },
       env,
@@ -62,11 +71,17 @@ describe("operator signature bypass", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as any;
     expect(json.auth).toBe(true);
+    expect(json.opAuth).toEqual({
+      address: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
+      signature: "0x123",
+      timestamp: ts,
+    });
   });
 
   it("sets operatorAuthVerified for protected GET route with valid headers", async () => {
     mockVerifySig.mockResolvedValue(true);
     const { app, env } = createApp();
+    const ts = Date.now();
     const res = await app.request(
       "/api/quote",
       {
@@ -74,7 +89,7 @@ describe("operator signature bypass", () => {
         headers: {
           "x-operator-address": "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
           "x-auth-signature": "0x123",
-          "x-auth-timestamp": String(Date.now()),
+          "x-auth-timestamp": String(ts),
         },
       },
       env,
@@ -82,6 +97,11 @@ describe("operator signature bypass", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as any;
     expect(json.auth).toBe(true);
+    expect(json.opAuth).toEqual({
+      address: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
+      signature: "0x123",
+      timestamp: ts,
+    });
   });
 
   it("returns 401 for invalid signature instead of 402", async () => {

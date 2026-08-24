@@ -132,11 +132,17 @@ tools.post("/", async (c) => {
     const resolvedVaultAddress: Address = (body.vaultAddress || ZERO_ADDRESS) as Address;
 
     // Auth gate — same model as chat.ts
-    const hasAuthCredentials = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
+    // operatorAuthVerified means a valid EIP-191 signature was supplied in headers,
+    // but it does NOT prove ownership of the request's vaultAddress. We must still
+    // call verifyOperatorAuth with the verified header address and the request's
+    // vaultAddress before granting operatorVerified.
+    const hasBodyAuth = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
+    const headerAuth = c.get("operatorAuth");
     const isOperatorAuth = c.get("operatorAuthVerified") ?? false;
-    let operatorVerified = isOperatorAuth;
+    let operatorVerified = false;
+    let verifiedOperatorAddress: string | undefined;
 
-    if (hasAuthCredentials) {
+    if (hasBodyAuth) {
       await verifyOperatorAuth({
         operatorAddress: body.operatorAddress || "",
         vaultAddress: body.vaultAddress || "",
@@ -145,8 +151,25 @@ tools.post("/", async (c) => {
         preferredChainId: body.chainId,
       });
       operatorVerified = true;
+      verifiedOperatorAddress = body.operatorAddress;
+    } else if (headerAuth && body.vaultAddress) {
+      await verifyOperatorAuth({
+        operatorAddress: headerAuth.address,
+        vaultAddress: body.vaultAddress,
+        authSignature: headerAuth.signature,
+        authTimestamp: headerAuth.timestamp,
+        preferredChainId: body.chainId,
+      });
+      operatorVerified = true;
+      verifiedOperatorAddress = headerAuth.address;
     } else if (!c.get("x402Paid") && !isOperatorAuth) {
       throw new AuthError("Authentication required", 401);
+    }
+
+    // If we have a verified header identity but no ownership proof, expose the
+    // address for tool context without granting operator privileges.
+    if (!verifiedOperatorAddress) {
+      verifiedOperatorAddress = headerAuth?.address ?? body.operatorAddress;
     }
 
     // ── Stored-operation confirmation shortcut ──
@@ -196,7 +219,7 @@ tools.post("/", async (c) => {
     const ctx: RequestContext = {
       vaultAddress: resolvedVaultAddress,
       chainId: body.chainId,
-      operatorAddress: body.operatorAddress as Address | undefined,
+      operatorAddress: (verifiedOperatorAddress ?? body.operatorAddress) as Address | undefined,
       operatorVerified,
       isBrowserRequest: isOperatorAuth,
       executionMode,
@@ -221,7 +244,7 @@ tools.post("/", async (c) => {
       const txList = [result.transaction];
       const flowResult = await runTransactionFlow(
         c.env,
-        body.operatorAddress || "",
+        verifiedOperatorAddress || body.operatorAddress || "",
         resolvedVaultAddress,
         txList as UnsignedTransaction[],
         result.message,

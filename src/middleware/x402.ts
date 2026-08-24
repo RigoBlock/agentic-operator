@@ -863,6 +863,11 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
             }
 
             c.set("operatorAuthVerified", true);
+            c.set("operatorAuth", {
+              address: operatorAddress,
+              signature: authSignature,
+              timestamp: ts,
+            });
             setRateLimitHeaders(c, rateLimit.remaining, rateLimit.resetAt);
             return next();
           }
