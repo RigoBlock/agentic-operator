@@ -143,6 +143,8 @@ async function pollTransactionReceipt(txHash, tx, statusEl) {
       });
       if (receipt) {
         const success = receipt.status === '0x1';
+        const explorerUrl = getExplorerUrl(tx.chainId, txHash);
+        const shortHash = `${txHash.slice(0, 10)}…${txHash.slice(-6)}`;
 
         if (success) {
           statusEl.style.color = 'var(--success)';
@@ -150,13 +152,14 @@ async function pollTransactionReceipt(txHash, tx, statusEl) {
           if (meta) {
             statusEl.textContent = `✓ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}`;
           } else {
-            statusEl.textContent = '✓ Transaction confirmed';
+            statusEl.innerHTML = `✓ Transaction confirmed — <a href="${explorerUrl}" target="_blank" rel="noopener">${shortHash} ↗</a>`;
           }
-          // Chat message: human-readable, no block number
+          // Chat message: human-readable with a clickable explorer link
+          // (assistant role renders rich content; system messages are plain text)
           const chatMsg = meta
-            ? `✅ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}${meta.price ? ' (' + meta.price + ')' : ''}`
-            : `✅ Transaction confirmed`;
-          appendMessage('system', chatMsg);
+            ? `✅ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}${meta.price ? ' (' + meta.price + ')' : ''} — [${shortHash}](${explorerUrl})`
+            : `✅ ${tx.description || 'Transaction'} confirmed — [${shortHash}](${explorerUrl})`;
+          appendMessage('assistant', chatMsg);
           // Refresh delegation status (handles chat-based delegation setup)
           window.refreshDelegationStatus();
           // Auto-progress to next strategy step if agent is leading a multi-step flow
@@ -166,8 +169,8 @@ async function pollTransactionReceipt(txHash, tx, statusEl) {
           setTimeout(() => window.autoProgressAfterTx(null), 4500);
         } else {
           statusEl.style.color = 'var(--error)';
-          statusEl.textContent = '✗ Transaction reverted';
-          appendMessage('system', `❌ Transaction reverted — ${txHash}`);
+          statusEl.innerHTML = `✗ Transaction reverted — <a href="${explorerUrl}" target="_blank" rel="noopener">${shortHash} ↗</a>`;
+          appendMessage('assistant', `❌ Transaction reverted — [${shortHash}](${explorerUrl})`);
         }
         // Keep modal open for 4 seconds so user sees the result
         setTimeout(() => {

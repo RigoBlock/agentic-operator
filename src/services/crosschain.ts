@@ -1307,14 +1307,25 @@ export async function buildCrosschainTransfer(params: {
       operatorAddress: params.operatorAddress,
     });
     if (simResult) {
-      // Re-quote with accurate destination fill simulation
-      quote = await getCrosschainQuote(
-        params.srcChainId,
-        params.dstChainId,
-        params.tokenSymbol,
-        bridgeAmount,
-        { recipient: simResult.recipient as Address, message: simResult.message },
-      );
+      // Re-quote with accurate destination fill simulation. If Across cannot
+      // simulate the fill, the destination call would very likely also revert
+      // on-chain — fail with context rather than silently falling back to the
+      // optimistic quote (a deposit that never fills strands funds in escrow).
+      try {
+        quote = await getCrosschainQuote(
+          params.srcChainId,
+          params.dstChainId,
+          params.tokenSymbol,
+          bridgeAmount,
+          { recipient: simResult.recipient as Address, message: simResult.message },
+        );
+      } catch (err) {
+        throw new Error(
+          `Across could not simulate the destination fill on ${chainName(params.dstChainId)} ` +
+          `(the relayer's call into the vault reverted). The bridge would likely fail on-chain. ` +
+          `Details: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       // Rebuild calldata with the accurate outputAmount
       calldata = buildDepositV3Calldata({
         vaultAddress: params.vaultAddress,
@@ -1977,13 +1988,21 @@ export async function buildCrosschainSync(params: {
       operatorAddress: params.operatorAddress,
     });
     if (simResult) {
-      quote = await getCrosschainQuote(
-        srcChainId,
-        dstChainId,
-        tokenSymbol,
-        amount,
-        { recipient: simResult.recipient as Address, message: simResult.message },
-      );
+      try {
+        quote = await getCrosschainQuote(
+          srcChainId,
+          dstChainId,
+          tokenSymbol,
+          amount,
+          { recipient: simResult.recipient as Address, message: simResult.message },
+        );
+      } catch (err) {
+        throw new Error(
+          `Across could not simulate the destination fill on ${chainName(dstChainId)} ` +
+          `(the relayer's call into the vault reverted). The bridge would likely fail on-chain. ` +
+          `Details: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       calldata = buildDepositV3Calldata({
         vaultAddress: params.vaultAddress,
         inputToken: quote.inputToken.address,
