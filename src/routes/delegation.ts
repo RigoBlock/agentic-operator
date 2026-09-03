@@ -34,6 +34,7 @@ import {
 import { getAgentWalletInfo, syncAgentWallet, deleteAgentWallet } from "../services/agentWallet.js";
 import { SUPPORTED_CHAINS } from "../config.js";
 import { checkAgentBalance, checkPendingTxStatus, executeViaDelegation } from "../services/execution.js";
+import { prepareTransaction } from "../services/transactionPrepare.js";
 import { ExecutionError } from "../services/executionError.js";
 import { sanitizeError } from "../config.js";
 import { getTelegramUser, getTelegramUserIdByAddress } from "../services/telegramPairing.js";
@@ -398,8 +399,9 @@ delegation.get("/status", async (c) => {
  * Skips LLM processing entirely — used when the operator has already reviewed
  * and approved the transaction details, so we just broadcast immediately.
  *
- * This is the fast path: simulate → broadcast → wait for receipt.
- * No LLM API calls, no DEX API re-fetches.
+ * The caller-supplied transaction is NOT trusted: before broadcasting it must
+ * target the caller's vault and pass the same preparation safety stack as the
+ * chat/tools flow (target==vault check, NAV shield, gas estimation).
  *
  * Body: { operatorAddress, vaultAddress, chainId, authSignature, authTimestamp, transaction }
  */
@@ -461,17 +463,37 @@ delegation.post("/execute", async (c) => {
       throw new ExecutionError("Delegation not configured. Set up delegation on the vault first.", "DELEGATION_NOT_CONFIGURED");
     }
 
-    tx = {
-      from: delegationConfig.agentAddress,
-      to: body.transaction.to as Address,
-      data: body.transaction.data as Hex,
-      value: body.transaction.value || "0x0",
-      chainId: body.transaction.chainId || body.chainId,
-      gas: body.transaction.gas || "0x0",
-      maxFeePerGas: body.transaction.maxFeePerGas || "0x0",
-      maxPriorityFeePerGas: body.transaction.maxPriorityFeePerGas || "0x0",
-      description: body.transaction.description || "",
-    };
+    // Execution-time safety stack. This route accepts a caller-supplied unsigned
+    // transaction, so before broadcasting we must enforce the same invariants as
+    // the chat/tools flow: the target MUST be the caller's vault, and the tx must
+    // pass the NAV shield + gas estimation in prepareTransaction.
+    if (body.transaction.to.toLowerCase() !== body.vaultAddress.toLowerCase()) {
+      throw new ExecutionError(
+        "Transaction target must be the vault address. Delegated execution cannot call arbitrary contracts.",
+        "TARGET_NOT_ALLOWED",
+        true,
+      );
+    }
+
+    const prepared = await prepareTransaction(
+      c.env,
+      {
+        vaultAddress: body.vaultAddress as Address,
+        chainId: body.chainId,
+        operatorAddress: body.operatorAddress as Address,
+        operatorVerified: true,
+        executionMode: "delegated",
+      },
+      {
+        to: body.transaction.to as Address,
+        data: body.transaction.data as Hex,
+        value: body.transaction.value || "0x0",
+        chainId: body.transaction.chainId || body.chainId,
+        description: body.transaction.description || "",
+      },
+    );
+
+    tx = prepared.tx;
     if (!tx) throw new Error("Transaction not built");
 
     const result = await executeViaDelegation(c.env, tx, body.vaultAddress, body.sponsoredGas);
@@ -497,6 +519,8 @@ delegation.post("/execute", async (c) => {
         SENDER_MISMATCH: 500,
         AGENT_WALLET_ERROR: 502,
         GAS_ESTIMATION_FAILED: 502,
+        PREPARATION_FAILED: 502,
+        VAULT_ADDRESS_REQUIRED: 400,
         SPONSORED_FAILED: 502,
         EXECUTION_FAILED: 502,
         RPC_UNAVAILABLE: 502,

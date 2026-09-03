@@ -27,6 +27,14 @@ const REQUIRED_TOOLS = [
   "gmx_claim_funding_fees",
   "gmx_get_markets",
   "gmx_increase_position",
+  // Hyperliquid perpetuals (HyperEVM)
+  "hyperliquid_get_positions",
+  "hyperliquid_get_markets",
+  "hyperliquid_deposit",
+  "hyperliquid_limit_order",
+  "hyperliquid_cancel_order",
+  "hyperliquid_usd_class_transfer",
+  "hyperliquid_spot_send",
   // Uniswap LP
   "get_pool_info",
   "initialize_pool",

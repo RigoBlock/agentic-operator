@@ -73,6 +73,15 @@ async function createPairedUser(kv: KVNamespace) {
   await verifyPairingCode(kv, code, 123456, "testuser");
 }
 
+function makeWebhookHeaders(): Record<string, string> {
+  // Matches the mocked getWebhookSecret() in the vi.mock block above — the
+  // webhook handler now rejects updates whose secret token does not match.
+  return {
+    "content-type": "application/json",
+    "x-telegram-bot-api-secret-token": "test-secret",
+  };
+}
+
 function makeWebhookUpdate(text: string): object {
   return {
     update_id: 1,
@@ -106,7 +115,7 @@ describe("Telegram /navshield command", () => {
       "/api/telegram/webhook",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: makeWebhookHeaders(),
         body: JSON.stringify(makeWebhookUpdate("/navshield 90%")),
       },
       { KV: kv, TELEGRAM_BOT_TOKEN: "test-token" } as any,
@@ -136,7 +145,7 @@ describe("Telegram /navshield command", () => {
       "/api/telegram/webhook",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: makeWebhookHeaders(),
         body: JSON.stringify(makeWebhookUpdate("/navshield@RigoblockBot 50%")),
       },
       { KV: kv, TELEGRAM_BOT_TOKEN: "test-token" } as any,
@@ -167,7 +176,7 @@ describe("Telegram /navshield command", () => {
       "/api/telegram/webhook",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: makeWebhookHeaders(),
         body: JSON.stringify(makeWebhookUpdate("/navshield 80%")),
       },
       { KV: kv, TELEGRAM_BOT_TOKEN: "test-token" } as any,
@@ -184,7 +193,7 @@ describe("Telegram /navshield command", () => {
       "/api/telegram/webhook",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: makeWebhookHeaders(),
         body: JSON.stringify(makeWebhookUpdate("/navshield reset")),
       },
       { KV: kv, TELEGRAM_BOT_TOKEN: "test-token" } as any,
@@ -211,7 +220,7 @@ describe("Telegram /navshield command", () => {
       "/api/telegram/webhook",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: makeWebhookHeaders(),
         body: JSON.stringify(makeWebhookUpdate("/navshield off")),
       },
       { KV: kv, TELEGRAM_BOT_TOKEN: "test-token" } as any,

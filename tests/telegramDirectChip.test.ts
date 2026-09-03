@@ -12,6 +12,28 @@ describe("parseTelegramDirectChip", () => {
     expect(result).toEqual({ type: "tool", toolName: "gmx_get_markets", args: {} });
   });
 
+  it("maps Refresh Hyperliquid positions to hyperliquid_get_positions", () => {
+    const result = parseTelegramDirectChip("Refresh Hyperliquid positions");
+    expect(result).toEqual({ type: "tool", toolName: "hyperliquid_get_positions", args: {} });
+  });
+
+  it("maps Show Hyperliquid markets to hyperliquid_get_markets", () => {
+    const result = parseTelegramDirectChip("Show Hyperliquid markets");
+    expect(result).toEqual({ type: "tool", toolName: "hyperliquid_get_markets", args: {} });
+  });
+
+  it("returns a direct reply for Deposit USDC to Hyperliquid", () => {
+    const result = parseTelegramDirectChip("Deposit USDC to Hyperliquid");
+    expect(result?.type).toBe("reply");
+    expect((result as { text: string }).text).toContain("deposit 500 usdc to hyperliquid");
+  });
+
+  it("returns a direct reply for Cancel Hyperliquid order", () => {
+    const result = parseTelegramDirectChip("Cancel Hyperliquid order");
+    expect(result?.type).toBe("reply");
+    expect((result as { text: string }).text).toContain("oid");
+  });
+
   it("returns a direct reply for Open new position", () => {
     const result = parseTelegramDirectChip("Open new position");
     expect(result?.type).toBe("reply");

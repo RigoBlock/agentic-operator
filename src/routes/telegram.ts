@@ -75,6 +75,7 @@ import {
   getTelegramUserIdByAddress,
 } from "../services/telegramPairing.js";
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
+import { isDevEscapeHatchEnabled } from "../services/devMode.js";
 import { getVaultInfo } from "../services/vault.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
 import type { TelegramVaultLink } from "../types.js";
@@ -225,7 +226,7 @@ export async function deleteAllPendingTxKeys(kv: KVNamespace, userId: string | n
 
 /**
  * Parse a suggestion-chip label to see if it should bypass the LLM entirely.
- * Returns a direct action (tool invocation or static reply) for known GMX chips.
+ * Returns a direct action (tool invocation or static reply) for known chips.
  */
 export function parseTelegramDirectChip(label: string):
   | { type: "tool"; toolName: string; args: Record<string, unknown> }
@@ -239,6 +240,31 @@ export function parseTelegramDirectChip(label: string):
   }
   if (lower === "show gmx markets") {
     return { type: "tool", toolName: "gmx_get_markets", args: {} };
+  }
+  if (lower === "refresh hyperliquid positions") {
+    return { type: "tool", toolName: "hyperliquid_get_positions", args: {} };
+  }
+  if (lower === "show hyperliquid markets") {
+    return { type: "tool", toolName: "hyperliquid_get_markets", args: {} };
+  }
+
+  // Hyperliquid actions that need parameters — reply with a concrete template.
+  if (lower === "deposit usdc to hyperliquid") {
+    return {
+      type: "reply",
+      text:
+        "To deposit USDC into Hyperliquid (this also activates a new Core account), type:\n" +
+        "• <code>deposit 500 usdc to hyperliquid</code>",
+    };
+  }
+  if (lower === "cancel hyperliquid order") {
+    return {
+      type: "reply",
+      text:
+        "To cancel a Hyperliquid order, type:\n" +
+        "<code>cancel my BTC order &lt;oid&gt; on hyperliquid</code>\n" +
+        "You can get the order id (oid) from your positions report.",
+    };
   }
 
   // Opening a position requires parameters we can't collect from an inline button.
@@ -342,16 +368,24 @@ telegram.post("/webhook", async (c) => {
     return c.json({ error: "Telegram not configured" }, 503);
   }
 
-  // Verify the webhook secret (prevents forged requests even if bot token leaks)
+  // Verify the webhook secret. The webhook URL is publicly guessable, so without
+  // this check anyone could forge updates and impersonate a paired user (chat as
+  // them + delegated trade execution in autonomous mode). Fail closed:
+  //   - secret configured + header mismatch/missing  → 401, update dropped
+  //   - no secret configured                        → 503, update dropped
+  //   - TELEGRAM_ALLOW_UNAUTHENTICATED_WEBHOOK=1 with APP_ENV=development
+  //     → process with loud warning (local-dev escape hatch; the APP_ENV gate
+  //       lives in devMode.ts and cannot be bypassed by the flag alone)
   const expected = await getWebhookSecret(c.env);
   if (expected) {
     const received = c.req.header("x-telegram-bot-api-secret-token") || "";
     if (received !== expected) {
       // Secret mismatch means the webhook was registered without a secret (or the
       // secret rotated). Re-register with the correct secret in the background so
-      // future updates arrive with the correct token.
+      // future updates arrive with the correct token — but NEVER process a
+      // request whose secret token does not match: that is a forged update.
       const webhookUrl = `${new URL(c.req.url).origin}/api/telegram/webhook`;
-      console.warn(`[telegram] Webhook secret mismatch — re-registering ${webhookUrl} (processing update anyway)`);
+      console.warn(`[telegram] Webhook secret mismatch — re-registering ${webhookUrl} and REJECTING update`);
       c.executionCtx.waitUntil(
         Promise.all([
           setWebhook(token, webhookUrl, expected)
@@ -360,11 +394,20 @@ telegram.post("/webhook", async (c) => {
           c.env.KV.put(WEBHOOK_URL_KV_KEY, webhookUrl),
         ]),
       );
-      // IMPORTANT: Do NOT drop the update — process it below. The bot token itself
-      // already authenticates this webhook URL (only Telegram knows it). Dropping
-      // updates on secret mismatch causes complete bot silence when the webhook was
-      // registered without a secret or the secret rotated.
+      return c.json({ error: "Invalid webhook secret" }, 401);
     }
+  } else if (isDevEscapeHatchEnabled("TELEGRAM_ALLOW_UNAUTHENTICATED_WEBHOOK", c.env)) {
+    console.warn(
+      "[telegram] INSECURE: processing webhook update without secret verification " +
+      "(APP_ENV=development + TELEGRAM_ALLOW_UNAUTHENTICATED_WEBHOOK=1). " +
+      "Set TELEGRAM_WEBHOOK_SECRET outside local dev.",
+    );
+  } else {
+    console.error(
+      "[telegram] No webhook secret configured — refusing to process unauthenticated webhook update. " +
+      "Set TELEGRAM_WEBHOOK_SECRET (or TELEGRAM_ALLOW_UNAUTHENTICATED_WEBHOOK=1 for local dev only).",
+    );
+    return c.json({ error: "Webhook secret not configured" }, 503);
   }
 
   let update: TgUpdate;
@@ -1452,6 +1495,7 @@ async function handleCallbackQuery(
         requestEnv,
         operationId,
         vault.address,
+        vault.operatorAddress || user?.operatorAddress,
         requestEnv.requestCache,
         async (idx, total, soFar) => {
           if (total > 1) {

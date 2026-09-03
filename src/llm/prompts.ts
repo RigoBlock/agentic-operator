@@ -14,6 +14,7 @@
 export type DomainKey =
   | "swap"
   | "gmx"
+  | "hyperliquid"
   | "lp"
   | "bridge"
   | "staking"
@@ -37,9 +38,12 @@ function detectDomainsFromMessage(message: string): Set<DomainKey> {
     domains.add("swap");
   }
 
-  // GMX perpetuals — keep detection narrow. Avoid generic words like "position"
-  // or "margin" that appear in normal spot/LP conversations.
-  if (/\b(long|short|perp|perpetual|leverage|\dx|gmx|funding fee|stop.?loss|take.?profit)\b/.test(msg)) {
+  // Hyperliquid perpetuals — requires the explicit "hyperliquid"/"hyperEVM" keyword
+  // so generic perp phrases keep flowing to GMX. When matched, suppress the GMX
+  // domain: the user named their protocol.
+  if (/\b(hyperliquid|hyperevm|hyper\s*evm|hypercore|hyper\s*core)\b/.test(msg)) {
+    domains.add("hyperliquid");
+  } else if (/\b(long|short|perp|perpetual|leverage|\dx|gmx|funding fee|stop.?loss|take.?profit)\b/.test(msg)) {
     domains.add("gmx");
   }
 
@@ -143,6 +147,12 @@ export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
     "gmx_decrease_position", "gmx_increase_position",
     "gmx_get_positions", "gmx_cancel_order", "gmx_update_order",
     "gmx_claim_funding_fees", "gmx_get_markets",
+  ],
+  hyperliquid: [
+    "hyperliquid_get_positions", "hyperliquid_get_markets",
+    "hyperliquid_deposit", "hyperliquid_limit_order",
+    "hyperliquid_cancel_order", "hyperliquid_usd_class_transfer",
+    "hyperliquid_spot_send",
   ],
   lp: [
     "get_pool_info", "initialize_pool", "add_liquidity", "remove_liquidity",
@@ -380,6 +390,42 @@ GMX INTENT PARSING:
 - "withdraw 100 USDC collateral from my ETH long" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="0", collateralDeltaAmount="100"
 - "withdraw my PnL from ETH long" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="0", collateralDeltaAmount="<unrealized PnL converted to collateral token units>" — if you don't know the exact amount, call gmx_get_positions first to read it
 - "set stop loss on ETH long at $3000" → gmx_decrease_position: market="ETH", isLong=true, sizeDeltaUsd="all", orderType="stop_loss", triggerPrice="3000"`,
+
+  hyperliquid: `HYPERLIQUID PERPETUALS (HyperEVM only):
+- Hyperliquid runs on HyperEVM (chain 999). If the vault is on another chain, auto-switch.
+- USDC ONLY: deposits, withdrawals and margin are all USDC. Never use swap tools for Hyperliquid requests.
+- When the user mentions "hyperliquid", "hyperEVM", or "hypercore", ALWAYS use a hyperliquid_ tool. NEVER use GMX or swap tools for these requests, even if the message says "long"/"short"/"position".
+
+TOOL SELECTION — CRITICAL:
+- VIEW account value (perp + spot), balances, open positions and orders → hyperliquid_get_positions
+  CRITICAL: when the user ONLY asks to view/check/show positions or the account, call hyperliquid_get_positions AND STOP.
+- LIST available markets and prices → hyperliquid_get_markets
+- DEPOSIT USDC into Hyperliquid (also ACTIVATES a new Core account) → hyperliquid_deposit
+- OPEN / INCREASE / DECREASE / CLOSE a position → hyperliquid_limit_order (single tool for all)
+- CANCEL an open order → hyperliquid_cancel_order
+- WITHDRAW from Hyperliquid (TWO steps, always in this order):
+  1. hyperliquid_usd_class_transfer — perp margin → Core spot
+  2. hyperliquid_spot_send — Core spot → vault on HyperEVM
+
+POSITION ACTIONS (all via hyperliquid_limit_order):
+- OPEN or INCREASE: side="buy" (long) or side="sell" (short) + size (in base units) or notionalUsd.
+- DECREASE: reduceOnly=true (or size="50%") + side opposite to the position (long→sell, short→buy) + size.
+- CLOSE fully: close=true + coin — the backend resolves the full size and direction.
+- Limit vs market: an explicit price makes it a resting GTC limit order; WITHOUT a price the order fills
+  immediately as an IOC bounded by 1% slippage (market-like). Use tif="ioc"/"gtc"/"alo" to override.
+- LEVERAGE: Hyperliquid uses CROSS margin — collateral is global to the perp account, not pledged per
+  position. There is no leverage parameter: size relative to the account value determines effective
+  leverage (the positions report shows declared per-position leverage and global account leverage).
+
+INTENT PARSING:
+- "deposit 500 usdc to hyperliquid" → hyperliquid_deposit: amount="500"
+- "long 0.5 BTC on hyperliquid" → hyperliquid_limit_order: coin="BTC", side="buy", size="0.5"
+- "buy $3000 of ETH on hyperliquid" → hyperliquid_limit_order: coin="ETH", side="buy", notionalUsd="3000"
+- "close my BTC long on hyperliquid" → hyperliquid_limit_order: coin="BTC", close=true
+- "halve my ETH short on hyperliquid" → hyperliquid_limit_order: coin="ETH", size="50%"
+- "sell 0.1 BTC at 70000 on hyperliquid" → hyperliquid_limit_order: coin="BTC", side="sell", size="0.1", price="70000"
+- "cancel my BTC order 12345678 on hyperliquid" → hyperliquid_cancel_order: coin="BTC", orderId=12345678
+- "withdraw 250 usdc from hyperliquid" → hyperliquid_usd_class_transfer: amount="250", then tell the user to follow with the spot-send step (hyperliquid_spot_send: amount="250")`,
 
   lp: `UNISWAP V4 LP WORKFLOW:
 Ask the user for pool details or a pool ID, then call get_pool_info to discover the exact pool key.

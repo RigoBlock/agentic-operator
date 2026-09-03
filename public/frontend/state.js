@@ -60,7 +60,7 @@ export function setDelegationState(v) { delegationState = v; }
 // ── Constants ─────────────────────────────────────────────────────────
 export const CHAIN_NAMES = {
   1: 'Ethereum', 8453: 'Base', 42161: 'Arbitrum', 10: 'Optimism',
-  137: 'Polygon', 56: 'BNB Chain', 130: 'Unichain', 11155111: 'Sepolia',
+  137: 'Polygon', 56: 'BNB Chain', 130: 'Unichain', 999: 'HyperEVM', 11155111: 'Sepolia',
 };
 
 export const MAINNET_CHAINS_LIST = [
@@ -71,6 +71,7 @@ export const MAINNET_CHAINS_LIST = [
   { id: 137, name: 'Polygon' },
   { id: 56, name: 'BNB Chain' },
   { id: 130, name: 'Unichain' },
+  { id: 999, name: 'HyperEVM' },
 ];
 
 export const TESTNET_CHAINS_LIST = [
@@ -215,6 +216,7 @@ export function getExplorerUrl(chainId, txHash) {
     137: 'https://polygonscan.com/tx/',
     56: 'https://bscscan.com/tx/',
     130: 'https://uniscan.xyz/tx/',
+    999: 'https://hyperevmscan.io/tx/',
     11155111: 'https://sepolia.etherscan.io/tx/',
   };
   return (explorers[chainId] || 'https://etherscan.io/tx/') + txHash;

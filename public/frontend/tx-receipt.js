@@ -215,7 +215,7 @@ async function pollPendingTx(r, swapMeta, statusEl) {
   if (!hash || hash === '0x') return;
 
   // L2s and BSC have sub-second blocks — poll faster
-  const fastChains = new Set([10, 42161, 8453, 130, 56, 84532]);
+  const fastChains = new Set([10, 42161, 8453, 130, 56, 999, 84532]);
   const intervalMs = fastChains.has(r.chainId) ? 1000 : 3000;
   const maxAttempts = fastChains.has(r.chainId) ? 15 : 20;
   let attempts = 0;

@@ -14,6 +14,7 @@ import {
   bsc,
   polygon,
   unichain,
+  hyperliquid,
   sepolia,
   baseSepolia,
 } from "viem/chains";
@@ -25,6 +26,7 @@ const chainMap: Record<number, Chain> = {
   56: bsc,
   130: unichain,
   137: polygon,
+  999: hyperliquid,
   8453: base,
   42161: arbitrum,
   11155111: sepolia,
@@ -40,6 +42,7 @@ export const SUPPORTED_CHAINS = [
   { id: 137, name: "Polygon", shortName: "polygon" },
   { id: 56, name: "BNB Chain", shortName: "bsc" },
   { id: 130, name: "Unichain", shortName: "unichain" },
+  { id: 999, name: "HyperEVM", shortName: "hyperevm" },
 ];
 
 /** Testnet chains (only shown when testnet mode is on) */
@@ -81,7 +84,7 @@ export function resolveChainName(chainId: number): string {
 
 /**
  * Alchemy network slugs for each chain.
- * Chains not listed here use their default public RPC.
+ * Chains not listed here use their default public RPC (see PUBLIC_RPC_URLS).
  */
 export const ALCHEMY_NETWORK: Record<number, string> = {
   1: "eth-mainnet",
@@ -89,11 +92,15 @@ export const ALCHEMY_NETWORK: Record<number, string> = {
   56: "bnb-mainnet",
   130: "unichain-mainnet",
   137: "polygon-mainnet",
+  999: "hyperliquid-mainnet",
   8453: "base-mainnet",
   42161: "arb-mainnet",
   11155111: "eth-sepolia",
   84532: "base-sepolia",
 };
+
+/** Chains without Alchemy support that use a public RPC instead (no API key). */
+const PUBLIC_RPC_URLS: Record<number, string> = {};
 
 /** Reads ALCHEMY_API_KEY from the active Cloudflare Worker env (set per request
  *  via AsyncLocalStorage) and falls back to `process.env` for tests/local scripts.
@@ -103,6 +110,9 @@ export const ALCHEMY_NETWORK: Record<number, string> = {
 
 /** Get the alchemy RPC URL for a chain */
 export function getRpcUrl(chainId: number): string {
+  const publicUrl = PUBLIC_RPC_URLS[chainId];
+  if (publicUrl) return publicUrl;
+
   const alchemyKey = getEnv()?.ALCHEMY_API_KEY ?? process.env.ALCHEMY_API_KEY;
 
   if (!alchemyKey) {
@@ -133,6 +143,7 @@ export const MIN_BALANCE: Record<number, bigint> = {
   137:      50_000_000_000_000_000n, // 0.05 POL    — Polygon
   8453:     1_000_000_000_000n,      // 0.000001 ETH — Base
   42161:    1_000_000_000_000n,      // 0.000001 ETH — Arbitrum
+  999:      1_000_000_000_000_000n,  // 0.001 HYPE — HyperEVM
   // Testnets
   11155111: 500_000_000_000_000n,    // 0.0005 ETH  — Sepolia
   84532:    1_000_000_000_000n,      // 0.000001 ETH — Base Sepolia
@@ -147,6 +158,7 @@ export const EXPLORER_TX_URL: Record<number, string> = {
   137: "https://polygonscan.com/tx/",
   8453: "https://basescan.org/tx/",
   42161: "https://arbiscan.io/tx/",
+  999: "https://hyperevmscan.io/tx/",
   11155111: "https://sepolia.etherscan.io/tx/",
   84532: "https://sepolia.basescan.org/tx/",
 };
@@ -154,7 +166,7 @@ export const EXPLORER_TX_URL: Record<number, string> = {
 /** Native token symbol per chain. Used to derive wrapped-native mappings dynamically. */
 export const NATIVE_TOKEN: Record<number, string> = {
   1: "ETH", 10: "ETH", 130: "ETH", 8453: "ETH", 42161: "ETH",
-  56: "BNB", 137: "POL",
+  56: "BNB", 137: "POL", 999: "HYPE",
 };
 
 /** Get the native token symbol for a chain (e.g., "ETH", "BNB", "POL"). */
@@ -248,6 +260,12 @@ export const TOKEN_MAP: Record<number, Record<string, `0x${string}`>> = {
     UNI: "0xFa7F8980b0f1E64A2062791cc3b0871572f1F7f0",
     XAUT: "0x40461291347e1eCbb09499F3371D3f17f10d7159",
     GRG: "0x7F4638A58C0615037deCc86f1daE60E55fE92874",
+  },
+  999: {
+    // HyperEVM (Hyperliquid L1) — USDC-only pool support per AHyperliquid
+    HYPE: "0x0000000000000000000000000000000000000000",
+    WHYPE: "0x5555555555555555555555555555555555555555",
+    USDC: "0xb88339CB7199b77E23DB6E890353E22632Ba630f",
   },
   11155111: {
     // Sepolia Testnet

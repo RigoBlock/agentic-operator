@@ -37,6 +37,7 @@ import { getTwapEvents } from "./skills/twap.js";
 import { processChat } from "./llm/client.js";
 import { ensureWebhookRegistered, getWebhookSecret } from "./services/telegram.js";
 import { withEnv } from "./services/envContext.js";
+import { validateEnvironmentConfig } from "./services/devMode.js";
 import type { Address } from "viem";
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
@@ -64,6 +65,18 @@ app.use("*", async (c, next) => {
     "Content-Security-Policy",
     "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https:; font-src 'self';"
   );
+});
+
+// Fail-closed deployment validation: a dev escape-hatch variable set without
+// APP_ENV=development poisons every response with a 500 so the misconfiguration
+// is fixed immediately rather than left dormant in production secrets.
+app.use("*", async (c, next) => {
+  const configError = validateEnvironmentConfig(c.env);
+  if (configError) {
+    console.error(`[security] ${configError}`);
+    return c.json({ error: "Invalid deployment configuration", detail: configError }, 500);
+  }
+  await next();
 });
 
 // Initialise token resolver KV on every request

@@ -211,6 +211,7 @@ export async function runTransactionFlow(
     vaultAddress,
     baseReply,
     transactions,
+    operatorAddress,
   );
 
   await hooks.requestConfirmation(transactions, { reply: baseReply });

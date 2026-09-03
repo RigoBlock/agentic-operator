@@ -23,6 +23,7 @@ vi.mock("@account-kit/infra", () => ({
   sepolia: { id: 11155111, name: "Sepolia", rpcUrls: { alchemy: { http: ["https://eth-sepolia.g.alchemy.com/v2"] } } },
   baseSepolia: { id: 84532, name: "Base Sepolia", rpcUrls: { alchemy: { http: ["https://base-sepolia.g.alchemy.com/v2"] } } },
   unichainMainnet: { id: 130, name: "Unichain", rpcUrls: { alchemy: { http: ["https://unichain-mainnet.g.alchemy.com/v2"] } } },
+  hyperliquid: { id: 999, name: "HyperEVM", rpcUrls: { alchemy: { http: ["https://hyperliquid-mainnet.g.alchemy.com/v2"] } } },
 }));
 
 vi.mock("@account-kit/wallet-client", () => ({

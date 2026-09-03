@@ -135,6 +135,9 @@ describe("execution validation invariants", () => {
       "0x13b4312f": "createIncreaseOrder(...)",                // GMX
       "0xdd5baad2": "updateOrder(...)",                        // GMX
       "0x770d096f": "depositV3(...)",                          // Across bridge
+      "0x2b2dfd2c": "deposit(uint256,uint32)",                 // AHyperliquid — bridge USDC to Core
+      "0xc23c545a": "depositFor(address,uint256,uint32)",      // AHyperliquid — explicit recipient
+      "0x17938e13": "sendRawAction(bytes)",                    // AHyperliquid — CoreWriter actions
       "0x1c58db4f": "wrapETH()",                                // AUniswap wrap native
       "0x49616997": "unwrapWETH9(uint256)",                     // AUniswap unwrap native
       "0xa694fc3a": "stake(uint256)",                          // GRG staking

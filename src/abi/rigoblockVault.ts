@@ -421,6 +421,14 @@ export const ALLOWED_VAULT_SELECTORS = {
   createDecreaseOrder: "0xe478512e" as `0x${string}`,
   createIncreaseOrder: "0x13b4312f" as `0x${string}`,
   updateOrder: "0xdd5baad2" as `0x${string}`,
+  // ── AHyperliquid Adapter (Hyperliquid on HyperEVM, USDC-only perps) ──
+  // deposit(uint256,uint32)                — bridge EVM USDC into Core perp account (activates account)
+  // depositFor(address,uint256,uint32)     — explicit-recipient variant (recipient must be the vault)
+  // sendRawAction(bytes)                   — CoreWriter actions: limit orders, spot send,
+  //                                          USD-class transfer (perp→spot), order cancels
+  hlDeposit: "0x2b2dfd2c" as `0x${string}`,
+  hlDepositFor: "0xc23c545a" as `0x${string}`,
+  hlSendRawAction: "0x17938e13" as `0x${string}`,
   // ── AIntents Adapter (cross-chain) ──
   depositV3: "0x770d096f" as `0x${string}`,
   // ── AUniswap Adapter (wrap/unwrap native ↔ wrapped-native) ──

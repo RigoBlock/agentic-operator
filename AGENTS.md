@@ -168,6 +168,20 @@ Natural-language interface. Returns `reply`, optional `transaction`/`transaction
 
 ---
 
+## Hyperliquid (HyperEVM, USDC-Only)
+
+Smart pools trade on Hyperliquid Core through the `AHyperliquid` vault adapter (`deposit` / `depositFor` / `sendRawAction`). The integration is **USDC-only**: on HyperEVM the pool base token must be USDC and only USDC can be deposited or withdrawn. Tools: `hyperliquid_get_positions`, `hyperliquid_get_markets`, `hyperliquid_deposit`, `hyperliquid_limit_order`, `hyperliquid_cancel_order`, `hyperliquid_usd_class_transfer`, `hyperliquid_spot_send`.
+
+Semantics you must know:
+
+- **Deposit** (`hyperliquid_deposit`) bridges EVM USDC (6 decimals) into the Core perp account (`destinationDex = 0`) and **activates the Core account** if it doesn't exist yet.
+- **Withdrawal is always two steps**: `hyperliquid_usd_class_transfer` moves USDC perp margin → Core spot (perp USDC, 6 decimals), then `hyperliquid_spot_send` bridges Core spot USDC (8-decimal core wei) back to HyperEVM. Spot→perp transfers are rejected by the adapter (perps-only).
+- **Trading** = CoreWriter limit orders behind `sendRawAction`: asset ids `< 10000` (core perps) only, outcome/spot markets rejected. An order without an explicit price is a marketable IOC bounded by 1% slippage; `reduceOnly` orders (or `close=true`) decrease/close positions. Orders can be cancelled by oid or cloid.
+- **Margin is cross/global**: collateral is not pledged per position. The positions report shows declared per-position leverage; account-wide leverage = total open notional / perp account value.
+- **Account value** (perp account value, Core spot USDC balance, account activation) is read from HyperEVM precompiles — the same values the vault NAV uses. **Per-position state** (entry/mark/liq prices, unrealized PnL, open orders) comes from the Hyperliquid Core info API (`api.hyperliquid.xyz/info`) and is unavailable on HyperEVM precompiles.
+- **Cross-chain bridging to/from HyperEVM** (transfer/sync/rebalance via Across) is enabled for **USDC only** — mirroring the on-chain `CrosschainLib` validation where `HYPER_USDC` is the sole bridgeable token on chain 999. Uses the dedicated HyperEVM MulticallHandler and the Across HyperEVM SpokePool.
+- After a deposit or spot-send, NAV-sensitive vault operations are locked for the ~128s HyperCore settlement window; the agent is also blocked from trading during that window on-chain.
+
 ## Supported Chains
 
 | Chain | ID | Short name |
@@ -179,6 +193,7 @@ Natural-language interface. Returns `reply`, optional `transaction`/`transaction
 | Polygon | 137 | `polygon` |
 | BNB Chain | 56 | `bsc` |
 | Unichain | 130 | `unichain` |
+| HyperEVM | 999 | `hyperevm` |
 
 ---
 
@@ -186,7 +201,7 @@ Natural-language interface. Returns `reply`, optional `transaction`/`transaction
 
 `/api/chat` is an **atomic operations provider**. Each request handles one operation.
 
-**The chat endpoint handles one per request:** spot swaps, GMX perpetuals, Uniswap v4 LP, GRG staking, cross-chain bridge/transfer/sync, vault info, delegation setup/revoke/status, TWAP orders, strategies, chain switch.
+**The chat endpoint handles one per request:** spot swaps, GMX perpetuals, Hyperliquid perpetuals, Uniswap v4 LP, GRG staking, cross-chain bridge/transfer/sync, vault info, delegation setup/revoke/status, TWAP orders, strategies, chain switch.
 
 **It does NOT handle:** multi-step orchestration, historical data, APR/APY estimates, lending protocols, arbitrary on-chain reads, or token approvals (the vault adapter handles approvals internally).
 

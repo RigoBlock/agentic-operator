@@ -37,7 +37,7 @@ function appendMessage(role, content, extras, isRestore) {
   const div = document.createElement('div');
   div.className = `msg ${role}`;
 
-  if (role === 'assistant' && (content || extras?.gmxPositions?.length > 0)) {
+  if (role === 'assistant' && (content || extras?.gmxPositions?.length > 0 || extras?.hyperliquidPositions?.length > 0)) {
     // Rich rendering: markdown tables + clickable links
     const contentDiv = document.createElement('div');
     contentDiv.className = 'msg-content';
@@ -54,6 +54,9 @@ function appendMessage(role, content, extras, isRestore) {
     chatEl.scrollTop = chatEl.scrollHeight;
     if (extras?.gmxPositions?.length > 0) {
       enhanceGmxPositions(div, extras.gmxPositions);
+    }
+    if (extras?.hyperliquidPositions?.length > 0) {
+      enhanceHyperliquidPositions(div, extras.hyperliquidPositions);
     }
     return;
   }
@@ -121,6 +124,9 @@ function appendMessage(role, content, extras, isRestore) {
   if (extras?.gmxPositions?.length > 0) {
     setLastGmxPositions(extras.gmxPositions);
     enhanceGmxPositions(div, extras.gmxPositions);
+  }
+  if (extras?.hyperliquidPositions?.length > 0) {
+    enhanceHyperliquidPositions(div, extras.hyperliquidPositions);
   }
 
   return div;
@@ -368,7 +374,7 @@ async function invokeDirectTool(toolInfo) {
 
   const body = {
     arguments: args,
-    chainId: 42161, // GMX is Arbitrum-only
+    chainId: toolInfo.chainId ?? currentChainId,
     vaultAddress: effectiveVault,
   };
   if (isOwner && authSignature) {
@@ -422,6 +428,9 @@ async function invokeDirectTool(toolInfo) {
     const extras = {};
     if (data.metadata?.gmxPositions) {
       extras.gmxPositions = data.metadata.gmxPositions;
+    }
+    if (data.metadata?.hyperliquidPositions) {
+      extras.hyperliquidPositions = data.metadata.hyperliquidPositions;
     }
     if (data.suggestions) {
       extras.suggestions = data.suggestions;
@@ -725,10 +734,219 @@ async function refreshGmxPositions(msgDiv) {
   }
 }
 
+/**
+ * Enhance a Hyperliquid positions message with inline action buttons.
+ * Mirrors the GMX enhancer: refresh button above the table and a per-row
+ * "⋯" actions menu (increase/decrease size, close position).
+ */
+function enhanceHyperliquidPositions(msgDiv, positions) {
+  const contentDiv = msgDiv.querySelector('.msg-content');
+  if (!contentDiv) return;
+
+  // Idempotent: skip if already enhanced
+  if (contentDiv.dataset.hlEnhanced === 'true') return;
+
+  // Strictly match the positions table by its exact 8-column header so we
+  // never hijack other tables (the GMX table has 9 columns, different headers).
+  const expectedHeaders = ['Market', 'Side', 'Size', 'Net PnL', 'Entry', 'Mark', 'Liq Price', 'Lev'];
+  const matches = Array.from(contentDiv.querySelectorAll('table')).filter((t) => {
+    const headers = Array.from(t.querySelectorAll('th'));
+    return headers.length === expectedHeaders.length
+      && headers.every((h, i) => h.textContent.trim() === expectedHeaders[i]);
+  });
+  if (matches.length !== 1) return;
+  const posTable = matches[0];
+
+  const rows = posTable.querySelectorAll('tr');
+  if (rows.length < 2) return; // header + at least one data row
+
+  // Skip header row
+  const dataRows = Array.from(rows).slice(1);
+  if (dataRows.length !== positions.length) return;
+
+  // Refresh button above the table
+  const refreshBtn = document.createElement('button');
+  refreshBtn.className = 'gmx-refresh-btn';
+  refreshBtn.textContent = '🔄 Refresh';
+  refreshBtn.title = 'Update positions (no LLM cost)';
+  refreshBtn.onclick = () => refreshHyperliquidPositions(msgDiv);
+  posTable.parentElement.insertBefore(refreshBtn, posTable);
+
+  // Add Actions header cell
+  const headerRow = rows[0];
+  const actionsTh = document.createElement('th');
+  actionsTh.textContent = 'Actions';
+  headerRow.appendChild(actionsTh);
+
+  // Enhance each data row
+  dataRows.forEach((row, idx) => {
+    const pos = positions[idx];
+    if (!pos) return;
+    const cells = row.querySelectorAll('td');
+    if (cells.length < 8) return;
+
+    // Actions dropdown cell
+    const actionsCell = document.createElement('td');
+    actionsCell.style.position = 'relative';
+    const actionsBtn = document.createElement('button');
+    actionsBtn.className = 'gmx-action-btn actions';
+    actionsBtn.textContent = '⋯';
+    actionsBtn.title = 'Position actions';
+    actionsCell.appendChild(actionsBtn);
+
+    const menu = document.createElement('div');
+    menu.className = 'gmx-cell-menu';
+    const menuItems = [
+      { label: '▲ Increase size', action: () => increaseHyperliquidSize(pos) },
+      { label: '▼ Decrease size', action: () => decreaseHyperliquidSize(pos) },
+      { label: '✕ Close position', action: () => closeHyperliquidPosition(pos), danger: true },
+    ];
+    for (const item of menuItems) {
+      const btn = document.createElement('button');
+      btn.className = 'gmx-menu-item' + (item.danger ? ' danger' : '');
+      btn.textContent = item.label;
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        menu.style.display = 'none';
+        item.action();
+      };
+      menu.appendChild(btn);
+    }
+    actionsCell.appendChild(menu);
+
+    actionsBtn.onclick = (e) => {
+      e.stopPropagation();
+      document.querySelectorAll('.gmx-cell-menu').forEach(m => {
+        if (m !== menu) m.style.display = 'none';
+      });
+      menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
+    };
+
+    document.addEventListener('click', (e) => {
+      if (!actionsCell.contains(e.target)) {
+        menu.style.display = 'none';
+      }
+    });
+
+    row.appendChild(actionsCell);
+
+    // Net PnL cell — color by gain/loss
+    const pnlCell = cells[3];
+    const pnlValue = parseFloat(pos.unrealizedPnl.replace(/[^0-9.-]/g, '')) || 0;
+    pnlCell.style.color = pnlValue >= 0 ? 'var(--success)' : 'var(--error)';
+    pnlCell.style.fontWeight = '600';
+  });
+
+  contentDiv.dataset.hlEnhanced = 'true';
+}
+
+function increaseHyperliquidSize(pos) {
+  const amount = prompt('USD amount to increase:');
+  if (amount === null) return;
+  const trimmed = amount.trim();
+  if (!trimmed) return;
+  invokeDirectTool({
+    toolName: 'hyperliquid_limit_order',
+    chainId: 999,
+    args: { coin: pos.coin, side: pos.isLong ? 'buy' : 'sell', notionalUsd: trimmed },
+  });
+}
+
+function decreaseHyperliquidSize(pos) {
+  const input = prompt('Size to decrease — base units (0.05) or percent (50%):');
+  if (input === null) return;
+  const trimmed = input.trim();
+  if (!trimmed) return;
+  invokeDirectTool({
+    toolName: 'hyperliquid_limit_order',
+    chainId: 999,
+    args: { coin: pos.coin, side: pos.isLong ? 'sell' : 'buy', size: trimmed, reduceOnly: true },
+  });
+}
+
+function closeHyperliquidPosition(pos) {
+  invokeDirectTool({
+    toolName: 'hyperliquid_limit_order',
+    chainId: 999,
+    args: { coin: pos.coin, close: true },
+  });
+}
+
+async function refreshHyperliquidPositions(msgDiv) {
+  const vault = vaultInput.value.trim();
+  if (!vault || vault.length !== 42) {
+    window.appendMessage('system', 'Please enter a vault address first.');
+    return;
+  }
+
+  const contentDiv = msgDiv.querySelector('.msg-content');
+  if (!contentDiv) return;
+
+  // Save current content for rollback on error
+  const originalHtml = contentDiv.innerHTML;
+  contentDiv.innerHTML = '<div style="color:var(--muted);font-style:italic;padding:4px 0;">🔄 Refreshing…</div>';
+
+  try {
+    const body = {
+      arguments: {},
+      chainId: 999, // Hyperliquid is handled off-chain, chain 999
+      vaultAddress: vault,
+    };
+    if (connectedAddress && authSignature) {
+      body.operatorAddress = connectedAddress;
+      body.authSignature = authSignature;
+      body.authTimestamp = authTimestamp;
+    }
+    const res = await fetch('/api/tools?toolName=hyperliquid_get_positions', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      contentDiv.innerHTML = originalHtml;
+      window.appendMessage('system', `❌ Failed to refresh: ${data.error || data.message || 'Unknown error'}`);
+      return;
+    }
+
+    const msg = data.message || data.reply || JSON.stringify(data);
+    contentDiv.innerHTML = renderRichContent(msg);
+    contentDiv.removeAttribute('data-hl-enhanced');
+
+    if (data.metadata?.hyperliquidPositions?.length > 0) {
+      enhanceHyperliquidPositions(msgDiv, data.metadata.hyperliquidPositions);
+    }
+
+    // Update suggestion chips in-place if present
+    const oldChips = msgDiv.querySelector('.suggestions');
+    if (oldChips) oldChips.remove();
+    if (data.suggestions?.length > 0) {
+      const chips = document.createElement('div');
+      chips.className = 'suggestions';
+      for (const label of data.suggestions) {
+        const chip = document.createElement('button');
+        chip.className = 'suggestion-chip';
+        chip.textContent = label;
+        chip.onclick = () => {
+          const direct = parseDirectToolCall(label);
+          if (direct) invokeDirectTool(direct);
+          else { inputEl.value = label; window.sendMessage(); }
+        };
+        chips.appendChild(chip);
+      }
+      msgDiv.appendChild(chips);
+    }
+  } catch (err) {
+    contentDiv.innerHTML = originalHtml;
+    window.appendMessage('system', `❌ Refresh failed: ${err.message}`);
+  }
+}
+
 export {
   appendMessage, renderRichContent, makeReasoningBlock,
   linkifyMarkdownInCell, linkifyUrls,
   parseDirectToolCall, invokeDirectTool,
   enhanceGmxPositions, closeGmxPosition, modifyGmxSize,
   modifyGmxCollateral, refreshGmxPositions,
+  enhanceHyperliquidPositions, refreshHyperliquidPositions,
 };

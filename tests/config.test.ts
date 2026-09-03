@@ -37,8 +37,8 @@ describe("getChain", () => {
     expect(() => getChain(99999)).toThrow("Unsupported chain ID: 99999");
   });
 
-  it("supports all 7 mainnet chains", () => {
-    const expectedIds = [1, 10, 56, 130, 137, 8453, 42161];
+  it("supports all 8 mainnet chains", () => {
+    const expectedIds = [1, 10, 56, 130, 137, 999, 8453, 42161];
     for (const id of expectedIds) {
       expect(() => getChain(id)).not.toThrow();
     }
@@ -95,6 +95,10 @@ describe("getRpcUrl", () => {
     const url = getRpcUrl(56);
     expect(url).toContain("bnb-mainnet");
   });
+
+  it("returns Alchemy URL for HyperEVM", () => {
+    expect(getRpcUrl(999)).toContain("hyperliquid-mainnet");
+  });
 });
 
 describe("TOKEN_MAP", () => {
@@ -121,6 +125,12 @@ describe("TOKEN_MAP", () => {
   it("has USDC on Arbitrum", () => {
     expect(TOKEN_MAP[42161]?.USDC).toBe("0xaf88d065e77c8cC2239327C5EDb3A432268e5831");
   });
+
+  it("has USDC and WHYPE on HyperEVM", () => {
+    expect(TOKEN_MAP[999]?.USDC).toBe("0xb88339CB7199b77E23DB6E890353E22632Ba630f");
+    expect(TOKEN_MAP[999]?.WHYPE).toBe("0x5555555555555555555555555555555555555555");
+    expect(getNativeTokenSymbol(999)).toBe("HYPE");
+  });
 });
 
 describe("STAKING_PROXY", () => {
@@ -134,8 +144,8 @@ describe("STAKING_PROXY", () => {
 });
 
 describe("SUPPORTED_CHAINS", () => {
-  it("has 7 mainnet chains", () => {
-    expect(SUPPORTED_CHAINS).toHaveLength(7);
+  it("has 8 mainnet chains", () => {
+    expect(SUPPORTED_CHAINS).toHaveLength(8);
   });
 
   it("each chain has id, name, and shortName", () => {

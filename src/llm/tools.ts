@@ -372,6 +372,175 @@ export const TOOL_DEFINITIONS = [
     },
   },
 
+  // ── Hyperliquid Perpetuals Tools (HyperEVM only) ────────────────────
+
+  {
+    type: "function" as const,
+    function: {
+      name: "hyperliquid_get_positions",
+      description:
+        "Get the Hyperliquid account dashboard for the vault: total account value (Core perp + Core spot USDC, " +
+        "read from HyperEVM precompiles), Core spot USDC balance, open perp positions (size, side, entry, mark, " +
+        "liq price, declared leverage, unrealized PnL) and open orders. HyperEVM (999) only — auto-switches if needed.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "hyperliquid_get_markets",
+      description:
+        "List available Hyperliquid perp markets with current prices, asset indexes and max leverage.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "hyperliquid_deposit",
+      description:
+        "Deposit (bridge) USDC from the vault on HyperEVM into its Hyperliquid Core perp account. " +
+        "This also ACTIVATES the Core account if it doesn't exist yet. Amount is capped to the vault's USDC balance.",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: {
+            type: "string",
+            description: "USDC amount in human units (e.g. '500')",
+          },
+        },
+        required: ["amount"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "hyperliquid_limit_order",
+      description:
+        "Place a Hyperliquid perp limit order. This is the SINGLE tool for opening, increasing, decreasing, " +
+        "or closing positions: use side without reduceOnly to open/increase, reduceOnly (or size='50%'/'all', " +
+        "or close=true) to decrease/close. Without an explicit price the order is a marketable IOC bounded by 1% slippage. " +
+        "Hyperliquid uses cross margin — collateral is global to the perp account, not pledged per position.",
+      parameters: {
+        type: "object",
+        properties: {
+          coin: {
+            type: "string",
+            description: "Market symbol (e.g. 'BTC', 'ETH', 'SOL')",
+          },
+          side: {
+            type: "string",
+            description: "'buy' or 'sell'. For reduce-only orders it defaults to the opposite of the open position.",
+          },
+          size: {
+            type: "string",
+            description: "Size in base-asset units (e.g. '0.15'), a percentage of the open position ('50%'), or 'all' to close fully.",
+          },
+          notionalUsd: {
+            type: "string",
+            description: "Order size in USD — converted to base units at the limit price. Alternative to size.",
+          },
+          price: {
+            type: "string",
+            description: "Limit price in USD. If omitted, the order fills immediately up to a 1% slippage bound (IOC).",
+          },
+          reduceOnly: {
+            type: "boolean",
+            description: "true to only reduce/close an existing position (never opens a new one).",
+          },
+          close: {
+            type: "boolean",
+            description: "true to close the entire open position (implies reduce-only, full size).",
+          },
+          tif: {
+            type: "string",
+            description: "Time in force: 'gtc' (default resting limit), 'ioc' (fill immediately or cancel), 'alo' (add liquidity only).",
+          },
+          cloid: {
+            type: "string",
+            description: "Optional client order id (uint128 hex/decimal). Auto-generated when omitted — quote it to cancel the order.",
+          },
+        },
+        required: ["coin"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "hyperliquid_cancel_order",
+      description:
+        "Cancel an open Hyperliquid order by order id (oid) or client order id (cloid), both shown in " +
+        "hyperliquid_get_positions. If neither is given and exactly one order is open on the market, it is cancelled.",
+      parameters: {
+        type: "object",
+        properties: {
+          coin: {
+            type: "string",
+            description: "Market symbol (e.g. 'BTC')",
+          },
+          orderId: {
+            type: "number",
+            description: "Order id (oid) from the positions report",
+          },
+          cloid: {
+            type: "string",
+            description: "Client order id (uint128) shown when the order was placed",
+          },
+        },
+        required: ["coin"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "hyperliquid_usd_class_transfer",
+      description:
+        "Withdrawal STEP 1: move USDC from the Hyperliquid Core perp margin account to the Core spot account. " +
+        "Always perp→spot (spot→perp is rejected by the adapter). Amount is capped to the withdrawable balance. " +
+        "Follow up with hyperliquid_spot_send to bridge back to HyperEVM.",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: {
+            type: "string",
+            description: "USDC amount in human units (e.g. '250')",
+          },
+        },
+        required: ["amount"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "hyperliquid_spot_send",
+      description:
+        "Withdrawal STEP 2: bridge USDC from the Hyperliquid Core spot account back to the vault on HyperEVM. " +
+        "Requires prior hyperliquid_usd_class_transfer. Keeps a 0.1 USDC bridge-fee reserve; amount is capped accordingly.",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: {
+            type: "string",
+            description: "USDC amount in human units (e.g. '250')",
+          },
+        },
+        required: ["amount"],
+      },
+    },
+  },
+
   // ── Delegation Management Tools ─────────────────────────────────────
 
   {

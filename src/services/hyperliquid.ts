@@ -1,0 +1,471 @@
+/**
+ * Hyperliquid account reads — HyperEVM read precompiles + Hyperliquid Core info API.
+ *
+ * Two complementary read paths, per the protocol design:
+ *
+ * 1. HyperEVM read precompiles (on-chain, used for NAV-critical values):
+ *    - accountMarginSummary(0, vault) → perp account value / notional / margin (USDC, 6 decimals)
+ *    - spotBalance(vault, USDC)       → Core spot USDC balance (8 decimals, "core wei")
+ *    - coreUserExists(vault)          → whether the Core account is activated
+ *
+ * 2. Hyperliquid Core info API (https://api.hyperliquid.xyz/info) — the ONLY source
+ *    for per-position state (entry/mark/liq prices, declared leverage, unrealized PnL,
+ *    open orders). Core perp account internals are not exposed on HyperEVM precompiles.
+ *
+ * Decimal conventions (see src/abi/hyperliquid.ts header):
+ *   perp account USDC = 6 decimals; Core spot USDC = 8 decimals; prices = 8-decimal fixed point.
+ */
+
+import { formatUnits, type Address } from "viem";
+import {
+  HYPEREVM_CHAIN_ID,
+  HYPEREVM_USDC,
+  HL_USDC_TOKEN_INDEX,
+  HL_DEFAULT_PERP_DEX,
+  HL_CORE_SPOT_ASSET_BASE,
+  HL_PRECOMPILES,
+  HL_SPOT_BALANCE_ABI,
+  HL_ACCOUNT_MARGIN_SUMMARY_ABI,
+  HL_CORE_USER_EXISTS_ABI,
+  HL_INFO_API_URL,
+} from "../abi/hyperliquid.js";
+import { getRpcProvider } from "./rpcClient.js";
+
+// ── Hyperliquid Core info API ─────────────────────────────────────────
+
+export async function hlInfoApi<T>(body: Record<string, unknown>): Promise<T> {
+  const res = await fetch(HL_INFO_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`Hyperliquid API HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  }
+  const data = (await res.json()) as T & { status?: string };
+  if (data && data.status === "err") {
+    throw new Error(`Hyperliquid API error: ${JSON.stringify(data).slice(0, 300)}`);
+  }
+  return data;
+}
+
+export interface HlPerpAsset {
+  name: string;
+  szDecimals: number;
+  maxLeverage: number;
+  onlyIsolated: boolean;
+}
+
+export interface HlMeta {
+  universe: HlPerpAsset[];
+}
+
+let metaCache: { at: number; meta: HlMeta } | null = null;
+const META_TTL_MS = 5 * 60 * 1000;
+
+/** Perp market metadata (universe). Cached 5 minutes. */
+export async function getHyperliquidMeta(): Promise<HlMeta> {
+  if (metaCache && Date.now() - metaCache.at < META_TTL_MS) return metaCache.meta;
+  const meta = await hlInfoApi<HlMeta>({ type: "meta" });
+  metaCache = { at: Date.now(), meta };
+  return meta;
+}
+
+/** Resolve a coin symbol ("BTC", "ETH") to its Core perp asset index. Throws if unknown or not a core perp. */
+export async function resolveHlAssetIndex(coin: string): Promise<number> {
+  const meta = await getHyperliquidMeta();
+  const wanted = coin.toUpperCase();
+  const idx = meta.universe.findIndex((u) => u.name.toUpperCase() === wanted);
+  if (idx === -1) {
+    throw new Error(
+      `Unknown Hyperliquid perp market: "${coin}". Available: ${meta.universe
+        .slice(0, 30)
+        .map((u) => u.name)
+        .join(", ")}${meta.universe.length > 30 ? ", …" : ""}`,
+    );
+  }
+  if (idx >= HL_CORE_SPOT_ASSET_BASE) {
+    throw new Error(`"${coin}" is not a core perp asset (assetId ${idx} ≥ ${HL_CORE_SPOT_ASSET_BASE}).`);
+  }
+  return idx;
+}
+
+/** Current mid prices keyed by coin (e.g. { BTC: "67234.5", ... }). */
+export async function getHyperliquidMids(): Promise<Record<string, string>> {
+  return hlInfoApi<Record<string, string>>({ type: "allMids" });
+}
+
+// ── HyperEVM precompile reads ─────────────────────────────────────────
+
+export interface HlPrecompileBalances {
+  /** Perp account value (USDC, 6 decimals). Negative values possible in extremis. */
+  perpAccountValue: bigint;
+  perpNtlPos: bigint;
+  perpMarginUsed: bigint;
+  perpRawUsd: bigint;
+  /** Core spot USDC balance (8 decimals, "core wei"). */
+  spotUsdcWei: bigint;
+  spotUsdcHoldWei: bigint;
+  /** Whether the vault has an activated HyperCore account. */
+  activated: boolean;
+}
+
+/** Read the on-chain HyperEVM precompiles. Any failing read degrades to zero instead of throwing. */
+export async function getHyperliquidPrecompileBalances(vaultAddress: Address): Promise<HlPrecompileBalances> {
+  const client = getRpcProvider(HYPEREVM_CHAIN_ID);
+  const zero: HlPrecompileBalances = {
+    perpAccountValue: 0n,
+    perpNtlPos: 0n,
+    perpMarginUsed: 0n,
+    perpRawUsd: 0n,
+    spotUsdcWei: 0n,
+    spotUsdcHoldWei: 0n,
+    activated: false,
+  };
+
+  const [summary, spot, exists] = await Promise.all([
+    client
+      .simulateContract({
+        address: HL_PRECOMPILES.accountMarginSummary,
+        abi: HL_ACCOUNT_MARGIN_SUMMARY_ABI,
+        functionName: "accountMarginSummary",
+        args: [HL_DEFAULT_PERP_DEX, vaultAddress],
+      })
+      .then((r) => r.result as [bigint, bigint, bigint, bigint])
+      .catch(() => [0n, 0n, 0n, 0n] as [bigint, bigint, bigint, bigint]),
+    client
+      .simulateContract({
+        address: HL_PRECOMPILES.spotBalance,
+        abi: HL_SPOT_BALANCE_ABI,
+        functionName: "spotBalance",
+        args: [vaultAddress, HL_USDC_TOKEN_INDEX],
+      })
+      .then((r) => r.result as [bigint, bigint, bigint])
+      .catch(() => [0n, 0n, 0n] as [bigint, bigint, bigint]),
+    client
+      .simulateContract({
+        address: HL_PRECOMPILES.coreUserExists,
+        abi: HL_CORE_USER_EXISTS_ABI,
+        functionName: "coreUserExists",
+        args: [vaultAddress],
+      })
+      .then((r) => r.result as boolean)
+      .catch(() => false),
+  ]);
+
+  return {
+    perpAccountValue: summary[0],
+    perpMarginUsed: summary[1],
+    perpNtlPos: summary[2],
+    perpRawUsd: summary[3],
+    spotUsdcWei: spot[0],
+    spotUsdcHoldWei: spot[1],
+    activated: exists,
+  };
+}
+
+// ── Core info API account state ───────────────────────────────────────
+
+export interface HlApiPosition {
+  coin: string;
+  /** Signed size in base units (negative = short). */
+  szi: string;
+  entryPx?: string;
+  positionValue: string;
+  unrealizedPnl: string;
+  leverage: { type: string; value: number };
+  liquidationPx?: string | null;
+  marginUsed: string;
+  maxLeverage: number;
+  cumFunding?: { allTime?: string; sinceOpen?: string; sinceChange?: string };
+}
+
+export interface HlApiMarginSummary {
+  accountValue: string;
+  totalNtlPos: string;
+  totalRawUsd: string;
+  totalMarginUsed: string;
+}
+
+export interface HlClearinghouseState {
+  marginSummary: HlApiMarginSummary;
+  withdrawable: string;
+  assetPositions: Array<{ position: HlApiPosition; type: string }>;
+  time: number;
+}
+
+export interface HlSpotBalanceEntry {
+  coin: string;
+  token: number;
+  total: string;
+  hold: string;
+  entryNtl: string;
+}
+
+export interface HlOpenOrder {
+  coin: string;
+  side: "B" | "A";
+  sz: string;
+  limitPx: string;
+  oid: number;
+  cloid?: string | null;
+  tif?: string;
+  reduceOnly?: boolean;
+  isPositionTaker?: boolean;
+  orderType?: string;
+  origSz?: string;
+  timestamp?: number;
+}
+
+export function fetchClearinghouseState(user: Address): Promise<HlClearinghouseState> {
+  return hlInfoApi<HlClearinghouseState>({ type: "clearinghouseState", user });
+}
+
+export function fetchSpotClearinghouseState(user: Address): Promise<{ balances: HlSpotBalanceEntry[] }> {
+  return hlInfoApi<{ balances: HlSpotBalanceEntry[] }>({ type: "spotClearinghouseState", user });
+}
+
+export function fetchOpenOrders(user: Address): Promise<HlOpenOrder[]> {
+  return hlInfoApi<HlOpenOrder[]>({ type: "openOrders", user });
+}
+
+// ── Normalized account summary ────────────────────────────────────────
+
+export interface HyperliquidPosition {
+  coin: string;
+  assetIndex: number;
+  isLong: boolean;
+  /** Signed and absolute sizes in base units, trimmed. */
+  sizeToken: string;
+  absSizeToken: number;
+  /** Position notional in USD. */
+  sizeUsd: string;
+  positionValue: number;
+  entryPx: string;
+  markPx: string;
+  liquidationPx: string | null;
+  unrealizedPnl: string;
+  unrealizedPnlPercent: string;
+  /** Declared leverage at open (e.g. "3x"). Global account leverage is in the summary. */
+  leverage: string;
+  leverageType: string;
+  marginUsedUsd: string;
+  maxLeverage: number;
+  fundingSinceOpen: string;
+}
+
+export interface HyperliquidOpenOrder {
+  coin: string;
+  assetIndex: number;
+  side: "long" | "short";
+  sizeToken: string;
+  price: string;
+  oid: number;
+  cloid: string | null;
+  tif: string;
+  reduceOnly: boolean;
+  orderType: string;
+  timestamp: number;
+}
+
+export interface HyperliquidAccountSummary {
+  vaultAddress: Address;
+  activated: boolean;
+  /** Perp account value (USDC, 6 decimals) — from the HyperEVM precompile (NAV-critical read). */
+  perpAccountValueUsd: string;
+  /** Total open notional (USDC, 6 decimals) — from the precompile. */
+  perpNtlPosUsd: string;
+  perpMarginUsedUsd: string;
+  withdrawableUsd: string;
+  /** Core spot USDC balance scaled from 8-decimal core wei to 6-decimal USD. */
+  spotUsdcUsd: string;
+  /** Total account value = perp account value + spot USDC. */
+  totalAccountValueUsd: string;
+  /** Global leverage = total open notional / perp account value. */
+  globalLeverage: string | null;
+  positions: HyperliquidPosition[];
+  openOrders: HyperliquidOpenOrder[];
+  formattedReport: string;
+}
+
+function fmtUsd(n: number): string {
+  if (!Number.isFinite(n)) return "$0.00";
+  const abs = Math.abs(n);
+  const digits = abs >= 1000 ? 2 : abs >= 1 ? 2 : 4;
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: digits })}`;
+}
+
+function fmtSignedUsd(n: number): string {
+  return `${n >= 0 ? "+" : ""}${fmtUsd(n)}`;
+}
+
+function fmtPx(px: number): string {
+  if (!Number.isFinite(px) || px <= 0) return "—";
+  const digits = px >= 1000 ? 1 : px >= 100 ? 2 : px >= 1 ? 3 : 5;
+  return `$${px.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: digits })}`;
+}
+
+function trimNum(s: string): string {
+  const n = parseFloat(s);
+  if (!Number.isFinite(n)) return s;
+  return n.toLocaleString("en-US", { maximumFractionDigits: 6 });
+}
+
+/** Normalize one clearinghouseState assetPosition entry. Exported for tests. */
+export function normalizeHlPosition(
+  raw: HlApiPosition,
+  assetIndex: number,
+  szDecimals: number,
+): HyperliquidPosition {
+  const szi = parseFloat(raw.szi) || 0;
+  const isLong = szi >= 0;
+  const positionValue = parseFloat(raw.positionValue) || 0;
+  const absSize = Math.abs(szi);
+  const markPx = absSize > 0 ? positionValue / absSize : 0;
+  const entryPx = raw.entryPx ? parseFloat(raw.entryPx) : 0;
+  const pnl = parseFloat(raw.unrealizedPnl) || 0;
+  const pnlPercent = entryPx > 0 && absSize > 0 ? (pnl / (entryPx * absSize)) * 100 : 0;
+
+  return {
+    coin: raw.coin,
+    assetIndex,
+    isLong,
+    sizeToken: `${isLong ? "" : "-"}${trimNum(absSize.toFixed(szDecimals + 4))}`,
+    absSizeToken: absSize,
+    sizeUsd: fmtUsd(positionValue),
+    positionValue,
+    entryPx: fmtPx(entryPx),
+    markPx: fmtPx(markPx),
+    liquidationPx: raw.liquidationPx ? fmtPx(parseFloat(raw.liquidationPx)) : null,
+    unrealizedPnl: fmtSignedUsd(pnl),
+    unrealizedPnlPercent: `${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}%`,
+    leverage: `${raw.leverage?.value ?? 1}x`,
+    leverageType: raw.leverage?.type ?? "cross",
+    marginUsedUsd: fmtUsd(parseFloat(raw.marginUsed) || 0),
+    maxLeverage: raw.maxLeverage ?? 1,
+    fundingSinceOpen: raw.cumFunding?.sinceOpen ? fmtSignedUsd(parseFloat(raw.cumFunding.sinceOpen)) : "—",
+  };
+}
+
+/** Normalize one openOrders entry. Exported for tests. */
+export function normalizeHlOpenOrder(raw: HlOpenOrder, assetIndex: number, szDecimals: number): HyperliquidOpenOrder {
+  const isBuy = raw.side === "B";
+  const reduceOnly = raw.reduceOnly === true;
+  return {
+    coin: raw.coin,
+    assetIndex,
+    side: isBuy !== reduceOnly ? "long" : "short",
+    sizeToken: trimNum((parseFloat(raw.origSz ?? raw.sz) || 0).toFixed(szDecimals + 4)),
+    price: fmtPx(parseFloat(raw.limitPx) || 0),
+    oid: raw.oid,
+    cloid: raw.cloid ?? null,
+    tif: raw.tif ?? "GTC",
+    reduceOnly,
+    orderType: raw.orderType ?? "limit",
+    timestamp: raw.timestamp ?? 0,
+  };
+}
+
+/**
+ * Full account summary: precompile balances + API positions/orders, plus the
+ * formatted markdown report used by chat and Telegram.
+ */
+export async function getHyperliquidAccountSummary(vaultAddress: Address): Promise<HyperliquidAccountSummary> {
+  const [meta, pre] = await Promise.all([
+    getHyperliquidMeta(),
+    getHyperliquidPrecompileBalances(vaultAddress),
+  ]);
+
+  // The API calls are best-effort: the account may not be activated yet, in which
+  // case clearinghouseState errors and we fall back to precompile-only data.
+  const [chState, orders] = await Promise.all([
+    fetchClearinghouseState(vaultAddress).catch(() => null),
+    fetchOpenOrders(vaultAddress).catch(() => [] as HlOpenOrder[]),
+  ]);
+
+  const coinIndex = new Map<string, number>();
+  meta.universe.forEach((u, i) => coinIndex.set(u.name.toUpperCase(), i));
+  const szDecimalsOf = (coin: string) => meta.universe[coinIndex.get(coin.toUpperCase()) ?? -1]?.szDecimals ?? 6;
+
+  const positions: HyperliquidPosition[] = (chState?.assetPositions ?? [])
+    .map((ap) => normalizeHlPosition(ap.position, coinIndex.get(ap.position.coin.toUpperCase()) ?? -1, szDecimalsOf(ap.position.coin)))
+    .filter((p) => p.assetIndex >= 0 && p.absSizeToken > 0);
+
+  const openOrders: HyperliquidOpenOrder[] = orders
+    .map((o) => normalizeHlOpenOrder(o, coinIndex.get(o.coin.toUpperCase()) ?? -1, szDecimalsOf(o.coin)))
+    .filter((o) => o.assetIndex >= 0);
+
+  // Prefer precompile reads for the NAV-critical account values (they are the same
+  // values the vault NAV uses); fall back to the API margin summary.
+  const perpAccountValue = Number(formatUnits(pre.perpAccountValue, 6));
+  const perpNtlPos = Number(formatUnits(pre.perpNtlPos, 6));
+  const perpMarginUsed = Number(formatUnits(pre.perpMarginUsed, 6));
+  const withdrawable = chState ? parseFloat(chState.withdrawable) || 0 : 0;
+  const spotUsdcUsd = Number(formatUnits(pre.spotUsdcWei, 8));
+  const totalAccountValue = perpAccountValue + spotUsdcUsd;
+  const globalLeverage = perpAccountValue > 0 ? perpNtlPos / perpAccountValue : null;
+
+  const summary: HyperliquidAccountSummary = {
+    vaultAddress,
+    activated: pre.activated,
+    perpAccountValueUsd: fmtUsd(perpAccountValue),
+    perpNtlPosUsd: fmtUsd(perpNtlPos),
+    perpMarginUsedUsd: fmtUsd(perpMarginUsed),
+    withdrawableUsd: fmtUsd(withdrawable),
+    spotUsdcUsd: fmtUsd(spotUsdcUsd),
+    totalAccountValueUsd: fmtUsd(totalAccountValue),
+    globalLeverage: globalLeverage != null ? `${globalLeverage.toFixed(2)}x` : null,
+    positions,
+    openOrders,
+    formattedReport: "",
+  };
+  summary.formattedReport = formatHyperliquidReport(summary);
+  return summary;
+}
+
+function formatHyperliquidReport(s: HyperliquidAccountSummary): string {
+  const lines: string[] = [];
+  lines.push("📊 Hyperliquid Account");
+  lines.push("");
+  lines.push(
+    s.activated
+      ? `HyperCore account: ✅ activated   |   ${HYPEREVM_USDC.slice(0, 6)}… USDC-only`
+      : `HyperCore account: ⏳ not activated — use hyperliquid_deposit to bridge USDC and activate it.`,
+  );
+  lines.push(
+    `Perp value: ${s.perpAccountValueUsd}   |   Spot (USDC): ${s.spotUsdcUsd}   |   Total: ${s.totalAccountValueUsd}` +
+      (s.globalLeverage ? `   |   Global leverage: ${s.globalLeverage}` : "") +
+      (s.withdrawableUsd !== "$0.00" ? `   |   Withdrawable: ${s.withdrawableUsd}` : ""),
+  );
+  lines.push("");
+
+  if (s.positions.length > 0) {
+    lines.push(`| Market | Side | Size | Net PnL | Entry | Mark | Liq Price | Lev |`);
+    lines.push(`|--------|------|------|---------|-------|------|-----------|-----|`);
+    for (const p of s.positions) {
+      lines.push(
+        `| ${p.coin} | ${p.isLong ? "LONG" : "SHORT"} | ${p.sizeUsd} (${p.sizeToken}) | ${p.unrealizedPnl} (${p.unrealizedPnlPercent}) | ${p.entryPx} | ${p.markPx} | ${p.liquidationPx ?? "—"} | ${p.leverage} ${p.leverageType === "cross" ? "cross" : "isol"} |`,
+      );
+    }
+    lines.push("");
+  } else {
+    lines.push("No open Hyperliquid positions.");
+    lines.push("");
+  }
+
+  if (s.openOrders.length > 0) {
+    lines.push(`⏳ Open Orders (${s.openOrders.length})`);
+    lines.push("");
+    lines.push(`| Market | Side | Type | Size | Price | OID |`);
+    lines.push(`|--------|------|------|------|-------|-----|`);
+    for (const o of s.openOrders) {
+      lines.push(
+        `| ${o.coin} | ${o.side.toUpperCase()}${o.reduceOnly ? " (reduce-only)" : ""} | ${o.tif} | ${o.sizeToken} | ${o.price} | ${o.oid} |`,
+      );
+    }
+    lines.push("");
+  }
+
+  lines.push(`[View account on Hyperliquid](https://app.hyperliquid.xyz/explorer/address/${s.vaultAddress})`);
+  return lines.join("\n");
+}

@@ -357,6 +357,8 @@ src/
     uniswapTrading.ts   ← Uniswap quote/swap building
     zeroXTrading.ts     ← 0x aggregator integration
     gmxTrading.ts       ← GMX perpetuals
+    hyperliquid.ts      ← Hyperliquid account reads (precompiles + Core info API)
+    hyperliquidTrading.ts ← Hyperliquid calldata builders (AHyperliquid adapter)
     crosschain.ts       ← Cross-chain bridging
     tokenResolver.ts    ← Dynamic token address resolution
     vault.ts            ← On-chain vault reads

@@ -47,8 +47,8 @@ const MAX_RESUBMIT_ATTEMPTS = 2;
 /** Timeout for waiting for a tx receipt (ms) */
 const TX_CONFIRM_TIMEOUT_MS = 60_000;
 
-/** Fast-confirming chains (L2s, BSC) with sub-second block times */
-const FAST_CHAIN_IDS = new Set([10, 42161, 8453, 130, 56, 84532]);
+/** Fast-confirming chains (L2s, BSC, HyperEVM) with sub-second block times */
+const FAST_CHAIN_IDS = new Set([10, 42161, 8453, 130, 56, 999, 84532]);
 
 /**
  * Execute a pre-prepared transaction via the agent wallet.
@@ -834,6 +834,8 @@ interface StoredTransaction {
 interface PendingSimulation {
   operationId: string;
   vaultAddress: string;
+  /** Lowercased operator address that created the operation (defense in depth). */
+  operatorAddress?: string;
   reply: string;
   txs: StoredTransaction[];
   createdAt: number;
@@ -873,17 +875,21 @@ function generateOperationId(): string {
 
 /**
  * Store a finalized, executable set of transactions and return an operationId.
+ * `operatorAddress` is recorded (lowercased) so the confirmation path can verify
+ * the stored bundle still belongs to the authenticated operator.
  */
 export async function storePendingSimulation(
   kv: KVNamespace,
   vaultAddress: string,
   reply: string,
   txs: UnsignedTransaction[],
+  operatorAddress?: string,
 ): Promise<string> {
   const operationId = generateOperationId();
   const stored: PendingSimulation = {
     operationId,
     vaultAddress: vaultAddress.toLowerCase(),
+    operatorAddress: operatorAddress?.toLowerCase(),
     reply,
     txs: txs.map(toStoredTransaction),
     createdAt: Date.now(),
@@ -929,11 +935,17 @@ export async function consumePendingSimulation(
  * transactions (with gas, fees, and NAV-shield already attached), marks the
  * bundle consumed to prevent replay, and broadcasts without re-running the LLM
  * or re-estimating gas.
+ *
+ * Defense in depth: `operatorAddress` (the authenticated operator from the
+ * confirmation request) must match the operator recorded when the bundle was
+ * stored. When omitted, the check is skipped for backwards compatibility but
+ * a warning is logged — call sites should always pass the verified operator.
  */
 export async function executeStoredSimulation(
   env: Env,
   operationId: string,
   vaultAddress: string,
+  operatorAddress?: string,
   requestCache?: Map<string, Promise<{ unitaryValue: bigint; totalValue: bigint; timestamp: bigint }>>,
   onProgress?: (index: number, total: number, outcomesSoFar: TxExecOutcome[]) => Promise<void>,
 ): Promise<TxExecOutcome[]> {
@@ -952,6 +964,22 @@ export async function executeStoredSimulation(
       "Stored operation does not match the requested vault.",
       "VAULT_MISMATCH",
       true,
+    );
+  }
+
+  // Defense in depth: the stored operator must match the authenticated operator.
+  if (operatorAddress) {
+    if (!stored.operatorAddress || stored.operatorAddress !== operatorAddress.toLowerCase()) {
+      throw new ExecutionError(
+        "Stored operation does not belong to the authenticated operator.",
+        "OPERATOR_MISMATCH",
+        true,
+      );
+    }
+  } else {
+    console.warn(
+      `[execution] executeStoredSimulation(${operationId}) called without operatorAddress — ` +
+      "operator identity not verified at execution time.",
     );
   }
 

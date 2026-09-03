@@ -6,3 +6,15 @@
 OPENAI_API_KEY=sk-...
 UNISWAP_API_KEY=your-uniswap-api-key
 COINGECKO_API_KEY=your-coingecko-api-key
+
+# Deployment environment. The ONLY value that enables the escape hatches below
+# is exactly "development" (enforced in src/services/devMode.ts). Keep this in
+# local .dev.vars only — NEVER define APP_ENV on the Cloudflare dashboard:
+# an unset APP_ENV is the production default and enforces all auth/payment
+# checks. Setting a hatch flag on the dashboard without APP_ENV=development
+# disables it AND fails every request with a 500 until removed.
+APP_ENV=development
+
+# --- Local-dev escape hatches (active ONLY with APP_ENV=development) ---
+# TELEGRAM_ALLOW_UNAUTHENTICATED_WEBHOOK=1  # skip Telegram webhook secret check
+# X402_RELAXED=1                            # serve paid endpoints if payment can't be verified

@@ -21,9 +21,14 @@ export enum OpType {
 
 export const DEFAULT_MULTICALL_HANDLER = "0x924a9f036260DdD5808007E1AA95f08eD08aA569" as Address;
 export const BSC_MULTICALL_HANDLER = "0xAC537C12fE8f544D712d71ED4376a502EEa944d7" as Address;
+/** HyperEVM's Across MulticallHandler lives at a non-default address (like BSC).
+ *  Must match CrosschainLib.HYPER_EVM_MULTICALL_HANDLER exactly. */
+export const HYPER_EVM_MULTICALL_HANDLER = "0x5E7840E06fAcCb6d1c3b5F5E0d1d3d07F2829bba" as Address;
 
 export function getAcrossHandler(destinationChainId: number): Address {
-  return destinationChainId === 56 ? BSC_MULTICALL_HANDLER : DEFAULT_MULTICALL_HANDLER;
+  if (destinationChainId === 56) return BSC_MULTICALL_HANDLER;
+  if (destinationChainId === 999) return HYPER_EVM_MULTICALL_HANDLER;
+  return DEFAULT_MULTICALL_HANDLER;
 }
 
 // ── Across SpokePool addresses (per chain) ────────────────────────────
@@ -34,6 +39,7 @@ export const ACROSS_SPOKE_POOL: Record<number, Address> = {
   56:    "0x7E63A5f1a8F0B4d0934B2f2327DAED3F6bb2ee75", // BSC
   130:   "0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64", // Unichain
   137:   "0x9295ee1d8C5b022Be115A2AD3c30C72E34e7F096", // Polygon
+  999:   "0x35E63eA3eb0fb7A3bc543C71FB66412e1F6B0E04", // HyperEVM
   8453:  "0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64", // Base
   42161: "0xe35e9842fceaCA96570B734083f4a58e8F7C5f2A", // Arbitrum
 };
@@ -89,6 +95,11 @@ export const CROSSCHAIN_TOKENS: Record<number, BridgeableToken[]> = {
   130: [
     { address: "0x078D782b760474a361dDA0AF3839290b0EF57AD6", type: "USDC", symbol: "USDC", decimals: 6 },
     { address: "0x4200000000000000000000000000000000000006", type: "WETH", symbol: "WETH", decimals: 18 },
+  ],
+  999: [
+    // HyperEVM — USDC ONLY, mirroring CrosschainLib.isAllowedCrosschainToken(999).
+    // Must be the same USDC the Hyperliquid adapter bridges (HYPER_USDC).
+    { address: "0xb88339CB7199b77E23DB6E890353E22632Ba630f", type: "USDC", symbol: "USDC", decimals: 6 },
   ],
 };
 

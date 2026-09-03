@@ -56,7 +56,6 @@ import {
   type Hex,
 } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
-import { ACROSS_SPOKE_POOL_ABI } from "../abi/aIntents.js";
 import { ERC20_ABI } from "../abi/erc20.js";
 import { getRpcUrl, getNativeTokenSymbol, getWrappedNativeAddress } from "../config.js";
 import {

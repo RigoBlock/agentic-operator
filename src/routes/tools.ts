@@ -36,6 +36,8 @@ const READONLY_TOOLS = new Set<string>([
   "get_lp_positions",
   "gmx_get_positions",
   "gmx_get_markets",
+  "hyperliquid_get_positions",
+  "hyperliquid_get_markets",
   "check_delegation_status",
   "check_pending_tx",
   "get_crosschain_quote",
@@ -52,6 +54,7 @@ function getToolCategory(name: string): string {
   if (name.startsWith("get_swap_quote") || name === "build_vault_swap") return "Spot Trading";
   if (name.startsWith("get_vault_info") || name === "get_token_balance" || name === "switch_chain") return "Vault Info";
   if (name.startsWith("gmx_")) return "GMX Perpetuals";
+  if (name.startsWith("hyperliquid_")) return "Hyperliquid Perpetuals";
   if (name.startsWith("get_pool_info") || name.startsWith("add_liquidity") || name.startsWith("remove_liquidity") || name.startsWith("collect_lp_fees") || name.startsWith("burn_position") || name.startsWith("get_lp_positions") || name.startsWith("initialize_pool")) return "Uniswap v4 LP";
   if (name.startsWith("crosschain_") || name.startsWith("get_aggregated_nav") || name.startsWith("get_rebalance_plan") || name.startsWith("verify_bridge_arrival")) return "Cross-Chain";
   if (name.startsWith("grg_")) return "GRG Staking";
@@ -188,6 +191,7 @@ tools.post("/", async (c) => {
         requestEnv,
         body.operationId,
         body.vaultAddress,
+        verifiedOperatorAddress,
         requestEnv.requestCache,
       );
       const results = outcomes.filter((o) => o.result).map((o) => o.result!);

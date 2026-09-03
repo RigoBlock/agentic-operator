@@ -35,6 +35,7 @@ import {
   sepolia as alchemySepolia,
   baseSepolia as alchemyBaseSepolia,
   unichainMainnet as alchemyUnichain,
+  hyperliquid as alchemyHyperliquid,
 } from "@account-kit/infra";
 import { getRpcUrl } from "../config.js";
 import { getEnv } from "./envContext.js";
@@ -47,6 +48,7 @@ const ALCHEMY_CHAIN_MAP: Record<number, Chain> = {
   56: alchemyBsc,
   130: alchemyUnichain,
   137: alchemyPolygon,
+  999: alchemyHyperliquid,
   8453: alchemyBase,
   42161: alchemyArbitrum,
   11155111: alchemySepolia,
@@ -77,6 +79,7 @@ const WAIT_FOR_CALLS_STATUS_TIMEOUT_MS: Record<number, number> = {
   56: 15_000,       // BNB Chain
   130: 15_000,      // Unichain
   137: 15_000,      // Polygon
+  999: 15_000,      // HyperEVM
   8453: 15_000,     // Base
   42161: 15_000,    // Arbitrum
   84532: 15_000,    // Base Sepolia
@@ -95,6 +98,7 @@ const WAIT_FOR_CALLS_STATUS_POLL_MS: Record<number, number> = {
   56: 1_000,        // BNB Chain
   130: 1_000,       // Unichain
   137: 1_000,       // Polygon
+  999: 1_000,       // HyperEVM
   8453: 1_000,      // Base
   42161: 1_000,     // Arbitrum
   84532: 1_000,     // Base Sepolia

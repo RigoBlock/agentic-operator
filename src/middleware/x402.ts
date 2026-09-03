@@ -42,9 +42,10 @@ import { UptoEvmScheme } from "@x402/evm/upto/server";
 import { bazaarResourceServerExtension } from "@x402/extensions";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { createFacilitatorConfig } from "@coinbase/x402";
-import type { MiddlewareHandler } from "hono";
+import type { MiddlewareHandler, Context } from "hono";
 import type { Env, AppVariables } from "../types.js";
 import { verifyOperatorSignatureOnly } from "../services/auth.js";
+import { isDevEscapeHatchEnabled } from "../services/devMode.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
 
@@ -820,6 +821,41 @@ function setRateLimitHeaders(
   }
 }
 
+/**
+ * Fail-closed helper for payment-verification outages.
+ *
+ * Paid endpoints must never be served for free just because payment cannot be
+ * VERIFIED (missing CDP credentials, facilitator unreachable, processing error).
+ * For routes in PROTECTED_ROUTES this returns a 503; public routes and the
+ * operator header-auth bypass are unaffected. X402_RELAXED=1 restores the old
+ * fail-open behavior, but only together with APP_ENV=development — the gate in
+ * devMode.ts cannot be bypassed by the flag alone.
+ *
+ * Returns null when the request may proceed (non-protected route or relaxed mode).
+ */
+function blockIfPaymentUnverifiable(
+  c: Context<{ Bindings: Env; Variables: AppVariables }>,
+  method: string,
+  path: string,
+  reason: string,
+): Response | null {
+  if (!isProtectedRoute(method, path)) return null; // public/unlisted routes — let through
+  if (isDevEscapeHatchEnabled("X402_RELAXED", c.env)) {
+    console.warn(`[x402] APP_ENV=development + X402_RELAXED=1 — allowing ${method} ${path} despite ${reason}`);
+    return null;
+  }
+  console.error(`[x402] Payment cannot be verified (${reason}) — failing closed for ${method} ${path}`);
+  return c.json(
+    {
+      error: "Payment verification unavailable",
+      detail:
+        `This endpoint requires x402 payment, but payment could not be verified: ${reason}. ` +
+        "Please retry later.",
+    },
+    503,
+  );
+}
+
 export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
   return async (c, next) => {
     // Fast path: authenticated operators skip x402 payment.
@@ -894,10 +930,16 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
     }
 
     // Skip x402 when CDP credentials are missing or clearly invalid (test/dev envs).
+    // FAIL CLOSED for paid endpoints: without credentials payment cannot be
+    // verified, so PROTECTED_ROUTES return 503 rather than being served for free.
+    // X402_RELAXED=1 (with APP_ENV=development) restores fail-open behavior
+    // for local development only.
     const hasCdpCreds =
       typeof c.env.CDP_API_KEY_ID === "string" && c.env.CDP_API_KEY_ID.length > 0 &&
       typeof c.env.CDP_API_KEY_SECRET === "string" && c.env.CDP_API_KEY_SECRET.length > 0;
     if (!hasCdpCreds) {
+      const blocked = blockIfPaymentUnverifiable(c, reqMethod, reqPath, "missing CDP facilitator credentials");
+      if (blocked) return blocked;
       return next();
     }
 
@@ -905,14 +947,15 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
     try {
       server = await getHttpServer(c.env);
     } catch (err) {
-      // x402 server init failed (facilitator unreachable, bad credentials, etc.)
-      // For non-protected routes, let the request through — don't block vault reads
-      // because the payment facilitator is down.
+      // x402 server init failed (facilitator unreachable, bad credentials, etc.).
+      // Fail closed for paid endpoints — an outage must not make them free.
       // Suppress noisy logs in test environments (Vitest).
       const isTest = typeof process !== "undefined" && (process.env?.VITEST || process.env?.NODE_ENV === "test");
       if (!isTest) {
         console.error("[x402] Server initialization failed:", err);
       }
+      const blocked = blockIfPaymentUnverifiable(c, reqMethod, reqPath, "facilitator initialization failed");
+      if (blocked) return blocked;
       return next();
     }
 
@@ -928,8 +971,12 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
     try {
       result = await server.processHTTPRequest(context);
     } catch (err) {
-      // Payment processing failed — for non-protected routes, let through
+      // Payment processing failed — fail closed for paid endpoints so an outage
+      // cannot be leveraged to reach them without paying.
       console.error("[x402] processHTTPRequest failed:", err);
+      const blocked = blockIfPaymentUnverifiable(
+        c, adapter.getMethod(), adapter.getPath(), "payment processing error");
+      if (blocked) return blocked;
       return next();
     }
 

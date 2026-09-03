@@ -161,8 +161,8 @@ chat.post("/", async (c) => {
       if (!body.vaultAddress) {
         return c.json({ error: "vaultAddress is required to confirm a stored operation" }, 400);
       }
-      const { operatorVerified } = await authenticateChatOperator(c, body);
-      if (!operatorVerified) {
+      const { operatorVerified, operatorAddress: confirmedOperatorAddress } = await authenticateChatOperator(c, body);
+      if (!operatorVerified || !confirmedOperatorAddress) {
         throw new AuthError("Wallet not connected. Connect your wallet and sign to authenticate.", 401);
       }
       try {
@@ -171,6 +171,7 @@ chat.post("/", async (c) => {
           requestEnv,
           body.operationId,
           body.vaultAddress,
+          confirmedOperatorAddress,
           requestEnv.requestCache,
         );
         const results = outcomes.filter((o) => o.result).map((o) => o.result!);

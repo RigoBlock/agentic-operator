@@ -25,6 +25,13 @@ import { handle_gmx_cancel_order } from "./gmx.js";
 import { handle_gmx_update_order } from "./gmx.js";
 import { handle_gmx_claim_funding_fees } from "./gmx.js";
 import { handle_gmx_get_markets } from "./gmx.js";
+import { handle_hyperliquid_get_positions } from "./hyperliquid.js";
+import { handle_hyperliquid_get_markets } from "./hyperliquid.js";
+import { handle_hyperliquid_deposit } from "./hyperliquid.js";
+import { handle_hyperliquid_limit_order } from "./hyperliquid.js";
+import { handle_hyperliquid_cancel_order } from "./hyperliquid.js";
+import { handle_hyperliquid_usd_class_transfer } from "./hyperliquid.js";
+import { handle_hyperliquid_spot_send } from "./hyperliquid.js";
 import { handle_setup_delegation } from "./delegation.js";
 import { handle_revoke_delegation } from "./delegation.js";
 import { handle_check_delegation_status } from "./delegation.js";
@@ -73,6 +80,13 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "gmx_update_order": handle_gmx_update_order,
   "gmx_claim_funding_fees": handle_gmx_claim_funding_fees,
   "gmx_get_markets": handle_gmx_get_markets,
+  "hyperliquid_get_positions": handle_hyperliquid_get_positions,
+  "hyperliquid_get_markets": handle_hyperliquid_get_markets,
+  "hyperliquid_deposit": handle_hyperliquid_deposit,
+  "hyperliquid_limit_order": handle_hyperliquid_limit_order,
+  "hyperliquid_cancel_order": handle_hyperliquid_cancel_order,
+  "hyperliquid_usd_class_transfer": handle_hyperliquid_usd_class_transfer,
+  "hyperliquid_spot_send": handle_hyperliquid_spot_send,
   "check_pending_tx": handle_check_pending_tx,
   "setup_delegation": handle_setup_delegation,
   "revoke_delegation": handle_revoke_delegation,

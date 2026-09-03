@@ -55,6 +55,22 @@ export interface Env {
   GAS_SPENDING_LIMIT_USD?: string; // Per-wallet daily gas sponsorship limit in USD (default: 5)
   TELEGRAM_BOT_TOKEN?: string;        // Telegram Bot API token (optional, enables Telegram control)
   TELEGRAM_WEBHOOK_SECRET?: string;   // Dedicated webhook secret (recommended). If absent, falls back to deriving from CDP_WALLET_SECRET.
+  // Deployment environment marker. The ONLY value that enables the dev escape
+  // hatches below is exactly "development". Unset (production default) means
+  // every auth/payment check is enforced. Exists solely in local, gitignored
+  // .dev.vars — it must NEVER be set on the Cloudflare dashboard.
+  APP_ENV?: string;
+  // Local-dev ONLY escape hatch: process Telegram webhook updates without verifying
+  // the secret token. Active ONLY together with APP_ENV=development (enforced in
+  // devMode.ts) — the flag alone does nothing, and setting it without APP_ENV=development
+  // fails every request with a 500 until it is removed. Unverified updates allow
+  // full impersonation of paired Telegram users, so this must never reach production.
+  TELEGRAM_ALLOW_UNAUTHENTICATED_WEBHOOK?: string;
+  // Local-dev ONLY escape hatch: allow paid endpoints through when x402 payment
+  // cannot be verified (missing CDP creds / facilitator down). Same APP_ENV=development
+  // gate as above; without it, paid endpoints fail closed with 503 instead of
+  // being served for free.
+  X402_RELAXED?: string;
   CDP_API_KEY_ID: string;             // Coinbase Developer Platform API key ID
   CDP_API_KEY_SECRET: string;  // Coinbase Developer Platform API key secret
   CDP_WALLET_SECRET: string;   // Coinbase Developer Platform wallet secret (agent wallet signing)

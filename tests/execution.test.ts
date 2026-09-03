@@ -341,3 +341,76 @@ describe("formatOutcomesMarkdown", () => {
     expect(summary).toContain("Fell back to direct agent-wallet broadcast");
   });
 });
+
+describe("executeStoredSimulation operator binding (L3)", () => {
+  const VAULT = "0xCA35b7d915458EF540aDe6068dFe2F44E8fa733c";
+  const OPERATOR_A = "0xA0F9C380ad1E1be09046319fd907335B2B452B37";
+  const OPERATOR_B = "0xB0b869091c11CB99acDb715C846A9227E59E0a9B";
+
+  function createMockKV(): KVNamespace {
+    const store = new Map<string, string>();
+    return {
+      get: async (key: string) => store.get(key) ?? null,
+      put: async (key: string, value: string) => { store.set(key, value); },
+      delete: async (key: string) => { store.delete(key); },
+      list: async () => ({ keys: [], list_complete: true, cursor: "" }),
+      getWithMetadata: async () => ({ value: null, metadata: null }),
+    } as unknown as KVNamespace;
+  }
+
+  const executableTx: import("../src/types.js").UnsignedTransaction = {
+    from: "0x1234567890123456789012345678901234567890",
+    to: VAULT,
+    data: "0xac9650d8" as `0x${string}`,
+    value: "0x0",
+    chainId: 8453,
+    gas: "0x5208",
+    maxFeePerGas: "0x1",
+    maxPriorityFeePerGas: "0x1",
+    description: "Test swap",
+    navShieldChecked: true,
+  };
+
+  it("rejects execution when the authenticated operator does not match the stored one", async () => {
+    const { storePendingSimulation, executeStoredSimulation } = await import("../src/services/execution.js");
+    const kv = createMockKV();
+    const operationId = await storePendingSimulation(kv, VAULT, "reply", [executableTx], OPERATOR_A);
+    await expect(
+      executeStoredSimulation({ KV: kv } as any, operationId, VAULT, OPERATOR_B),
+    ).rejects.toMatchObject({ code: "OPERATOR_MISMATCH" });
+  });
+
+  it("rejects execution when the stored operation has no recorded operator", async () => {
+    const { storePendingSimulation, executeStoredSimulation } = await import("../src/services/execution.js");
+    const kv = createMockKV();
+    // Stored without an operator (legacy entry) — a caller providing an
+    // operator identity cannot be matched, so execution must be refused.
+    const operationId = await storePendingSimulation(kv, VAULT, "reply", [executableTx]);
+    await expect(
+      executeStoredSimulation({ KV: kv } as any, operationId, VAULT, OPERATOR_A),
+    ).rejects.toMatchObject({ code: "OPERATOR_MISMATCH" });
+  });
+
+  it("allows execution when the operator matches case-insensitively", async () => {
+    const { storePendingSimulation, executeStoredSimulation } = await import("../src/services/execution.js");
+    const kv = createMockKV();
+    const operationId = await storePendingSimulation(kv, VAULT, "reply", [executableTx], OPERATOR_A);
+    // Lowercase variant of the same address must be accepted.
+    const outcomes = await executeStoredSimulation(
+      { KV: kv } as any, operationId, VAULT, OPERATOR_A.toLowerCase(),
+    );
+    // The operator check passed; execution itself fails because no delegation
+    // config exists in the mock KV — proof we got past the operator check.
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].error).toContain("Delegation not configured");
+  });
+
+  it("keeps legacy behavior (with a warning) when no operator is provided", async () => {
+    const { storePendingSimulation, executeStoredSimulation } = await import("../src/services/execution.js");
+    const kv = createMockKV();
+    const operationId = await storePendingSimulation(kv, VAULT, "reply", [executableTx], OPERATOR_A);
+    const outcomes = await executeStoredSimulation({ KV: kv } as any, operationId, VAULT);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].error).toContain("Delegation not configured");
+  });
+});

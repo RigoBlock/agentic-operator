@@ -22,6 +22,7 @@ External AI Agent ───┘   /api/… │  ├── x402 Payment Gate     �
                                   │  ├── 0x Aggregator (default)│             │
                                   │  ├── Uniswap Trading API   │───execute()─►│
                                   │  ├── GMX V2 (Arbitrum)     │             │
+                                  │  ├── Hyperliquid (HyperEVM)│             │
                                   │  ├── Across Protocol (bridge)│            │
                                   │  ├── NAV Shield (10% max)  │             │
                                   │  └── Agent Wallet (CDP)    │             │
@@ -87,6 +88,7 @@ The typical flow for a new operator using the web interface:
 | Polygon | 137 | 0x, Uniswap V2/V3/V4 |
 | BNB Chain | 56 | 0x, Uniswap V2/V3/V4 |
 | Unichain | 130 | Uniswap V2/V3/V4 |
+| HyperEVM | 999 | Hyperliquid perps, Across bridging (USDC-only) |
 
 ### Cross-Chain Bridging
 
@@ -95,7 +97,7 @@ Cross-chain asset transfers and NAV synchronization via [Across Protocol](https:
 - **Transfer mode** (NAV-neutral): Moves tokens between chains using a Virtual Supply model — NAV stays constant on both chains
 - **Sync mode** (NAV-equalizing): Rebalances NAV across chains with a closed-form equalization formula
 - **NAV equalization**: Deterministic calculation of optimal bridge amount to converge NAV across chain pairs
-- All 7 supported chains as source and destination
+- All Ethereum-based supported chains as source and destination (HyperEVM bridges USDC only — the only token Rigoblock allows on that chain)
 
 ## DEX Integrations
 
@@ -119,6 +121,16 @@ Features:
 ### GMX V2 (Perpetuals)
 
 Arbitrum-only perpetual futures via GMX V2. Supports opening/closing long/short positions with leverage.
+
+### Hyperliquid (Perpetuals)
+
+HyperEVM-only perpetual futures via the Rigoblock `AHyperliquid` vault adapter — a **USDC-only** perps account on Hyperliquid Core. The pool's base token on HyperEVM must be USDC (the only token with a price feed there).
+
+- **Deposit** bridges EVM USDC (6 decimals) into the Core perp account and activates the Core account if it doesn't exist yet
+- **Withdrawal is two steps**: `USD_CLASS_TRANSFER` (perp margin → Core spot, 6 decimals) then `SPOT_SEND` (Core spot → HyperEVM; Core spot USDC uses 8-decimal core wei)
+- **Trading** uses CoreWriter limit orders behind `sendRawAction`: an IOC order without an explicit price behaves like a market order (1% slippage bound), `reduceOnly` orders decrease/close. Cross margin — collateral is global to the perp account; the positions report shows declared per-position leverage and global account leverage
+- Account value is read from HyperEVM precompiles (`accountMarginSummary`, `spotBalance`, `coreUserExists`); per-position state (entry/mark/liq, PnL, orders) comes from the Hyperliquid Core info API
+- After a deposit or spot-send, NAV-sensitive vault operations pause for the ~128s HyperCore settlement window
 
 ## x402 Payment Protocol
 
@@ -149,8 +161,8 @@ src/
 │   ├── rigoblockVault.ts    #   Vault (IAUniswapRouter interface)
 │   ├── erc20.ts             #   ERC-20
 │   ├── gmx.ts               #   GMX V2
+│   ├── hyperliquid.ts       #   AHyperliquid adapter + CoreWriter constants + precompiles
 │   ├── poolFactory.ts       #   RigoblockPoolProxyFactory
-│   └── aIntents.ts          #   AIntents adapter
 ├── llm/
 │   ├── client.ts            # LLM provider routing + tool execution loop
 │   ├── prompts.ts           # Modular system prompt (core + domain sections)
@@ -173,6 +185,8 @@ src/
     ├── execution.ts         # 7-point validation + NAV shield + broadcast
     ├── gmxTrading.ts        # GMX V2 perpetuals
     ├── gmxPositions.ts      # GMX position queries
+    ├── hyperliquid.ts       # Hyperliquid account reads (precompiles + Core info API)
+    ├── hyperliquidTrading.ts# Hyperliquid calldata builders (adapter + sendRawAction)
     ├── grgStaking.ts        # GRG staking via vault adapter
     ├── navGuard.ts          # NAV shield simulation (10% threshold)
     ├── telegram.ts          # Telegram Bot API helpers

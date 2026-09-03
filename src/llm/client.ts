@@ -152,6 +152,11 @@ export const VAULT_TX_TOOLS = new Set<string>([
   "gmx_cancel_order",
   "gmx_update_order",
   "gmx_claim_funding_fees",
+  "hyperliquid_deposit",
+  "hyperliquid_limit_order",
+  "hyperliquid_cancel_order",
+  "hyperliquid_usd_class_transfer",
+  "hyperliquid_spot_send",
   "grg_stake",
   "grg_undelegate_stake",
   "grg_unstake",
@@ -937,6 +942,7 @@ ${executionModeNote}${contextDocsBlock}`;
     tryFastPathBridge(effectiveMsg) ||
     tryFastPathTwapCreate(effectiveMsg) ||
     tryFastPathGmxIncrease(effectiveMsg) ||
+    tryFastPathHyperliquid(effectiveMsg) ||
     tryFastPathStrategyQueries(effectiveMsg) ||
     tryFastPathPendingTx(effectiveMsg);
   if (immediateFastPath) {
@@ -1121,6 +1127,8 @@ ${executionModeNote}${contextDocsBlock}`;
             detectedDex = "0x";
           } else if (name.startsWith("gmx_")) {
             detectedDex = "GMX";
+          } else if (name.startsWith("hyperliquid_")) {
+            detectedDex = "Hyperliquid";
           }
         } catch (err) {
           // Token resolution failures should ask the user for a contract address or
@@ -2480,6 +2488,66 @@ export function tryFastPathGmxIncrease(msg: string): FastPathResult | null {
   // "gmx markets" / "show gmx markets"
   if (/^(?:show\s+)?gmx\s+markets?[\s?.!]*$/i.test(m) || /^(?:list\s+)?gmx\s+markets?[\s?.!]*$/i.test(m)) {
     return { name: "gmx_get_markets", args: {} };
+  }
+
+  return null;
+}
+
+// ── Fast-path: Hyperliquid (HyperEVM) ─────────────────────────────────
+
+/**
+ * Deterministic fast paths for unambiguous Hyperliquid commands. Every pattern
+ * REQUIRES the "hyperliquid" keyword so generic perp phrases ("close my BTC long")
+ * keep flowing to GMX. Ambiguous Hyperliquid requests are routed by the prompt's
+ * hyperliquid domain block instead.
+ */
+export function tryFastPathHyperliquid(msg: string): FastPathResult | null {
+  const m = msg.trim();
+  const hasHl = /\bhyperliquid\b/i.test(m);
+  if (!hasHl) return null;
+
+  // "show my hyperliquid positions" / "hyperliquid account" / "my hyperliquid positions"
+  if (/^(?:show|list|get|check|what\s+are)(?:\s+my)?\s+hyperliquid\s+(?:positions?|account|balance)[\s?.!]*$/i.test(m) ||
+      /^my\s+hyperliquid\s+(?:positions?|account|balance)[\s?.!]*$/i.test(m) ||
+      /^hyperliquid\s+(?:positions?|account|balance)[\s?.!]*$/i.test(m)) {
+    return { name: "hyperliquid_get_positions", args: {} };
+  }
+
+  // "hyperliquid markets" / "show hyperliquid markets"
+  if (/^(?:show|list|get)?\s*hyperliquid\s+markets?[\s?.!]*$/i.test(m)) {
+    return { name: "hyperliquid_get_markets", args: {} };
+  }
+
+  // "deposit 500 usdc to hyperliquid" / "hyperliquid deposit 500"
+  const depositMatch = m.match(/^(?:(?:hyperliquid\s+)?deposit|bridge)\s+([\d.,]+)\s*(?:usdc|usd)?\s*(?:to|into)?\s*hyperliquid[\s?.!]*$/i) ||
+    m.match(/^hyperliquid\s+deposit\s+([\d.,]+)\s*(?:usdc|usd)?[\s?.!]*$/i);
+  if (depositMatch) {
+    return { name: "hyperliquid_deposit", args: { amount: depositMatch[1].replace(/,/g, "") } };
+  }
+
+  // "close my BTC long on hyperliquid" → full close via reduce-only limit order
+  const closeMatch = m.match(/^close(?:\s+my)?\s+([A-Z]{2,10})(?:\/USD)?\s+(long|short)(?:\s+position)?\s+on\s+hyperliquid[\s?.!]*$/i);
+  if (closeMatch) {
+    return {
+      name: "hyperliquid_limit_order",
+      args: { coin: closeMatch[1].toUpperCase(), close: true },
+    };
+  }
+
+  // "long 0.5 BTC on hyperliquid" / "buy 0.5 BTC on hyperliquid" — open/increase with explicit size
+  const openMatch = m.match(/^(long|short|buy|sell)\s+([\d.,]+)\s+([A-Z]{2,10})(?:\/USD)?\s+on\s+hyperliquid[\s?.!]*$/i);
+  if (openMatch) {
+    const dir = openMatch[1].toLowerCase();
+    const priceMatch = m.match(/@\s*([\d.,]+)/);
+    return {
+      name: "hyperliquid_limit_order",
+      args: {
+        coin: openMatch[3].toUpperCase(),
+        side: dir === "long" || dir === "buy" ? "buy" : "sell",
+        size: openMatch[2].replace(/,/g, ""),
+        ...(priceMatch ? { price: priceMatch[1].replace(/,/g, "") } : {}),
+      },
+    };
   }
 
   return null;

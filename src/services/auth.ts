@@ -17,6 +17,7 @@
 import { verifyMessage, isAddress, type Address } from "viem";
 import { isVaultOwner } from "./vault.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "../config.js";
+import { getEnv } from "./envContext.js";
 
 const AUTH_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -27,6 +28,66 @@ const AUTH_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
  */
 const ownershipCache = new Map<string, number>();
 const OWNERSHIP_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Anti-replay store: highest consumed authTimestamp per operator address.
+ * A captured (address, signature, timestamp) triple is otherwise replayable by
+ * anyone for the full 24h signature validity window. Requiring strictly
+ * increasing timestamps per address means a previously seen triple can never
+ * be accepted again.
+ *
+ * KV (`auth:ts:{address}`) is authoritative when available; the in-memory map
+ * mirrors it so non-worker contexts (unit tests, scripts) still get partial
+ * protection within a single process.
+ */
+const authTimestampCache = new Map<string, number>();
+const AUTH_TS_TTL_SECONDS = 25 * 60 * 60; // 25h — covers the 24h signature window
+
+/**
+ * Reject authTimestamps that are not strictly newer than the highest one
+ * already consumed for this address, then record the new maximum.
+ *
+ * MUST only be called AFTER the signature has verified — otherwise an
+ * attacker could burn a victim's timestamp window without knowing the key.
+ */
+async function enforceAuthTimestampMonotonicity(
+  operatorAddress: string,
+  authTimestamp: number,
+): Promise<void> {
+  const key = `auth:ts:${operatorAddress.toLowerCase()}`;
+  const kv = getEnv()?.KV;
+
+  let stored: number | undefined;
+  if (kv) {
+    try {
+      const raw = await kv.get(key);
+      if (raw != null) stored = Number(raw);
+    } catch {
+      // KV read failed — fall back to the in-memory mirror below.
+    }
+  }
+  if (stored === undefined || Number.isNaN(stored)) {
+    stored = authTimestampCache.get(key);
+  }
+
+  if (stored !== undefined && authTimestamp <= stored) {
+    throw new AuthError(
+      "Authentication replay detected. This signature was already used. " +
+      "Please sign a fresh authentication message with a newer timestamp.",
+      401,
+    );
+  }
+
+  const newMax = Math.max(stored ?? 0, authTimestamp);
+  authTimestampCache.set(key, newMax);
+  if (kv) {
+    try {
+      await kv.put(key, String(newMax), { expirationTtl: AUTH_TS_TTL_SECONDS });
+    } catch {
+      // KV write failed — the in-memory mirror still protects this process.
+    }
+  }
+}
 
 /**
  * Build the exact message the frontend must sign.
@@ -123,6 +184,11 @@ async function _verifyOperatorSignature(
       401,
     );
   }
+
+  // Anti-replay: only after the signature has verified, reject timestamps that
+  // are not strictly newer than the highest one already consumed for this
+  // address, then record the new maximum (KV + in-memory mirror).
+  await enforceAuthTimestampMonotonicity(operatorAddress, authTimestamp);
 }
 
 /**

@@ -127,12 +127,15 @@ describe("operator signature bypass", () => {
     expect(json.error).toContain("Authentication expired");
   });
 
-  it("does NOT bypass when headers are missing", async () => {
+  it("fails closed (503) on protected routes when headers are missing and payment cannot be verified", async () => {
     mockVerifySig.mockResolvedValue(true);
     const { app, env } = createApp();
+    // No auth headers + no CDP creds → payment cannot be verified for a
+    // PROTECTED route → must fail closed with 503, not serve the endpoint free.
     const res = await app.request("/api/chat", { method: "POST" }, env);
+    expect(res.status).toBe(503);
     const json = (await res.json()) as any;
-    expect(json.auth).toBe(false);
+    expect(json.error).toBe("Payment verification unavailable");
   });
 
   it("does NOT bypass for unlisted /api routes even with valid signature", async () => {
@@ -150,11 +153,79 @@ describe("operator signature bypass", () => {
       },
       env,
     );
-    // Unlisted routes fall through to x402 server (which fails in tests → next()).
-    // This is a pre-existing behavior when the facilitator is unreachable.
+    // Unlisted routes are NOT in PROTECTED_ROUTES — payment is not required
+    // for them, so the fail-closed path lets them through when the facilitator
+    // is unreachable in tests.
     expect(res.status).toBe(200);
     const json = (await res.json()) as any;
     expect(json.ok).toBe(true);
+  });
+});
+
+describe("fail-closed payment verification (F4)", () => {
+  beforeEach(() => {
+    mockVerifySig.mockReset();
+  });
+
+  it("returns 503 for protected routes when CDP credentials are missing", async () => {
+    const { app, env } = createApp();
+    const res = await app.request("/api/chat", { method: "POST" }, env);
+    expect(res.status).toBe(503);
+    const json = (await res.json()) as any;
+    expect(json.error).toBe("Payment verification unavailable");
+  });
+
+  it("returns 503 for protected GET routes when CDP credentials are missing", async () => {
+    const { app, env } = createApp();
+    const res = await app.request("/api/quote", { method: "GET" }, env);
+    expect(res.status).toBe(503);
+  });
+
+  it("still serves public routes without credentials", async () => {
+    const app = new Hono<{ Bindings: { KV: KVNamespace }; Variables: Record<string, unknown> }>();
+    app.use("*", createX402Middleware());
+    app.get("/api/health", (c) => c.json({ ok: true }));
+    const env = { KV: createMockKV() };
+    const res = await app.request("/api/health", { method: "GET" }, env);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.ok).toBe(true);
+  });
+
+  it("X402_RELAXED=1 restores fail-open behavior for protected routes only with APP_ENV=development", async () => {
+    const { app, env } = createApp();
+    const relaxedEnv = { ...env, APP_ENV: "development", X402_RELAXED: "1" };
+    const res = await app.request("/api/chat", { method: "POST" }, relaxedEnv);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.auth).toBe(false); // no operator auth — just allowed through
+  });
+
+  it("X402_RELAXED=1 without APP_ENV=development stays fail-closed (503)", async () => {
+    const { app, env } = createApp();
+    const rogueEnv = { ...env, X402_RELAXED: "1" };
+    const res = await app.request("/api/chat", { method: "POST" }, rogueEnv);
+    expect(res.status).toBe(503);
+  });
+
+  it("operator header-auth bypass still works when CDP credentials are missing", async () => {
+    mockVerifySig.mockResolvedValue(true);
+    const { app, env } = createApp();
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-operator-address": "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
+          "x-auth-signature": "0x123",
+          "x-auth-timestamp": String(Date.now()),
+        },
+      },
+      env,
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.auth).toBe(true);
   });
 });
 
