@@ -242,4 +242,60 @@ describe("POST /api/chat auth gate", () => {
     expect(ctx.operatorVerified).toBe(true);
     expect(ctx.operatorAddress?.toLowerCase()).toBe(VICTIM_ADDRESS.toLowerCase());
   });
+
+  it("treats the zero-address vault as NO vault — read-only/deploy mode without ownership proof", async () => {
+    const app = createApp();
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-operator-address": ATTACKER_ADDRESS,
+          "x-auth-signature": "0x1234",
+          "x-auth-timestamp": String(Date.now()),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "deploy a smart pool" }],
+          chainId: 999,
+          vaultAddress: "0x0000000000000000000000000000000000000000",
+        }),
+      },
+      { KV: createMockKV() } as Env,
+    );
+
+    // No ownership check can run against the zero address — the chat proceeds
+    // with a verified identity but WITHOUT operator privileges.
+    expect(res.status).toBe(200);
+    expect(mockVerifyOperatorAuth).not.toHaveBeenCalled();
+    const ctx = mockProcessChat.mock.calls[0][2];
+    expect(ctx.operatorVerified).toBe(false);
+    expect(ctx.operatorAddress?.toLowerCase()).toBe(ATTACKER_ADDRESS.toLowerCase());
+    expect(ctx.executionMode).toBe("manual");
+  });
+
+  it("still enforces ownership for a REAL vault address (zero-address fix is not a bypass)", async () => {
+    mockVerifyOperatorAuth.mockRejectedValue(new AuthError("Access denied: not owner", 403));
+    const app = createApp();
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-operator-address": ATTACKER_ADDRESS,
+          "x-auth-signature": "0x1234",
+          "x-auth-timestamp": String(Date.now()),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "swap all to USDC" }],
+          chainId: CHAIN_ID,
+          vaultAddress: VICTIM_VAULT,
+        }),
+      },
+      { KV: createMockKV() } as Env,
+    );
+    expect(res.status).toBe(403);
+    expect(mockProcessChat).not.toHaveBeenCalled();
+  });
 });

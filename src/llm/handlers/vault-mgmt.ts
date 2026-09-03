@@ -43,9 +43,27 @@ export async function handle_deploy_smart_pool(
 
   // Resolve base token — default to ETH (address(0))
   let baseTokenAddress: Address = "0x0000000000000000000000000000000000000000";
-  const baseTokenArg = (args.baseToken as string) || "ETH";
+  let baseTokenArg = (args.baseToken as string) || "ETH";
 
-  if (baseTokenArg.startsWith("0x") && baseTokenArg.length === 42) {
+  // HyperEVM (Hyperliquid) pools are USDC-only: the AHyperliquid adapter settles
+  // margin in USDC, so a pool with any other base token could never trade there.
+  // Default to USDC and reject any other base token with actionable guidance.
+  if (ctx.chainId === 999) {
+    const HYPER_USDC = "0xb88339CB7199b77E23DB6E890353E22632Ba630f";
+    const requested = (args.baseToken as string) || "USDC";
+    const isUsdc =
+      requested.toUpperCase() === "USDC" ||
+      (requested.startsWith("0x") && requested.toLowerCase() === HYPER_USDC.toLowerCase());
+    if (!isUsdc) {
+      throw new Error(
+        `HyperEVM smart pools must use USDC as the base token — the Hyperliquid adapter settles ` +
+        `margin in USDC, so a pool with a different base token could never trade there. ` +
+        `Requested: "${requested}". Deploy with USDC, or switch to another chain for an ETH-based pool.`,
+      );
+    }
+    baseTokenAddress = HYPER_USDC as Address;
+    baseTokenArg = "USDC";
+  } else if (baseTokenArg.startsWith("0x") && baseTokenArg.length === 42) {
     baseTokenAddress = baseTokenArg as Address;
   } else if (baseTokenArg.toUpperCase() !== "ETH") {
     baseTokenAddress = await resolveTokenAddress(ctx.chainId, baseTokenArg) as Address;

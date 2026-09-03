@@ -636,7 +636,9 @@ export const TOOL_DEFINITIONS = [
         "Deploy a new Rigoblock smart pool via the RigoblockPoolProxyFactory. " +
         "Returns an unsigned createPool() transaction for the operator to sign. " +
         "After deployment, the operator can set the new pool address in the interface. " +
-        "Default base tokens: ETH (address(0)) or USDC. User can also paste a custom token address.",
+        "Default base tokens: ETH (address(0)) or USDC. User can also paste a custom token address. " +
+        "On HyperEVM the base token is always USDC (Hyperliquid adapter requirement) — ask only for " +
+        "name and symbol there; any other base token is rejected.",
       parameters: {
         type: "object",
         properties: {

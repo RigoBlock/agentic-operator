@@ -107,11 +107,19 @@ async function authenticateChatOperator(
 ): Promise<{ operatorVerified: boolean; operatorAddress?: string }> {
   const hasBodyAuth = !!(body.operatorAddress && body.authSignature && body.authTimestamp);
   const headerAuth = c.get("operatorAuth");
+  // The zero address signals "no pool yet" (pool deployment flow). Treat it as
+  // NO vault: no ownership check can succeed against it, and the documented
+  // intent for vault-less chats is read-only/deploy mode without operatorVerified.
+  const ZERO_VAULT = "0x0000000000000000000000000000000000000000";
+  const effectiveVault =
+    body.vaultAddress && body.vaultAddress.toLowerCase() !== ZERO_VAULT
+      ? body.vaultAddress
+      : undefined;
 
   if (hasBodyAuth) {
     await verifyOperatorAuth({
       operatorAddress: body.operatorAddress || "",
-      vaultAddress: body.vaultAddress,
+      vaultAddress: effectiveVault,
       authSignature: body.authSignature || "",
       authTimestamp: body.authTimestamp || 0,
       preferredChainId: body.chainId,
@@ -119,10 +127,10 @@ async function authenticateChatOperator(
     return { operatorVerified: true, operatorAddress: body.operatorAddress };
   }
 
-  if (headerAuth && body.vaultAddress) {
+  if (headerAuth && effectiveVault) {
     await verifyOperatorAuth({
       operatorAddress: headerAuth.address,
-      vaultAddress: body.vaultAddress,
+      vaultAddress: effectiveVault,
       authSignature: headerAuth.signature,
       authTimestamp: headerAuth.timestamp,
       preferredChainId: body.chainId,

@@ -15,6 +15,7 @@
  */
 
 import { verifyMessage, isAddress, type Address } from "viem";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { isVaultOwner } from "./vault.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "../config.js";
 import { getEnv } from "./envContext.js";
@@ -44,8 +45,35 @@ const authTimestampCache = new Map<string, number>();
 const AUTH_TS_TTL_SECONDS = 25 * 60 * 60; // 25h — covers the 24h signature window
 
 /**
+ * Request-scoped record of (address, timestamp) pairs already consumed during
+ * the current request. A single logical request legitimately verifies the same
+ * credentials twice — the x402 middleware verifies the X-Auth-* headers, then
+ * the route handler calls verifyOperatorAuth with the same signature to check
+ * vault ownership. Without request-scoped idempotency, the anti-replay
+ * monotonicity check would reject the second verification of the SAME triple
+ * (its timestamp is no longer strictly newer than the one the middleware just
+ * recorded), producing an unfixable re-authentication loop.
+ *
+ * Cross-request replay protection is unchanged: this store is created fresh
+ * per request (AsyncLocalStorage) and consulted only within it. Reusing the
+ * same triple in a LATER request is still rejected by the KV-backed monotonicity
+ * check below. Only triples whose signature has already verified are recorded.
+ */
+const authRequestScope = new AsyncLocalStorage<Set<string>>();
+
+/** Run `fn` with a fresh per-request auth-consumption scope. */
+export function withAuthRequestScope<T>(fn: () => T): T {
+  return authRequestScope.run(new Set<string>(), fn);
+}
+
+/**
  * Reject authTimestamps that are not strictly newer than the highest one
  * already consumed for this address, then record the new maximum.
+ *
+ * Idempotent within a single request (see authRequestScope): the same verified
+ * triple may be consumed more than once when the x402 middleware AND the route
+ * handler both authenticate the same credentials. Across requests, consumption
+ * is strictly monotonic.
  *
  * MUST only be called AFTER the signature has verified — otherwise an
  * attacker could burn a victim's timestamp window without knowing the key.
@@ -56,6 +84,17 @@ async function enforceAuthTimestampMonotonicity(
 ): Promise<void> {
   const key = `auth:ts:${operatorAddress.toLowerCase()}`;
   const kv = getEnv()?.KV;
+
+  // Same-request idempotency: the middleware and the route may both verify the
+  // identical triple within one request. The signature has already verified at
+  // this point, and the triple passed the monotonicity check on first use.
+  // Keyed by address + timestamp so a DIFFERENT timestamp in the same request
+  // is still evaluated against the monotonicity store.
+  const seen = authRequestScope.getStore();
+  const seenKey = `${key}:${authTimestamp}`;
+  if (seen?.has(seenKey)) {
+    return;
+  }
 
   let stored: number | undefined;
   if (kv) {
@@ -80,6 +119,7 @@ async function enforceAuthTimestampMonotonicity(
 
   const newMax = Math.max(stored ?? 0, authTimestamp);
   authTimestampCache.set(key, newMax);
+  seen?.add(seenKey);
   if (kv) {
     try {
       await kv.put(key, String(newMax), { expirationTtl: AUTH_TS_TTL_SECONDS });
@@ -194,6 +234,10 @@ async function _verifyOperatorSignature(
 /**
  * Lightweight signature verification — returns boolean instead of throwing.
  * Used by x402 middleware to skip payment for authenticated operators.
+ *
+ * The client-facing 401 is intentionally generic; the real rejection reason is
+ * logged server-side (worker contexts only) so misconfigurations and regressions
+ * are visible in production logs.
  */
 export async function verifyOperatorSignatureOnly(
   operatorAddress: string,
@@ -203,7 +247,12 @@ export async function verifyOperatorSignatureOnly(
   try {
     await _verifyOperatorSignature(operatorAddress, authSignature, authTimestamp);
     return true;
-  } catch {
+  } catch (err) {
+    if (getEnv()) {
+      console.warn(
+        `[auth] operator signature rejected for ${operatorAddress}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
     return false;
   }
 }

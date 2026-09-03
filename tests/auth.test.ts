@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { buildAuthMessage, AuthError, verifyOperatorSignatureOnly } from "../src/services/auth.js";
+import { buildAuthMessage, AuthError, verifyOperatorSignatureOnly, withAuthRequestScope } from "../src/services/auth.js";
 
 describe("buildAuthMessage", () => {
   it("returns a deterministic legacy message for any address when no timestamp", () => {
@@ -187,6 +187,63 @@ describe("auth timestamp anti-replay (F3)", () => {
     // scope, because KV (not just the in-memory mirror) recorded the timestamp.
     await withEnv(env, async () => {
       expect(await verifyOperatorSignatureOnly(account.address, await signFor(account, ts), ts)).toBe(false);
+    });
+  });
+});
+
+
+describe("request-scoped auth idempotency (middleware + route double-verification)", () => {
+  async function signFor(account: ReturnType<typeof privateKeyToAccount>, ts: number) {
+    const msg = buildAuthMessage(account.address, ts);
+    return account.signMessage({ message: msg });
+  }
+
+  it("accepts the SAME triple twice within one request scope", async () => {
+    const account = privateKeyToAccount(generatePrivateKey());
+    const ts = Date.now();
+    const sig = await signFor(account, ts);
+    await withAuthRequestScope(async () => {
+      // First consumption — e.g. the x402 middleware verifying X-Auth-* headers
+      expect(await verifyOperatorSignatureOnly(account.address, sig, ts)).toBe(true);
+      // Second consumption of the identical triple in the SAME request — e.g.
+      // the chat route calling verifyOperatorAuth for vault ownership.
+      expect(await verifyOperatorSignatureOnly(account.address, sig, ts)).toBe(true);
+    });
+  });
+
+  it("still rejects replay of the same triple in a LATER request scope", async () => {
+    const account = privateKeyToAccount(generatePrivateKey());
+    const ts = Date.now();
+    const sig = await signFor(account, ts);
+    await withAuthRequestScope(() => verifyOperatorSignatureOnly(account.address, sig, ts));
+    // A subsequent request reusing the captured triple must be rejected.
+    await withAuthRequestScope(async () => {
+      expect(await verifyOperatorSignatureOnly(account.address, sig, ts)).toBe(false);
+    });
+  });
+
+  it("keeps cross-request monotonicity: newer fresh signature passes, older fails", async () => {
+    const account = privateKeyToAccount(generatePrivateKey());
+    const ts1 = Date.now();
+    const ts2 = ts1 + 1_000;
+    await withAuthRequestScope(async () => {
+      expect(await verifyOperatorSignatureOnly(account.address, await signFor(account, ts1), ts1)).toBe(true);
+    });
+    await withAuthRequestScope(async () => {
+      expect(await verifyOperatorSignatureOnly(account.address, await signFor(account, ts2), ts2)).toBe(true);
+      // Older timestamp can no longer be used, even with a valid signature.
+      expect(await verifyOperatorSignatureOnly(account.address, await signFor(account, ts1), ts1)).toBe(false);
+    });
+  });
+
+  it("does not grant idempotency across different addresses", async () => {
+    const accountA = privateKeyToAccount(generatePrivateKey());
+    const accountB = privateKeyToAccount(generatePrivateKey());
+    const ts = Date.now();
+    await withAuthRequestScope(async () => {
+      expect(await verifyOperatorSignatureOnly(accountA.address, await signFor(accountA, ts), ts)).toBe(true);
+      // Same timestamp, different address — must be evaluated on its own merits.
+      expect(await verifyOperatorSignatureOnly(accountB.address, await signFor(accountB, ts), ts)).toBe(true);
     });
   });
 });
