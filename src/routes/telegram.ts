@@ -1264,6 +1264,21 @@ async function handleMessage(
 
         if (flowResult.kind === "pending_confirmation") {
           const pendingTxs = flowResult.transactions ?? [];
+
+          // No operationId means nothing is agent-executable (e.g. pool
+          // deployment) — the vault owner must sign from their wallet. Point
+          // to the web app instead of showing a dead Execute button.
+          if (!flowResult.operationId) {
+            const manualText = [
+              formatForTelegram(stripToolPrefix(cleanedReply)),
+              `\n✍️ <b>Signature required from your wallet.</b>\n` +
+                `Open <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> and repeat this request while connected — ` +
+                `the transaction will appear for you to sign directly (it cannot be executed by the agent wallet).`,
+              ...buildMetricsLines(),
+              delegationWarning,
+            ].filter(Boolean).join("\n\n");
+            await sendMessage(token, chatId, manualText.slice(0, 4000));
+          } else {
           const tradeCount = pendingTxs.length > 1 ? `${pendingTxs.length} trades` : "trade";
           const execLabel = pendingTxs.length > 1 ? "Execute All" : "Execute";
           const replyText = flowResult.reply ?? "";
@@ -1288,12 +1303,13 @@ async function handleMessage(
           };
           const sent = await sendMessage(token, chatId, truncated, { replyMarkup: keyboard });
           const messageId = sent?.message_id;
-          if (messageId && flowResult.operationId) {
+          if (messageId) {
             await env.KV.put(
               pendingTxKey(userId, messageId),
               JSON.stringify({ operationId: flowResult.operationId, createdAt: Date.now(), messageId }),
               { expirationTtl: 120 },
             );
+          }
           }
         }
 

@@ -549,7 +549,7 @@ Each vault gets its own agent EOA (deterministic per vault address).`,
 - get_vault_info: vault name, symbol, owner, total supply.
 - get_token_balance: check a specific token balance.
 - switch_chain: change active chain (only when user wants to change chain without trading).
-- deploy_smart_pool: create a NEW pool. Only when user explicitly wants to create one.
+- deploy_smart_pool: create a NEW pool. Only when user explicitly wants to create one. Pass the name EXACTLY as the user typed it (the registry is case-sensitive — never change capitalization); the symbol is auto-uppercased server-side.
 - fund_pool: deposit capital (mint pool tokens). "buy X USDT of [pool name]" = fund_pool.
 
 POOL FUNDING:

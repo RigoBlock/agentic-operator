@@ -37,7 +37,6 @@ import { getTwapEvents } from "./skills/twap.js";
 import { processChat } from "./llm/client.js";
 import { ensureWebhookRegistered, getWebhookSecret } from "./services/telegram.js";
 import { withEnv } from "./services/envContext.js";
-import { withAuthRequestScope } from "./services/auth.js";
 import { validateEnvironmentConfig } from "./services/devMode.js";
 import type { Address } from "viem";
 
@@ -80,13 +79,13 @@ app.use("*", async (c, next) => {
   await next();
 });
 
-// Initialise token resolver KV on every request. The auth-request scope makes
-// timestamp consumption idempotent within one request (x402 middleware + route
-// handler both verify the same credentials) while keeping cross-request
-// anti-replay strictly monotonic.
+// Initialise token resolver KV on every request. Auth verification is
+// idempotent (see auth.ts): the x402 middleware and the route handler both
+// verify the same credentials within one request, with no consumption side
+// effects.
 app.use("*", async (c, next) => {
   if (c.env.KV) initTokenResolver(c.env.KV, c.env.COINGECKO_API_KEY);
-  await withEnv(c.env, () => withAuthRequestScope(next));
+  await withEnv(c.env, next);
 });
 
 // x402 payment gate — charges external agents for /api/chat and /api/quote.

@@ -15,7 +15,6 @@
  */
 
 import { verifyMessage, isAddress, type Address } from "viem";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { isVaultOwner } from "./vault.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "../config.js";
 import { getEnv } from "./envContext.js";
@@ -31,103 +30,17 @@ const ownershipCache = new Map<string, number>();
 const OWNERSHIP_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
- * Anti-replay store: highest consumed authTimestamp per operator address.
- * A captured (address, signature, timestamp) triple is otherwise replayable by
- * anyone for the full 24h signature validity window. Requiring strictly
- * increasing timestamps per address means a previously seen triple can never
- * be accepted again.
- *
- * KV (`auth:ts:{address}`) is authoritative when available; the in-memory map
- * mirrors it so non-worker contexts (unit tests, scripts) still get partial
- * protection within a single process.
+ * Verification is IDEMPOTENT within the signature's validity window: the
+ * frontend caches one wallet signature per address (localStorage, 23h) and
+ * reuses it for every request, including delegated executions — so a still
+ * valid (address, signature, timestamp) triple must be accepted on every
+ * presentation. Replay protection comes from the cryptographic binding of the
+ * timestamp into the signed message (a captured signature cannot be presented
+ * with a different or fresher timestamp) and from the bounded 24h window.
+ * Single-use semantics were tried and rejected: they break the cached session
+ * and add no real security, since only the keyholder can mint a fresh
+ * credential anyway.
  */
-const authTimestampCache = new Map<string, number>();
-const AUTH_TS_TTL_SECONDS = 25 * 60 * 60; // 25h — covers the 24h signature window
-
-/**
- * Request-scoped record of (address, timestamp) pairs already consumed during
- * the current request. A single logical request legitimately verifies the same
- * credentials twice — the x402 middleware verifies the X-Auth-* headers, then
- * the route handler calls verifyOperatorAuth with the same signature to check
- * vault ownership. Without request-scoped idempotency, the anti-replay
- * monotonicity check would reject the second verification of the SAME triple
- * (its timestamp is no longer strictly newer than the one the middleware just
- * recorded), producing an unfixable re-authentication loop.
- *
- * Cross-request replay protection is unchanged: this store is created fresh
- * per request (AsyncLocalStorage) and consulted only within it. Reusing the
- * same triple in a LATER request is still rejected by the KV-backed monotonicity
- * check below. Only triples whose signature has already verified are recorded.
- */
-const authRequestScope = new AsyncLocalStorage<Set<string>>();
-
-/** Run `fn` with a fresh per-request auth-consumption scope. */
-export function withAuthRequestScope<T>(fn: () => T): T {
-  return authRequestScope.run(new Set<string>(), fn);
-}
-
-/**
- * Reject authTimestamps that are not strictly newer than the highest one
- * already consumed for this address, then record the new maximum.
- *
- * Idempotent within a single request (see authRequestScope): the same verified
- * triple may be consumed more than once when the x402 middleware AND the route
- * handler both authenticate the same credentials. Across requests, consumption
- * is strictly monotonic.
- *
- * MUST only be called AFTER the signature has verified — otherwise an
- * attacker could burn a victim's timestamp window without knowing the key.
- */
-async function enforceAuthTimestampMonotonicity(
-  operatorAddress: string,
-  authTimestamp: number,
-): Promise<void> {
-  const key = `auth:ts:${operatorAddress.toLowerCase()}`;
-  const kv = getEnv()?.KV;
-
-  // Same-request idempotency: the middleware and the route may both verify the
-  // identical triple within one request. The signature has already verified at
-  // this point, and the triple passed the monotonicity check on first use.
-  // Keyed by address + timestamp so a DIFFERENT timestamp in the same request
-  // is still evaluated against the monotonicity store.
-  const seen = authRequestScope.getStore();
-  const seenKey = `${key}:${authTimestamp}`;
-  if (seen?.has(seenKey)) {
-    return;
-  }
-
-  let stored: number | undefined;
-  if (kv) {
-    try {
-      const raw = await kv.get(key);
-      if (raw != null) stored = Number(raw);
-    } catch {
-      // KV read failed — fall back to the in-memory mirror below.
-    }
-  }
-  if (stored === undefined || Number.isNaN(stored)) {
-    stored = authTimestampCache.get(key);
-  }
-
-  if (stored !== undefined && authTimestamp <= stored) {
-    throw new AuthError(
-      "Authentication replay detected. This signature was already used. " +
-      "Please sign a fresh authentication message with a newer timestamp.",
-      401,
-    );
-  }
-
-  const newMax = Math.max(stored ?? 0, authTimestamp);
-  authTimestampCache.set(key, newMax);
-  seen?.add(seenKey);
-  if (kv) {
-    try {
-      await kv.put(key, String(newMax), { expirationTtl: AUTH_TS_TTL_SECONDS });
-    } catch {
-      // KV write failed — the in-memory mirror still protects this process.
-    }
-  }
-}
 
 /**
  * Build the exact message the frontend must sign.
@@ -224,11 +137,6 @@ async function _verifyOperatorSignature(
       401,
     );
   }
-
-  // Anti-replay: only after the signature has verified, reject timestamps that
-  // are not strictly newer than the highest one already consumed for this
-  // address, then record the new maximum (KV + in-memory mirror).
-  await enforceAuthTimestampMonotonicity(operatorAddress, authTimestamp);
 }
 
 /**

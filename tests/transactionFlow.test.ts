@@ -151,7 +151,8 @@ describe("runTransactionFlow", () => {
     await setExecutionModePreference(kv, OPERATOR, "confirm");
 
     const cases = [
-      { tx: makeTx({ operatorOnly: true, description: "operator only" }), reason: /owner.*sign/i },
+      // NOTE: operatorOnly is intentionally absent — those transactions are
+      // returned for direct wallet signing, not rejected (see below).
       { tx: makeTx({ revertWarning: "would revert", description: "revert warning" }), reason: /simulation failed/i },
       { tx: makeTx({ gas: "0x0", description: "no gas" }), reason: /missing a gas limit/i },
       { tx: makeTx({ maxFeePerGas: "0x0", description: "no max fee" }), reason: /missing a max fee per gas/i },
@@ -171,6 +172,61 @@ describe("runTransactionFlow", () => {
         ),
       ).rejects.toThrow(reason);
     }
+  });
+
+  it("returns operatorOnly transactions for direct signing in confirm mode (no error, no operationId)", async () => {
+    const kv = createMockKV();
+    await setExecutionModePreference(kv, OPERATOR, "confirm");
+    const txs = [makeTx({ operatorOnly: true, description: "Deploy pool" })];
+    let confirmationRequested = false;
+
+    const result = await runTransactionFlow(
+      makeEnv(kv),
+      OPERATOR,
+      VAULT,
+      txs,
+      "Sign to deploy",
+      { requestConfirmation: async () => { confirmationRequested = true; } },
+    );
+
+    expect(result.kind).toBe("pending_confirmation");
+    expect(result.transactions).toEqual(txs);
+    expect(result.operationId).toBeUndefined();
+    expect(confirmationRequested).toBe(false);
+    expect(mockExecuteTxList).not.toHaveBeenCalled();
+
+    // Nothing may be stored for agent execution — the agent must never sign
+    // an operatorOnly transaction (e.g. it would become the pool owner).
+    const list = await kv.list({ prefix: "pending-sim:" });
+    expect(list.keys).toHaveLength(0);
+  });
+
+  it("stores only the delegated transactions when a bundle mixes delegated and operatorOnly", async () => {
+    const kv = createMockKV();
+    await setExecutionModePreference(kv, OPERATOR, "confirm");
+    const delegated = makeTx({ description: "Fund pool" });
+    const ownerTx = makeTx({ operatorOnly: true, description: "Deploy pool" });
+
+    const result = await runTransactionFlow(
+      makeEnv(kv),
+      OPERATOR,
+      VAULT,
+      [ownerTx, delegated],
+      "Deploy then fund",
+      { requestConfirmation: async () => {} },
+    );
+
+    expect(result.kind).toBe("pending_confirmation");
+    expect(result.operationId).toBeDefined();
+
+    const storedRaw = await kv.get(`pending-sim:${result.operationId}`);
+    expect(storedRaw).not.toBeNull();
+    const stored = JSON.parse(storedRaw!);
+    expect(stored.txs).toHaveLength(1);
+    expect(stored.txs[0].description).toBe("Fund pool");
+
+    // The operatorOnly transaction is still returned for wallet signing.
+    expect(result.transactions).toHaveLength(2);
   });
 
   it("executes non-operatorOnly transactions in autonomous mode", async () => {

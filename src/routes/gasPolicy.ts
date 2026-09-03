@@ -278,7 +278,6 @@ gasPolicy.post("/", async (c) => {
     // ── Extract sender from userOperation ─────────────────────────────
     // Alchemy sends: { userOperation: { sender, callData, ... }, policyId, chainId, webhookData }
     const userOp = body.userOperation;
-    const policyId = body.policyId || "";
     const chainId = body.chainId || "";
 
     if (!userOp || !userOp.sender) {
@@ -295,7 +294,6 @@ gasPolicy.post("/", async (c) => {
       c.env.GAS_SPENDING_LIMIT_USD || String(DEFAULT_GAS_SPENDING_LIMIT_USD),
       SPENDING_DECIMALS,
     );
-    const gasLimitUsdDisplay = formatUnits(gasLimitUsdRaw, SPENDING_DECIMALS);
 
     // ── 1. Check if sender is a registered agent wallet ──
     const vaultAddress = await resolveAgentToVault(c.env.KV, sender);
@@ -329,8 +327,10 @@ gasPolicy.post("/", async (c) => {
             console.warn(`[GasPolicy] ✗ REJECTED: ${reason}`);
             return c.json({ approved: false, reason }, 200);
           }
-        } else {
         }
+        // If the target cannot be decoded, fail-open here — the on-chain
+        // delegation caveats (target == vault, selector whitelist) are the
+        // real protection.
       }
 
       // ── 5. Per-wallet daily spending limit ──

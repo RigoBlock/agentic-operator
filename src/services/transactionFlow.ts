@@ -202,18 +202,33 @@ export async function runTransactionFlow(
     return { kind: "executed", outcomes, reply: baseReply };
   }
 
-  // Confirm mode: reject non-executable txs early, store the executable bundle
-  // in KV, and return an operationId for the confirmation step.
-  assertExecutableTransactions(transactions);
+  // Confirm mode: operatorOnly transactions can never be agent-executed — the
+  // vault owner must sign them directly from their wallet (e.g. pool
+  // deployment, where msg.sender becomes the pool owner). They are returned
+  // for direct wallet signing; only the delegated transactions go through the
+  // executable assertion and the stored confirmation bundle. Mixing them into
+  // the stored bundle would let the agent sign a deployment, making the AGENT
+  // the pool owner — so they are filtered out before storePendingSimulation.
+  const executableTxs = transactions.filter(tx => !tx.operatorOnly);
+
+  if (executableTxs.length === 0) {
+    // Nothing the agent can execute — the channel renders the transactions
+    // for direct wallet signing (web wallet modal / manual instructions).
+    return { kind: "pending_confirmation", transactions, reply: baseReply };
+  }
+
+  // Confirm mode: reject non-executable delegated txs early, store the
+  // executable bundle in KV, and return an operationId for confirmation.
+  assertExecutableTransactions(executableTxs);
 
   const operationId = await storePendingSimulation(
     env.KV,
     vaultAddress,
     baseReply,
-    transactions,
+    executableTxs,
     operatorAddress,
   );
 
-  await hooks.requestConfirmation(transactions, { reply: baseReply });
+  await hooks.requestConfirmation(executableTxs, { reply: baseReply });
   return { kind: "pending_confirmation", transactions, operationId, reply: baseReply };
 }

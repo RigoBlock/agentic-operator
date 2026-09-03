@@ -17,6 +17,33 @@ import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../../abi/poolFactory.js
 import { ERC20_ABI } from "../../abi/erc20.js";
 import { resolveChainArg, resolveChainName } from "../client.js";
 
+/**
+ * Mirrors PoolRegistry._assertValidNameAndSymbol + LibSanitize on-chain checks.
+ * Name: 4-31 chars, [0-9A-Za-z ] only, no leading/trailing space — stored
+ * case-sensitively. Symbol: 3-5 chars, same charset, must be ALL UPPERCASE.
+ */
+function assertValidPoolNameAndSymbol(name: string, symbol: string): void {
+  const NAME_CHARSET = /^[0-9A-Za-z ]+$/;
+  const SYMBOL_CHARSET = /^[0-9A-Z ]+$/;
+
+  if (name.length < 4 || name.length > 31) {
+    throw new Error(`Pool name must be 4-31 characters long (got ${name.length}: "${name}").`);
+  }
+  if (!NAME_CHARSET.test(name) || name.startsWith(" ") || name.endsWith(" ")) {
+    throw new Error(
+      `Pool name "${name}" contains invalid characters. Only letters, numbers and spaces are allowed, with no leading or trailing space.`,
+    );
+  }
+  if (symbol.length < 3 || symbol.length > 5) {
+    throw new Error(`Pool symbol must be 3-5 characters long (got ${symbol.length}: "${symbol}").`);
+  }
+  if (!SYMBOL_CHARSET.test(symbol) || symbol.startsWith(" ") || symbol.endsWith(" ")) {
+    throw new Error(
+      `Pool symbol "${symbol}" contains invalid characters. Only uppercase letters, numbers and spaces are allowed.`,
+    );
+  }
+}
+
 export async function handle_deploy_smart_pool(
   env: Env,
   ctx: RequestContext,
@@ -38,8 +65,15 @@ export async function handle_deploy_smart_pool(
   }
 
   const chainName = resolveChainName(ctx.chainId);
-  const poolName = args.name as string;
-  const poolSymbol = args.symbol as string;
+  // The registry (PoolRegistry._assertValidNameAndSymbol) is strict: the name
+  // is stored case-SENSITIVELY exactly as passed (4-31 chars), while the symbol
+  // must be UPPERCASE (3-5 chars); both allow only [0-9A-Za-z ] with no
+  // leading/trailing space (LibSanitize.assertIsValidCheck). Validate here so
+  // a rejected createPool never reaches the user's wallet, preserve the name's
+  // case exactly as the user typed it, and uppercase the symbol.
+  const poolName = String(args.name ?? "").trim();
+  const poolSymbol = String(args.symbol ?? "").trim().toUpperCase();
+  assertValidPoolNameAndSymbol(poolName, poolSymbol);
 
   // Resolve base token — default to ETH (address(0))
   let baseTokenAddress: Address = "0x0000000000000000000000000000000000000000";

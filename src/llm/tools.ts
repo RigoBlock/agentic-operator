@@ -638,17 +638,20 @@ export const TOOL_DEFINITIONS = [
         "After deployment, the operator can set the new pool address in the interface. " +
         "Default base tokens: ETH (address(0)) or USDC. User can also paste a custom token address. " +
         "On HyperEVM the base token is always USDC (Hyperliquid adapter requirement) — ask only for " +
-        "name and symbol there; any other base token is rejected.",
+        "name and symbol there; any other base token is rejected. " +
+        "CRITICAL naming rules (PoolRegistry is strict): pass the pool name EXACTLY as the user typed " +
+        "it — never change capitalization (4-31 chars, letters/numbers/spaces). The symbol is " +
+        "automatically uppercased server-side (3-5 chars) — pass it as typed.",
       parameters: {
         type: "object",
         properties: {
           name: {
             type: "string",
-            description: "Pool name (e.g., 'My Trading Pool')",
+            description: "Pool name EXACTLY as the user typed it (case preserved, e.g. 'alcyoneus'). 4-31 chars, letters/numbers/spaces.",
           },
           symbol: {
             type: "string",
-            description: "Pool symbol (e.g., 'MTP'). 3-5 uppercase chars recommended.",
+            description: "Pool symbol as typed — uppercased automatically server-side (e.g. 'alc' → 'ALC'). 3-5 chars.",
           },
           baseToken: {
             type: "string",

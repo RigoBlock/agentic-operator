@@ -2,6 +2,7 @@
  * Config tests — chain resolution, token maps, RPC URLs, sanitization.
  */
 import { describe, it, expect } from "vitest";
+import { parseGwei } from "viem";
 import {
   getChain,
   resolveChainId,
@@ -9,12 +10,17 @@ import {
   TOKEN_MAP,
   STAKING_PROXY,
   SUPPORTED_CHAINS,
+  TESTNET_CHAINS,
   NATIVE_TOKEN,
+  MIN_BALANCE,
+  ALCHEMY_NETWORK,
+  EXPLORER_TX_URL,
   getNativeTokenSymbol,
   getWrappedNativeAddress,
   sanitizeError,
   resolveTokenAddress,
 } from "../src/config.js";
+import { GAS_CAPS } from "../src/services/gas.js";
 
 describe("getChain", () => {
   it("returns mainnet for chain 1", () => {
@@ -275,5 +281,52 @@ describe("NATIVE_TOKEN consistency", () => {
     expect(getNativeTokenSymbol(1)).toBe("ETH");
     expect(getNativeTokenSymbol(56)).toBe("BNB");
     expect(getNativeTokenSymbol(137)).toBe("POL");
+  });
+});
+
+describe("per-chain config completeness", () => {
+  // These invariants guard the exact failure class that shipped to production
+  // when HyperEVM (999) was added to SUPPORTED_CHAINS without a GAS_CAPS
+  // entry: every user-facing chain selector entry must be fully operational
+  // end-to-end (RPC, gas estimation, execution balance check, explorer links).
+  const allChains = [...SUPPORTED_CHAINS, ...TESTNET_CHAINS];
+
+  it("every selectable chain has gas caps, min balance, RPC, and explorer config", () => {
+    for (const chain of allChains) {
+      const caps = GAS_CAPS[chain.id];
+      expect(caps, `${chain.name} (${chain.id}) missing GAS_CAPS`).toBeDefined();
+      expect(caps!.maxFeePerGas, `${chain.name}: maxFeePerGas must be > 0`).toBeGreaterThan(0n);
+      expect(caps!.maxPriorityFee, `${chain.name}: maxPriorityFee must be > 0`).toBeGreaterThan(0n);
+      expect(
+        caps!.maxFeePerGas >= caps!.maxPriorityFee,
+        `${chain.name}: maxFeePerGas must be >= maxPriorityFee`,
+      ).toBe(true);
+
+      expect(MIN_BALANCE[chain.id], `${chain.name} (${chain.id}) missing MIN_BALANCE`).toBeDefined();
+      expect(MIN_BALANCE[chain.id], `${chain.name}: MIN_BALANCE must be > 0`).toBeGreaterThan(0n);
+
+      expect(ALCHEMY_NETWORK[chain.id], `${chain.name} (${chain.id}) missing ALCHEMY_NETWORK`).toMatch(/^[a-z0-9-]+$/);
+      expect(EXPLORER_TX_URL[chain.id], `${chain.name} (${chain.id}) missing EXPLORER_TX_URL`).toMatch(/^https:\/\//);
+
+      expect(() => getChain(chain.id), `${chain.name} (${chain.id}) missing viem chain definition`).not.toThrow();
+    }
+  });
+
+  it("no config exists for chains we have no chain definition for", () => {
+    // Reverse direction: catches stale per-chain config left behind when a
+    // chain is removed from chainMap.
+    for (const map of [GAS_CAPS, MIN_BALANCE, ALCHEMY_NETWORK, EXPLORER_TX_URL, TOKEN_MAP, NATIVE_TOKEN]) {
+      for (const key of Object.keys(map)) {
+        expect(
+          () => getChain(Number(key)),
+          `chain ${key} has config but no viem chain definition`,
+        ).not.toThrow();
+      }
+    }
+  });
+
+  it("HyperEVM gas caps keep the operator-tuned values (100 / 0.02 gwei)", () => {
+    expect(GAS_CAPS[999]?.maxFeePerGas).toBe(parseGwei("100"));
+    expect(GAS_CAPS[999]?.maxPriorityFee).toBe(parseGwei("0.02"));
   });
 });

@@ -28,6 +28,7 @@ export const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bi
   56:       { maxFeePerGas: parseGwei("0.2"),  maxPriorityFee: parseGwei("0.1") },
   130:      { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
   137:      { maxFeePerGas: parseGwei("500"),  maxPriorityFee: parseGwei("100") },
+  999:      { maxFeePerGas: parseGwei("100"),  maxPriorityFee: parseGwei("0.02") },
   8453:     { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
   42161:    { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
   // Testnets
