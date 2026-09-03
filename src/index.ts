@@ -348,12 +348,13 @@ app.get("/.well-known/ai-plugin.json", (c) =>
     name_for_human: "Rigoblock Trading Agent",
     name_for_model: "rigoblock_trading_agent",
     description_for_human:
-      "AI-powered DeFi trading for Rigoblock smart vaults. Swap, bridge, LP, stake, and manage positions across 7 chains.",
+      "AI-powered DeFi trading for Rigoblock smart vaults. Swap, bridge, LP, stake, trade perpetuals on GMX and Hyperliquid, and manage positions across 8 chains.",
     description_for_model:
       "DeFi trading agent for Rigoblock smart pool vaults. Provides: " +
       "swap calldata via Uniswap and 0x, cross-chain bridges via Across, " +
-      "Uniswap v4 LP management, GMX perpetuals, GRG staking, vault deployment, " +
-      "and aggregated NAV across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain. " +
+      "Uniswap v4 LP management, GMX perpetuals, Hyperliquid perpetuals (HyperEVM, USDC-only), " +
+      "GRG staking, vault deployment, " +
+      "and aggregated NAV across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain, HyperEVM. " +
       "All vault-modifying operations require operator authentication and are protected by a 10% NAV shield. " +
       "Payment: up to $0.10 USDC per chat request (billed by inference usage, ~$0.003–$0.015), $0.0020–$0.0025 per endpoint (exact amount depends on endpoint), via x402 on Base.",
     auth: {
@@ -491,7 +492,7 @@ app.get("/.well-known/mcp/server-card.json", (c) =>
       name: "Rigoblock Trading Agent",
       version: "0.7.0",
       description:
-        "AI-powered DeFi trading for Rigoblock smart vaults. Swap, bridge, LP, stake, and manage positions across 7 chains.",
+        "AI-powered DeFi trading for Rigoblock smart vaults. Swap, bridge, LP, stake, trade perpetuals on GMX and Hyperliquid, and manage positions across 8 chains.",
     },
     transport: {
       endpoint: "https://trader.rigoblock.com/api/chat",

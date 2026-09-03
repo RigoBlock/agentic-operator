@@ -109,13 +109,14 @@ export const PROTECTED_ROUTES: RoutesConfig = {
     ],
     description:
       "AI-powered DeFi trading agent for Rigoblock smart vaults. Natural language to safe swap/bridge " +
-      "calldata or delegated execution. Supports Uniswap, 0x, GMX perpetuals, Across bridging, " +
-      "Uniswap v4 LP, GRG staking, and pool deployment across 7 chains. Protected by NAV Shield " +
+      "calldata or delegated execution. Supports Uniswap, 0x, GMX perpetuals, Hyperliquid perpetuals, " +
+      "Across bridging, Uniswap v4 LP, GRG staking, and pool deployment across 8 chains. Protected by " +
+      "NAV Shield " +
       "(10% max loss per trade), Swap Shield (oracle vs DEX price divergence check), slippage " +
       "protection, delegation verification, and transaction simulation.",
     mimeType: "application/json",
     serviceName: "Rigoblock",
-    tags: ["defi", "trading", "rigoblock", "vault", "swap", "uniswap", "0x", "bridge", "lp", "staking"],
+    tags: ["defi", "trading", "rigoblock", "vault", "swap", "bridge", "lp", "staking", "perps", "hyperliquid"],
     iconUrl: "https://trader.rigoblock.com/favicon.png",
     // Bazaar discovery extension: declared with the official SDK helper so
     // inputSchema is a real JSON Schema rather than a description map. The
