@@ -16,7 +16,7 @@
  *   perp account USDC = 6 decimals; Core spot USDC = 8 decimals; prices = 8-decimal fixed point.
  */
 
-import { formatUnits, type Address } from "viem";
+import { decodeAbiParameters, encodeAbiParameters, formatUnits, parseUnits, type Address } from "viem";
 import {
   HYPEREVM_CHAIN_ID,
   HYPEREVM_USDC,
@@ -24,9 +24,6 @@ import {
   HL_DEFAULT_PERP_DEX,
   HL_CORE_SPOT_ASSET_BASE,
   HL_PRECOMPILES,
-  HL_SPOT_BALANCE_ABI,
-  HL_ACCOUNT_MARGIN_SUMMARY_ABI,
-  HL_CORE_USER_EXISTS_ABI,
   HL_INFO_API_URL,
 } from "../abi/hyperliquid.js";
 import { getRpcProvider } from "./rpcClient.js";
@@ -95,6 +92,16 @@ export async function getHyperliquidMids(): Promise<Record<string, string>> {
   return hlInfoApi<Record<string, string>>({ type: "allMids" });
 }
 
+/** Top-of-book quote (level 1) for a perp market, from the Core order book. */
+export async function getHyperliquidQuote(coin: string): Promise<{ bid: number; ask: number }> {
+  const res = await hlInfoApi<{
+    levels: [Array<{ px: string; sz: string }>, Array<{ px: string; sz: string }>];
+  }>({ type: "l2Book", coin });
+  const bid = parseFloat(res.levels[0][0]?.px ?? "");
+  const ask = parseFloat(res.levels[1][0]?.px ?? "");
+  return { bid, ask };
+}
+
 // ── HyperEVM precompile reads ─────────────────────────────────────────
 
 export interface HlPrecompileBalances {
@@ -110,9 +117,41 @@ export interface HlPrecompileBalances {
   activated: boolean;
 }
 
-/** Read the on-chain HyperEVM precompiles. Any failing read degrades to zero instead of throwing. */
-export async function getHyperliquidPrecompileBalances(vaultAddress: Address): Promise<HlPrecompileBalances> {
+/**
+ * HyperEVM read precompiles take raw abi.encode(args) input — WITHOUT the
+ * 4-byte function selector a normal contract call prepends. Sending a selector
+ * makes the precompile revert with PrecompileError, which is why selector-based
+ * `simulateContract` reads always degraded to zero/false here.
+ * See: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm/interacting-with-hypercore
+ */
+const HL_PRECOMPILE_PARAMS = {
+  marginSummary: {
+    in: [{ type: "uint32" }, { type: "address" }] as const,
+    out: [{ type: "int64" }, { type: "uint64" }, { type: "uint64" }, { type: "int64" }] as const,
+  },
+  spotBalance: {
+    in: [{ type: "address" }, { type: "uint64" }] as const,
+    out: [{ type: "uint64" }, { type: "uint64" }, { type: "uint64" }] as const,
+  },
+  coreUserExists: {
+    in: [{ type: "address" }] as const,
+    out: [{ type: "bool" }] as const,
+  },
+} as const;
+
+async function callReadPrecompile(
+  to: Address,
+  params: { in: readonly { type: string }[]; out: readonly { type: string }[] },
+  args: readonly unknown[],
+): Promise<readonly unknown[]> {
   const client = getRpcProvider(HYPEREVM_CHAIN_ID);
+  const data = encodeAbiParameters([...params.in], [...args] as never);
+  const { data: returnData } = await client.call({ to, data });
+  return decodeAbiParameters([...params.out], returnData ?? "0x");
+}
+
+/** Read the on-chain HyperEVM precompiles. Failing reads degrade to zero instead of throwing. */
+export async function getHyperliquidPrecompileBalances(vaultAddress: Address): Promise<HlPrecompileBalances> {
   const zero: HlPrecompileBalances = {
     perpAccountValue: 0n,
     perpNtlPos: 0n,
@@ -124,32 +163,20 @@ export async function getHyperliquidPrecompileBalances(vaultAddress: Address): P
   };
 
   const [summary, spot, exists] = await Promise.all([
-    client
-      .simulateContract({
-        address: HL_PRECOMPILES.accountMarginSummary,
-        abi: HL_ACCOUNT_MARGIN_SUMMARY_ABI,
-        functionName: "accountMarginSummary",
-        args: [HL_DEFAULT_PERP_DEX, vaultAddress],
-      })
-      .then((r) => r.result as [bigint, bigint, bigint, bigint])
+    callReadPrecompile(HL_PRECOMPILES.accountMarginSummary, HL_PRECOMPILE_PARAMS.marginSummary, [HL_DEFAULT_PERP_DEX, vaultAddress])
+      .then((r) => r as [bigint, bigint, bigint, bigint])
       .catch(() => [0n, 0n, 0n, 0n] as [bigint, bigint, bigint, bigint]),
-    client
-      .simulateContract({
-        address: HL_PRECOMPILES.spotBalance,
-        abi: HL_SPOT_BALANCE_ABI,
-        functionName: "spotBalance",
-        args: [vaultAddress, HL_USDC_TOKEN_INDEX],
-      })
-      .then((r) => r.result as [bigint, bigint, bigint])
-      .catch(() => [0n, 0n, 0n] as [bigint, bigint, bigint]),
-    client
-      .simulateContract({
-        address: HL_PRECOMPILES.coreUserExists,
-        abi: HL_CORE_USER_EXISTS_ABI,
-        functionName: "coreUserExists",
-        args: [vaultAddress],
-      })
-      .then((r) => r.result as boolean)
+    // The spotBalance precompile reverts (PrecompileError) for accounts with no
+    // spot entry, so fall back to the Core info API for the same USDC value.
+    callReadPrecompile(HL_PRECOMPILES.spotBalance, HL_PRECOMPILE_PARAMS.spotBalance, [vaultAddress, HL_USDC_TOKEN_INDEX])
+      .then((r) => r as [bigint, bigint, bigint])
+      .catch(async () => {
+        const spotState = await fetchSpotClearinghouseState(vaultAddress).catch(() => null);
+        const usdc = spotState?.balances.find((b) => b.token === Number(HL_USDC_TOKEN_INDEX));
+        return [usdc ? parseUnits(usdc.total, 8) : 0n, usdc ? parseUnits(usdc.hold, 8) : 0n, 0n] as [bigint, bigint, bigint];
+      }),
+    callReadPrecompile(HL_PRECOMPILES.coreUserExists, HL_PRECOMPILE_PARAMS.coreUserExists, [vaultAddress])
+      .then((r) => r[0] as boolean)
       .catch(() => false),
   ]);
 

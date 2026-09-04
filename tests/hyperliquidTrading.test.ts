@@ -197,7 +197,25 @@ describe("handle_hyperliquid_limit_order minimum notional", () => {
       if (body.type === "allMids") {
         return new Response(JSON.stringify({ ETH: "2500" }), { status: 200 });
       }
+      if (body.type === "l2Book") {
+        return new Response(JSON.stringify({ levels: [[{ px: "2500", sz: "10" }], [{ px: "2500", sz: "10" }]] }), { status: 200 });
+      }
       return new Response("{}", { status: 200 });
+    }));
+  }
+
+  function stubHlApiBrokenBook() {
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: { body?: string }) => {
+      const body = JSON.parse(init?.body ?? "{}") as { type?: string };
+      if (body.type === "meta") {
+        return new Response(JSON.stringify({
+          universe: [{ name: "ETH", szDecimals: 4, maxLeverage: 25, onlyIsolated: false }],
+        }), { status: 200 });
+      }
+      if (body.type === "allMids") {
+        return new Response(JSON.stringify({ ETH: "2500" }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 }); // l2Book unavailable
     }));
   }
 
@@ -246,6 +264,64 @@ describe("handle_hyperliquid_limit_order minimum notional", () => {
     );
     expect(limitPx).toBe(252_500_000_000n); // 2525 × 1e8
     expect(sz).toBe(118_810_000n); // 1.1881 × 1e8
+    vi.unstubAllGlobals();
+  }, 30_000);
+
+  it("anchors market orders to the best ask, not the mid", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: { body?: string }) => {
+      const body = JSON.parse(init?.body ?? "{}") as { type?: string };
+      if (body.type === "meta") {
+        return new Response(JSON.stringify({
+          universe: [{ name: "ETH", szDecimals: 4, maxLeverage: 25, onlyIsolated: false }],
+        }), { status: 200 });
+      }
+      if (body.type === "allMids") {
+        return new Response(JSON.stringify({ ETH: "2500" }), { status: 200 });
+      }
+      if (body.type === "l2Book") {
+        // Best ask 2510 → market buy should be priced at 2510 × 1.01 = 2535.1, not mid × 1.01 = 2525
+        return new Response(JSON.stringify({ levels: [[{ px: "2490", sz: "10" }], [{ px: "2510", sz: "10" }]] }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }));
+    const { handle_hyperliquid_limit_order } = await import("../src/llm/handlers/hyperliquid.js");
+    const result = await handle_hyperliquid_limit_order({} as never, makeCtx(), {
+      coin: "ETH", side: "buy", notionalUsd: "3000",
+    }, "hyperliquid_limit_order");
+    expect(result.message).toContain("market order ready");
+    expect(result.message).toContain("Market price: $2535.1");
+    const { actionId, params } = decodeSendRawAction(result.transaction!.data);
+    expect(actionId).toBe(1);
+    const [, , limitPx] = decodeAbiParameters(
+      [
+        { type: "uint32" }, { type: "bool" }, { type: "uint64" }, { type: "uint64" },
+        { type: "bool" }, { type: "uint8" }, { type: "uint128" },
+      ],
+      params,
+    );
+    expect(limitPx).toBe(253_510_000_000n); // 2535.1 × 1e8
+    vi.unstubAllGlobals();
+  }, 30_000);
+
+  it("falls back to mid ±1% when the order book is unavailable", async () => {
+    stubHlApiBrokenBook();
+    const { handle_hyperliquid_limit_order } = await import("../src/llm/handlers/hyperliquid.js");
+    const result = await handle_hyperliquid_limit_order({} as never, makeCtx(), {
+      coin: "ETH", side: "buy", notionalUsd: "3000",
+    }, "hyperliquid_limit_order");
+    expect(result.message).toContain("Market price: $2525");
+    vi.unstubAllGlobals();
+  }, 30_000);
+
+  it("labels explicit-price orders as GTC limits with no expiry", async () => {
+    stubHlApi();
+    const { handle_hyperliquid_limit_order } = await import("../src/llm/handlers/hyperliquid.js");
+    const result = await handle_hyperliquid_limit_order({} as never, makeCtx(), {
+      coin: "ETH", side: "buy", size: "1.2", price: "2400",
+    }, "hyperliquid_limit_order");
+    expect(result.message).toContain("limit order ready");
+    expect(result.message).toContain("Limit price: $2400");
+    expect(result.message).toContain("TIF: GTC (no expiry)");
     vi.unstubAllGlobals();
   }, 30_000);
 

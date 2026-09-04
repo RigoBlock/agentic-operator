@@ -944,7 +944,8 @@ ${executionModeNote}${contextDocsBlock}`;
     tryFastPathGmxIncrease(effectiveMsg) ||
     tryFastPathHyperliquid(effectiveMsg) ||
     tryFastPathStrategyQueries(effectiveMsg) ||
-    tryFastPathPendingTx(effectiveMsg);
+    tryFastPathPendingTx(effectiveMsg) ||
+    tryFastPathToolMenu(effectiveMsg);
   if (immediateFastPath) {
     try {
       onStreamEvent?.({ type: "status", message: `Executing ${immediateFastPath.name}...` });
@@ -2583,6 +2584,30 @@ export function tryFastPathPendingTx(msg: string): FastPathResult | null {
 
   if (isPendingQuery) {
     return { name: "check_pending_tx", args: {} };
+  }
+  return null;
+}
+
+// ── Fast-path: tool menu ("what are my hyperliquid tools?") ───────────
+
+/**
+ * Detect tool-menu requests and route them straight to get_tool_menu,
+ * bypassing the LLM. The model otherwise tends to answer from conversation
+ * memory (dropping tools or inventing descriptions) when earlier menu calls
+ * are already in the history.
+ * Examples:
+ *   "what are my hyperliquid tools?"
+ *   "list my gmx tools"
+ *   "what tools do I have" (no category → returns the list of categories)
+ */
+export function tryFastPathToolMenu(msg: string): FastPathResult | null {
+  const m = msg.trim();
+  const catMatch = m.match(/^(?:what\s+are|show|list|get)\s+(?:my\s+)?(?!all\b)([a-z][a-z0-9]*(?:\s+[a-z][a-z0-9]*)*)\s+tools[\s?.!]*$/i);
+  if (catMatch) {
+    return { name: "get_tool_menu", args: { category: catMatch[1].trim().toLowerCase() } };
+  }
+  if (/^(?:what\s+tools\s+(?:do\s+i\s+have|are\s+(?:there|available))|list\s+(?:all\s+)?(?:my\s+)?tools|show\s+(?:me\s+)?(?:all\s+|my\s+)?tools|tool\s*menu)[\s?.!]*$/i.test(m)) {
+    return { name: "get_tool_menu", args: {} };
   }
   return null;
 }

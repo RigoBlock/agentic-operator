@@ -461,9 +461,11 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "hyperliquid_limit_order",
       description:
-        "Place a Hyperliquid perp limit order. This is the SINGLE tool for opening, increasing, decreasing, " +
+        "Place a Hyperliquid perp order. This is the SINGLE tool for opening, increasing, decreasing, " +
         "or closing positions: use side without reduceOnly to open/increase, reduceOnly (or size='50%'/'all', " +
-        "or close=true) to decrease/close. Without an explicit price the order is a marketable IOC bounded by 1% slippage. " +
+        "or close=true) to decrease/close. WITHOUT a price the order is a MARKET order: priced at the best " +
+        "ask (buy) or best bid (sell) plus a 1% bound, executed as IOC. WITH a price it is a resting limit " +
+        "order (GTC by default — no expiry, stays until filled or cancelled). " +
         "Hyperliquid uses cross margin — collateral is global to the perp account, not pledged per position.",
       parameters: {
         type: "object",
@@ -486,7 +488,7 @@ export const TOOL_DEFINITIONS = [
           },
           price: {
             type: "string",
-            description: "Limit price in USD. If omitted, the order fills immediately up to a 1% slippage bound (IOC).",
+            description: "Limit price in USD — creates a resting limit order (GTC, no expiry). Omit for a market order (fills immediately, priced off the best ask/bid with a 1% bound).",
           },
           reduceOnly: {
             type: "boolean",
@@ -498,7 +500,7 @@ export const TOOL_DEFINITIONS = [
           },
           tif: {
             type: "string",
-            description: "Time in force: 'gtc' (default resting limit), 'ioc' (fill immediately or cancel), 'alo' (add liquidity only).",
+            description: "Time in force for explicit-price orders: 'gtc' (default — rests until filled or cancelled, NO expiry), 'ioc' (fill immediately or cancel), 'alo' (add liquidity only / post-only).",
           },
           cloid: {
             type: "string",

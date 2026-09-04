@@ -24,6 +24,7 @@ import {
   getHyperliquidAccountSummary,
   getHyperliquidMeta,
   getHyperliquidMids,
+  getHyperliquidQuote,
   getHyperliquidPrecompileBalances,
   resolveHlAssetIndex,
   fetchClearinghouseState,
@@ -253,19 +254,35 @@ export async function handle_hyperliquid_limit_order(
     throw new Error(`Invalid side: ${side} (use "buy" or "sell").`);
   }
 
-  // ── Price: explicit limit price, or a marketable IOC bounded by 1% slippage ──
+  // ── Price: explicit limit price, or a market order anchored to the touch ──
+  // Market (no explicit price): price at best ask (buy) / best bid (sell) + a 1%
+  // buffer as an IOC. Anchoring to mid±1% can rest unfilled in a fast market —
+  // the IOC then expires without a fill. Limit (explicit price): rests on the
+  // book as GTC by default — GTC has NO expiry; it stays until filled or cancelled.
   const mids = await getHyperliquidMids();
   const midPx = parseFloat(mids[coin]);
   let priceStr = String(args.price ?? "").trim();
   let tif: HlTifName = (String(args.tif ?? "").trim().toLowerCase() as HlTifName) || "gtc";
+  let isMarket = false;
   if (priceStr) {
     if (!Number.isFinite(parseFloat(priceStr))) throw new Error(`Invalid limit price: ${priceStr}`);
     if (args.tif) tif = String(args.tif).trim().toLowerCase() as HlTifName;
   } else {
-    if (!Number.isFinite(midPx) || midPx <= 0) {
+    isMarket = true;
+    const touch = await getHyperliquidQuote(coin).catch(() => ({ bid: 0, ask: 0 }));
+    const basis = isBuy ? touch.ask : touch.bid;
+    const ref = Number.isFinite(basis) && basis > 0 ? basis : midPx;
+    if (!Number.isFinite(ref) || ref <= 0) {
       throw new Error(`No live price available for ${coin} — provide an explicit limit price.`);
     }
-    const bounded = (midPx * Number(10_000n + (isBuy ? SLIPPAGE_BPS : -SLIPPAGE_BPS))) / 10_000;
+    const bounded = (ref * Number(10_000n + (isBuy ? SLIPPAGE_BPS : -SLIPPAGE_BPS))) / 10_000;
+    // Thin-book guard: the executable price must stay within 2% of mid.
+    if (Number.isFinite(midPx) && midPx > 0 && Math.abs(bounded - midPx) / midPx > 0.02) {
+      throw new Error(
+        `${coin} book is too thin around $${midPx.toFixed(2)} (best ${isBuy ? "ask" : "bid"} $${ref.toFixed(2)}) — ` +
+        `provide an explicit limit price instead of a market order.`,
+      );
+    }
     priceStr = bounded.toFixed(8);
     tif = "ioc"; // marketable: fill immediately up to the 1% bound or fail
   }
@@ -332,9 +349,11 @@ export async function handle_hyperliquid_limit_order(
   const actionLine = txActionLine(ctx);
   return {
     message: [
-      `✅ Hyperliquid limit order ready`,
+      `✅ Hyperliquid ${isMarket ? "market" : "limit"} order ready`,
       `${verb}: ${isBuy ? "BUY" : "SELL"} ${sizeDisplayed} ${coin} (~$${notionalUsdValue.toLocaleString("en-US", { maximumFractionDigits: 2 })})`,
-      `Limit price: $${pxHuman}   |   TIF: ${tif.toUpperCase()}${reduceOnly ? "   |   reduce-only" : ""}`,
+      isMarket
+        ? `Market price: $${pxHuman} (best ${isBuy ? "ask" : "bid"} +1% bound)   |   TIF: IOC${reduceOnly ? "   |   reduce-only" : ""}`
+        : `Limit price: $${pxHuman}   |   TIF: ${tif.toUpperCase()}${tif === "gtc" ? " (no expiry)" : ""}${reduceOnly ? "   |   reduce-only" : ""}`,
       `Leverage: ${position?.leverage?.value ? `${position.leverage.value}x (existing position)` : `not set — Hyperliquid defaults to cross margin; account leverage is shown in the positions report`}`,
       `Client order id (cloid): 0x${cloidArg.toString(16)} — quote it to cancel this order`,
       ...(actionLine ? [actionLine] : []),

@@ -122,55 +122,15 @@ export const RIGOBLOCK_HYPERLIQUID_ABI = [
 export const HL_PRECOMPILES = {
   spotBalance: "0x0000000000000000000000000000000000000801",
   position2: "0x0000000000000000000000000000000000000813",
-  accountMarginSummary: "0x000000000000000000000000000000000000080F",
+  accountMarginSummary: "0x000000000000000000000000000000000000080f",
   coreUserExists: "0x0000000000000000000000000000000000000810",
 } as const;
 
-export const HL_SPOT_BALANCE_ABI = [
-  {
-    name: "spotBalance",
-    type: "function",
-    stateMutability: "view",
-    inputs: [
-      { name: "user", type: "address" },
-      { name: "token", type: "uint64" },
-    ],
-    outputs: [
-      { name: "total", type: "uint64" },
-      { name: "hold", type: "uint64" },
-      { name: "entryNtl", type: "uint64" },
-    ],
-  },
-] as const;
-
-export const HL_ACCOUNT_MARGIN_SUMMARY_ABI = [
-  {
-    name: "accountMarginSummary",
-    type: "function",
-    stateMutability: "view",
-    inputs: [
-      { name: "perpDexIndex", type: "uint32" },
-      { name: "user", type: "address" },
-    ],
-    outputs: [
-      { name: "accountValue", type: "int64" },
-      { name: "marginUsed", type: "uint64" },
-      { name: "ntlPos", type: "uint64" },
-      { name: "rawUsd", type: "int64" },
-    ],
-  },
-] as const;
-
-export const HL_CORE_USER_EXISTS_ABI = [
-  {
-    name: "coreUserExists",
-    type: "function",
-    stateMutability: "view",
-    inputs: [{ name: "user", type: "address" }],
-    outputs: [{ name: "exists", type: "bool" }],
-  },
-] as const;
-
+/**
+ * NOTE: HyperEVM read precompiles take raw abi.encode(args) input WITHOUT a
+ * 4-byte function selector (selector-based calls revert with PrecompileError).
+ * Call them via raw eth_call — see callReadPrecompile in services/hyperliquid.ts.
+ */
 export const HL_POSITION_ABI = [
   {
     name: "position",
