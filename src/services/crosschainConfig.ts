@@ -115,7 +115,10 @@ export function findBridgeableToken(
   const tokens = CROSSCHAIN_TOKENS[chainId];
   if (!tokens) return undefined;
 
-  const upper = symbolOrAddress.toUpperCase();
+  // Common spoken aliases — users say "5 USD" meaning USDC.
+  const TOKEN_SYMBOL_ALIASES: Record<string, string> = { USD: "USDC" };
+  const upper = TOKEN_SYMBOL_ALIASES[symbolOrAddress.toUpperCase()]
+    ?? symbolOrAddress.toUpperCase();
   // By symbol / type
   const bySymbol = tokens.find((t) => t.symbol === upper || t.type === upper);
   if (bySymbol) return bySymbol;

@@ -515,7 +515,7 @@ async function handleChatResponse(data, options = {}) {
       const stepPattern = /step\s+\d+\s*(of|\/)\s*\d+|next\s+(step|i['']ll|we['']ll)|after\s+this|then\s+(i['']ll|we['']ll)|following\s+step|first,?\s+.*then/i;
       setMultiStepActive(stepPattern.test(data.reply));
     } else {
-      const extras = withModelTrace({ suggestions: data.suggestions });
+      const extras = withModelTrace({ suggestions: data.suggestions, toolCards: data.metadata?.toolCards });
       if (data.metadata?.gmxPositions) {
         extras.gmxPositions = data.metadata.gmxPositions;
       }
@@ -542,7 +542,7 @@ async function handleChatResponse(data, options = {}) {
       .map(tc => tc.result)
       .join('\n');
     if (resultsText) {
-      const extras = withModelTrace({ suggestions: data.suggestions });
+      const extras = withModelTrace({ suggestions: data.suggestions, toolCards: data.metadata?.toolCards });
       if (data.metadata?.gmxPositions) {
         extras.gmxPositions = data.metadata.gmxPositions;
       }
@@ -582,16 +582,24 @@ async function handleChatResponse(data, options = {}) {
       ? data.transactions
       : data.transaction ? [data.transaction] : [];
 
+    // A transaction is agent-executed only when delegated mode is on AND the
+    // prepared executor (tx.from) is not the connected operator — e.g. a
+    // Hyperliquid tx prepared for HyperEVM while delegation only exists on
+    // Ethereum falls back to operator signing even in delegated mode.
+    const isAgentTx = (tx) =>
+      executionMode === 'delegated' && !tx.operatorOnly && !!connectedAddress &&
+      !!tx.from && tx.from.toLowerCase() !== connectedAddress.toLowerCase();
+
     // operatorOnly transactions always go through standard wallet modal
     const anyOperatorOnly = txList.some(tx => tx.operatorOnly);
-    if (txList.length > 1 && executionMode === 'delegated' && !anyOperatorOnly) {
+    if (txList.length > 1 && txList.every(isAgentTx)) {
       showMultiDelegatedConfirmation(txList, fallbackNote);
-    } else if (txList.length > 1 && (executionMode !== 'delegated' || anyOperatorOnly)) {
+    } else if (txList.length > 1) {
       for (const tx of txList) {
         showManualTxCard(tx);
       }
     } else if (data.transaction) {
-      if (executionMode === 'delegated' && !data.transaction.operatorOnly) {
+      if (isAgentTx(data.transaction)) {
         // In delegated mode: show in-chat confirmation instead of wallet modal
         showDelegatedConfirmation(data.transaction, fallbackNote);
       } else {

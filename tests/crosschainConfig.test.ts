@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import {
   CROSSCHAIN_TOKENS,
   ACROSS_SPOKE_POOL,
+  findBridgeableToken,
   getAcrossHandler,
   getOutputToken,
   getSupportedDestinations,
@@ -47,5 +48,12 @@ describe("HyperEVM (999) cross-chain support", () => {
     // No WETH on HyperEVM: a WETH bridge to 999 must not resolve an output token
     const arbWeth = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1";
     expect(getOutputToken(42161, 999, arbWeth)).toBeUndefined();
+  });
+
+  it("resolves the 'USD' spoken alias to USDC on HyperEVM", () => {
+    expect(findBridgeableToken(999, "USD")?.address).toBe(HYPER_USDC);
+    expect(findBridgeableToken(999, "usdc")?.address).toBe(HYPER_USDC);
+    expect(findBridgeableToken(8453, "USD")?.type).toBe("USDC");
+    expect(findBridgeableToken(999, "WETH")).toBeUndefined();
   });
 });

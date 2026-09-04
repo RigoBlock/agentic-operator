@@ -73,6 +73,8 @@ const REQUIRED_TOOLS = [
   "list_strategies",
   // Bridge verification
   "verify_bridge_arrival",
+  // Tool menu (structured cards rendered by the chat UI)
+  "get_tool_menu",
 ];
 
 describe("TOOL_DEFINITIONS", () => {
@@ -135,5 +137,43 @@ describe("SYSTEM_PROMPT", () => {
   it("instructs the LLM to call verify_token when the user answers a token disambiguation question", () => {
     expect(systemPrompt.toLowerCase()).toContain("verify_token");
     expect(systemPrompt.toLowerCase()).toContain("disambiguation");
+  });
+
+  it("instructs the LLM to use get_tool_menu for tool-menu requests instead of answering from its own assumptions", () => {
+    expect(systemPrompt).toContain("get_tool_menu");
+    expect(CORE_TOOLS).toContain("get_tool_menu");
+  });
+});
+
+describe("get_tool_menu handler", () => {
+  it("returns 11 hyperliquid cards with only required input fields", async () => {
+    const { handle_get_tool_menu } = await import("../src/llm/handlers/menu.js");
+    const result = await handle_get_tool_menu(
+      {} as never, {} as never, { category: "hyperliquid" }, "get_tool_menu",
+    );
+    const cards = (result.metadata as { toolCards: { toolName: string; title: string; fields: { name: string; required: boolean }[] }[] }).toolCards;
+    expect(cards).toHaveLength(11);
+    expect(cards.map((c) => c.toolName)).toContain("hyperliquid_deposit");
+    expect(cards.map((c) => c.toolName)).toContain("crosschain_transfer");
+    for (const card of cards) {
+      expect(card.title.length).toBeGreaterThan(0);
+      for (const field of card.fields) {
+        expect(field.name).toBeTypeOf("string");
+      }
+    }
+    const deposit = cards.find((c) => c.toolName === "hyperliquid_deposit")!;
+    expect(deposit.fields.map((f) => f.name)).toContain("amount");
+    const transfer = cards.find((c) => c.toolName === "crosschain_transfer")!;
+    expect(transfer.fields.filter((f) => f.required).map((f) => f.name)).toEqual(
+      expect.arrayContaining(["destinationChain", "token", "amount"]),
+    );
+  });
+
+  it("lists available categories for unknown or missing category", async () => {
+    const { handle_get_tool_menu } = await import("../src/llm/handlers/menu.js");
+    const result = await handle_get_tool_menu({} as never, {} as never, {}, "get_tool_menu");
+    expect(result.metadata).toHaveProperty("toolCategories");
+    expect((result.metadata as { toolCategories: string[] }).toolCategories).toContain("hyperliquid");
+    expect(result.selfContained).toBe(true);
   });
 });

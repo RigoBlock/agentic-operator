@@ -34,6 +34,16 @@ export const HYPEREVM_CHAIN_ID = 999;
 /** EVM-side USDC on HyperEVM (6 decimals). */
 export const HYPEREVM_USDC = "0xb88339CB7199b77E23DB6E890353E22632Ba630f" as const;
 
+/**
+ * CoreDepositWallet (Circle) — the ONLY supported HyperEVM → HyperCore deposit path
+ * since Hyperliquid's native-USDC migration. Native USDC is a plain ERC20; calling
+ * `deposit(...)` on it reverts with no reason. The AHyperliquid adapter must approve
+ * USDC to this contract and call its `deposit(uint256 amount, uint32 destinationDex)`
+ * (selector identical to the adapter's own deposit). Verify via spotMeta
+ * `evmContract.address` for USDC. destinationDex: 0 = perps, type(uint32).max = spot.
+ */
+export const HL_CORE_DEPOSIT_WALLET = "0x6b9e773128f453f5c2c60935ee2de2cbc5390a24" as const;
+
 /** USDC token index on HyperCore. */
 export const HL_USDC_TOKEN_INDEX = 0n;
 

@@ -1339,6 +1339,8 @@ ${executionModeNote}${contextDocsBlock}`;
           reply: report,
           toolCalls: [],
           chainSwitch: pendingChainSwitch,
+          suggestions: pendingSuggestions,
+          metadata: pendingMetadata,
           reasoning: orchestrationReasoning,
           modelsUsed,
           finalModel: "tooling",

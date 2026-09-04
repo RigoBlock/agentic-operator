@@ -132,7 +132,7 @@
           <span id="agent-balance-display" class="agent-balance" style="display:none;"></span>
           <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
           <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
-          <label id="sponsor-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, gas fees are sponsored (no agent funding needed). When disabled, the agent pays gas from its own ETH balance.">
+          <label id="sponsor-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, gas fees are sponsored (no agent funding needed). When disabled, the agent pays gas from its own native-token balance (ETH, HYPE on HyperEVM, BNB, POL).">
             <input type="checkbox" id="sponsor-toggle" onchange="toggleSponsoredGas(this.checked)" />
             <span id="sponsor-toggle-text">Sponsored gas</span>
           </label>

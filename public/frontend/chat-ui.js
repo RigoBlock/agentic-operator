@@ -117,6 +117,9 @@ function appendMessage(role, content, extras, isRestore) {
     }
     div.appendChild(chips);
   }
+  if (extras?.toolCards?.length && !isRestore) {
+    renderToolCards(div, extras.toolCards);
+  }
   chatEl.appendChild(div);
   chatEl.scrollTop = chatEl.scrollHeight;
 
@@ -244,6 +247,150 @@ function parseDirectToolCall(label) {
     }
   }
   return null;
+}
+
+/**
+ * Render structured tool cards (from the get_tool_menu tool) as clickable boxes.
+ * Clicking a card swaps it for an inline form with only the fields the user must
+ * provide; submitting invokes the tool directly via /api/tools — no LLM involved.
+ * The card is always restored after submit/cancel so the menu stays available.
+ */
+function renderToolCards(container, cards) {
+  const wrap = document.createElement('div');
+  wrap.className = 'tool-cards';
+  wrap.style.display = 'grid';
+  wrap.style.gridTemplateColumns = 'repeat(auto-fill, minmax(200px, 1fr))';
+  wrap.style.gap = '8px';
+  wrap.style.marginTop = '12px';
+
+  const makeCardBox = (card) => {
+    const box = buildToolCardBox(card, () => box.replaceWith(makeCardForm(card)));
+    return box;
+  };
+  const makeCardForm = (card) => {
+    const form = buildToolCardForm(card, () => form.replaceWith(makeCardBox(card)));
+    return form;
+  };
+
+  for (const card of cards) wrap.appendChild(makeCardBox(card));
+  container.appendChild(wrap);
+}
+
+function buildToolCardBox(card, onOpen) {
+  const box = document.createElement('div');
+  box.style.border = '1px solid var(--border, #2a2f3a)';
+  box.style.borderRadius = '8px';
+  box.style.padding = '10px 12px';
+  box.style.background = 'var(--bg-secondary, rgba(255,255,255,0.03))';
+  box.style.display = 'flex';
+  box.style.flexDirection = 'column';
+  box.style.gap = '6px';
+
+  const title = document.createElement('div');
+  title.style.fontWeight = '600';
+  title.style.fontSize = '14px';
+  title.textContent = card.title || card.toolName;
+  box.appendChild(title);
+
+  if (card.summary) {
+    const sum = document.createElement('div');
+    sum.style.fontSize = '12px';
+    sum.style.opacity = '0.7';
+    sum.style.overflow = 'hidden';
+    sum.style.display = '-webkit-box';
+    sum.style.webkitBoxOrient = 'vertical';
+    sum.style.webkitLineClamp = '2';
+    sum.textContent = card.summary;
+    box.appendChild(sum);
+  }
+
+  const openBtn = document.createElement('button');
+  openBtn.className = 'suggestion-chip';
+  openBtn.style.alignSelf = 'flex-start';
+  openBtn.textContent = card.fields?.length ? 'Open' : 'Run';
+  box.appendChild(openBtn);
+
+  openBtn.onclick = () => {
+    if (!card.fields?.length) {
+      invokeDirectTool({ toolName: card.toolName, args: {} });
+      return;
+    }
+    onOpen();
+  };
+  return box;
+}
+
+function buildToolCardForm(card, onClose) {
+  const form = document.createElement('div');
+  form.style.border = '1px solid var(--border, #2a2f3a)';
+  form.style.borderRadius = '8px';
+  form.style.padding = '12px';
+  form.style.display = 'flex';
+  form.style.flexDirection = 'column';
+  form.style.gap = '10px';
+
+  const title = document.createElement('div');
+  title.style.fontWeight = '600';
+  title.textContent = card.title || card.toolName;
+  form.appendChild(title);
+
+  const inputs = {};
+  for (const field of card.fields) {
+    const label = document.createElement('label');
+    label.style.fontSize = '12px';
+    label.style.opacity = '0.8';
+    label.textContent = field.label + (field.required ? ' *' : '');
+    form.appendChild(label);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = field.placeholder || field.name;
+    if (field.required) input.dataset.required = '1';
+    input.style.width = '100%';
+    input.style.boxSizing = 'border-box';
+    input.style.padding = '6px 8px';
+    input.style.borderRadius = '6px';
+    input.style.border = '1px solid var(--border, #2a2f3a)';
+    input.style.background = 'var(--bg, transparent)';
+    input.style.color = 'inherit';
+    form.appendChild(input);
+    inputs[field.name] = input;
+  }
+
+  const btnRow = document.createElement('div');
+  btnRow.style.display = 'flex';
+  btnRow.style.gap = '8px';
+
+  const submit = document.createElement('button');
+  submit.className = 'btn-confirm';
+  submit.textContent = 'Run';
+  submit.onclick = () => {
+    const args = {};
+    for (const [name, input] of Object.entries(inputs)) {
+      const value = input.value.trim();
+      if (!value) {
+        if (input.dataset.required) {
+          input.style.borderColor = '#e5534b';
+          input.focus();
+          return;
+        }
+        continue;
+      }
+      args[name] = value;
+    }
+    onClose();
+    invokeDirectTool({ toolName: card.toolName, args });
+  };
+
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-cancel';
+  cancel.textContent = 'Cancel';
+  cancel.onclick = () => onClose();
+
+  btnRow.appendChild(submit);
+  btnRow.appendChild(cancel);
+  form.appendChild(btnRow);
+  return form;
 }
 
 /**
@@ -437,8 +584,13 @@ async function invokeDirectTool(toolInfo) {
     }
     appendMessage('assistant', msg, extras);
     // In delegated confirm-trades mode, show the delegated confirmation card
-    // instead of manual wallet-sign buttons.
-    if (data.transaction && executionMode === 'delegated' && !data.transaction.operatorOnly) {
+    // instead of manual wallet-sign buttons — but only when the prepared
+    // transaction is actually agent-executed (tx.from != operator). A tx on a
+    // chain without active delegation falls back to operator signing.
+    const txIsAgentExecuted = !!data.transaction && !!connectedAddress &&
+      !!data.transaction.from &&
+      data.transaction.from.toLowerCase() !== connectedAddress.toLowerCase();
+    if (data.transaction && executionMode === 'delegated' && !data.transaction.operatorOnly && txIsAgentExecuted) {
       window.showDelegatedConfirmation(data.transaction);
     } else if (data.transaction) {
       // Manual mode or operator-only: show standard wallet modal

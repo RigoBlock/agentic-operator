@@ -186,7 +186,7 @@ export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
 /** Always-included tools regardless of domain detection. */
 export const CORE_TOOLS = [
   "get_vault_info", "get_token_balance", "switch_chain", "check_pending_tx",
-  "verify_token",
+  "verify_token", "get_tool_menu",
 ];
 
 // ── Core system prompt (always sent) ──────────────────────────────────
@@ -223,7 +223,8 @@ GENERAL:
 - Token symbols resolve automatically. If resolution fails or is ambiguous, ask once for the exact name or contract address, then call verify_token with the user's answer to register the disambiguation and retry the operation.
 - Slippage and safety-shield thresholds are operator settings (web UI or Telegram commands) — you cannot change them.
 - Execution: by default transactions are unsigned and the operator signs in their wallet. When delegation is active, tools execute directly via the agent wallet. Every transaction passes the automated safety layer either way.
-- Polygon's native token is POL; BNB Chain's native token is BNB, not ETH.`;
+- Polygon's native token is POL; BNB Chain's native token is BNB, not ETH.
+- When the user asks what tools/operations are available or wants to run a tool by filling a form ("what are my hyperliquid tools?"), call get_tool_menu (optionally with a category like "hyperliquid"). The returned cards are rendered directly in the chat UI and run the tool without you — do not re-invoke the tools it lists.`;
 
 // ── Domain-specific prompt sections ───────────────────────────────────
 

@@ -137,6 +137,26 @@ export const TOOL_DEFINITIONS = [
   {
     type: "function" as const,
     function: {
+      name: "get_tool_menu",
+      description:
+        "Return the menu of directly-invokable tools for a category (e.g. 'hyperliquid') as structured cards " +
+        "listing only the required input fields. Use when the user asks what tools/operations are available " +
+        "or wants to run a tool directly by filling a form instead of describing it in prose.",
+      parameters: {
+        type: "object",
+        properties: {
+          category: {
+            type: "string",
+            description: "Menu category, e.g. 'hyperliquid'. Omit for the full list.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "get_vault_info",
       description: "Get vault name, symbol, owner, total supply.",
       parameters: { type: "object", properties: {}, required: [] },

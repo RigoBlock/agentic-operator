@@ -83,7 +83,10 @@ async function confirmDelegatedExecution(btn) {
   const sponsorCheckbox = container.querySelector('.sponsor-tx-checkbox');
   const txSponsored = sponsorCheckbox ? sponsorCheckbox.checked : true;
 
-  // Pre-check: if sponsored gas is OFF, verify agent has ETH before calling execute
+  // Pre-check: if sponsored gas is OFF, verify the agent has the chain's native
+  // gas token before calling execute
+  const NATIVE_GAS_SYMBOL = { 999: 'HYPE', 56: 'BNB', 137: 'POL' };
+  const gasSymbol = NATIVE_GAS_SYMBOL[tx.chainId] || 'ETH';
   if (!txSponsored) {
     statusEl.style.color = 'var(--muted)';
     statusEl.textContent = 'Checking agent balance…';
@@ -94,7 +97,7 @@ async function confirmDelegatedExecution(btn) {
         const balData = await balRes.json();
         if (!balData.sufficient) {
           statusEl.style.color = 'var(--error)';
-          statusEl.innerHTML = `Agent wallet has no ETH for gas on ${CHAIN_NAMES[tx.chainId] || tx.chainId}. ` +
+          statusEl.innerHTML = `Agent wallet has no ${gasSymbol} for gas on ${CHAIN_NAMES[tx.chainId] || tx.chainId}. ` +
             `<a href="#" onclick="event.preventDefault();document.getElementById('settings-btn').click();" style="color:var(--accent);">Enable sponsored gas</a> or fund ${balData.agentAddress?.slice(0,6)}…${balData.agentAddress?.slice(-4)}.`;
           buttons.forEach(b => b.disabled = false);
           btn.textContent = 'Execute';

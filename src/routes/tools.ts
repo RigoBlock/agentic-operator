@@ -48,6 +48,7 @@ const READONLY_TOOLS = new Set<string>([
   "list_nav_syncs",
   "list_strategies",
   "switch_chain",
+  "get_tool_menu",
 ]);
 
 function getToolCategory(name: string): string {
@@ -65,6 +66,7 @@ function getToolCategory(name: string): string {
   if (name.startsWith("set_default_slippage") || name.startsWith("set_swap_shield_tolerance") || name.startsWith("enable_swap_shield")) return "Operator Settings";
   if (name.startsWith("refresh_oracle_feed")) return "Oracle";
   if (name.startsWith("list_strategies")) return "Strategy";
+  if (name === "get_tool_menu") return "Tool Menu";
   return "Other";
 }
 

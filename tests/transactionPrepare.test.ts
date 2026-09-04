@@ -122,3 +122,72 @@ describe("prepareTransaction with NAV shield disabled", () => {
     expect(result.tx.navShieldChecked).toBe(true);
   });
 });
+
+describe("prepareTransaction delegated executor selection (per-chain)", () => {
+  const AGENT = "0x3333333333333333333333333333333333333333" as Address;
+  const HYPER_EVM = 999;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEstimateGas.mockResolvedValue(100_000n);
+    mockEstimateFeesPerGas.mockResolvedValue({
+      maxFeePerGas: 1_000_000_000n,
+      maxPriorityFeePerGas: 100_000_000n,
+    });
+    mockReadContract.mockResolvedValue(0n);
+    mockGetRpcProvider.mockReturnValue(makePublicClient());
+  });
+
+  const draft = {
+    to: VAULT,
+    data: "0x12345678" as Hex,
+    value: "0x0" as Hex,
+    chainId: HYPER_EVM,
+    description: "Hyperliquid deposit",
+  };
+  const delegatedCtx = {
+    vaultAddress: VAULT,
+    chainId: 1, // UI active chain — differs from the tx chain
+    operatorAddress: OPERATOR,
+    operatorVerified: true,
+    executionMode: "delegated" as const,
+  };
+
+  it("uses the agent wallet when delegation is active on the transaction's chain", async () => {
+    const { getChainDelegation, getDelegationConfig } = await import("../src/services/delegation.js");
+    vi.mocked(getChainDelegation).mockResolvedValue({
+      confirmedAt: 1, delegatedSelectors: ["0x12345678"],
+    } as never);
+    vi.mocked(getDelegationConfig).mockResolvedValue({
+      enabled: true, agentAddress: AGENT,
+    } as never);
+
+    const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
+
+    expect(result.tx.from).toBe(AGENT);
+    expect(mockEstimateGas).toHaveBeenCalledWith(
+      expect.objectContaining({ account: AGENT }),
+    );
+  });
+
+  it("falls back to the operator signer when delegation is NOT active on the tx chain", async () => {
+    const { getChainDelegation } = await import("../src/services/delegation.js");
+    vi.mocked(getChainDelegation).mockResolvedValue(null);
+
+    const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
+
+    expect(result.tx.from).toBe(OPERATOR);
+    expect(mockEstimateGas).toHaveBeenCalledWith(
+      expect.objectContaining({ account: OPERATOR }),
+    );
+  });
+
+  it("throws a clear error when delegation is inactive on the tx chain and no operator is available", async () => {
+    const { getChainDelegation } = await import("../src/services/delegation.js");
+    vi.mocked(getChainDelegation).mockResolvedValue(null);
+
+    await expect(
+      prepareTransaction({ KV: makeKV("0") } as any, { ...delegatedCtx, operatorAddress: undefined }, draft),
+    ).rejects.toMatchObject({ code: "DELEGATION_NOT_ACTIVE_ON_CHAIN" });
+  });
+});

@@ -14,7 +14,7 @@
 import type { PublicClient, Hex, Address } from "viem";
 import type { Env, RequestContext, TransactionDraft, UnsignedTransaction } from "../types.js";
 import { ZERO_ADDRESS } from "../config.js";
-import { getDelegationConfig } from "./delegation.js";
+import { getChainDelegation, getDelegationConfig } from "./delegation.js";
 import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
 import { getRpcProvider } from "./rpcClient.js";
 import { ExecutionError } from "./executionError.js";
@@ -36,6 +36,12 @@ export async function prepareTransaction(
 ): Promise<{ tx: UnsignedTransaction; warning?: string }> {
   // Determine the executor (sender) before constructing the full transaction so
   // the `from` field is present from the start.
+  //
+  // Delegated mode is honored ONLY when delegation is active on the transaction's
+  // chain (draft.chainId). The UI's active chain can differ from the chain a tool
+  // actually targets (e.g. Hyperliquid tools run on HyperEVM while the UI shows
+  // Ethereum) — falling back to the operator signer in that case keeps the
+  // operator-signer default the user expects.
   let executor: Address;
   if (draft.operatorOnly || ctx.executionMode === "manual") {
     if (!ctx.operatorAddress) {
@@ -52,14 +58,29 @@ export async function prepareTransaction(
         "VAULT_ADDRESS_REQUIRED",
       );
     }
-    const config = await getDelegationConfig(env.KV, ctx.vaultAddress);
-    if (!config || !config.enabled) {
-      throw new ExecutionError(
-        "Delegation not configured. Set up delegation on the vault first.",
-        "DELEGATION_NOT_CONFIGURED",
-      );
+    const chainDelegation = env.KV
+      ? await getChainDelegation(env.KV, ctx.vaultAddress, draft.chainId)
+      : null;
+    if (!chainDelegation) {
+      // Delegation not active on the target chain — operator signs instead.
+      if (!ctx.operatorAddress) {
+        throw new ExecutionError(
+          `Delegated mode requested but delegation is not active on chain ${draft.chainId}, ` +
+          "and no operator address is available to sign manually.",
+          "DELEGATION_NOT_ACTIVE_ON_CHAIN",
+        );
+      }
+      executor = ctx.operatorAddress;
+    } else {
+      const config = await getDelegationConfig(env.KV!, ctx.vaultAddress);
+      if (!config || !config.enabled) {
+        throw new ExecutionError(
+          "Delegation not configured. Set up delegation on the vault first.",
+          "DELEGATION_NOT_CONFIGURED",
+        );
+      }
+      executor = config.agentAddress;
     }
-    executor = config.agentAddress;
   }
 
   const tx: UnsignedTransaction = {
@@ -126,9 +147,10 @@ export async function prepareTransaction(
     ]);
   } catch (err) {
     let msg = err instanceof Error ? err.message : String(err);
+    const revertData = getRevertDataFromError(err);
     // When the RPC omits revert data (common on HyperEVM), trace the call to
     // recover the on-chain revert reason so the user gets an actionable error.
-    if (!getRevertDataFromError(err)) {
+    if (!revertData) {
       const reason = await traceRevertReason(tx.chainId, {
         from: executor,
         to: tx.to,
@@ -136,6 +158,17 @@ export async function prepareTransaction(
         value: txValue,
       });
       if (reason) msg = `${msg} — revert reason: ${reason}`;
+    }
+    // A bare revert from a delegated executor almost always means the agent wallet
+    // is not authorized for this selector on this vault/chain — the vault's
+    // authorization check reverts without reason data, so decoding finds nothing.
+    const isDelegatedExecutor =
+      ctx.executionMode !== "manual" &&
+      !!ctx.operatorAddress &&
+      executor.toLowerCase() !== ctx.operatorAddress.toLowerCase();
+    if (isDelegatedExecutor && !revertData && !msg.includes("revert reason:")) {
+      msg += " — the agent wallet may not be authorized for this function on this chain. " +
+        "Check delegation status for this selector, or switch to manual mode and sign with your wallet.";
     }
     throw new ExecutionError(
       `Transaction preparation failed: ${msg}`,
