@@ -44,9 +44,12 @@ describe("unit conversions", () => {
     expect(toHlPx(0.05234)).toBe(5234000n);
   });
 
-  it("converts sizes using market szDecimals", () => {
-    expect(toHlSz("0.15", 5)).toBe(15000n); // BTC, 5 szDecimals
-    expect(toHlSz("1.234", 4)).toBe(12340n); // ETH, 4 szDecimals
+  it("converts sizes to 1e8 wire fixed point, quantized to market szDecimals", () => {
+    // HyperCore wire format: sz = 10^8 × human size, for EVERY market.
+    // szDecimals only quantizes the size increment before scaling.
+    expect(toHlSz("0.15", 5)).toBe(15_000_000n); // BTC: 0.15 × 1e8
+    expect(toHlSz("1.234", 4)).toBe(123_400_000n); // ETH: 1.234 × 1e8
+    expect(toHlSz("1.23456", 4)).toBe(123_460_000n); // quantized to 4 decimals (rounded)
   });
 
   it("converts human USDC to 6-decimal perp units", () => {
@@ -225,10 +228,48 @@ describe("handle_hyperliquid_limit_order minimum notional", () => {
     const result = await handle_hyperliquid_limit_order({} as never, makeCtx(), {
       coin: "ETH", side: "buy", notionalUsd: "3000",
     }, "hyperliquid_limit_order");
-    // $3000 @ $2525 (mid +1%) = 1.18811881… ETH → rounded to 4 decimals = 1.1881
+    // $3000 @ $2525 (mid +1%) = 1.18811881… ETH → quantized to 4 decimals = 1.1881
     expect(result.message).toContain("BUY 1.1881 ETH");
-    expect(result.message).toContain("~$3,000");
+    expect(result.message).toContain("~$2,999.95");
     expect(result.transaction).toBeDefined();
+
+    // Wire-format regression: HyperCore expects sz as 1e8 × human size —
+    // NOT scaled by szDecimals (that bug produced ~0-size orders on-chain).
+    const { actionId, params } = decodeSendRawAction(result.transaction!.data);
+    expect(actionId).toBe(1);
+    const [, , limitPx, sz] = decodeAbiParameters(
+      [
+        { type: "uint32" }, { type: "bool" }, { type: "uint64" }, { type: "uint64" },
+        { type: "bool" }, { type: "uint8" }, { type: "uint128" },
+      ],
+      params,
+    );
+    expect(limitPx).toBe(252_500_000_000n); // 2525 × 1e8
+    expect(sz).toBe(118_810_000n); // 1.1881 × 1e8
+    vi.unstubAllGlobals();
+  }, 30_000);
+
+  it("lists recent fills and open orders for the vault", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: { body?: string }) => {
+      const body = JSON.parse(init?.body ?? "{}") as { type?: string };
+      if (body.type === "userFills") {
+        return new Response(JSON.stringify([
+          {
+            coin: "ETH", side: "B", px: "2501.5", sz: "1.1881", time: 1788530000000,
+            dir: "Open Long", closedPnl: "0", oid: 123, crossed: true, fee: "0.595",
+          },
+        ]), { status: 200 });
+      }
+      if (body.type === "openOrders") {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }));
+    const { handle_hyperliquid_get_fills } = await import("../src/llm/handlers/hyperliquid.js");
+    const result = await handle_hyperliquid_get_fills({} as never, makeCtx(), {}, "hyperliquid_get_fills");
+    expect(result.message).toContain("BUY 1.1881 ETH @ $2,501.5");
+    expect(result.message).toContain("Open Long");
+    expect(result.message).toContain("Open orders: none");
     vi.unstubAllGlobals();
   }, 30_000);
 });

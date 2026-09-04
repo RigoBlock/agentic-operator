@@ -53,14 +53,21 @@ export function toHlPx(price: number | string): bigint {
   return px;
 }
 
-/** Human base-asset size (e.g. "0.15" BTC with szDecimals=5) → Core uint64 size. */
+/** Human base-asset size (e.g. "0.15" BTC) → Core uint64 size.
+ *
+ * Per the HyperCore docs, sz is sent as 10^8 × the human-readable value —
+ * the SAME 1e8 fixed point as prices, for every market. `szDecimals` is only a
+ * matching-engine quantization constraint (min size increment), NOT the wire
+ * scale: the size is first rounded to `szDecimals` decimals, then scaled by
+ * 10^(8 - szDecimals), keeping the math exact in integers. */
 export function toHlSz(size: number | string, szDecimals: number): bigint {
   const n = typeof size === "string" ? parseFloat(size) : size;
   if (!Number.isFinite(n) || n <= 0) {
     throw new Error(`Invalid Hyperliquid order size: ${size} (must be a positive number).`);
   }
-  const sz = BigInt(Math.round(n * 10 ** szDecimals));
-  if (sz === 0n) throw new Error(`Hyperliquid order size too small: ${size} (rounds to 0 at ${szDecimals} decimals).`);
+  const quantum = BigInt(Math.round(n * 10 ** szDecimals));
+  if (quantum === 0n) throw new Error(`Hyperliquid order size too small: ${size} (rounds to 0 at ${szDecimals} decimals).`);
+  const sz = quantum * 10n ** BigInt(8 - szDecimals);
   if (sz > U64_MAX) throw new Error(`Hyperliquid order size too large: ${size}`);
   return sz;
 }

@@ -38,6 +38,7 @@ const READONLY_TOOLS = new Set<string>([
   "gmx_get_markets",
   "hyperliquid_get_positions",
   "hyperliquid_get_markets",
+  "hyperliquid_get_fills",
   "check_delegation_status",
   "check_pending_tx",
   "get_crosschain_quote",

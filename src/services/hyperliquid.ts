@@ -229,6 +229,32 @@ export function fetchOpenOrders(user: Address): Promise<HlOpenOrder[]> {
   return hlInfoApi<HlOpenOrder[]>({ type: "openOrders", user });
 }
 
+/** One executed trade from the Core userFills API (prices/sizes as float strings). */
+export interface HlUserFill {
+  coin: string;
+  /** "B" = buy, "A" = sell (taker side). */
+  side: "B" | "A";
+  /** Fill price (human readable). */
+  px: string;
+  /** Filled size in base asset (human readable). */
+  sz: string;
+  /** Fill time, milliseconds since epoch. */
+  time: number;
+  /** e.g. "Open Long", "Close Short", "Open Short", "Close Long", "Fee". */
+  dir: string;
+  /** Realized PnL on closing fills. */
+  closedPnl: string;
+  oid: number;
+  /** Taker fill crossed the spread. */
+  crossed: boolean;
+  fee: string;
+}
+
+/** Recent fills for a Core account (newest first, exchange-limited window). */
+export function fetchUserFills(user: Address): Promise<HlUserFill[]> {
+  return hlInfoApi<HlUserFill[]>({ type: "userFills", user });
+}
+
 // ── Normalized account summary ────────────────────────────────────────
 
 export interface HyperliquidPosition {

@@ -30,6 +30,7 @@ const REQUIRED_TOOLS = [
   // Hyperliquid perpetuals (HyperEVM)
   "hyperliquid_get_positions",
   "hyperliquid_get_markets",
+  "hyperliquid_get_fills",
   "hyperliquid_deposit",
   "hyperliquid_limit_order",
   "hyperliquid_cancel_order",
@@ -146,13 +147,13 @@ describe("SYSTEM_PROMPT", () => {
 });
 
 describe("get_tool_menu handler", () => {
-  it("returns 11 hyperliquid cards with only required input fields", async () => {
+  it("returns 12 hyperliquid cards with only required input fields", async () => {
     const { handle_get_tool_menu } = await import("../src/llm/handlers/menu.js");
     const result = await handle_get_tool_menu(
       {} as never, {} as never, { category: "hyperliquid" }, "get_tool_menu",
     );
     const cards = (result.metadata as { toolCards: { toolName: string; title: string; fields: { name: string; required: boolean }[] }[] }).toolCards;
-    expect(cards).toHaveLength(11);
+    expect(cards).toHaveLength(12);
     expect(cards.map((c) => c.toolName)).toContain("hyperliquid_deposit");
     expect(cards.map((c) => c.toolName)).toContain("crosschain_transfer");
     for (const card of cards) {

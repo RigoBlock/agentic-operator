@@ -425,6 +425,21 @@ export const TOOL_DEFINITIONS = [
   {
     type: "function" as const,
     function: {
+      name: "hyperliquid_get_fills",
+      description:
+        "Get the vault's recent Hyperliquid Core fills (executed trades: time, market, side, price, size, " +
+        "open/close direction, realized PnL) and currently open orders. Use after executing an order to confirm " +
+        "the actual fill, or to check whether an order filled, was cancelled, or expired. HyperEVM (999) only.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "hyperliquid_deposit",
       description:
         "Deposit (bridge) USDC from the vault on HyperEVM into its Hyperliquid Core perp account. " +

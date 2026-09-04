@@ -30,6 +30,7 @@ export interface ToolCard {
 const MENU_TITLES: Record<string, string> = {
   hyperliquid_get_positions: "View Hyperliquid account",
   hyperliquid_get_markets: "View Hyperliquid markets",
+  hyperliquid_get_fills: "Recent fills & open orders",
   hyperliquid_deposit: "Deposit USDC to Hyperliquid",
   hyperliquid_limit_order: "Trade (open / close position)",
   hyperliquid_cancel_order: "Cancel Hyperliquid order",
@@ -79,6 +80,7 @@ const MENU_CATEGORIES: Record<string, string[]> = {
   hyperliquid: [
     "hyperliquid_get_positions",
     "hyperliquid_get_markets",
+    "hyperliquid_get_fills",
     "hyperliquid_deposit",
     "hyperliquid_limit_order",
     "hyperliquid_cancel_order",

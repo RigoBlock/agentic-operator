@@ -28,7 +28,10 @@ import {
   resolveHlAssetIndex,
   fetchClearinghouseState,
   fetchOpenOrders,
+  fetchUserFills,
   type HlApiPosition,
+  type HlOpenOrder,
+  type HlUserFill,
 } from "../../services/hyperliquid.js";
 import {
   buildHlDepositCalldata,
@@ -292,10 +295,12 @@ export async function handle_hyperliquid_limit_order(
 
   // Hyperliquid rejects orders below a $10 minimum value ("Order must have
   // minimum value of 10 USD"), with an exception only for exact position
-  // closes. Reject here so the user gets a clear error instead of a
-  // seemingly-successful transaction whose order never fills.
+  // closes. The engine computes value on the quantized (szDecimals) size, so
+  // do the same here — reject before building a transaction whose order can
+  // never fill.
   const pxHuman = parseFloat(priceStr);
-  const notionalUsdValue = sizeHuman * pxHuman;
+  const sizeSubmitted = Number(formatUnits(sz, 8));
+  const notionalUsdValue = sizeSubmitted * pxHuman;
   const exactClose = reduceOnly && (closeRequested || isAll);
   if (notionalUsdValue < 10 && !exactClose) {
     throw new Error(
@@ -314,9 +319,7 @@ export async function handle_hyperliquid_limit_order(
     cloid: cloidArg,
   });
 
-  // Display the size as actually submitted (rounded to the market's szDecimals)
-  // so the message matches what the explorer shows.
-  const sizeDisplayed = Number(formatUnits(sz, szDecimals));
+  const sizeDisplayed = sizeSubmitted;
   const verb = reduceOnly
     ? closeRequested || isAll ? "Close position" : "Decrease position"
     : position && !closeRequested ? "Increase position" : "Open position";
@@ -499,5 +502,74 @@ export async function handle_hyperliquid_spot_send(
     ].filter(Boolean).join("\n"),
     transaction,
     chainSwitch: chainSwitched,
+  };
+}
+
+
+// ── Fills + open orders (post-execution tracking) ─────────────────────
+
+const MAX_FILLS_SHOWN = 10;
+
+function formatFillTime(timeMs: number): string {
+  return new Date(timeMs).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+}
+
+export async function handle_hyperliquid_get_fills(
+  env: Env,
+  ctx: RequestContext,
+  args: Record<string, unknown>,
+  toolName: string,
+): Promise<ToolResult> {
+  if (!ctx.operatorAddress) {
+    throw new Error("Wallet not connected. Connect your wallet first.");
+  }
+  if (!ctx.vaultAddress) {
+    throw new Error("Set a vault address first.");
+  }
+  const chainSwitched = switchToHyperEVM(ctx);
+  const vault = ctx.vaultAddress as Address;
+
+  const [fills, orders] = await Promise.all([
+    fetchUserFills(vault).catch(() => [] as HlUserFill[]),
+    fetchOpenOrders(vault).catch(() => [] as HlOpenOrder[]),
+  ]);
+
+  const lines: string[] = [];
+  if (fills.length === 0) {
+    lines.push("No fills recorded yet for this vault's Core account.");
+  } else {
+    lines.push(`✅ Last ${Math.min(fills.length, MAX_FILLS_SHOWN)} Hyperliquid fills (newest first)`);
+    for (const f of fills.slice(0, MAX_FILLS_SHOWN)) {
+      const px = parseFloat(f.px) || 0;
+      const sz = parseFloat(f.sz) || 0;
+      const pnl = parseFloat(f.closedPnl) || 0;
+      const pnlPart = Math.abs(pnl) > 1e-9
+        ? `   |   PnL ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`
+        : "";
+      lines.push(
+        `${formatFillTime(f.time)}   |   ${f.side === "B" ? "BUY" : "SELL"} ${sz} ${f.coin} @ $${px.toLocaleString("en-US", { maximumFractionDigits: 2 })} ` +
+        `(~$${(px * sz).toLocaleString("en-US", { maximumFractionDigits: 2 })})   |   ${f.dir}${pnlPart}`,
+      );
+    }
+  }
+
+  lines.push("");
+  if (orders.length === 0) {
+    lines.push("Open orders: none. An order that is neither open nor filled expired or was cancelled (IOC orders that don't fill expire immediately).");
+  } else {
+    lines.push(`⏳ Open Orders (${orders.length})`);
+    for (const o of orders) {
+      lines.push(
+        `${o.side === "B" ? "BUY" : "SELL"} ${o.sz} ${o.coin} @ $${o.limitPx}` +
+        `   |   oid ${o.oid}${o.cloid ? `   |   cloid ${o.cloid}` : ""}` +
+        `${o.reduceOnly ? "   |   reduce-only" : ""}${o.tif ? `   |   ${String(o.tif).toUpperCase()}` : ""}`,
+      );
+    }
+  }
+
+  return {
+    message: lines.join("\n"),
+    chainSwitch: chainSwitched,
+    suggestions: ["refresh fills"],
   };
 }

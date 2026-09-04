@@ -28,6 +28,7 @@ import { handle_gmx_claim_funding_fees } from "./gmx.js";
 import { handle_gmx_get_markets } from "./gmx.js";
 import { handle_hyperliquid_get_positions } from "./hyperliquid.js";
 import { handle_hyperliquid_get_markets } from "./hyperliquid.js";
+import { handle_hyperliquid_get_fills } from "./hyperliquid.js";
 import { handle_hyperliquid_deposit } from "./hyperliquid.js";
 import { handle_hyperliquid_limit_order } from "./hyperliquid.js";
 import { handle_hyperliquid_cancel_order } from "./hyperliquid.js";
@@ -84,6 +85,7 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "gmx_get_markets": handle_gmx_get_markets,
   "hyperliquid_get_positions": handle_hyperliquid_get_positions,
   "hyperliquid_get_markets": handle_hyperliquid_get_markets,
+  "hyperliquid_get_fills": handle_hyperliquid_get_fills,
   "hyperliquid_deposit": handle_hyperliquid_deposit,
   "hyperliquid_limit_order": handle_hyperliquid_limit_order,
   "hyperliquid_cancel_order": handle_hyperliquid_cancel_order,
