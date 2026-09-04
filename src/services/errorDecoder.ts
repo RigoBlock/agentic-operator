@@ -8,6 +8,8 @@
  */
 
 import { decodeErrorResult } from "viem";
+import type { Address, Hex } from "viem";
+import { getRpcUrl } from "../config.js";
 
 const COMMON_ERRORS = [
   // Solidity builtins
@@ -242,5 +244,82 @@ export function getRevertDataFromError(err: unknown): string | null {
     current = record.cause ?? record.error;
   }
 
+  return null;
+}
+
+// ── debug_traceCall fallback ──────────────────────────────────────────
+
+/** callTracer frame shape (subset). */
+interface TraceFrame {
+  type?: string;
+  error?: string | null;
+  revertReason?: string;
+  output?: string;
+  calls?: TraceFrame[];
+}
+
+/**
+ * Re-run a failing call under debug_traceCall and extract a human-readable
+ * revert reason from the deepest reverting frame.
+ *
+ * Used when eth_call / estimateGas fail WITHOUT revert data (common on
+ * HyperEVM and other chains where the RPC omits the reason), so the user
+ * sees e.g. "NotDelegated(deposit)" instead of a bare "execution reverted".
+ * Requires an Alchemy RPC (debug_traceCall); returns null otherwise.
+ */
+export async function traceRevertReason(
+  chainId: number,
+  call: { from: Address; to: Address; data: Hex; value?: bigint },
+): Promise<string | null> {
+  const rpcUrl = getRpcUrl(chainId);
+  if (!rpcUrl || !rpcUrl.includes("alchemy.com")) return null;
+
+  try {
+    const response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "debug_traceCall",
+        params: [
+          {
+            from: call.from,
+            to: call.to,
+            data: call.data,
+            ...(call.value && call.value > 0n ? { value: `0x${call.value.toString(16)}` } : {}),
+          },
+          "latest",
+          { tracer: "callTracer" },
+        ],
+      }),
+    });
+    if (!response.ok) return null;
+    const json = (await response.json()) as { result?: TraceFrame; error?: { message: string } };
+    const root = json.result;
+    if (!root || json.error) return null;
+    return findRevertReason(root);
+  } catch {
+    return null;
+  }
+}
+
+/** Depth-first: the deepest frame with an error wins; decode its revert payload. */
+function findRevertReason(frame: TraceFrame): string | null {
+  // Prefer the last (deepest) reverting child, then this frame itself.
+  if (frame.calls) {
+    for (let i = frame.calls.length - 1; i >= 0; i--) {
+      const childReason = findRevertReason(frame.calls[i]);
+      if (childReason) return childReason;
+    }
+  }
+  if (frame.error != null || frame.type === "REVERT") {
+    if (frame.revertReason) return frame.revertReason;
+    if (frame.output) {
+      const decoded = decodeRevertData(frame.output);
+      if (decoded) return decoded.replace(/^Contract reverted: /, "");
+    }
+    if (typeof frame.error === "string" && frame.error.length > 0) return frame.error;
+  }
   return null;
 }

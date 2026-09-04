@@ -1055,6 +1055,9 @@ ${executionModeNote}${contextDocsBlock}`;
     let lastFailedTool: string | undefined;
     let lastFailedError: string | undefined;
     let consecutiveFailures = 0;
+    // The most recent tool error, whatever the tool. If the model then replies
+    // with empty text, this becomes the reply so the user always sees the error.
+    let lastToolError: string | null = null;
 
     for (let round = 1; round <= MAX_AUTONOMOUS_ROUNDS; round++) {
       if (!currentMessage.tool_calls || currentMessage.tool_calls.length === 0) {
@@ -1197,6 +1200,7 @@ ${executionModeNote}${contextDocsBlock}`;
           }
           result = `Error: ${friendlyError(sanitizeError(rawMsg))}`;
           isError = true;
+          lastToolError = result;
         }
 
         const callMetadata = !isError && toolResult?.metadata ? toolResult.metadata : undefined;
@@ -1213,11 +1217,12 @@ ${executionModeNote}${contextDocsBlock}`;
 
         if (onToolResult) await onToolResult(name, result, isError).catch(() => {});
 
-        // Terminal error detection: certain errors from swap/trade tools should be
-        // returned directly to the user instead of giving the LLM another round.
-        // Without this, the model gets confused by the error and calls unrelated tools
-        // (e.g., GMX markets after a swap revert).
-        if (isError && (name === "build_vault_swap" || name === "get_swap_quote")) {
+        // Terminal error detection: revert-type errors (from any tool) are returned
+        // directly to the user instead of giving the LLM another round — the model
+        // cannot fix an on-chain revert and tends to confabulate when it sees one.
+        // Validation errors (missing args, unknown chains, disambiguation) still go
+        // back to the model so it can ask the user the right question.
+        if (isError) {
           const isTerminalError =
             /Swap Shield blocked/i.test(result) ||
             /NAV.*shield.*blocked/i.test(result) ||
@@ -1273,6 +1278,7 @@ ${executionModeNote}${contextDocsBlock}`;
           consecutiveFailures = 0;
           lastFailedTool = undefined;
           lastFailedError = undefined;
+          lastToolError = null;
         }
 
         toolMessages.push({
@@ -1376,7 +1382,7 @@ ${executionModeNote}${contextDocsBlock}`;
       if (!followUpHasMoreToolCalls) {
         finalModel = llmModel;
         return {
-          reply: currentMessage.content || "Done.",
+          reply: currentMessage.content?.trim() || lastToolError?.replace(/^Error: /, "") || "Done.",
           toolCalls: toolCallResults,
           transaction: pendingTransactions[pendingTransactions.length - 1],
           transactions: pendingTransactions.length > 0 ? pendingTransactions : undefined,

@@ -19,6 +19,7 @@ import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
 import { getRpcProvider } from "./rpcClient.js";
 import { ExecutionError } from "./executionError.js";
 import { estimateGasFees, type GasFees } from "./gas.js";
+import { getRevertDataFromError, traceRevertReason } from "./errorDecoder.js";
 
 /**
  * Prepare a transaction for signing/broadcast.
@@ -124,7 +125,18 @@ export async function prepareTransaction(
       estimateGasFees(publicClient, tx.chainId),
     ]);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    let msg = err instanceof Error ? err.message : String(err);
+    // When the RPC omits revert data (common on HyperEVM), trace the call to
+    // recover the on-chain revert reason so the user gets an actionable error.
+    if (!getRevertDataFromError(err)) {
+      const reason = await traceRevertReason(tx.chainId, {
+        from: executor,
+        to: tx.to,
+        data: tx.data,
+        value: txValue,
+      });
+      if (reason) msg = `${msg} — revert reason: ${reason}`;
+    }
     throw new ExecutionError(
       `Transaction preparation failed: ${msg}`,
       "PREPARATION_FAILED",
