@@ -463,10 +463,10 @@ export const TOOL_DEFINITIONS = [
       description:
         "Place a Hyperliquid perp order. This is the SINGLE tool for opening, increasing, decreasing, " +
         "or closing positions: use side without reduceOnly to open/increase, reduceOnly (or size='50%'/'all', " +
-        "or close=true) to decrease/close. WITHOUT a price the order is a MARKET order: priced at the best " +
-        "ask (buy) or best bid (sell) plus a 1% bound, executed as IOC. WITH a price it is a resting limit " +
-        "order (GTC by default — no expiry, stays until filled or cancelled). " +
-        "Hyperliquid uses cross margin — collateral is global to the perp account, not pledged per position.",
+        "or close=true) to decrease/close. orderType='market' (or no price) fills immediately at best ask/bid " +
+        "+1% as IOC. orderType='limit' (or a price) is a resting order — GTC by default, no expiry. Prices are " +
+        "formatted to the market's valid tick automatically (official Hyperliquid tick rules). Hyperliquid uses cross margin — collateral is global " +
+        "to the perp account, not pledged per position.",
       parameters: {
         type: "object",
         properties: {
@@ -486,9 +486,13 @@ export const TOOL_DEFINITIONS = [
             type: "string",
             description: "Order size in USD — converted to base units at the limit price. Alternative to size.",
           },
+          orderType: {
+            type: "string",
+            description: "Explicit order type: 'market' (no price — fills immediately, bounded by 1% from the best ask/bid) or 'limit' (price required — resting order, GTC by default, no expiry). If omitted it is inferred: a price means limit, no price means market.",
+          },
           price: {
             type: "string",
-            description: "Limit price in USD — creates a resting limit order (GTC, no expiry). Omit for a market order (fills immediately, priced off the best ask/bid with a 1% bound).",
+            description: "Limit price in USD — required for limit orders, forbidden for market orders. Automatically formatted to the market's valid tick (max 5 significant figures).",
           },
           reduceOnly: {
             type: "boolean",

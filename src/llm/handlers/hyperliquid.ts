@@ -41,6 +41,7 @@ import {
   buildHlUsdClassTransferCalldata,
   buildHlCancelByOidCalldata,
   buildHlCancelByCloidCalldata,
+  formatHlPrice,
   toHlPx,
   toHlSz,
   randomCloid,
@@ -254,21 +255,41 @@ export async function handle_hyperliquid_limit_order(
     throw new Error(`Invalid side: ${side} (use "buy" or "sell").`);
   }
 
-  // ── Price: explicit limit price, or a market order anchored to the touch ──
-  // Market (no explicit price): price at best ask (buy) / best bid (sell) + a 1%
-  // buffer as an IOC. Anchoring to mid±1% can rest unfilled in a fast market —
-  // the IOC then expires without a fill. Limit (explicit price): rests on the
-  // book as GTC by default — GTC has NO expiry; it stays until filled or cancelled.
-  const mids = await getHyperliquidMids();
-  const midPx = parseFloat(mids[coin]);
+  // ── Order type + price ────────────────────────────────────────────────
+  // orderType makes market-vs-limit explicit:
+  //   market — no price; best ask (buy) / best bid (sell) + 1% bound, IOC.
+  //            Anchoring to mid±1% can rest unfilled in a fast market.
+  //   limit  — explicit price required; rests as GTC (no expiry) by default.
+  // When orderType is omitted it is inferred: price present = limit, else market.
+  // Every price is rounded to a valid Hyperliquid tick (≤5 significant figures
+  // and ≤ 6−szDecimals decimals) — off-tick prices are rejected by the engine
+  // with "Price must be divisible by tick size".
+  const orderTypeArg = String(args.orderType ?? "").trim().toLowerCase();
+  if (orderTypeArg && orderTypeArg !== "market" && orderTypeArg !== "limit") {
+    throw new Error(`Invalid orderType: ${orderTypeArg} (use "market" or "limit").`);
+  }
   let priceStr = String(args.price ?? "").trim();
   let tif: HlTifName = (String(args.tif ?? "").trim().toLowerCase() as HlTifName) || "gtc";
   let isMarket = false;
+  let tickNote = "";
+  if (orderTypeArg === "market" && priceStr) {
+    throw new Error('A market order must not include a price. Remove price, or use orderType="limit".');
+  }
+  if (orderTypeArg === "limit" && !priceStr) {
+    throw new Error('A limit order requires an explicit price. Omit the price for a market order.');
+  }
   if (priceStr) {
     if (!Number.isFinite(parseFloat(priceStr))) throw new Error(`Invalid limit price: ${priceStr}`);
     if (args.tif) tif = String(args.tif).trim().toLowerCase() as HlTifName;
+    const pxFormatted = formatHlPrice(parseFloat(priceStr), szDecimals);
+    if (Math.abs(parseFloat(pxFormatted) - parseFloat(priceStr)) > 1e-12) {
+      tickNote = `Price truncated to the valid tick: $${pxFormatted} (Hyperliquid allows at most 5 significant figures).`;
+    }
+    priceStr = pxFormatted;
   } else {
     isMarket = true;
+    const mids = await getHyperliquidMids();
+    const midPx = parseFloat(mids[coin]);
     const touch = await getHyperliquidQuote(coin).catch(() => ({ bid: 0, ask: 0 }));
     const basis = isBuy ? touch.ask : touch.bid;
     const ref = Number.isFinite(basis) && basis > 0 ? basis : midPx;
@@ -283,8 +304,37 @@ export async function handle_hyperliquid_limit_order(
         `provide an explicit limit price instead of a market order.`,
       );
     }
-    priceStr = bounded.toFixed(8);
+    // Truncation toward zero (never up) keeps the bound conservative: a buy bound
+    // stays at/under the computed cap and a sell bound at/over it, always ≥1 tick
+    // of marketability room from the touch price.
+    const tickPx = parseFloat(formatHlPrice(bounded, szDecimals));
+    if (Math.abs(tickPx - bounded) > Math.max(1e-9, bounded * 1e-9)) {
+      tickNote = `Bound truncated to the valid tick: $${tickPx}.`;
+    }
+    priceStr = String(tickPx);
     tif = "ioc"; // marketable: fill immediately up to the 1% bound or fail
+  }
+
+  // ── Limit direction clarity: will this rest, or execute immediately? ──
+  let executionLine: string | undefined;
+  if (!isMarket) {
+    const quote = await getHyperliquidQuote(coin).catch(() => ({ bid: 0, ask: 0 }));
+    const px = parseFloat(priceStr);
+    if (quote.ask > 0 && quote.bid > 0) {
+      if (isBuy) {
+        executionLine = px >= quote.ask
+          ? "⚡ Executes immediately (buy ≥ best ask — behaves like a market order)."
+          : px > quote.bid
+            ? "⚡ Executes immediately (inside the spread — taker)."
+            : `⏳ Rests as a maker order until ${coin} falls to $${px} (buy < best bid).`;
+      } else {
+        executionLine = px <= quote.bid
+          ? "⚡ Executes immediately (sell ≤ best bid — behaves like a market order)."
+          : px < quote.ask
+            ? "⚡ Executes immediately (inside the spread — taker)."
+            : `⏳ Rests as a maker order until ${coin} rises to $${px} (sell > best ask).`;
+      }
+    }
   }
 
   // ── Size: base units, percentage of position, or USD notional ───────
@@ -326,6 +376,19 @@ export async function handle_hyperliquid_limit_order(
     );
   }
 
+  // Opening orders beyond the account value rely on leverage — warn rather than
+  // block, since the engine's default margin may still accept them.
+  let marginNote = "";
+  if (!reduceOnly) {
+    const state = await fetchClearinghouseState(ctx.vaultAddress as Address).catch(() => null);
+    const accountValue = state?.marginSummary?.accountValue ? parseFloat(state.marginSummary.accountValue) || 0 : 0;
+    if (accountValue > 0 && notionalUsdValue > accountValue) {
+      marginNote =
+        `\n⚠️ Notional $${notionalUsdValue.toFixed(2)} exceeds the perp account value ($${accountValue.toFixed(2)}) — ` +
+        `this order relies on leverage. If the engine rejects it for insufficient margin, lower the size or deposit more USDC.`;
+    }
+  }
+
   const calldata = buildHlLimitOrderCalldata({
     asset: assetIndex,
     isBuy,
@@ -354,8 +417,11 @@ export async function handle_hyperliquid_limit_order(
       isMarket
         ? `Market price: $${pxHuman} (best ${isBuy ? "ask" : "bid"} +1% bound)   |   TIF: IOC${reduceOnly ? "   |   reduce-only" : ""}`
         : `Limit price: $${pxHuman}   |   TIF: ${tif.toUpperCase()}${tif === "gtc" ? " (no expiry)" : ""}${reduceOnly ? "   |   reduce-only" : ""}`,
+      ...(executionLine ? [executionLine] : []),
+      ...(tickNote ? [tickNote] : []),
       `Leverage: ${position?.leverage?.value ? `${position.leverage.value}x (existing position)` : `not set — Hyperliquid defaults to cross margin; account leverage is shown in the positions report`}`,
       `Client order id (cloid): 0x${cloidArg.toString(16)} — quote it to cancel this order`,
+      ...(marginNote ? [marginNote] : []),
       ...(actionLine ? [actionLine] : []),
     ].filter(Boolean).join("\n"),
     transaction,

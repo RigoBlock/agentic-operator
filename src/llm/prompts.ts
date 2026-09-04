@@ -262,7 +262,7 @@ INTENT → ARGS examples:
 - VIEW account value, positions, orders → hyperliquid_get_positions — then stop
 - LIST markets → hyperliquid_get_markets
 - DEPOSIT USDC → hyperliquid_deposit (also activates a new Core account)
-- TRADE (open/increase/decrease/close) → hyperliquid_limit_order — single tool, semantics in its definition (NO price = MARKET order, fills immediately off the best ask/bid with a 1% bound; explicit price = resting limit, GTC by default — no expiry, stays until filled or cancelled)
+- TRADE (open/increase/decrease/close) → hyperliquid_limit_order — single tool, semantics in its definition (orderType="market" or NO price = MARKET order, fills immediately off the best ask/bid with a 1% bound; orderType="limit" or a price = resting GTC limit — no expiry, stays until filled or cancelled; prices are auto-formatted to the market's valid tick per the official Hyperliquid tick rules)
 - CANCEL an order → hyperliquid_cancel_order
 - WITHDRAW = TWO steps, always in this order: 1) hyperliquid_usd_class_transfer 2) hyperliquid_spot_send (each caps the amount tool-side)
 INTENT → ARGS:

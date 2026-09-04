@@ -53,7 +53,8 @@ const MENU_FIELD_OVERRIDES: Record<string, ToolCardField[]> = {
     { name: "side", label: "Side", required: true, placeholder: "buy (long) or sell (short)" },
     { name: "size", label: "Size", required: false, placeholder: "0.5 — or use notionalUsd, e.g. 3000" },
     { name: "notionalUsd", label: "Notional USD", required: false, placeholder: "3000 — alternative to size" },
-    { name: "price", label: "Limit price (USD)", required: false, placeholder: "empty = immediate marketable order" },
+    { name: "orderType", label: "Order type", required: false, placeholder: "market (default) or limit" },
+    { name: "price", label: "Limit price (USD)", required: false, placeholder: "required for limit — omit for market" },
   ],
   crosschain_transfer: [
     { name: "sourceChain", label: "Source chain", required: false, placeholder: "empty = current chain" },

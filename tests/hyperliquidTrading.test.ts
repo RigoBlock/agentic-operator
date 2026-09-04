@@ -17,6 +17,7 @@ import {
   buildHlUsdClassTransferCalldata,
   buildHlCancelByOidCalldata,
   buildHlCancelByCloidCalldata,
+  formatHlPrice,
 } from "../src/services/hyperliquidTrading.js";
 import {
   RIGOBLOCK_HYPERLIQUID_ABI,
@@ -46,10 +47,11 @@ describe("unit conversions", () => {
 
   it("converts sizes to 1e8 wire fixed point, quantized to market szDecimals", () => {
     // HyperCore wire format: sz = 10^8 × human size, for EVERY market.
-    // szDecimals only quantizes the size increment before scaling.
+    // szDecimals only quantizes the size increment before scaling (truncated,
+    // mirroring formatSize() in @nktkas/hyperliquid/utils).
     expect(toHlSz("0.15", 5)).toBe(15_000_000n); // BTC: 0.15 × 1e8
     expect(toHlSz("1.234", 4)).toBe(123_400_000n); // ETH: 1.234 × 1e8
-    expect(toHlSz("1.23456", 4)).toBe(123_460_000n); // quantized to 4 decimals (rounded)
+    expect(toHlSz("1.23456", 4)).toBe(123_450_000n); // quantized to 4 decimals (truncated)
   });
 
   it("converts human USDC to 6-decimal perp units", () => {
@@ -69,6 +71,34 @@ describe("unit conversions", () => {
     expect(() => toHlSz("0.0000001", 5)).toThrow(); // rounds to 0
     expect(() => usdToPerpUnits("abc")).toThrow();
     expect(() => usdToCoreWei("")).toThrow();
+  });
+});
+
+describe("formatHlPrice (official Hyperliquid tick rules)", () => {
+  it("matches the reference examples from @nktkas/hyperliquid", () => {
+    expect(formatHlPrice("97123.456789", 0)).toBe("97123"); // 5 sig figs, truncated
+    expect(formatHlPrice("1.23456789", 5)).toBe("1.2"); // max 1 decimal (6−5)
+    expect(formatHlPrice("1234.5", 4)).toBe("1234.5"); // valid as-is
+    expect(formatHlPrice("1234.56", 4)).toBe("1234.5"); // 6 sig figs → truncated to 5
+  });
+
+  it("allows integer prices regardless of significant figures", () => {
+    expect(formatHlPrice("123456", 5)).toBe("123456"); // the docs' own example
+    expect(formatHlPrice("79474.0", 5)).toBe("79474"); // live BTC book format
+  });
+
+  it("preserves the high precision low-priced markets need", () => {
+    expect(formatHlPrice("0.084543", 0)).toBe("0.084543"); // DOGE: 5 sig figs, 6 decimals
+    expect(formatHlPrice("0.33026", 0)).toBe("0.33026"); // TRX: 5 decimals
+    expect(formatHlPrice("0.001234", 0)).toBe("0.001234"); // docs example: 6 decimals ok
+    expect(formatHlPrice("0.0012345", 0)).toBe("0.001234"); // 7 decimals → truncated
+    expect(formatHlPrice("0.012345", 1)).toBe("0.01234"); // max 6−1=5 decimals
+  });
+
+  it("rejects prices that truncate to zero", () => {
+    expect(() => formatHlPrice("0.0000001", 0)).toThrow();
+    expect(() => formatHlPrice(0, 4)).toThrow();
+    expect(() => formatHlPrice("abc", 4)).toThrow();
   });
 });
 
@@ -322,6 +352,60 @@ describe("handle_hyperliquid_limit_order minimum notional", () => {
     expect(result.message).toContain("limit order ready");
     expect(result.message).toContain("Limit price: $2400");
     expect(result.message).toContain("TIF: GTC (no expiry)");
+    vi.unstubAllGlobals();
+  }, 30_000);
+
+  it("rejects a market order that carries a price, and a limit order without one", async () => {
+    stubHlApi();
+    const { handle_hyperliquid_limit_order } = await import("../src/llm/handlers/hyperliquid.js");
+    await expect(
+      handle_hyperliquid_limit_order({} as never, makeCtx(), {
+        coin: "ETH", side: "buy", notionalUsd: "3000", orderType: "market", price: "2500",
+      }, "hyperliquid_limit_order"),
+    ).rejects.toThrow(/market order must not include a price/i);
+    await expect(
+      handle_hyperliquid_limit_order({} as never, makeCtx(), {
+        coin: "ETH", side: "buy", notionalUsd: "3000", orderType: "limit",
+      }, "hyperliquid_limit_order"),
+    ).rejects.toThrow(/limit order requires an explicit price/i);
+    vi.unstubAllGlobals();
+  }, 30_000);
+
+  it("states whether a limit rests or executes immediately, per direction", async () => {
+    stubHlApi(); // book: bid 2500 / ask 2500
+    const { handle_hyperliquid_limit_order } = await import("../src/llm/handlers/hyperliquid.js");
+    // Sell limit above the ask → rests until price rises (a short entry waiting for a rally)
+    const resting = await handle_hyperliquid_limit_order({} as never, makeCtx(), {
+      coin: "ETH", side: "sell", size: "0.005", price: "2600",
+    }, "hyperliquid_limit_order");
+    expect(resting.message).toContain("Rests as a maker order until ETH rises to $2600");
+    // Sell limit at/below the bid → executes immediately
+    const immediate = await handle_hyperliquid_limit_order({} as never, makeCtx(), {
+      coin: "ETH", side: "sell", size: "0.005", price: "2400",
+    }, "hyperliquid_limit_order");
+    expect(immediate.message).toContain("Executes immediately");
+    vi.unstubAllGlobals();
+  }, 30_000);
+
+  it("formats a 6-significant-figure limit price to a valid tick before submitting", async () => {
+    stubHlApi();
+    const { handle_hyperliquid_limit_order } = await import("../src/llm/handlers/hyperliquid.js");
+    const result = await handle_hyperliquid_limit_order({} as never, makeCtx(), {
+      coin: "ETH", side: "sell", size: "0.005", price: "2429.46",
+    }, "hyperliquid_limit_order");
+    // 2429.46 → 6 sig figs → truncated to 2429.4 (the valid 5-sig-fig tick)
+    expect(result.message).toContain("Limit price: $2429.4");
+    expect(result.message).toContain("truncated to the valid tick");
+    const { actionId, params } = decodeSendRawAction(result.transaction!.data);
+    expect(actionId).toBe(1);
+    const [, , limitPx] = decodeAbiParameters(
+      [
+        { type: "uint32" }, { type: "bool" }, { type: "uint64" }, { type: "uint64" },
+        { type: "bool" }, { type: "uint8" }, { type: "uint128" },
+      ],
+      params,
+    );
+    expect(limitPx).toBe(242_940_000_000n); // 2429.4 × 1e8
     vi.unstubAllGlobals();
   }, 30_000);
 

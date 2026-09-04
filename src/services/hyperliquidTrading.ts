@@ -53,20 +53,46 @@ export function toHlPx(price: number | string): bigint {
   return px;
 }
 
+/** Format a human price to a valid Hyperliquid perp price, following the official
+ *  tick rules exactly (https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/tick-and-lot-size)
+ *  and mirroring formatPrice() in @nktkas/hyperliquid/utils:
+ *    1. truncate toward zero to (6 − szDecimals) decimal places;
+ *    2. if the result is not an integer, truncate to 5 significant figures
+ *       (integer prices are exempt from the sig-fig cap, e.g. 79474 is valid BTC);
+ *    3. error if the result truncates to zero.
+ *  Truncation (never rounding up) is deliberate: it mirrors the reference SDK and
+ *  keeps market-order bounds conservative in both directions. Float dust is
+ *  guarded so exactly-on-tick inputs are not truncated one tick below. */
+export function formatHlPrice(px: number | string, szDecimals: number): string {
+  const n = typeof px === "string" ? parseFloat(px) : px;
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`Invalid Hyperliquid price: ${px}`);
+  const maxDec = Math.max(6 - szDecimals, 0);
+  const f = 10 ** maxDec;
+  let truncated = Math.floor(n * f + 1e-6) / f;
+  if (truncated <= 0) throw new Error(`Hyperliquid price too small: ${px}`);
+  if (!Number.isInteger(truncated)) {
+    const sigF = 10 ** (4 - Math.floor(Math.log10(truncated)));
+    truncated = Math.floor(truncated * sigF + 1e-6) / sigF;
+    if (truncated <= 0) throw new Error(`Hyperliquid price too small: ${px}`);
+  }
+  return String(truncated);
+}
+
 /** Human base-asset size (e.g. "0.15" BTC) → Core uint64 size.
  *
  * Per the HyperCore docs, sz is sent as 10^8 × the human-readable value —
  * the SAME 1e8 fixed point as prices, for every market. `szDecimals` is only a
  * matching-engine quantization constraint (min size increment), NOT the wire
- * scale: the size is first rounded to `szDecimals` decimals, then scaled by
- * 10^(8 - szDecimals), keeping the math exact in integers. */
+ * scale: the size is first truncated to `szDecimals` decimals (mirroring
+ * formatSize() in @nktkas/hyperliquid/utils — truncation never exceeds the
+ * requested size), then scaled by 10^(8 − szDecimals), exact in integers. */
 export function toHlSz(size: number | string, szDecimals: number): bigint {
   const n = typeof size === "string" ? parseFloat(size) : size;
   if (!Number.isFinite(n) || n <= 0) {
     throw new Error(`Invalid Hyperliquid order size: ${size} (must be a positive number).`);
   }
-  const quantum = BigInt(Math.round(n * 10 ** szDecimals));
-  if (quantum === 0n) throw new Error(`Hyperliquid order size too small: ${size} (rounds to 0 at ${szDecimals} decimals).`);
+  const quantum = BigInt(Math.floor(n * 10 ** szDecimals + 1e-6));
+  if (quantum === 0n) throw new Error(`Hyperliquid order size too small: ${size} (truncates to 0 at ${szDecimals} decimals).`);
   const sz = quantum * 10n ** BigInt(8 - szDecimals);
   if (sz > U64_MAX) throw new Error(`Hyperliquid order size too large: ${size}`);
   return sz;
