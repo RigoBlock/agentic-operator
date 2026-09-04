@@ -3649,6 +3649,20 @@ ox@0.14.32:
     abitype "^1.2.3"
     eventemitter3 "5.0.1"
 
+ox@0.14.44:
+  version "0.14.44"
+  resolved "https://registry.yarnpkg.com/ox/-/ox-0.14.44.tgz#58cda086c7e2d4c3ba39f08a33778c47de5e2dee"
+  integrity sha512-O54qXXHEk4ySamMSyBpI0AeBegS5frxU6+LA6Jb9Sf6kMOxcTNaxYmwZfpOu22DIQsdKfgQxHq8EsAGaoBQScA==
+  dependencies:
+    "@adraffy/ens-normalize" "^1.11.0"
+    "@noble/ciphers" "^1.3.0"
+    "@noble/curves" "1.9.1"
+    "@noble/hashes" "^1.8.0"
+    "@scure/bip32" "^1.7.0"
+    "@scure/bip39" "^1.6.0"
+    abitype "^1.2.3"
+    eventemitter3 "5.0.1"
+
 ox@^0.6.12:
   version "0.6.12"
   resolved "https://registry.npmjs.org/ox/-/ox-0.6.12.tgz"
@@ -4149,7 +4163,7 @@ uuid@^9.0.1:
   resolved "https://registry.npmjs.org/uuid/-/uuid-9.0.1.tgz"
   integrity sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==
 
-viem@^2.21.0, viem@^2.21.26, viem@^2.32.0:
+viem@^2.21.26, viem@^2.32.0:
   version "2.46.2"
   resolved "https://registry.npmjs.org/viem/-/viem-2.46.2.tgz"
   integrity sha512-w8Qv5Vyo7TfXcH3vgmxRa1NRvzJCDy2aSGSRsJn3503nC/qVbgEQ+n3aj/CkqWXbloudZh97h5o5aQrQSVGy0w==
@@ -4189,6 +4203,20 @@ viem@^2.48.11:
     abitype "1.2.3"
     isows "1.0.7"
     ox "0.14.32"
+    ws "8.21.0"
+
+viem@^2.56.3:
+  version "2.56.3"
+  resolved "https://registry.yarnpkg.com/viem/-/viem-2.56.3.tgz#d76da19f71a9e70863c1288b2836903bc43b3425"
+  integrity sha512-vUObq3GO7D3lz9gPNEE/xd5jIUnMbeVDWewh252o54pDEDlW4pDe6FEd/qTGL5RyK52cGHMM7kQ3wjxhilEvkQ==
+  dependencies:
+    "@noble/curves" "1.9.1"
+    "@noble/hashes" "1.8.0"
+    "@scure/bip32" "1.7.0"
+    "@scure/bip39" "1.6.0"
+    abitype "1.2.3"
+    isows "1.0.7"
+    ox "0.14.44"
     ws "8.21.0"
 
 "vite@^6.0.0 || ^7.0.0 || ^8.0.0-0":

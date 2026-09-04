@@ -491,8 +491,7 @@ INTENT ROUTING — CHOOSE THE RIGHT TOOL:
 - Never use placeholders like "first chain" or "second chain" in tool args.
   Always pass real chain names/IDs (e.g., "Arbitrum" -> "Base", or "42161" -> "8453").
 - If the user asks "sync between X and Y" without specifying amount/token, run one direction first (X -> Y), then propose/prepare Y -> X if requested.
-- Bridgeable tokens: USDC, USDT, WETH, WBTC. Not all available on all chains.
-- Supported chains: Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Unichain.
+- Bridgeable tokens include USDC, USDT, WETH, WBTC, but availability is validated by the tool per chain (e.g. HyperEVM is USDC-only). NEVER refuse or redirect a route yourself: pass the chains the user named to the tool and relay the error it returns if the chain or token is unsupported.
 - Bridge fees: 0.01%-0.5%, max 2%. Fill time: 2s-10min.
 - Requires depositV3 selector delegated for delegated execution.
 

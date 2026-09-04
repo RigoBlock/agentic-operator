@@ -170,7 +170,7 @@ export const TOOL_DEFINITIONS = [
         properties: {
           chain: {
             type: "string",
-            description: "Chain name or ID (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB Chain, Unichain, Sepolia)",
+            description: "Chain name or ID (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB Chain, Unichain, HyperEVM, Sepolia)",
           },
         },
         required: ["chain"],
@@ -708,8 +708,9 @@ export const TOOL_DEFINITIONS = [
         "to bridge/transfer/move a specific amount of a token between named chains. Fetches the quote " +
         "and prepares the transaction in a single call — do NOT call get_crosschain_quote first. " +
         "Uses the Across Protocol via the AIntents adapter. " +
-        "Supported tokens: USDC, USDT, WETH, WBTC (not all tokens on all chains). " +
-        "Supported chains: Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Unichain. " +
+        "Supported tokens: USDC, USDT, WETH, WBTC (availability is validated per chain by the tool). " +
+        "Chain/token support is enforced by the tool: pass the chains the user named and relay the " +
+        "error it returns if a chain or token is unsupported — do NOT refuse routes on your own. " +
         "The transfer burns virtual supply on the source chain and mints via donate on the destination. " +
         "Requires the depositV3 selector to be delegated (same as other vault operations). " +
         "IMPORTANT: sourceChain defaults to the current chain if not specified, but ALWAYS include it " +

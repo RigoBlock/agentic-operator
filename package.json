@@ -32,7 +32,7 @@
     "hono": "^4.12.27",
     "jsbi": "^3.1.4",
     "openai": "^4.70.0",
-    "viem": "^2.21.0"
+    "viem": "^2.56.3"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.13.1",

@@ -212,7 +212,8 @@ export async function loadAgentWalletAccount(
   // CDP's EvmServerAccount has sign, signMessage, signTransaction, signTypedData
   // but NOT signAuthorization (EIP-7702). Patch it so Alchemy Smart Wallet's
   // signPreparedCalls can sign the 7702 authorization tuple via CDP.
-  const account = toAccount(cdpAccount);
+  // The cast bridges viem's stricter TypedData generics — runtime-compatible.
+  const account = toAccount(cdpAccount as unknown as LocalAccount);
   if (!account.signAuthorization) {
     account.signAuthorization = async (authorization) => {
       const hash = hashAuthorization(authorization);

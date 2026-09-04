@@ -54,6 +54,13 @@ describe("getChain", () => {
     expect(() => getChain(11155111)).not.toThrow(); // Sepolia
     expect(() => getChain(84532)).not.toThrow();    // Base Sepolia
   });
+
+  it("exposes multicall3 on the HyperEVM chain definition", () => {
+    const chain = getChain(999);
+    expect(chain.contracts?.multicall3?.address).toBe(
+      "0xcA11bde05977b3631167028862bE2a173976CA11",
+    );
+  });
 });
 
 describe("resolveChainId", () => {
