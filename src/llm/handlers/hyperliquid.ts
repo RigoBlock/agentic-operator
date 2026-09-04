@@ -18,7 +18,7 @@
 
 import type { Env, RequestContext, TransactionDraft } from "../../types.js";
 import type { ToolResult } from "../client.js";
-import type { Address } from "viem";
+import { formatUnits, type Address } from "viem";
 import { HYPEREVM_CHAIN_ID, HYPEREVM_USDC, type HlTifName } from "../../abi/hyperliquid.js";
 import {
   getHyperliquidAccountSummary,
@@ -290,6 +290,20 @@ export async function handle_hyperliquid_limit_order(
   const sz = toHlSz(sizeHuman.toFixed(10), szDecimals);
   const cloidArg = args.cloid ? BigInt(String(args.cloid)) : randomCloid();
 
+  // Hyperliquid rejects orders below a $10 minimum value ("Order must have
+  // minimum value of 10 USD"), with an exception only for exact position
+  // closes. Reject here so the user gets a clear error instead of a
+  // seemingly-successful transaction whose order never fills.
+  const pxHuman = parseFloat(priceStr);
+  const notionalUsdValue = sizeHuman * pxHuman;
+  const exactClose = reduceOnly && (closeRequested || isAll);
+  if (notionalUsdValue < 10 && !exactClose) {
+    throw new Error(
+      `$${notionalUsdValue.toFixed(2)} is below Hyperliquid's $10 minimum order value. ` +
+      `Increase the amount (e.g. notionalUsd=10 or size accordingly).`,
+    );
+  }
+
   const calldata = buildHlLimitOrderCalldata({
     asset: assetIndex,
     isBuy,
@@ -300,22 +314,23 @@ export async function handle_hyperliquid_limit_order(
     cloid: cloidArg,
   });
 
-  const pxHuman = parseFloat(priceStr);
-  const notionalUsdValue = sizeHuman * pxHuman;
+  // Display the size as actually submitted (rounded to the market's szDecimals)
+  // so the message matches what the explorer shows.
+  const sizeDisplayed = Number(formatUnits(sz, szDecimals));
   const verb = reduceOnly
     ? closeRequested || isAll ? "Close position" : "Decrease position"
     : position && !closeRequested ? "Increase position" : "Open position";
   const transaction = draft(
     ctx,
     calldata,
-    `[Hyperliquid] ${verb}: ${isBuy ? "BUY" : "SELL"} ${sizeHuman} ${coin} @ ${pxHuman} (${tif.toUpperCase()})`,
+    `[Hyperliquid] ${verb}: ${isBuy ? "BUY" : "SELL"} ${sizeDisplayed} ${coin} @ ${pxHuman} (${tif.toUpperCase()})`,
   );
 
   const actionLine = txActionLine(ctx);
   return {
     message: [
       `✅ Hyperliquid limit order ready`,
-      `${verb}: ${isBuy ? "BUY" : "SELL"} ${sizeHuman} ${coin} (~$${notionalUsdValue.toLocaleString("en-US", { maximumFractionDigits: 2 })})`,
+      `${verb}: ${isBuy ? "BUY" : "SELL"} ${sizeDisplayed} ${coin} (~$${notionalUsdValue.toLocaleString("en-US", { maximumFractionDigits: 2 })})`,
       `Limit price: $${pxHuman}   |   TIF: ${tif.toUpperCase()}${reduceOnly ? "   |   reduce-only" : ""}`,
       `Leverage: ${position?.leverage?.value ? `${position.leverage.value}x (existing position)` : `not set — Hyperliquid defaults to cross margin; account leverage is shown in the positions report`}`,
       `Client order id (cloid): 0x${cloidArg.toString(16)} — quote it to cancel this order`,

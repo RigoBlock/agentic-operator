@@ -2,7 +2,7 @@
  * Hyperliquid calldata builder tests — unit conversions, CoreWriter action payload
  * layout, and vault adapter calldata. All pure functions, no network.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { decodeAbiParameters, toFunctionSelector } from "viem";
 import {
   toHlPx,
@@ -176,4 +176,59 @@ describe("sendRawAction calldata", () => {
     const names = RIGOBLOCK_HYPERLIQUID_ABI.map((f) => f.name);
     expect(names).toEqual(["deposit", "depositFor", "sendRawAction"]);
   });
+});
+
+
+describe("handle_hyperliquid_limit_order minimum notional", () => {
+  const VAULT = "0xefa4bdf566ae50537a507863612638680420645c" as const;
+  const OPERATOR = "0xcA9F5049c1Ea8FC78574f94B7Cf5bE5fEE354C31" as const;
+
+  function stubHlApi() {
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: { body?: string }) => {
+      const body = JSON.parse(init?.body ?? "{}") as { type?: string };
+      if (body.type === "meta") {
+        return new Response(JSON.stringify({
+          universe: [{ name: "ETH", szDecimals: 4, maxLeverage: 25, onlyIsolated: false }],
+        }), { status: 200 });
+      }
+      if (body.type === "allMids") {
+        return new Response(JSON.stringify({ ETH: "2500" }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }));
+  }
+
+  function makeCtx() {
+    return {
+      vaultAddress: VAULT,
+      chainId: 999,
+      operatorAddress: OPERATOR,
+      operatorVerified: true,
+      executionMode: "manual",
+    } as never;
+  }
+
+  it("rejects orders below Hyperliquid's $10 minimum with a clear error", async () => {
+    stubHlApi();
+    const { handle_hyperliquid_limit_order } = await import("../src/llm/handlers/hyperliquid.js");
+    await expect(
+      handle_hyperliquid_limit_order({} as never, makeCtx(), {
+        coin: "ETH", side: "buy", notionalUsd: "3",
+      }, "hyperliquid_limit_order"),
+    ).rejects.toThrow(/\$10 minimum order value/);
+    vi.unstubAllGlobals();
+  }, 30_000);
+
+  it("accepts orders at or above $10 and reports the size rounded to szDecimals", async () => {
+    stubHlApi();
+    const { handle_hyperliquid_limit_order } = await import("../src/llm/handlers/hyperliquid.js");
+    const result = await handle_hyperliquid_limit_order({} as never, makeCtx(), {
+      coin: "ETH", side: "buy", notionalUsd: "3000",
+    }, "hyperliquid_limit_order");
+    // $3000 @ $2525 (mid +1%) = 1.18811881… ETH → rounded to 4 decimals = 1.1881
+    expect(result.message).toContain("BUY 1.1881 ETH");
+    expect(result.message).toContain("~$3,000");
+    expect(result.transaction).toBeDefined();
+    vi.unstubAllGlobals();
+  }, 30_000);
 });
