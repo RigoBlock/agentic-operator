@@ -41,6 +41,7 @@ import {
   buildHlUsdClassTransferCalldata,
   buildHlCancelByOidCalldata,
   buildHlCancelByCloidCalldata,
+  assertCoreSpotSendGas,
   formatHlPrice,
   toHlPx,
   toHlSz,
@@ -552,26 +553,24 @@ export async function handle_hyperliquid_spot_send(
   let amount = String(args.amount ?? "").trim();
   if (!amount) throw new Error("Specify the USDC amount to bridge back to HyperEVM, e.g. amount=\"250\".");
 
-  // The adapter keeps a 1e7 core-wei (0.1 USDC) bridge-fee reserve in the spot account.
-  const BRIDGE_RESERVE = 1e7;
-  const pre = await getHyperliquidPrecompileBalances(ctx.vaultAddress as Address);
+  const vault = ctx.vaultAddress as Address;
+  const pre = await getHyperliquidPrecompileBalances(vault);
   const spotHuman = Number(pre.spotUsdcWei) / 1e8;
-  let cappedNote = "";
   const requested = parseFloat(amount.replace(/[$,]/g, ""));
   if (!Number.isFinite(requested) || requested <= 0) {
     throw new Error(`Invalid amount: ${amount}`);
   }
-  const maxSendable = Number(pre.spotUsdcWei) / 1e8 - BRIDGE_RESERVE / 1e8;
-  if (requested > maxSendable) {
-    if (maxSendable < 1) {
-      throw new Error(
-        `Insufficient Core spot USDC. Available: ${spotHuman.toFixed(4)} USDC (0.1 USDC is kept as a bridge-fee reserve). ` +
-        `Run hyperliquid_usd_class_transfer first to move perp margin to spot.`,
-      );
-    }
-    amount = maxSendable.toFixed(6);
-    cappedNote = `\n⚠️ Amount capped to the spot balance minus the 0.1 USDC bridge reserve: ${amount} USDC`;
+  if (requested > spotHuman) {
+    throw new Error(
+      `Insufficient Core spot USDC. Available: ${spotHuman.toFixed(4)} USDC. ` +
+      `Run hyperliquid_usd_class_transfer first to move perp margin to spot.`,
+    );
   }
+
+  // HyperCore charges each Core→HyperEVM send's gas from the remaining Core spot
+  // USDC; CoreWriter never reverts on HyperCore failures, so a send that can't cover
+  // gas would show as a successful HyperEVM tx — preflight before drafting any tx.
+  assertCoreSpotSendGas({ spotUsdc: spotHuman, amount: requested });
 
   const calldata = buildHlSpotSendCalldata(amount);
   const transaction = draft(ctx, calldata, `[Hyperliquid] Bridge ${amount} USDC from Core spot to HyperEVM`);
@@ -582,7 +581,6 @@ export async function handle_hyperliquid_spot_send(
       `✅ Hyperliquid withdrawal step 2 ready`,
       `Bridges ${amount} USDC from the Core spot account back to the vault on HyperEVM.`,
       `Note: the bridged USDC lands in the vault wallet after HyperCore settlement (~128s).`,
-      cappedNote,
       ...(actionLine ? [actionLine] : []),
     ].filter(Boolean).join("\n"),
     transaction,

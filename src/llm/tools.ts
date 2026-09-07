@@ -568,7 +568,9 @@ export const TOOL_DEFINITIONS = [
       name: "hyperliquid_spot_send",
       description:
         "Withdrawal STEP 2: bridge USDC from the Hyperliquid Core spot account back to the vault on HyperEVM. " +
-        "Requires prior hyperliquid_usd_class_transfer. Keeps a 0.1 USDC bridge-fee reserve; amount is capped accordingly.",
+        "Requires prior hyperliquid_usd_class_transfer. HyperCore charges each send's gas (~0.002 USDC) from the " +
+        "remaining Core spot USDC, so the send is blocked unless it leaves ≥0.1 USDC on Core spot; a pool's first " +
+        "successful send also deducts a one-time 1 USDC activation fee (leave ~1.1 USDC for that first send).",
       parameters: {
         type: "object",
         properties: {

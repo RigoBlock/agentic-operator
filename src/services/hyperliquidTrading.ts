@@ -216,6 +216,37 @@ export function buildHlSpotSendCalldata(amountHuman: string): Hex {
   );
 }
 
+// ── Core spot-send gas preflight ──────────────────────────────────────
+
+/**
+ * Core spot USDC residual required after a bridge send, as a gas buffer. Observed
+ * gas ≈ 0.0017 USDC per send (charged from Core spot, or from Core HYPE when the
+ * pool happens to hold it); 0.1 is a safety buffer. A pool's first-ever successful
+ * Core→HyperEVM send additionally deducts a one-time 1 USDC activation fee
+ * (Circle CCTP-on-HyperCore docs; confirmed n=2) — documented in the error message
+ * but NOT enforced here, since activation status is not queryable via any known API.
+ */
+export const SPOT_SEND_GAS_USDC = 0.1;
+
+/**
+ * Preflight for SPOT_SEND: HyperCore charges each Core→HyperEVM send's gas from
+ * the pool's Core spot USDC. CoreWriter never reverts on HyperCore failures, so a
+ * send that can't cover gas would show as a successful HyperEVM tx — check before
+ * drafting any transaction.
+ */
+export function assertCoreSpotSendGas(p: { spotUsdc: number; amount: number }): void {
+  const residual = p.spotUsdc - p.amount;
+  if (residual >= SPOT_SEND_GAS_USDC) return;
+  throw new Error(
+    `This withdrawal is blocked: HyperCore charges each Core→HyperEVM send's gas (~0.002 USDC at the Core gas ` +
+    `schedule, not the HyperEVM gas price) from the pool's Core spot USDC. This send would leave ` +
+    `${residual.toFixed(4)} USDC on Core spot — send a smaller amount so at least ${SPOT_SEND_GAS_USDC} USDC ` +
+    `remains for gas. Note: a pool's first-ever successful Core→HyperEVM send also deducts a one-time 1 USDC ` +
+    `activation fee, so for that first send ~1.1 USDC should remain on Core spot; a failed attempt charges ` +
+    `nothing — just retry with a smaller amount.`,
+  );
+}
+
 /**
  * USD_CLASS_TRANSFER_ACTION — move USDC between the Core perp margin account and the
  * Core spot account. The adapter is perps-only and rejects toPerp=true, so this only
