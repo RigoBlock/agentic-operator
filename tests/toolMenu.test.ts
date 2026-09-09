@@ -106,6 +106,23 @@ describe("tryFastPathToolMenu end-to-end", () => {
     expect(swaps.map((s) => s.presetArgs?.dex).sort()).toEqual(["0x", "uniswap"]);
   });
 
+  it("offers direction as a dropdown and collateral disambiguation on GMX position cards", async () => {
+    mockCreate.mockReset();
+
+    const result = await processChat({} as Env, [{ role: "user", content: "what are my gmx tools?" }], ctx);
+
+    const cards = (result.metadata as {
+      toolCards: { toolName: string; fields: { name: string; options?: { label: string; value: string }[] }[] }[];
+    }).toolCards;
+    const decrease = cards.find((c) => c.toolName === "gmx_decrease_position")!;
+    const direction = decrease.fields.find((f) => f.name === "isLong")!;
+    expect(direction.options?.map((o) => o.value)).toEqual(["true", "false"]);
+    // collateral token disambiguates multiple positions on the same market+side
+    expect(decrease.fields.map((f) => f.name)).toContain("collateral");
+    const increase = cards.find((c) => c.toolName === "gmx_increase_position")!;
+    expect(increase.fields.map((f) => f.name)).toContain("collateral");
+  });
+
   it("lists bridgeable tokens in the crosschain menu message", async () => {
     mockCreate.mockReset();
 

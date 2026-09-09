@@ -623,8 +623,10 @@ async function handleChatResponse(data, options = {}) {
       appendMessage('system', metaNote);
     }
 
-    // Suggestions still appear below the transaction card when relevant.
-    if (data.suggestions?.length) {
+    // Suggestions still appear below the transaction card when relevant. Without
+    // a transaction they were already rendered with the reply / tool-result
+    // message above — rendering them again here duplicates the chip row.
+    if (hasTx && data.suggestions?.length) {
       appendMessage('assistant', '', withModelTrace({ suggestions: data.suggestions }));
     }
   }

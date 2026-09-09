@@ -730,13 +730,13 @@ function formatPositionsReport(
   if (pendingOrders.length > 0) {
     lines.push(`⏳ Pending Orders (${pendingOrders.length})`);
     lines.push("");
-    lines.push("| Market | Side | Type | Size | Trigger |");
-    lines.push("|--------|------|------|------|---------|");
+    lines.push("| Market | Side | Type | Size | Trigger | Order Key |");
+    lines.push("|--------|------|------|------|---------|-----------|");
 
     for (const order of pendingOrders) {
       const dir = order.isLong ? "LONG" : "SHORT";
       lines.push(
-        `| ${order.marketSymbol} | ${dir} | ${order.orderType} | ${order.sizeDeltaUsd} | ${order.triggerPrice} |`,
+        `| ${order.marketSymbol} | ${dir} | ${order.orderType} | ${order.sizeDeltaUsd} | ${order.triggerPrice} | \`${order.orderKey}\` |`,
       );
     }
     lines.push("");

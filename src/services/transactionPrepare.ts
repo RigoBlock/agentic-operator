@@ -12,14 +12,90 @@
  */
 
 import type { PublicClient, Hex, Address } from "viem";
-import type { Env, RequestContext, TransactionDraft, UnsignedTransaction } from "../types.js";
+import type { Env, RequestContext, TransactionDraft, UnsignedTransaction, DelegationConfig } from "../types.js";
 import { ZERO_ADDRESS } from "../config.js";
-import { getChainDelegation, getDelegationConfig } from "./delegation.js";
+import {
+  getChainDelegation,
+  getDelegationConfig,
+  saveDelegationConfig,
+  checkDelegationOnChain,
+  buildDefaultSelectors,
+} from "./delegation.js";
+import { createAgentWallet, markChainDelegated } from "./agentWallet.js";
+import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
 import { getRpcProvider } from "./rpcClient.js";
 import { ExecutionError } from "./executionError.js";
 import { estimateGasFees, type GasFees } from "./gas.js";
 import { getRevertDataFromError, traceRevertReason } from "./errorDecoder.js";
+
+/**
+ * Recover the delegated executor from on-chain state when KV has no record for
+ * the chain.
+ *
+ * KV can be empty or stale while on-chain delegation is active (fresh/reset dev
+ * KV, or the chain was delegated outside this UI). Downgrading silently to
+ * operator signing in that case makes a delegated operator sign every
+ * transaction in MetaMask — so verify on-chain first, and heal KV when the
+ * delegation is real. The on-chain check is the same one the status route uses.
+ */
+async function resolveDelegatedExecutorFromChain(
+  env: Env,
+  vaultAddress: string,
+  chainId: number,
+): Promise<Address | null> {
+  if (!env.KV) return null;
+  try {
+    const config = await getDelegationConfig(env.KV, vaultAddress);
+    if (config && !config.enabled) return null; // operator disabled delegation — respect it
+
+    // Agent address: from KV if present, else the deterministic CDP account
+    // (idempotent — the same address the delegation was granted to).
+    const agentAddress = config?.agentAddress
+      ?? (await createAgentWallet(env.KV, vaultAddress, env)).address;
+    if (!agentAddress) return null;
+
+    const status = await checkDelegationOnChain(
+      chainId,
+      vaultAddress as Address,
+      agentAddress,
+      buildDefaultSelectors(),
+    );
+    if (status.delegatedSelectors.length === 0) return null;
+
+    // Heal KV (best-effort) so subsequent prepares and /api/delegation/execute
+    // take the fast path and the UI sees the chain as delegated.
+    try {
+      const operatorAddress = config?.operatorAddress
+        ?? (await getRpcProvider(chainId).readContract({
+          address: vaultAddress as Address,
+          abi: RIGOBLOCK_VAULT_ABI,
+          functionName: "getPool",
+        }) as { owner: Address }).owner;
+      const healed: DelegationConfig = {
+        enabled: true,
+        agentAddress,
+        operatorAddress,
+        vaultAddress: vaultAddress as Address,
+        sponsoredGas: config?.sponsoredGas ?? true,
+        chains: {
+          ...(config?.chains ?? {}),
+          [String(chainId)]: {
+            confirmedAt: Date.now(),
+            delegatedSelectors: status.delegatedSelectors,
+          },
+        },
+      };
+      await saveDelegationConfig(env.KV, healed);
+      await markChainDelegated(env.KV, vaultAddress, chainId);
+    } catch (healErr) {
+      console.warn("[prepare] Delegation KV heal failed (non-fatal):", healErr);
+    }
+    return agentAddress;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Prepare a transaction for signing/broadcast.
@@ -61,17 +137,7 @@ export async function prepareTransaction(
     const chainDelegation = env.KV
       ? await getChainDelegation(env.KV, ctx.vaultAddress, draft.chainId)
       : null;
-    if (!chainDelegation) {
-      // Delegation not active on the target chain — operator signs instead.
-      if (!ctx.operatorAddress) {
-        throw new ExecutionError(
-          `Delegated mode requested but delegation is not active on chain ${draft.chainId}, ` +
-          "and no operator address is available to sign manually.",
-          "DELEGATION_NOT_ACTIVE_ON_CHAIN",
-        );
-      }
-      executor = ctx.operatorAddress;
-    } else {
+    if (chainDelegation) {
       const config = await getDelegationConfig(env.KV!, ctx.vaultAddress);
       if (!config || !config.enabled) {
         throw new ExecutionError(
@@ -80,6 +146,25 @@ export async function prepareTransaction(
         );
       }
       executor = config.agentAddress;
+    } else {
+      // KV has no record for this chain — check on-chain before downgrading.
+      // A delegated operator must never get a silent MetaMask popup because
+      // KV was empty or stale.
+      const healedExecutor = await resolveDelegatedExecutorFromChain(
+        env, ctx.vaultAddress, draft.chainId,
+      );
+      if (healedExecutor) {
+        executor = healedExecutor;
+      } else if (!ctx.operatorAddress) {
+        // Delegation not active on the target chain — operator signs instead.
+        throw new ExecutionError(
+          `Delegated mode requested but delegation is not active on chain ${draft.chainId}, ` +
+          "and no operator address is available to sign manually.",
+          "DELEGATION_NOT_ACTIVE_ON_CHAIN",
+        );
+      } else {
+        executor = ctx.operatorAddress;
+      }
     }
   }
 

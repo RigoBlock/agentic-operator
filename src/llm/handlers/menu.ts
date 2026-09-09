@@ -19,6 +19,8 @@ export interface ToolCardField {
   label: string;
   required: boolean;
   placeholder?: string;
+  /** Render as a dropdown instead of a free-text input (label → sent value). */
+  options?: { label: string; value: string }[];
 }
 
 export interface ToolCard {
@@ -73,7 +75,10 @@ const MENU_TITLES: Record<string, string> = {
 const MENU_FIELD_OVERRIDES: Record<string, ToolCardField[]> = {
   hyperliquid_limit_order: [
     { name: "coin", label: "Market", required: true, placeholder: "BTC" },
-    { name: "side", label: "Side", required: true, placeholder: "buy (long) or sell (short)" },
+    { name: "side", label: "Side", required: true, options: [
+      { label: "Buy / long", value: "buy" },
+      { label: "Sell / short", value: "sell" },
+    ] },
     { name: "size", label: "Size", required: false, placeholder: "0.5 — or use notionalUsd, e.g. 3000" },
     { name: "notionalUsd", label: "Notional USD", required: false, placeholder: "3000 — alternative to size" },
     { name: "orderType", label: "Order type", required: false, placeholder: "market (default) or limit" },
@@ -101,16 +106,33 @@ const MENU_FIELD_OVERRIDES: Record<string, ToolCardField[]> = {
   ],
   gmx_increase_position: [
     { name: "market", label: "Market", required: true, placeholder: "ETH" },
-    { name: "isLong", label: "Direction", required: true, placeholder: "true = long, false = short" },
+    { name: "isLong", label: "Direction", required: true, options: [
+      { label: "Long", value: "true" },
+      { label: "Short", value: "false" },
+    ] },
+    { name: "collateral", label: "Collateral token", required: false, placeholder: "WETH or USDC — omit to reuse an existing position's collateral" },
     { name: "notionalUsd", label: "Notional USD", required: false, placeholder: "1500 — position size to add" },
-    { name: "collateralAmount", label: "Collateral to add", required: false, placeholder: "200 USDC — omit to size without adding collateral" },
+    { name: "collateralAmount", label: "Collateral amount", required: false, placeholder: "200 — omit when using notionalUsd + leverage" },
     { name: "leverage", label: "Leverage", required: false, placeholder: "e.g. 10 — omit to keep current" },
   ],
   gmx_decrease_position: [
     { name: "market", label: "Market", required: true, placeholder: "ETH" },
-    { name: "isLong", label: "Direction", required: true, placeholder: "true = long, false = short" },
-    { name: "sizeDeltaUsd", label: "Size to close (USD)", required: false, placeholder: "'all' to close fully, '50%' partial, '0' = withdraw collateral only" },
-    { name: "collateralDeltaAmount", label: "Collateral to withdraw", required: false, placeholder: "only with size 0" },
+    { name: "isLong", label: "Direction", required: true, options: [
+      { label: "Long", value: "true" },
+      { label: "Short", value: "false" },
+    ] },
+    { name: "collateral", label: "Collateral token", required: false, placeholder: "disambiguates when several positions share market + side" },
+    { name: "sizeDeltaUsd", label: "Size to close (USD)", required: false, placeholder: "'all' closes fully · '50%' partially · '0' keeps size (collateral-only)" },
+    { name: "collateralDeltaAmount", label: "Collateral amount to withdraw", required: false, placeholder: "e.g. 100 — usable with partial closes or size 0; a full close returns all collateral automatically" },
+  ],
+  gmx_cancel_order: [
+    { name: "orderKey", label: "Order key", required: true, placeholder: "0x… — copy from Pending Orders in View GMX positions" },
+  ],
+  gmx_update_order: [
+    { name: "orderKey", label: "Order key", required: true, placeholder: "0x… — copy from Pending Orders in View GMX positions" },
+    { name: "sizeDeltaUsd", label: "New size (USD)", required: true, placeholder: "5000" },
+    { name: "triggerPrice", label: "New trigger price (USD)", required: true, placeholder: "3000" },
+    { name: "acceptablePrice", label: "Acceptable price (USD)", required: true, placeholder: "worst price you would still accept" },
   ],
   get_swap_quote: [
     { name: "tokenIn", label: "Sell", required: true, placeholder: "ETH" },

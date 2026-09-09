@@ -1088,18 +1088,27 @@ async function handleMessage(
     let progressStatus = "Thinking…";
     const progressLines: string[] = [];
 
-    const updateProgress = async () => {
-      const parts: string[] = [escapeHtml(progressStatus)];
-      if (progressLines.length > 0) {
-        parts.push(progressLines.join("\n"));
-      }
-      const text = parts.join("\n\n");
-      if (!progressMsgId) {
-        const sent = await sendMessage(token, chatId, text).catch(() => null);
-        if (sent?.message_id) progressMsgId = sent.message_id;
-      } else {
-        await editMessageText(token, chatId, progressMsgId, text).catch(() => {});
-      }
+    // Serialize updates through a promise chain: the stream events fire
+    // synchronously and each handler calls updateProgress() without awaiting.
+    // Unserialized, two concurrent calls both take the "send a new message"
+    // branch, the sends complete out of order, and only the last message id is
+    // deleted — leaving scrambled stale progress messages in the chat.
+    let progressChain: Promise<void> = Promise.resolve();
+    const updateProgress = () => {
+      progressChain = progressChain.then(async () => {
+        const parts: string[] = [escapeHtml(progressStatus)];
+        if (progressLines.length > 0) {
+          parts.push(progressLines.join("\n"));
+        }
+        const text = parts.join("\n\n");
+        if (!progressMsgId) {
+          const sent = await sendMessage(token, chatId, text).catch(() => null);
+          if (sent?.message_id) progressMsgId = sent.message_id;
+        } else {
+          await editMessageText(token, chatId, progressMsgId, text).catch(() => {});
+        }
+      }).catch(() => {});
+      return progressChain;
     };
 
     const response: ChatResponse = await processChat(
@@ -1164,6 +1173,18 @@ async function handleMessage(
     const replyParts: string[] = [];
     if (cleanedReply) {
       replyParts.push(formatForTelegram(stripToolPrefix(cleanedReply)));
+    }
+
+    // Tool menus (get_tool_menu) return structured cards for the web UI. Telegram
+    // cannot render cards — list the tools as name + title so the operator can
+    // reply with a tool name to run it directly.
+    const toolCards = (response.metadata as
+      { toolCards?: { title: string; toolName: string }[] } | undefined)?.toolCards;
+    if (toolCards?.length) {
+      const list = toolCards
+        .map((c) => `• ${c.title} — <code>${c.toolName}</code>`)
+        .join("\n");
+      replyParts.push(`🧰 <b>Tools</b> — reply with a tool name to run it:\n${list}`);
     }
 
     // Handle transactions through the unified TransactionFlow engine.

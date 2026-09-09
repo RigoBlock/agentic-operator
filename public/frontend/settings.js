@@ -325,6 +325,19 @@ let shieldTimerInterval = null;
 function getNavShieldPct() {
   const stored = localStorage.getItem(navShieldKey());
   if (!stored) return DEFAULT_NAV_SHIELD_PCT;
+  // The disable sentinel is temporary server-side (10-minute KV TTL). Store it
+  // with a timestamp so the UI does not stay "disabled" forever after the
+  // server has already reverted — legacy plain-'0' entries are long expired.
+  if (stored.startsWith('0:')) {
+    const setAt = parseInt(stored.slice(2), 10);
+    if (Number.isFinite(setAt) && Date.now() - setAt < 10 * 60 * 1000) return 0;
+    localStorage.removeItem(navShieldKey());
+    return DEFAULT_NAV_SHIELD_PCT;
+  }
+  if (stored === '0') {
+    localStorage.removeItem(navShieldKey());
+    return DEFAULT_NAV_SHIELD_PCT;
+  }
   const parsed = parseInt(stored, 10);
   // 0 is the explicit disabled sentinel; anything else outside 1-100 falls back to default.
   if (!Number.isFinite(parsed) || parsed < 0 || parsed > MAX_NAV_SHIELD_PCT || (parsed > 0 && parsed < MIN_NAV_SHIELD_PCT)) {
@@ -448,7 +461,9 @@ async function disableNavShieldThreshold() {
       throw new Error(err.error || `HTTP ${res.status}`);
     }
 
-    localStorage.setItem(navShieldKey(), '0');
+    // Store the disable sentinel with a timestamp — the override is temporary
+    // (10-minute server TTL) and the UI must not stay "disabled" afterwards.
+    localStorage.setItem(navShieldKey(), '0:' + Date.now());
     input.value = '0';
     updateNavShieldUiState(true);
     appendMessage('system', 'NAV Shield temporarily disabled for 10 minutes. It will reset to 10% automatically.');

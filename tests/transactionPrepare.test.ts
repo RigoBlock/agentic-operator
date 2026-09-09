@@ -16,6 +16,14 @@ vi.mock("../src/services/rpcClient.js", () => ({
 vi.mock("../src/services/delegation.js", () => ({
   getDelegationConfig: vi.fn(),
   getChainDelegation: vi.fn(),
+  saveDelegationConfig: vi.fn(),
+  checkDelegationOnChain: vi.fn(),
+  buildDefaultSelectors: vi.fn(() => ["0x12345678"]),
+}));
+
+vi.mock("../src/services/agentWallet.js", () => ({
+  createAgentWallet: vi.fn(),
+  markChainDelegated: vi.fn(),
 }));
 
 const { prepareTransaction } = await import("../src/services/transactionPrepare.js");
@@ -213,5 +221,60 @@ describe("prepareTransaction delegated executor selection (per-chain)", () => {
     expect(mockEstimateGas).toHaveBeenCalledWith(
       expect.objectContaining({ account: AGENT }),
     );
+  });
+
+  it("recovers agent execution from on-chain delegation when KV misses the tx chain", async () => {
+    // KV desync (empty/stale KV, chain delegated outside this UI): KV has no
+    // record, but on-chain delegation is active — must NOT fall back to the
+    // operator/MetaMask path.
+    const { getChainDelegation, getDelegationConfig, checkDelegationOnChain, saveDelegationConfig } =
+      await import("../src/services/delegation.js");
+    const { createAgentWallet, markChainDelegated } = await import("../src/services/agentWallet.js");
+    vi.mocked(getChainDelegation).mockResolvedValue(null);
+    vi.mocked(getDelegationConfig).mockResolvedValue({
+      enabled: true, agentAddress: AGENT, operatorAddress: OPERATOR, chains: {},
+    } as never);
+    vi.mocked(checkDelegationOnChain).mockResolvedValue({
+      allDelegated: true, delegatedSelectors: ["0x12345678"], undelegatedSelectors: [],
+    } as never);
+
+    const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
+
+    expect(result.tx.from).toBe(AGENT);
+    // KV heal: config merged + chain marked so /api/delegation/execute and the
+    // UI's mode detection take the fast path next time.
+    expect(saveDelegationConfig).toHaveBeenCalled();
+    expect(markChainDelegated).toHaveBeenCalledWith(expect.anything(), VAULT, HYPER_EVM);
+    expect(createAgentWallet).not.toHaveBeenCalled(); // agent known from config
+  });
+
+  it("does not recover when on-chain delegation is absent for the tx chain", async () => {
+    const { getChainDelegation, getDelegationConfig, checkDelegationOnChain } =
+      await import("../src/services/delegation.js");
+    vi.mocked(getChainDelegation).mockResolvedValue(null);
+    vi.mocked(getDelegationConfig).mockResolvedValue({
+      enabled: true, agentAddress: AGENT, operatorAddress: OPERATOR, chains: {},
+    } as never);
+    vi.mocked(checkDelegationOnChain).mockResolvedValue({
+      allDelegated: false, delegatedSelectors: [], undelegatedSelectors: ["0x12345678"],
+    } as never);
+
+    const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
+
+    expect(result.tx.from).toBe(OPERATOR);
+  });
+
+  it("does not recover when the operator disabled delegation in KV", async () => {
+    const { getChainDelegation, getDelegationConfig, checkDelegationOnChain } =
+      await import("../src/services/delegation.js");
+    vi.mocked(getChainDelegation).mockResolvedValue(null);
+    vi.mocked(getDelegationConfig).mockResolvedValue({
+      enabled: false, agentAddress: AGENT,
+    } as never);
+
+    const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
+
+    expect(result.tx.from).toBe(OPERATOR);
+    expect(checkDelegationOnChain).not.toHaveBeenCalled();
   });
 });

@@ -353,6 +353,31 @@ function buildToolCardForm(card, onClose) {
     label.textContent = field.label + (field.required ? ' *' : '');
     form.appendChild(label);
 
+    if (field.options?.length) {
+      const select = document.createElement('select');
+      const placeholderOpt = document.createElement('option');
+      placeholderOpt.value = '';
+      placeholderOpt.textContent = field.placeholder || 'Select…';
+      select.appendChild(placeholderOpt);
+      for (const opt of field.options) {
+        const option = document.createElement('option');
+        option.value = opt.value;
+        option.textContent = opt.label;
+        select.appendChild(option);
+      }
+      if (field.required) select.dataset.required = '1';
+      select.style.width = '100%';
+      select.style.boxSizing = 'border-box';
+      select.style.padding = '6px 8px';
+      select.style.borderRadius = '6px';
+      select.style.border = '1px solid var(--border, #2a2f3a)';
+      select.style.background = 'var(--bg, transparent)';
+      select.style.color = 'inherit';
+      form.appendChild(select);
+      inputs[field.name] = select;
+      continue;
+    }
+
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = field.placeholder || field.name;
@@ -557,14 +582,18 @@ async function invokeDirectTool(toolInfo) {
     body.operatorAddress = connectedAddress;
     body.authSignature = authSignature;
     body.authTimestamp = authTimestamp;
-    // If delegated mode is active and delegation is confirmed on this chain,
-    // auto-execute ONLY when in autonomous mode. In confirm-trades mode, the
-    // user must review and approve each action before execution.
+    // If delegated mode is active, ALWAYS send it so the backend prepares an
+    // agent-executed transaction — in confirm mode the user reviews via the
+    // delegated confirmation card, in autonomous mode it executes immediately.
+    // Sending nothing here would default the backend to manual mode and pop
+    // MetaMask even with delegation fully active.
     const isDelegated = delegationState && (delegationState.enabled || delegationState.isActiveOnChain);
     const isAutonomous = autoExecuteMode === 'autonomous';
-    if (executionMode === 'delegated' && isDelegated && isAutonomous) {
+    if (executionMode === 'delegated' && isDelegated) {
       body.executionMode = 'delegated';
-      body.confirmExecution = true;
+      if (isAutonomous) {
+        body.confirmExecution = true;
+      }
     }
   }
 
