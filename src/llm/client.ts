@@ -171,9 +171,55 @@ export const VAULT_TX_TOOLS = new Set<string>([
  * Preserves on-chain revert details (decoded from selectors) while hiding
  * RPC internals, stack traces, and API keys.
  */
+/** True for tool errors the model cannot fix by re-planning — these are returned
+ *  directly to the user instead of being fed back to the model, which tends to
+ *  confabulate a plausible-looking reply (e.g. "ready for confirmation") that
+ *  hides the failure. Route-impossible bridge errors belong here: no amount of
+ *  re-planning makes WETH bridgeable to HyperEVM. */
+export function isTerminalToolError(message: string): boolean {
+  return (
+    /Swap Shield blocked/i.test(message) ||
+    /NAV.*shield.*blocked/i.test(message) ||
+    /would revert on-chain/i.test(message) ||
+    /execution reverted/i.test(message) ||
+    /On-chain (?:revert|error)/i.test(message) ||
+    /simulation failed/i.test(message) ||
+    /not bridgeable/i.test(message) ||
+    /no bridgeable token/i.test(message) ||
+    /no matching .* token on destination/i.test(message)
+  );
+}
+
+/** Human-facing labels for progress/status messages. Raw snake_case tool names
+ *  must never be shown to users — display goes through this helper, which maps
+ *  known tools to a friendly label and falls back to a spaced version of the name. */
+const TOOL_LABEL_MAP: Record<string, string> = {
+  crosschain_sync: "NAV sync",
+  crosschain_transfer: "cross-chain transfer",
+  get_crosschain_quote: "bridge quote",
+  get_aggregated_nav: "aggregated NAV",
+  get_rebalance_plan: "rebalance plan",
+  get_swap_quote: "swap quote",
+  build_vault_swap: "vault swap",
+  switch_chain: "chain switch",
+  get_tool_menu: "tool menu",
+  gmx_get_positions: "GMX positions",
+  gmx_get_markets: "GMX markets",
+  gmx_increase_position: "GMX increase position",
+  gmx_decrease_position: "GMX decrease position",
+  hyperliquid_get_positions: "Hyperliquid positions",
+  hyperliquid_get_markets: "Hyperliquid markets",
+  hyperliquid_deposit: "Hyperliquid deposit",
+  get_vault_info: "vault info",
+  check_delegation_status: "delegation status",
+};
+
+export function toolLabel(name: string): string {
+  return TOOL_LABEL_MAP[name] ?? name.replace(/_/g, " ");
+}
+
 export function friendlyError(raw: string): string {
-  // Pass through already-formatted rich error messages (multiline with context).
-  // These come from tool handlers (crosschain_sync, Swap Shield, etc.) that include proposed
+  // Pass through already-formatted rich error messages (multiline with context).  // These come from tool handlers (crosschain_sync, Swap Shield, etc.) that include proposed
   // action details, NAV data, options, and decoded revert reasons. Don't strip them.
   if (raw.includes('\n') && (raw.startsWith('❌') || raw.startsWith('⚠️') || raw.includes('Proposed action:'))) {
     return raw;
@@ -927,10 +973,11 @@ ${executionModeNote}${contextDocsBlock}`;
   // included here — they have unambiguous regex shapes. Bypassing the LLM avoids
   // the 30-50s Workers AI latency with the full 55-tool catalog and prevents the
   // model from hallucinating tool calls on trivial requests.
-  // NOTE: crosschain_sync is intentionally NOT in the fast-path.
-  // Cross-chain operations need LLM reasoning to show the user what was computed
-  // (NAV data, direction, token, amount) and explain errors. Speed is not the
-  // priority — correctness and transparency are.
+  // NOTE: only the NO-AMOUNT form of crosschain_sync is fast-pathed ("sync nav
+  // from X to Y") — the tool computes the equalizing amount deterministically,
+  // and the LLM path was observed confabulating confirmations without calling
+  // the tool. Explicit-amount syncs still go through the LLM so the model can
+  // reason about amounts and explain the computed NAV impact.
   const oracleFastPath = tryFastPathOracleRefresh(effectiveMsg, ctx.chainId);
   const immediateFastPath =
     oracleFastPath ||
@@ -940,6 +987,7 @@ ${executionModeNote}${contextDocsBlock}`;
     tryFastPathNavShieldThreshold(effectiveMsg) ||
     tryFastPathSlippage(effectiveMsg) ||
     tryFastPathBridge(effectiveMsg) ||
+    tryFastPathCrosschainSync(effectiveMsg) ||
     tryFastPathTwapCreate(effectiveMsg) ||
     tryFastPathGmxIncrease(effectiveMsg) ||
     tryFastPathHyperliquid(effectiveMsg) ||
@@ -948,7 +996,7 @@ ${executionModeNote}${contextDocsBlock}`;
     tryFastPathToolMenu(effectiveMsg);
   if (immediateFastPath) {
     try {
-      onStreamEvent?.({ type: "status", message: `Executing ${immediateFastPath.name}...` });
+      onStreamEvent?.({ type: "status", message: `Executing ${toolLabel(immediateFastPath.name)}...` });
       const toolResult = await executeToolCall(env, ctx, immediateFastPath.name, immediateFastPath.args);
       // Finalize transaction: single gas estimate + NAV shield before returning it.
       let fastPathReply = toolResult.message;
@@ -1224,14 +1272,7 @@ ${executionModeNote}${contextDocsBlock}`;
         // Validation errors (missing args, unknown chains, disambiguation) still go
         // back to the model so it can ask the user the right question.
         if (isError) {
-          const isTerminalError =
-            /Swap Shield blocked/i.test(result) ||
-            /NAV.*shield.*blocked/i.test(result) ||
-            /would revert on-chain/i.test(result) ||
-            /execution reverted/i.test(result) ||
-            /On-chain (?:revert|error)/i.test(result) ||
-            /simulation failed/i.test(result);
-          if (isTerminalError) {
+          if (isTerminalToolError(result)) {
             toolMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
             return {
               reply: result.replace(/^Error: /, ""),
@@ -2075,6 +2116,27 @@ function tryFastPathBridge(msg: string): FastPathResult | null {
   }
 
   return null;
+}
+
+/** Deterministic NAV sync — "sync nav from <chain> to <chain> [using|with <token>]".
+ *  No amount is given: the tool computes the NAV-equalizing amount itself, so the
+ *  request shape is unambiguous. This was added after the LLM path confabulated a
+ *  "ready for your confirmation" reply without ever calling the tool (observed in
+ *  prod for HyperEVM destinations) — routing it deterministically guarantees the
+ *  tool actually runs and the confirmation box carries a real transaction.
+ *  Explicit-amount syncs ("sync 50 usdc ...") stay on the LLM path. */
+export function tryFastPathCrosschainSync(msg: string): FastPathResult | null {
+  const m = msg.trim();
+  const match = m.match(
+    /^(?:crosschain\s+)?sync\s+nav(?:igation)?\s+from\s+([\w][\w\s]*?)\s+to\s+([\w][\w\s]*?)(?:\s+(?:using|with)\s+([a-z0-9]+))?$/i,
+  );
+  if (!match) return null;
+  const args: Record<string, unknown> = {
+    sourceChain: match[1].trim(),
+    destinationChain: match[2].trim(),
+  };
+  if (match[3]) args.token = match[3].toUpperCase();
+  return { name: "crosschain_sync", args };
 }
 
 function tryFastPathTwapCreate(msg: string): FastPathResult | null {

@@ -824,6 +824,39 @@ export async function getAcrossSuggestedFees(
 
 // ── Quote builder ─────────────────────────────────────────────────────
 
+/** Resolve a token symbol/address against a source→destination route.
+ *  Throws a data-driven error when the token is not bridgeable end-to-end:
+ *  missing on the source chain, or no matching type on the destination.
+ *  HyperEVM (999) USDC-only routes are covered automatically because
+ *  CROSSCHAIN_TOKENS[999] lists USDC alone. */
+function resolveRouteToken(
+  srcChainId: number,
+  dstChainId: number,
+  symbolOrAddress: string,
+): BridgeableToken {
+  const inputToken = findBridgeableToken(srcChainId, symbolOrAddress);
+  if (!inputToken) {
+    const available = CROSSCHAIN_TOKENS[srcChainId]
+      ?.map((t) => t.symbol)
+      .join(", ") ?? "none";
+    throw new Error(
+      `${symbolOrAddress} is not bridgeable on chain ${srcChainId} (${chainName(srcChainId)}). ` +
+      `Available: ${available}.`,
+    );
+  }
+  const outputToken = getOutputToken(srcChainId, dstChainId, inputToken.address);
+  if (!outputToken) {
+    const available = CROSSCHAIN_TOKENS[dstChainId]
+      ?.map((t) => t.symbol)
+      .join(", ") ?? "none";
+    throw new Error(
+      `No matching ${inputToken.type} token on destination chain ${dstChainId} (${chainName(dstChainId)}). ` +
+      `Available: ${available}.`,
+    );
+  }
+  return inputToken;
+}
+
 /**
  * Build a complete cross-chain quote (fee estimation, input/output amounts).
  *
@@ -844,23 +877,10 @@ export async function getCrosschainQuote(
    *  destination fill gas accurately and no static overhead deduction is needed. */
   simulatedFill?: { recipient: Address; message: Hex },
 ): Promise<CrosschainQuote> {
-  // Resolve tokens on both chains
-  const inputToken = findBridgeableToken(srcChainId, tokenSymbol);
-  if (!inputToken) {
-    const available = CROSSCHAIN_TOKENS[srcChainId]
-      ?.map((t) => t.symbol)
-      .join(", ") ?? "none";
-    throw new Error(
-      `${tokenSymbol} is not bridgeable on chain ${srcChainId}. Available: ${available}`,
-    );
-  }
-
-  const outputToken = getOutputToken(srcChainId, dstChainId, inputToken.address);
-  if (!outputToken) {
-    throw new Error(
-      `No matching ${inputToken.type} token on destination chain ${dstChainId}.`,
-    );
-  }
+  // Resolve tokens on both chains — throws when the token is not bridgeable
+  // end-to-end (missing on source, or no matching type on destination).
+  const inputToken = resolveRouteToken(srcChainId, dstChainId, tokenSymbol);
+  const outputToken = getOutputToken(srcChainId, dstChainId, inputToken.address)!;
 
   // Parse amount in input token's native decimals (e.g. 18 for BSC USDT)
   const inputAmountRaw = parseUnits(amount, inputToken.decimals);
@@ -1229,10 +1249,10 @@ export async function buildCrosschainTransfer(params: {
     throw new Error("Cross-chain transfer requires different source and destination chains.");
   }
 
-  const inputToken = findBridgeableToken(params.srcChainId, params.tokenSymbol);
-  if (!inputToken) {
-    throw new Error(`${params.tokenSymbol} is not bridgeable on chain ${params.srcChainId}.`);
-  }
+  // Resolve the token against the full route up front — throws when it is not
+  // bridgeable end-to-end, before any balance reads or quote fetches.
+  resolveRouteToken(params.srcChainId, params.dstChainId, params.tokenSymbol);
+  const inputToken = findBridgeableToken(params.srcChainId, params.tokenSymbol)!;
 
   let inputAmountRaw = parseUnits(params.amount, inputToken.decimals);
   let bridgeAmount = params.amount; // may be capped below
@@ -1741,7 +1761,8 @@ export async function computeNavEqualization(params: {
   if (bridgeAmountRaw > bestBalance) {
     bridgeAmountRaw = bestBalance;
     capped = true;
-    capReason = `Capped at available balance (${formatUnits(bestBalance, bestToken.decimals)} ${bestToken.symbol})`;
+    capReason = `Capped at available balance (${formatUnits(bestBalance, bestToken.decimals)} ${bestToken.symbol}); ` +
+      `full NAV equalization requires ~${formatUnits(bridgeUsdc, 6)} USDC — deposit more USDC on ${chainName(srcChainId)} to complete the sync`;
     // Recompute the USDC value of the capped amount for simulation.
     if (bestToken.type === "USDC") {
       actualBridgeUsdc = normalizeToDecimals(bridgeAmountRaw, bestToken.decimals, 6);
@@ -1861,6 +1882,17 @@ export async function buildCrosschainSync(params: {
 }> {
   if (params.srcChainId === params.dstChainId) {
     throw new Error("Cross-chain sync requires different source and destination chains.");
+  }
+
+  // An explicitly requested token must be bridgeable end-to-end: present on the
+  // source chain AND with a matching type on the destination. Without this the
+  // preferred-token filter below silently substitutes another token and the
+  // user never learns their request was overridden. Data-driven — HyperEVM
+  // (999) USDC-only routes are covered because CROSSCHAIN_TOKENS[999] lists
+  // USDC alone; on-chain simulation (AIntents eth_call + Across destination
+  // fill) remains the final backstop for anything this cannot see.
+  if (params.tokenSymbol) {
+    resolveRouteToken(params.srcChainId, params.dstChainId, params.tokenSymbol);
   }
 
   // Working variables — overwritten by equalization when it determines direction

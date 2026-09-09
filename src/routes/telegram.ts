@@ -22,7 +22,7 @@
 import { Hono, type Context } from "hono";
 import type { Env, ChatMessage, RequestContext, ChatResponse, TelegramConversation, UnsignedTransaction, ToolCallResult } from "../types.js";
 import { formatUnits, type Address } from "viem";
-import { processChat, executeToolCall, type ToolResult } from "../llm/client.js";
+import { processChat, executeToolCall, toolLabel, type ToolResult } from "../llm/client.js";
 import {
   handle_set_default_slippage,
   handle_set_swap_shield_tolerance,
@@ -1125,7 +1125,7 @@ async function handleMessage(
             void updateProgress().catch(() => {});
             break;
           case "tool_call":
-            progressStatus = `Running ${event.name}…`;
+            progressStatus = `Running ${toolLabel(event.name)}…`;
             void updateProgress().catch(() => {});
             break;
           case "tool_result": {
@@ -1145,6 +1145,12 @@ async function handleMessage(
       },
     );
     clearInterval(typingInterval);
+
+    // Flush pending progress updates before finishing: the stream events only
+    // QUEUE work on the chain (void updateProgress()). Without awaiting it here,
+    // a still-in-flight sendMessage can land AFTER the final reply and never be
+    // deleted — leaving a stale "Executing…" below the answer.
+    await progressChain.catch(() => {});
 
     // Delete progress message — final reply contains the single human-friendly output.
     if (progressMsgId) {
