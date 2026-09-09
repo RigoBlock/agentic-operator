@@ -33,7 +33,8 @@ vi.mock("../src/services/delegation.js", () => ({
   getActiveChains: mockGetActiveChains,
 }));
 
-const { getAggregatedNav } = await import("../src/services/crosschain.js");
+const { getAggregatedNav, chainName } = await import("../src/services/crosschain.js");
+const { SUPPORTED_CHAINS } = await import("../src/config.js");
 
 const VAULT = "0xEfa4bDf566aE50537A507863612638680420645C" as Address;
 const zeroAddr = "0x0000000000000000000000000000000000000000" as Address;
@@ -152,5 +153,39 @@ describe("getAggregatedNav global assets", () => {
     });
 
     await expect(getAggregatedNav(VAULT, makeKV())).rejects.toThrow(/Oracle/);
+  });
+
+  it("labels HyperEVM (999) snapshots by name instead of the raw chain id", async () => {
+    mockGetEffectivePoolState.mockImplementation(async (chainId: number) => {
+      if (chainId === 999) {
+        // HyperEVM pool: USDC base token (6 decimals)
+        return {
+          unitaryValue: 918880n,
+          netTotalValue: 123136400n,
+          effectiveSupply: 134000000n,
+          decimals: 6,
+          baseToken: "0xb88339CB7199b77E23DB6E890353E22632Ba630f" as Address,
+        };
+      }
+      return null;
+    });
+
+    const nav = await getAggregatedNav(VAULT, makeKV());
+
+    const hyper = nav.chains.find((c) => c.chainId === 999);
+    expect(hyper).toBeDefined();
+    expect(hyper!.chainName).toBe("HyperEVM");
+  });
+});
+
+describe("chainName", () => {
+  it("recognizes every supported chain by its canonical name", () => {
+    for (const chain of SUPPORTED_CHAINS) {
+      expect(chainName(chain.id)).toBe(chain.name);
+    }
+  });
+
+  it("falls back to the raw chain id for unknown chains", () => {
+    expect(chainName(424242)).toBe("Chain 424242");
   });
 });

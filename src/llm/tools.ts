@@ -139,7 +139,8 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "get_tool_menu",
       description:
-        "Return the menu of directly-invokable tools for a category (e.g. 'hyperliquid') as structured cards " +
+        "Return the menu of directly-invokable tools for a category (e.g. 'hyperliquid', 'gmx', 'swap', " +
+        "'lp'/'uniswap', 'crosschain') as structured cards " +
         "listing only the required input fields. Use when the user asks what tools/operations are available " +
         "or wants to run a tool directly by filling a form instead of describing it in prose.",
       parameters: {

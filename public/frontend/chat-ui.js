@@ -335,7 +335,18 @@ function buildToolCardForm(card, onClose) {
   form.appendChild(title);
 
   const inputs = {};
+  const presetArgs = { ...(card.presetArgs || {}) };
   for (const field of card.fields) {
+    if (field.value !== undefined && field.value !== null) {
+      // Pre-filled argument (e.g. dex='uniswap') — shown as static text, sent with the form.
+      const preset = document.createElement('div');
+      preset.style.fontSize = '12px';
+      preset.style.opacity = '0.8';
+      preset.textContent = `${field.label}: ${field.value}`;
+      form.appendChild(preset);
+      presetArgs[field.name] = String(field.value);
+      continue;
+    }
     const label = document.createElement('label');
     label.style.fontSize = '12px';
     label.style.opacity = '0.8';
@@ -365,7 +376,7 @@ function buildToolCardForm(card, onClose) {
   submit.className = 'btn-confirm';
   submit.textContent = 'Run';
   submit.onclick = () => {
-    const args = {};
+    const args = { ...presetArgs };
     for (const [name, input] of Object.entries(inputs)) {
       const value = input.value.trim();
       if (!value) {
@@ -410,11 +421,29 @@ function formatDirectToolLabel(toolName, args) {
     return `Increase ${args.market} ${side}`;
   }
   if (toolName === 'build_vault_swap') {
-    return `Swap ${args.amountIn} ${args.tokenIn} → ${args.tokenOut}`;
+    const dex = args.dex === 'uniswap' ? ' via Uniswap' : args.dex === '0x' ? ' via 0x' : '';
+    return `Swap${dex} ${args.amountIn || args.amountOut} ${args.tokenIn} → ${args.tokenOut}`;
   }
+  if (toolName === 'get_swap_quote') {
+    return `Quote ${args.tokenIn} → ${args.tokenOut}`;
+  }
+  if (toolName === 'refresh_oracle_feed') return 'Refresh oracle feed';
   if (toolName === 'gmx_get_positions') return 'Refresh GMX positions';
+  if (toolName === 'gmx_get_markets') return 'Refresh GMX markets';
+  if (toolName === 'gmx_cancel_order') return 'Cancel GMX order';
+  if (toolName === 'gmx_update_order') return 'Update GMX order';
   if (toolName === 'gmx_claim_funding_fees') return 'Claim GMX funding fees';
   if (toolName === 'crosschain_transfer') return `Bridge ${args.amount} ${args.token} to ${args.destinationChain}`;
+  if (toolName === 'crosschain_sync') return `NAV sync ${args.sourceChain || ''} → ${args.destinationChain}`;
+  if (toolName === 'get_crosschain_quote') return `Quote: bridge ${args.amount} ${args.token} to ${args.destinationChain}`;
+  if (toolName === 'get_aggregated_nav') return 'Show aggregated NAV';
+  if (toolName === 'get_rebalance_plan') return 'Get rebalance plan';
+  if (toolName === 'verify_bridge_arrival') return 'Check bridge arrival';
+  if (toolName === 'get_lp_positions') return 'Refresh LP positions';
+  if (toolName === 'get_pool_info') return 'Get pool info';
+  if (toolName === 'initialize_pool') return `Initialize ${args.tokenA}/${args.tokenB} pool`;
+  if (toolName === 'collect_lp_fees') return `Collect fees from position ${args.tokenId}`;
+  if (toolName === 'burn_position') return `Burn position ${args.tokenId}`;
   if (toolName === 'deploy_smart_pool') return `Deploy pool: ${args.name}`;
   if (toolName === 'fund_pool') return `Fund pool with ${args.amount} ${args.token}`;
   if (toolName === 'setup_delegation') return 'Set up delegation';

@@ -17,17 +17,40 @@ import { fetchDelegationStatus, fetchAgentBalance } from "./api.js";
    Execution Mode — auto-detected from delegation status
    ================================================================ */
 
-/** Auto-detect execution mode from delegation state.
- *  Allows delegated mode if delegation is active on ANY chain,
- *  not just the current one — enables multi-chain delegated swaps. */
+/**
+ * Decide the execution mode from a delegation status object — pure function,
+ * exported for unit tests.
+ *
+ * Delegated mode must depend on whether delegation is active on ANY chain,
+ * never on the wallet's currently selected chain: the frontend sends this mode
+ * with the chat request BEFORE the tool's target chain is known, and the
+ * backend re-checks delegation per transaction chain anyway
+ * (prepareTransaction → getChainDelegation on draft.chainId). If we forced
+ * 'manual' here whenever the wallet's current chain lacks delegation, tool
+ * calls targeting a delegated chain would come back operator-signed and pop
+ * MetaMask — the exact bug this guards against. When the tx chain turns out
+ * NOT to be delegated, the backend still falls back to operator signing for
+ * that transaction, and the tx modal auto-switches the wallet to the tx chain.
+ *
+ * Regression this guards: HyperEVM selected in MetaMask, on-chain delegation
+ * only on Arbitrum, no KV config → mode flipped to 'manual' → MetaMask popup.
+ *
+ * @param {object|null} state delegation status from GET /api/delegation/status
+ * @returns {'delegated'|'manual'}
+ */
+export function computeExecutionMode(state) {
+  if (!state || state.walletChanged) return 'manual';
+  if (state.isActiveOnChain === true) return 'delegated';
+  if (Array.isArray(state.activeChains) && state.activeChains.length > 0) return 'delegated';
+  // delegatedChains = chains with on-chain delegation (AgentWalletInfo), regardless
+  // of the chain the status was queried for.
+  if (Array.isArray(state.delegatedChains) && state.delegatedChains.length > 0) return 'delegated';
+  return 'manual';
+}
+
+/** Auto-detect execution mode from the cached delegation state. */
 export function syncExecutionMode() {
-  if (delegationState &&
-      (delegationState.enabled || delegationState.isActiveOnChain) &&
-      (delegationState.isActiveOnChain || (delegationState.activeChains && delegationState.activeChains.length > 0))) {
-    setExecutionMode('delegated');
-  } else {
-    setExecutionMode('manual');
-  }
+  setExecutionMode(computeExecutionMode(delegationState));
 }
 
 /* ================================================================

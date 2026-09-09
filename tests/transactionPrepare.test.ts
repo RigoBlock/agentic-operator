@@ -190,4 +190,28 @@ describe("prepareTransaction delegated executor selection (per-chain)", () => {
       prepareTransaction({ KV: makeKV("0") } as any, { ...delegatedCtx, operatorAddress: undefined }, draft),
     ).rejects.toMatchObject({ code: "DELEGATION_NOT_ACTIVE_ON_CHAIN" });
   });
+
+  it("uses the agent wallet for an Arbitrum tool tx even when the UI chain is HyperEVM (999)", async () => {
+    // Reported regression: wallet had HyperEVM selected, tool targeted Arbitrum
+    // where delegation is active — the executor must follow the TRANSACTION's
+    // chain, never the UI/wallet chain.
+    const { getChainDelegation, getDelegationConfig } = await import("../src/services/delegation.js");
+    vi.mocked(getChainDelegation).mockResolvedValue({
+      confirmedAt: 1, delegatedSelectors: ["0x12345678"],
+    } as never);
+    vi.mocked(getDelegationConfig).mockResolvedValue({
+      enabled: true, agentAddress: AGENT,
+    } as never);
+
+    const result = await prepareTransaction(
+      { KV: makeKV("0") } as any,
+      { ...delegatedCtx, chainId: HYPER_EVM }, // UI active chain: HyperEVM
+      { ...draft, chainId: 42161, description: "GMX order" }, // tool tx on Arbitrum
+    );
+
+    expect(result.tx.from).toBe(AGENT);
+    expect(mockEstimateGas).toHaveBeenCalledWith(
+      expect.objectContaining({ account: AGENT }),
+    );
+  });
 });

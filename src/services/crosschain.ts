@@ -2071,6 +2071,7 @@ const CHAIN_NAMES: Record<number, string> = {
   137: "Polygon",
   8453: "Base",
   42161: "Arbitrum",
+  999: "HyperEVM",
 };
 
 export function chainName(chainId: number): string {

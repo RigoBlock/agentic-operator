@@ -147,15 +147,16 @@ describe("SYSTEM_PROMPT", () => {
 });
 
 describe("get_tool_menu handler", () => {
-  it("returns 12 hyperliquid cards with only required input fields", async () => {
+  it("returns 8 hyperliquid cards with only required input fields", async () => {
     const { handle_get_tool_menu } = await import("../src/llm/handlers/menu.js");
     const result = await handle_get_tool_menu(
       {} as never, {} as never, { category: "hyperliquid" }, "get_tool_menu",
     );
     const cards = (result.metadata as { toolCards: { toolName: string; title: string; fields: { name: string; required: boolean }[] }[] }).toolCards;
-    expect(cards).toHaveLength(12);
+    expect(cards).toHaveLength(8);
     expect(cards.map((c) => c.toolName)).toContain("hyperliquid_deposit");
-    expect(cards.map((c) => c.toolName)).toContain("crosschain_transfer");
+    // Cross-chain tools moved to the dedicated "crosschain" menu
+    expect(cards.map((c) => c.toolName)).not.toContain("crosschain_transfer");
     for (const card of cards) {
       expect(card.title.length).toBeGreaterThan(0);
       for (const field of card.fields) {
@@ -164,10 +165,21 @@ describe("get_tool_menu handler", () => {
     }
     const deposit = cards.find((c) => c.toolName === "hyperliquid_deposit")!;
     expect(deposit.fields.map((f) => f.name)).toContain("amount");
+  });
+
+  it("returns crosschain cards including the transfer form fields", async () => {
+    const { handle_get_tool_menu } = await import("../src/llm/handlers/menu.js");
+    const result = await handle_get_tool_menu(
+      {} as never, {} as never, { category: "crosschain" }, "get_tool_menu",
+    );
+    const cards = (result.metadata as { toolCards: { toolName: string; fields: { name: string; required: boolean }[] }[] }).toolCards;
+    expect(cards.map((c) => c.toolName)).toContain("get_aggregated_nav");
     const transfer = cards.find((c) => c.toolName === "crosschain_transfer")!;
     expect(transfer.fields.filter((f) => f.required).map((f) => f.name)).toEqual(
       expect.arrayContaining(["destinationChain", "token", "amount"]),
     );
+    // The menu message carries the per-chain bridgeable token list
+    expect(result.message).toContain("Supported bridgeable tokens per chain");
   });
 
   it("lists available categories for unknown or missing category", async () => {

@@ -74,6 +74,61 @@ describe("tryFastPathToolMenu end-to-end", () => {
     expect(cards.length).toBeGreaterThan(0);
     expect(cards.map((c) => c.toolName)).toContain("hyperliquid_deposit");
   });
+
+  it.each([
+    ["gmx", "gmx_increase_position"],
+    ["swap", "build_vault_swap"],
+    ["lp", "add_liquidity"],
+    ["crosschain", "crosschain_transfer"],
+  ])("serves the %s menu deterministically without any LLM round", async (category, expectedTool) => {
+    mockCreate.mockReset();
+
+    const result = await processChat({} as Env, [{ role: "user", content: `what are my ${category} tools?` }], ctx);
+
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(result.finalModel).toBe("tooling");
+    expect(result.toolCalls?.[0]?.name).toBe("get_tool_menu");
+    const cards = (result.metadata as { toolCards: { toolName: string }[] }).toolCards;
+    expect(cards.length).toBeGreaterThan(0);
+    expect(cards.map((c) => c.toolName)).toContain(expectedTool);
+  });
+
+  it("offers separate 0x and Uniswap swap boxes with the dex pre-filled", async () => {
+    mockCreate.mockReset();
+
+    const result = await processChat({} as Env, [{ role: "user", content: "what are my swap tools?" }], ctx);
+
+    const cards = (result.metadata as {
+      toolCards: { toolName: string; title: string; presetArgs?: Record<string, string> }[];
+    }).toolCards;
+    const swaps = cards.filter((c) => c.toolName === "build_vault_swap");
+    expect(swaps).toHaveLength(2);
+    expect(swaps.map((s) => s.presetArgs?.dex).sort()).toEqual(["0x", "uniswap"]);
+  });
+
+  it("lists bridgeable tokens in the crosschain menu message", async () => {
+    mockCreate.mockReset();
+
+    const result = await processChat({} as Env, [{ role: "user", content: "what are my crosschain tools?" }], ctx);
+
+    const cards = (result.metadata as { toolCards: { toolName: string }[] }).toolCards;
+    expect(cards.map((c) => c.toolName)).toContain("get_aggregated_nav");
+    expect(cards.map((c) => c.toolName)).toContain("crosschain_sync");
+    expect(result.reply).toContain("USDC");
+    expect(result.reply).toContain("WETH");
+    // HyperEVM is USDC-only — the per-chain summary must say so
+    expect(result.reply).toMatch(/HyperEVM: USDC\b/);
+  });
+
+  it("serves LP tools for the 'uniswap' and 'liquidity' aliases", async () => {
+    for (const alias of ["uniswap", "liquidity"]) {
+      mockCreate.mockReset();
+      const result = await processChat({} as Env, [{ role: "user", content: `what are my ${alias} tools?` }], ctx);
+      expect(mockCreate).not.toHaveBeenCalled();
+      const cards = (result.metadata as { toolCards: { toolName: string }[] }).toolCards;
+      expect(cards.map((c) => c.toolName)).toContain("add_liquidity");
+    }
+  });
 });
 
 describe("tryFastPathToolMenu", () => {

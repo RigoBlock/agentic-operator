@@ -1805,7 +1805,7 @@ function countExpectedSwaps(msg: string): number {
  * and token corrections are SKIPPED — the LLM gets per-call amounts right,
  * and applying the first regex match to every call duplicates amounts.
  */
-function sanitizeSwapArgs(
+export function sanitizeSwapArgs(
   args: Record<string, unknown>,
   userMessage: string,
 ): Record<string, unknown> {
@@ -1890,11 +1890,20 @@ function sanitizeSwapArgs(
   // For multi-swap, the LLM sets the chain per tool call; overriding here
   // would apply the first chain match to all calls.
   if (!multiSwap) {
-    const chainNames = ["ethereum", "base", "arbitrum", "optimism", "polygon", "bnb chain", "unichain", "sepolia"];
-    for (const cn of chainNames) {
-      if (msg.includes(`on ${cn}`) || msg.includes(`to ${cn}`)) {
+    // Derived from SUPPORTED_CHAINS so newly added chains (e.g. HyperEVM) are
+    // recognized without touching this list. "hyperliquid" names the protocol
+    // but users mean the HyperEVM chain.
+    const chainMatches: [string, string][] = [
+      ...[...SUPPORTED_CHAINS, ...TESTNET_CHAINS].flatMap((c): [string, string][] => [
+        [c.name.toLowerCase(), c.shortName],
+        [c.shortName.toLowerCase(), c.shortName],
+      ]),
+      ["hyperliquid", "hyperevm"],
+    ];
+    for (const [spoken, resolved] of chainMatches) {
+      if (msg.includes(`on ${spoken}`) || msg.includes(`to ${spoken}`)) {
         if (!corrected.chain) {
-          corrected.chain = cn;
+          corrected.chain = resolved;
         }
         break;
       }
