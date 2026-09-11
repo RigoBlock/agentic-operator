@@ -5,6 +5,12 @@
  * MAX_NAV_DROP_PCT (10%) compared to the pre-swap value or the 24-hour
  * baseline (whichever is higher).
  *
+ * KILL-SWITCH: beyond per-trade protection, the threshold check halts ALL
+ * trading once the vault has breached its allowed NAV drop — a rogue or
+ * unlucky bot stops trading while NAV-neutral operations (deposits,
+ * withdrawals, spot sends) keep working so the operator can rebalance or
+ * exit. NEVER exempt a trading path (swaps, orders) from this shield.
+ *
  * ## How it works
  *
  * 1. Read current NAV via `updateUnitaryValue()` eth_call on the vault
@@ -67,14 +73,78 @@
 
 import {
   encodeFunctionData,
+  decodeFunctionData,
   decodeFunctionResult,
   type Address,
   type Hex,
 } from "viem";
-import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
+import { RIGOBLOCK_VAULT_ABI, ALLOWED_VAULT_SELECTORS } from "../abi/rigoblockVault.js";
+import { RIGOBLOCK_HYPERLIQUID_ABI, HL_ACTIONS } from "../abi/hyperliquid.js";
 import { getRpcProvider } from "./rpcClient.js";
 import { decodeRevertData, getRevertDataFromError } from "./errorDecoder.js";
 import type { Env } from "../types.js";
+
+/**
+ * HyperEVM → HyperCore NAV-neutral selectors (AHyperliquid) — chain 999 only.
+ *
+ * The NAV shield doubles as a KILL-SWITCH for trading: a transaction is
+ * rejected when the vault is already below the allowed NAV drop, halting a
+ * rogue or unlucky trading bot. That kill-switch MUST stay on every trading
+ * path — including `sendRawAction` limit orders — while deposits and
+ * withdrawals keep working so the operator can always rebalance or exit.
+ * Do NOT add trading selectors here.
+ *
+ * The selectors below are the ONLY HyperCore interactions exempted from the
+ * post-tx NAV comparison (the raw transaction is still simulated and reverts
+ * still block). They share one property: they lock pool NAV at the end of
+ * execution (they touch `lastActionTimestamp`, so a trailing
+ * updateUnitaryValue in the same multicall always reverts NavLocked), yet
+ * they cannot impact NAV:
+ *  - `deposit`/`depositFor` move USDC 1:1 into the Core perp account, which
+ *    the NAV already counts via the precompiles.
+ *  - `spotSend` (CoreWriter action id 6, inside sendRawAction(bytes)) bridges
+ *    Core spot USDC back to HyperEVM — a withdrawal. It is detected by
+ *    `isSpotSendAction` below; every OTHER sendRawAction payload (limit
+ *    orders, USD-class transfers, cancels) is trading-relevant and keeps the
+ *    full multicall shield as the kill-switch.
+ */
+const HYPERCORE_NAV_NEUTRAL_SELECTORS: string[] = [
+  ALLOWED_VAULT_SELECTORS.hlDeposit.toLowerCase(),
+  ALLOWED_VAULT_SELECTORS.hlDepositFor.toLowerCase(),
+];
+
+/**
+ * Decode a sendRawAction(bytes) vault calldata payload and report whether it
+ * carries a SPOT_SEND_ACTION (CoreWriter action id 6) — the only sendRawAction
+ * variant that locks NAV (touches lastActionTimestamp) without being able to
+ * impact it, since it is a withdrawal from Core to HyperEVM. Returns false for
+ * every other action (limit orders, USD-class transfers, cancels), which keep
+ * the full NAV shield kill-switch — and false for any payload that does not
+ * decode: undecodable payloads MUST keep the shield (fail closed), never skip
+ * it.
+ *
+ * Payload layout (CoreWriter): 1 version byte + uint24 action id + abi params.
+ */
+function isSpotSendAction(txData: Hex): boolean {
+  try {
+    const decoded = decodeFunctionData({
+      abi: RIGOBLOCK_HYPERLIQUID_ABI,
+      data: txData,
+    });
+    if (decoded.functionName !== "sendRawAction") return false;
+    const action = decoded.args[0] as Hex;
+    if (action.length < 10) return false;
+    if (Number(BigInt(action.slice(2, 4))) !== 1) return false; // version
+    const actionId = Number(
+      (BigInt(action.slice(4, 6)) << 16n) |
+      (BigInt(action.slice(6, 8)) << 8n) |
+      BigInt(action.slice(8, 10)),
+    );
+    return actionId === HL_ACTIONS.spotSend;
+  } catch {
+    return false;
+  }
+}
 
 /** Default maximum allowed NAV drop per transaction (10%) — used for swaps */
 export const DEFAULT_MAX_NAV_DROP_PCT = 10n;
@@ -188,11 +258,17 @@ export interface NavShieldResult {
   /** Distinguishes WHY the result is what it is:
    *  - 'BLOCKED'       — NAV would drop more than the threshold
    *  - 'TRADE_REVERTS' — the transaction itself reverts on-chain (not a NAV issue)
-   *  - 'UNVERIFIED'    — no outstanding shares yet; nothing to protect
+   *  - 'NAV_NEUTRAL'   — HyperEVM → HyperCore interaction that locks NAV but
+   *                      cannot impact it (deposit/depositFor/spotSend): tx
+   *                      simulates cleanly; the [tx, updateUnitaryValue]
+   *                      composition would always revert NavLocked, so the raw
+   *                      tx was simulated and the threshold comparison skipped.
+   *                      Trading actions (sendRawAction orders) are NEVER this
+   *                      code — they keep the full shield as the kill-switch.
    *  - 'DISABLED'      — operator intentionally disabled the NAV shield temporarily
    *  - undefined       — allowed, NAV verified OK
    */
-  code?: 'BLOCKED' | 'TRADE_REVERTS' | 'UNVERIFIED' | 'DISABLED';
+  code?: 'BLOCKED' | 'TRADE_REVERTS' | 'NAV_NEUTRAL' | 'DISABLED';
 }
 
 /** @deprecated Use NavShieldResult */
@@ -410,6 +486,27 @@ async function evaluateNavImpact(
  *   - `updateUnitaryValue()` for the pre-swap unitary value
  *   - `multicall([tx, updateUnitaryValue])` for the post-swap unitary value
  *
+ * KILL-SWITCH — the threshold comparison is what halts a trading bot once the
+ * vault has breached its allowed NAV drop. Trading actions therefore always go
+ * through the multicall path below; only NAV-neutral operations are exempted.
+ *
+ * EXCEPTION — NAV-neutral HyperEVM → HyperCore interactions (chain 999):
+ * `deposit`, `depositFor`, and `sendRawAction` payloads carrying a SPOT_SEND
+ * action (CoreWriter action id 6, a Core → HyperEVM withdrawal). These touch
+ * `lastActionTimestamp`, which locks pool NAV for a few seconds while
+ * HyperCore settles — a trailing `updateUnitaryValue` in the same multicall
+ * always reverts `NavLocked()` — yet they cannot impact NAV (deposits move
+ * USDC 1:1 into the Core perp account the NAV already counts via the
+ * precompiles; a spot send is a withdrawal). For these the shield simulates
+ * the raw transaction instead (reverts still block; a clean simulation is
+ * allowed with code NAV_NEUTRAL and no threshold comparison).
+ *
+ * sendRawAction payloads that are NOT spot sends (limit orders, USD-class
+ * transfers, cancels) are trading-relevant and MUST keep the full multicall
+ * shield even though their Core settlement is asynchronous and invisible to
+ * the simulation — the shield's job for them is the kill-switch, not measuring
+ * the fill.
+ *
  * `knownOwner`: callers that already verified vault ownership pass the owner
  * address (no extra RPC read); otherwise it is read on-chain, batched with the
  * totalSupply read into one round-trip.
@@ -445,51 +542,81 @@ export async function checkNavImpact(
     };
   }
 
-  // First deposit: no outstanding shares means no unitary value to protect.
-  // totalSupply and owner are independent reads, issued together so viem's HTTP
-  // transport batches them into a single round-trip. `knownOwner` lets callers
-  // that already verified vault ownership (operatorVerified) skip the owner read
-  // entirely — latency-critical on the execution path.
-  const [supplyResult, ownerResult] = await Promise.allSettled([
-    publicClient.readContract({
-      address: vaultAddress,
-      abi: RIGOBLOCK_VAULT_ABI,
-      functionName: "totalSupply",
-    }),
-    knownOwner
-      ? Promise.resolve(knownOwner)
-      : publicClient.readContract({
-          address: vaultAddress,
-          abi: RIGOBLOCK_VAULT_ABI,
-          functionName: "owner",
-        }),
-  ]);
-
-  if (supplyResult.status === "fulfilled" && supplyResult.value === 0n) {
-    return {
-      allowed: true,
-      verified: false,
-      code: 'UNVERIFIED',
-      preNavUnitaryValue: "0",
-      postNavUnitaryValue: "0",
-      dropPct: "0",
-      impactPct: "0",
-      reason: "no outstanding shares — first deposit, skipping NAV shield.",
-    };
-  }
-  if (supplyResult.status === "rejected") {
-    // If totalSupply cannot be read, fall through to simulation and let it fail closed.
-    console.warn("[NavShield] totalSupply read failed (falling through):", supplyResult.reason);
-  }
-
+  // No supply-based skip. Raw ERC-20 totalSupply can be 0 while virtual supply
+  // (cross-chain transfers) keeps NAV live, and even zero effective supply is
+  // handled on-chain (MixinPoolValue._updateNav returns the stored value
+  // without update). The shield therefore always simulates.
+  // `knownOwner` lets callers that already verified vault ownership
+  // (operatorVerified) skip the owner read — latency-critical on the execution path.
   try {
-    if (ownerResult.status === "rejected") throw ownerResult.reason;
-    const vaultOwner = ownerResult.value as Address;
+    const vaultOwner = (knownOwner ??
+      (await publicClient.readContract({
+        address: vaultAddress,
+        abi: RIGOBLOCK_VAULT_ABI,
+        functionName: "owner",
+      }))) as Address;
 
     const updateNavCalldata = encodeFunctionData({
       abi: RIGOBLOCK_VAULT_ABI,
       functionName: "updateUnitaryValue",
     });
+
+    // NAV-neutral HyperCore interactions (deposits, depositFor, spot sends)
+    // lock pool NAV at the end of execution — they touch lastActionTimestamp,
+    // so a trailing updateUnitaryValue in the same multicall always reverts
+    // NavLocked — even though they cannot impact NAV. For those the
+    // [tx, update] composition can never succeed even though the action itself
+    // is valid. Simulate the raw transaction instead; reverts still block.
+    //
+    // KILL-SWITCH RULE: sendRawAction is only exempted when its inner payload
+    // is a SPOT_SEND (a withdrawal). Limit orders and other CoreWriter actions
+    // are trading and MUST keep the full multicall shield below, so a vault
+    // that already breached its NAV threshold stops trading while deposits and
+    // withdrawals keep working.
+    const txSelector = txData.slice(0, 10).toLowerCase();
+    const isNavNeutralHyperCoreTx =
+      chainId === 999 &&
+      (HYPERCORE_NAV_NEUTRAL_SELECTORS.includes(txSelector) ||
+        (txSelector === ALLOWED_VAULT_SELECTORS.hlSendRawAction.toLowerCase() &&
+          isSpotSendAction(txData)));
+    if (isNavNeutralHyperCoreTx) {
+      const [preSettled, txSettled] = await Promise.allSettled([
+        publicClient.call({
+          account: vaultOwner,
+          to: vaultAddress,
+          data: updateNavCalldata,
+        }),
+        publicClient.call({
+          account: vaultOwner,
+          to: vaultAddress,
+          data: txData,
+          value: txValue,
+        }),
+      ]);
+
+      if (preSettled.status === "rejected") {
+        throw preSettled.reason instanceof Error
+          ? preSettled.reason
+          : new Error(String(preSettled.reason));
+      }
+      const preNav = decodeUpdateUnitaryValue(preSettled.value.data!);
+
+      if (txSettled.status === "rejected") {
+        return buildTradeRevertsResult(txSettled.reason, preNav.unitaryValue);
+      }
+
+      return {
+        allowed: true,
+        verified: false,
+        code: "NAV_NEUTRAL",
+        preNavUnitaryValue: preNav.unitaryValue.toString(),
+        postNavUnitaryValue: "0",
+        dropPct: "0",
+        impactPct: "0",
+        reason: "Transaction simulates cleanly. This HyperCore interaction locks NAV for a few seconds at the end of execution but cannot impact NAV: deposits move USDC 1:1 into the Core perp account the NAV already counts, and spot sends are withdrawals from Core back to HyperEVM. The NAV threshold comparison is skipped for it by design; reverts still block. Trading actions (orders) keep the full NAV shield.",
+      };
+    }
+
     const multicallData = encodeFunctionData({
       abi: RIGOBLOCK_VAULT_ABI,
       functionName: "multicall",

@@ -4,13 +4,65 @@
  * Tests the ExecutionError class and the execution validation logic WITHOUT
  * real RPC calls.
  */
-import { describe, it, expect, vi } from "vitest";
-import { parseGwei, type PublicClient } from "viem";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { parseGwei, type PublicClient, type Address, type Hex } from "viem";
 import { formatOutcomesMarkdown } from "../src/services/execution.js";
 import { ExecutionError } from "../src/services/executionError.js";
 import { estimateGasFees, bumpGasFees, clampGasFees } from "../src/services/gas.js";
 import { handle_check_pending_tx } from "../src/llm/handlers/delegation.js";
 import type { Env, RequestContext } from "../src/types.js";
+
+// ── Mocks for executeViaDelegation path-selection tests ───────────────
+const mockGetRpcProvider = vi.hoisted(() => vi.fn());
+const mockLoadAgentWalletAccount = vi.hoisted(() => vi.fn());
+const mockGetDelegationConfig = vi.hoisted(() => vi.fn());
+const mockGetChainDelegation = vi.hoisted(() => vi.fn());
+const mockExecuteSponsoredCalls = vi.hoisted(() => vi.fn());
+const mockRecordGasSpend = vi.hoisted(() => vi.fn());
+
+vi.mock("../src/services/rpcClient.js", () => ({
+  getRpcProvider: mockGetRpcProvider,
+  ALCHEMY_ORIGIN: "https://trader.rigoblock.com",
+}));
+
+vi.mock("../src/services/agentWallet.js", () => ({
+  loadAgentWalletAccount: mockLoadAgentWalletAccount,
+  getAgentWalletInfo: vi.fn(),
+  createAgentWallet: vi.fn(),
+  markChainDelegated: vi.fn(),
+  unmarkChainDelegated: vi.fn(),
+  deleteAgentWallet: vi.fn(),
+  syncAgentWallet: vi.fn(),
+}));
+
+vi.mock("../src/services/delegation.js", () => ({
+  getDelegationConfig: mockGetDelegationConfig,
+  getChainDelegation: mockGetChainDelegation,
+  saveDelegationConfig: vi.fn(),
+  getAgentDelegatedSelectors: vi.fn(),
+  getDelegableSelectors: vi.fn(),
+  prepareDelegation: vi.fn(),
+  prepareRevocation: vi.fn(),
+  prepareSelectiveRevocation: vi.fn(),
+  checkDelegationOnChain: vi.fn(),
+  revokeDelegation: vi.fn(),
+  revokeDelegationOnChain: vi.fn(),
+  isDelegationActive: vi.fn(),
+  getActiveChains: vi.fn(),
+}));
+
+vi.mock("../src/services/bundler.js", () => ({
+  executeSponsoredCalls: mockExecuteSponsoredCalls,
+  getSponsoredCallsStatus: vi.fn(),
+}));
+
+vi.mock("../src/routes/gasPolicy.js", () => ({
+  recordGasSpend: mockRecordGasSpend.mockResolvedValue(undefined),
+}));
+
+const { executeViaDelegation } = await import("../src/services/execution.js");
+const { executeSponsoredCalls } = await import("../src/services/bundler.js");
+const { getChainDelegation } = await import("../src/services/delegation.js");
 
 describe("ExecutionError", () => {
   it("has correct name and code", () => {
@@ -467,5 +519,147 @@ describe("executeStoredSimulation operator binding (L3)", () => {
     const outcomes = await executeStoredSimulation({ KV: kv } as any, operationId, VAULT);
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0].error).toContain("Delegation not configured");
+  });
+});
+
+
+// ── HyperEVM (999) sma-b path selection ───────────────────────────────
+
+describe("executeViaDelegation — HyperEVM (999) sma-b sender/paths", () => {
+  const VAULT = "0xca35b7d915458ef540aade6068dfe2f44e8fa733c";
+  const AGENT = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
+  const SCA = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;
+  const FOREIGN = "0xcccccccccccccccccccccccccccccccccccccccc" as Address;
+
+  let mockPublicClient: {
+    getBalance: ReturnType<typeof vi.fn>;
+    getTransactionCount: ReturnType<typeof vi.fn>;
+    getTransactionReceipt: ReturnType<typeof vi.fn>;
+  };
+
+  function makeKV(): KVNamespace {
+    const store = new Map<string, string>();
+    return {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => { store.set(k, v); },
+      delete: async (k: string) => { store.delete(k); },
+      list: async () => ({ keys: [], list_complete: true, cursor: undefined }),
+      getWithMetadata: async () => ({ value: null, metadata: null }),
+    } as unknown as KVNamespace;
+  }
+
+  function makeEnv(kv: KVNamespace): Env {
+    return {
+      KV: kv,
+      ALCHEMY_API_KEY: "test-key",
+      ALCHEMY_GAS_POLICY_ID: "test-policy-id",
+    } as unknown as Env;
+  }
+
+  function makeTx(from: Address) {
+    return {
+      from,
+      to: VAULT as Address,
+      data: "0x" as Hex,
+      value: "0x0" as Hex,
+      chainId: 999,
+      gas: "0x5208" as Hex,
+      maxFeePerGas: "0x3b9aca00" as Hex,
+      maxPriorityFeePerGas: "0x7a120" as Hex,
+      description: "Hyperliquid deposit",
+      navShieldChecked: true,
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPublicClient = {
+      getBalance: vi.fn().mockResolvedValue(0n), // forces INSUFFICIENT_BALANCE on the direct path
+      getTransactionCount: vi.fn().mockResolvedValue(0),
+      getTransactionReceipt: vi.fn(),
+    };
+    mockGetRpcProvider.mockReturnValue(mockPublicClient);
+    mockLoadAgentWalletAccount.mockResolvedValue({ address: AGENT });
+    mockGetDelegationConfig.mockResolvedValue({
+      enabled: true,
+      agentAddress: AGENT,
+      sponsoredGas: true,
+      chains: {},
+    });
+    mockExecuteSponsoredCalls.mockResolvedValue({
+      callId: `0x${"ab".repeat(32)}`,
+      status: "success",
+      receipts: [{
+        transactionHash: `0x${"11".repeat(32)}` as Hex,
+        blockHash: `0x${"22".repeat(32)}` as Hex,
+        blockNumber: 1n,
+        gasUsed: 100_000n,
+        status: "success",
+        logs: [],
+        effectiveGasPrice: 1_000_000n,
+      }],
+    });
+  });
+
+  it("SENDER_MISMATCH passes for the agent EOA sender (direct path attempted)", async () => {
+    mockGetChainDelegation.mockResolvedValue({ confirmedAt: 1, delegatedSelectors: [] });
+
+    await expect(
+      executeViaDelegation(makeEnv(makeKV()), makeTx(AGENT), VAULT),
+    ).rejects.toMatchObject({ code: "INSUFFICIENT_BALANCE" });
+    expect(executeSponsoredCalls).not.toHaveBeenCalled();
+  });
+
+  it("SENDER_MISMATCH passes for the stored sca address on 999", async () => {
+    mockGetChainDelegation.mockResolvedValue({
+      confirmedAt: 1, delegatedSelectors: [], scaAddress: SCA,
+    });
+
+    const result = await executeViaDelegation(makeEnv(makeKV()), makeTx(SCA), VAULT);
+
+    expect(result.confirmed).toBe(true);
+    expect(result.sponsored).toBe(true);
+    expect(executeSponsoredCalls).toHaveBeenCalledTimes(1);
+    // fromAddress is the 8th positional arg of executeSponsoredCalls
+    expect(vi.mocked(executeSponsoredCalls).mock.calls[0][7]).toBe(SCA);
+    // The direct path was never touched
+    expect(mockPublicClient.getBalance).not.toHaveBeenCalled();
+  });
+
+  it("SENDER_MISMATCH still rejects a foreign address", async () => {
+    mockGetChainDelegation.mockResolvedValue({
+      confirmedAt: 1, delegatedSelectors: [], scaAddress: SCA,
+    });
+
+    await expect(
+      executeViaDelegation(makeEnv(makeKV()), makeTx(FOREIGN), VAULT),
+    ).rejects.toMatchObject({ code: "SENDER_MISMATCH" });
+    expect(executeSponsoredCalls).not.toHaveBeenCalled();
+  });
+
+  it("a sponsored failure with tx.from = sca throws without falling back to the EOA", async () => {
+    mockGetChainDelegation.mockResolvedValue({
+      confirmedAt: 1, delegatedSelectors: [], scaAddress: SCA,
+    });
+    mockExecuteSponsoredCalls.mockRejectedValue(new Error("paymaster policy rejected"));
+
+    await expect(
+      executeViaDelegation(makeEnv(makeKV()), makeTx(SCA), VAULT),
+    ).rejects.toThrow("paymaster policy rejected");
+    expect(executeSponsoredCalls).toHaveBeenCalledTimes(1);
+    // No EOA fallback: the direct path must not even have been probed
+    expect(mockPublicClient.getBalance).not.toHaveBeenCalled();
+  });
+
+  it("uses the direct broadcast path when tx.from is the agent EOA, even with a stored sca", async () => {
+    mockGetChainDelegation.mockResolvedValue({
+      confirmedAt: 1, delegatedSelectors: [], scaAddress: SCA,
+    });
+
+    await expect(
+      executeViaDelegation(makeEnv(makeKV()), makeTx(AGENT), VAULT),
+    ).rejects.toMatchObject({ code: "INSUFFICIENT_BALANCE" });
+    expect(executeSponsoredCalls).not.toHaveBeenCalled();
+    expect(mockPublicClient.getBalance).toHaveBeenCalled();
   });
 });

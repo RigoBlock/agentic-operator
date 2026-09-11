@@ -474,10 +474,11 @@ async function handleChatResponse(data, options = {}) {
     appendMessage('assistant', '', withModelTrace({ reasoning: data.reasoning }));
   }
 
+  const normalize = (s) => (s || '').replace(/\s+/g, ' ').trim();
+
   // When a transaction card is shown, the assistant reply and tool results duplicate
   // the same details. Suppress the verbose text and only surface routing fallbacks.
   if (!hasTx && data.toolCalls?.length > 0 && !data._streamShowedErrors && data.reply) {
-    const normalize = (s) => (s || '').replace(/\s+/g, ' ').trim();
     const suppressEcho = !!(
       data.toolCalls.length === 1 &&
       !data.toolCalls[0].error &&
@@ -501,8 +502,10 @@ async function handleChatResponse(data, options = {}) {
       // Keep routing/meta notes out of the main chat; they are rendered inline on the card.
       let historyContent = data.reply;
       if (data.toolCalls?.length > 0) {
+        // Skip results that duplicate the reply text — persisting them would
+        // double the message in history (same echo the display suppresses above).
         const resultsText = data.toolCalls
-          .filter(tc => !tc.error && tc.result)
+          .filter(tc => !tc.error && tc.result && normalize(tc.result) !== normalize(data.reply))
           .map(tc => tc.result)
           .join('\n');
         if (resultsText) {
@@ -522,8 +525,10 @@ async function handleChatResponse(data, options = {}) {
       appendMessage('assistant', data.reply, extras);
       let historyContent = data.reply;
       if (data.toolCalls?.length > 0) {
+        // Skip results that duplicate the reply text — persisting them would
+        // double the message in history (same echo the display suppresses above).
         const resultsText = data.toolCalls
-          .filter(tc => !tc.error && tc.result)
+          .filter(tc => !tc.error && tc.result && normalize(tc.result) !== normalize(data.reply))
           .map(tc => tc.result)
           .join('\n');
         if (resultsText) {

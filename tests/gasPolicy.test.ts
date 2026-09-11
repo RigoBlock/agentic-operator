@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Address } from "viem";
+import type { Env } from "../src/types.js";
 
 const mockConvertTokenAmountViaOracle = vi.hoisted(() => vi.fn());
 
@@ -371,5 +372,113 @@ describe("recordGasSpend", () => {
     await recordGasSpend(kv, SENDER, 999999, 1n * 10n ** 18n);
     const stored = await kv.get(`${GAS_SPEND_KEY}${SENDER.toLowerCase()}:${getCurrentDayBucket()}`);
     expect(stored).toBeNull();
+  });
+});
+
+
+// ── Webhook: HyperEVM sma-b sender approval ───────────────────────────
+
+describe("gasPolicy webhook — HyperEVM (999) sma-b sender", () => {
+  const AGENT = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const SCA = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const VAULT = "0xd14d4321a33f7ed001ba5b60ce54b0f7ba621247";
+
+  function makeWebhookEnv(): Env {
+    const store = new Map<string, string>();
+    // sca reverse lookup, written by confirmDelegation on 999
+    store.set(`agent-reverse:${SCA}`, VAULT);
+    store.set(`delegation:${VAULT}`, JSON.stringify({
+      enabled: true,
+      agentAddress: AGENT,
+      operatorAddress: "0xoperator0000000000000000000000000000000000",
+      vaultAddress: VAULT,
+      sponsoredGas: true,
+      chains: {
+        "999": { confirmedAt: 1, delegatedSelectors: [], scaAddress: SCA },
+      },
+    }));
+    return {
+      KV: {
+        get: async (k: string) => store.get(k) ?? null,
+        put: async (k: string, v: string) => { store.set(k, v); },
+        delete: async (k: string) => { store.delete(k); },
+        list: async () => ({ keys: [], list_complete: true, cursor: undefined }),
+        getWithMetadata: async () => ({ value: null, metadata: null }),
+      } as unknown as KVNamespace,
+    } as unknown as Env;
+  }
+
+  function makeWebhookBody(sender: string) {
+    return {
+      userOperation: {
+        sender,
+        callData: "0x",
+        maxFeePerGas: "0x5f5e100",
+        callGasLimit: "0x186a0",
+        verificationGasLimit: "0x186a0",
+        preVerificationGas: "0x186a0",
+      },
+      policyId: "test-policy",
+      chainId: "0x3e7", // 999
+      webhookData: "",
+    };
+  }
+
+  async function postWebhook(env: Env, body: unknown) {
+    const { gasPolicy } = await import("../src/routes/gasPolicy.js");
+    return gasPolicy.request("/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, env);
+  }
+
+  beforeEach(() => {
+    mockConvertTokenAmountViaOracle.mockReset();
+    mockConvertTokenAmountViaOracle.mockResolvedValue(1n * 10n ** 6n); // $1.00 < $5 limit
+  });
+
+  it("approves when the sender is the vault's stored sca address (same checks as the agent sender)", async () => {
+    const res = await postWebhook(makeWebhookEnv(), makeWebhookBody(SCA));
+    const json = await res.json() as { approved: boolean };
+
+    expect(json.approved).toBe(true);
+  });
+
+  it("approves when the sender is the agent EOA (unchanged 7702 route)", async () => {
+    const env = makeWebhookEnv();
+    const store = (env.KV as any);
+    // Reverse lookup for the agent EOA
+    await store.put(`agent-reverse:${AGENT}`, VAULT);
+    const res = await postWebhook(env, makeWebhookBody(AGENT));
+    const json = await res.json() as { approved: boolean };
+
+    expect(json.approved).toBe(true);
+  });
+
+  it("still rejects an unknown sender", async () => {
+    const res = await postWebhook(
+      makeWebhookEnv(),
+      makeWebhookBody("0xcccccccccccccccccccccccccccccccccccccccc"),
+    );
+    const json = await res.json() as { approved: boolean; reason?: string };
+
+    expect(json.approved).toBe(false);
+    expect(json.reason).toContain("not a registered agent wallet");
+  });
+
+  it("rejects a sender whose address matches neither the agent nor the stored sca", async () => {
+    // Same vault, but the webhook claims a different chain whose config has no sca
+    const env = makeWebhookEnv();
+    const res = await postWebhook(env, {
+      ...makeWebhookBody(SCA),
+      userOperation: {
+        ...makeWebhookBody(SCA).userOperation,
+        sender: "0xdddddddddddddddddddddddddddddddddddddddd",
+      },
+    });
+    const json = await res.json() as { approved: boolean };
+
+    expect(json.approved).toBe(false);
   });
 });

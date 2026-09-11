@@ -73,6 +73,9 @@ const COMMON_ERRORS = [
   { name: "InvalidQuoteTimestamp", type: "error", inputs: [] },
   { name: "OutputAmountTooLow", type: "error", inputs: [] },
   { name: "OutputAmountTooHigh", type: "error", inputs: [] },
+
+  // Rigoblock pool (MixinPoolValue / NavImpactLib)
+  { name: "NavLocked", type: "error", inputs: [] },
 ];
 
 /** Names for 0x Settler action selectors that A0xRouter may report via ActionNotAllowed. */
@@ -158,6 +161,11 @@ function formatDecodedError(name: string, args: unknown): string {
   }
   if (name === "OutputAmountTooHigh") {
     return "OutputAmountTooHigh — the bridge output exceeds what the solver can cover.";
+  }
+
+  if (name === "NavLocked") {
+    return "NavLocked — the vault is in the HyperCore settlement window (~2 minutes after a deposit or spot send). " +
+      "Operations that touch pool NAV are blocked on-chain during this window; retry shortly.";
   }
 
   const argEntries = Object.entries(record).map(([k, v]) => `${k}=${String(v)}`);

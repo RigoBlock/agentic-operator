@@ -103,9 +103,15 @@ export async function executeViaDelegation(
   // The stored transaction already encodes who must send it. Verify the loaded
   // signer matches. This is the only execution-time identity check: whoever
   // broadcasts must be the address in `tx.from`. For delegated mode that is the
-  // agent wallet; a future manual-execution path would load the operator EOA
-  // and apply the same check.
-  if (agentAccount.address.toLowerCase() !== tx.from.toLowerCase()) {
+  // agent wallet — or, on HyperEVM (999) only, the vault's sma-b smart-account
+  // address, whose UserOps the agent key signs (sponsored path). Any other
+  // sender is a hard error.
+  const chainDelegation = await getChainDelegation(env.KV, vaultAddress, tx.chainId);
+  const scaAddress = tx.chainId === 999 ? chainDelegation?.scaAddress : undefined;
+  const isAgentSender = agentAccount.address.toLowerCase() === tx.from.toLowerCase();
+  const isScaSender =
+    !!scaAddress && tx.chainId === 999 && scaAddress.toLowerCase() === tx.from.toLowerCase();
+  if (!isAgentSender && !isScaSender) {
     throw new ExecutionError(
       "Stored transaction sender does not match the wallet that will broadcast it.",
       "SENDER_MISMATCH",
@@ -113,24 +119,36 @@ export async function executeViaDelegation(
   }
 
   // Choose execution path: sponsored (ERC-4337 bundler) or direct broadcast.
-  const chainDelegation = await getChainDelegation(env.KV, vaultAddress, tx.chainId);
+  // Explicit per-chain setting wins; otherwise the global preference applies.
   const chainSponsored = chainDelegation?.sponsoredGas !== undefined
     ? chainDelegation.sponsoredGas
-    : config.sponsoredGas;
+    : (config.sponsoredGas ?? true);
   const effectiveSponsored = sponsoredGasOverride !== undefined ? sponsoredGasOverride : chainSponsored;
-  const useSponsored = effectiveSponsored && !!env.ALCHEMY_GAS_POLICY_ID;
+  // Path selection is deterministic by sender. On HyperEVM (999), sponsored
+  // execution sends `from` the sma-b smart account (signed by the agent key):
+  // a stored sender of scaAddress means the sponsored path ONLY — the EOA
+  // cannot send as the sca, so a sponsored failure must NOT silently fall back
+  // to an EOA broadcast (the frontend offers retry). A stored sender of the
+  // agent EOA means direct broadcast — the EOA path is only chosen at prepare
+  // time when sponsored is OFF or no sca address is stored yet.
+  // On every other chain the sponsored flag selects the path as before.
+  const useSponsored = tx.chainId === 999
+    ? isScaSender
+    : effectiveSponsored && !!env.ALCHEMY_GAS_POLICY_ID;
 
   let result: ExecutionResult;
 
   if (useSponsored) {
-    // Sponsored path: Alchemy paymaster covers gas. Falls back to direct broadcast
-    // if sponsorship fails for any non-simulation reason.
+    // Sponsored path: Alchemy paymaster covers gas. Failures propagate as
+    // SPONSORED_FAILED — the route returns 502 and the frontend offers to
+    // disable sponsored gas for the chain or sign manually.
     result = await sponsoredAgentTransaction(
       agentAccount,
       tx,
       tx.chainId,
       env.ALCHEMY_GAS_POLICY_ID!,
       env.KV,
+      isScaSender ? (scaAddress as Address) : undefined,
     );
   } else {
     // Direct broadcast: agent wallet pays gas.
@@ -346,11 +364,14 @@ async function broadcastAgentTransaction(
  *
  * Uses @account-kit/wallet-client's createSmartWalletClient and the low-level
  * prepareCalls → signPreparedCalls → sendPreparedCalls flow (bundler.ts), which
- * gives us control over gas parameter overrides. The SDK does NOT create the
- * smart account automatically: on chains where Alchemy requires it to exist
- * before wallet_prepareCalls (HyperEVM), bundler.ts activates it via
- * wallet_requestAccount — a one-time, Alchemy-sponsored transaction; the signer
- * only produces an off-chain EIP-7702 authorization and never needs native gas.
+ * gives us control over gas parameter overrides. Gas sponsorship additionally
+ * requires the transaction's chain to be included in the Alchemy Gas Manager
+ * policy for the API key (dashboard → Gas Manager) — a chain missing from the
+ * policy is rejected by the paymaster, not by our code.
+ *
+ * `fromAddress` (HyperEVM sma-b route): when provided, the UserOp is sent
+ * `from` this smart-account address instead of the signer address. The agent
+ * key still signs — it owns the sma-b account.
  */
 async function sponsoredAgentTransaction(
   agentAccount: LocalAccount,
@@ -358,6 +379,7 @@ async function sponsoredAgentTransaction(
   chainId: number,
   gasPolicyId: string,
   _kv: KVNamespace,
+  fromAddress?: Address,
 ): Promise<ExecutionResult> {
   // The simulation only needs any working RPC — the actual sponsored execution
   // uses the Alchemy SDK's own transport (which supports more chains).
@@ -393,6 +415,9 @@ async function sponsoredAgentTransaction(
       gasPolicyId,
       calls,
       callGasLimit,
+      undefined,
+      undefined,
+      fromAddress,
     );
   } else {
     try {
@@ -404,6 +429,7 @@ async function sponsoredAgentTransaction(
         callGasLimit,
         fees.maxFeePerGas,
         fees.maxPriorityFeePerGas,
+        fromAddress,
       );
     } catch (firstErr) {
       const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
@@ -419,6 +445,9 @@ async function sponsoredAgentTransaction(
         gasPolicyId,
         calls,
         callGasLimit,
+        undefined,
+        undefined,
+        fromAddress,
       );
     }
   }
@@ -480,7 +509,9 @@ async function sponsoredAgentTransaction(
       ? ` Tx hash: ${failTxHash}.${failExplorer ? ` Explorer: ${failExplorer}` : ""}`
       : " No receipt returned by bundler.";
     throw new ExecutionError(
-      `Sponsored execution failed — the bundler or paymaster rejected the transaction.${failDetail}`,
+      `Sponsored execution failed — the bundler or paymaster rejected the transaction.${failDetail} ` +
+      `If this chain was recently added, make sure it is included in the Alchemy Gas Manager policy ` +
+      `(dashboard → Gas Manager → your policy → chain allowlist).`,
       "SPONSORED_FAILED",
     );
   }

@@ -19,7 +19,8 @@
  * ```json
  * {
  *   "userOperation": {
- *     "sender": "0x...",     // our agent wallet EOA (EIP-7702)
+ *     "sender": "0x...",     // our agent wallet EOA (EIP-7702) or its
+ *                            // HyperEVM sma-b smart-account address (non-7702)
  *     "callData": "0x...",   // encoded execute() wrapping our vault call
  *     "nonce": "0x...",
  *     ...
@@ -39,7 +40,7 @@
 
 import { Hono } from "hono";
 import type { Env } from "../types.js";
-import { getDelegationConfig } from "../services/delegation.js";
+import { getDelegationConfig, AGENT_REVERSE_KEY } from "../services/delegation.js";
 import { convertTokenAmountViaOracle } from "../services/oraclePrice.js";
 import { CROSSCHAIN_TOKENS } from "../services/crosschainConfig.js";
 import { formatUnits, parseUnits, type Address } from "viem";
@@ -68,9 +69,6 @@ function getUsdcInfo(chainId: number): { address: Address; decimals: number } | 
 }
 
 const gasPolicy = new Hono<{ Bindings: Env }>();
-
-/** KV prefix for agent wallet reverse lookup: agentAddress → vaultAddress */
-const AGENT_REVERSE_KEY = "agent-reverse:";
 
 /** KV prefix for per-wallet daily gas sponsorship spend tracking */
 export const GAS_SPEND_KEY = "gas-spend:";
@@ -309,8 +307,12 @@ gasPolicy.post("/", async (c) => {
         return c.json({ approved: false, reason }, 200);
       }
 
-      // ── 3. Verify the agent address matches delegation config ──
-      if (config.agentAddress.toLowerCase() !== sender) {
+      // ── 3. Verify the sender matches the delegation config ──
+      // The UserOp sender is either the agent EOA (7702 route) or, on HyperEVM
+      // (999), the vault's sma-b smart-account address derived from it (non-7702
+      // route). Both are agent aliases for this vault.
+      const chainScaAddress = config.chains?.[String(chainIdNumber)]?.scaAddress?.toLowerCase();
+      if (config.agentAddress.toLowerCase() !== sender && chainScaAddress !== sender) {
         const reason = `Agent wallet mismatch: sender ${sender} does not match delegated agent ${config.agentAddress}`;
         console.warn(`[GasPolicy] ✗ REJECTED: ${reason}`);
         return c.json({ approved: false, reason }, 200);

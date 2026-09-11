@@ -140,10 +140,11 @@
           <span id="agent-balance-display" class="agent-balance" style="display:none;"></span>
           <button id="delegation-setup-btn" class="btn-delegation" onclick="openDelegationSetup()" style="display:none;">Set Up Delegation</button>
           <button id="delegation-revoke-btn" class="btn-delegation danger" onclick="revokeDelegation()" style="display:none;">Revoke</button>
-          <label id="sponsor-toggle-label" class="sponsor-toggle" style="display:none;" title="When enabled, gas fees are sponsored (no agent funding needed). When disabled, the agent pays gas from its own native-token balance (ETH, HYPE on HyperEVM, BNB, POL).">
-            <input type="checkbox" id="sponsor-toggle" onchange="toggleSponsoredGas(this.checked)" />
-            <span id="sponsor-toggle-text">Sponsored gas</span>
-          </label>
+          <div id="sponsor-toggles" style="display:none;align-items:center;gap:8px;margin-top:8px;" title="When enabled, gas fees are sponsored (no agent funding needed). When disabled, the agent pays gas from its own native-token balance (ETH, HYPE on HyperEVM, BNB, POL).">
+            <span style="font-size:13px;color:var(--muted);">Sponsored</span>
+            <select id="sponsor-chain-select" style="background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:3px 6px;font-size:13px;"></select>
+            <label class="sponsor-toggle"><input type="checkbox" id="sponsor-chain-toggle" /></label>
+          </div>
           <!-- Per-chain active status pills — shown once any chain is set up -->
           <div id="delegation-chain-chips" class="delegation-chain-chips" style="display:none;"></div>
         </div>

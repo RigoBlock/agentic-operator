@@ -316,6 +316,12 @@ export interface ChainDelegation {
   delegateTxHash?: Hex;
   /** Per-chain override for sponsored gas. If undefined, falls back to DelegationConfig.sponsoredGas */
   sponsoredGas?: boolean;
+  /**
+   * HyperEVM (999) only: the deterministic sma-b smart-account address derived
+   * from the agent EOA. It is the PRIMARY delegatee on 999 (sponsored path);
+   * the agent EOA stays delegated as the direct-broadcast fallback.
+   */
+  scaAddress?: string;
 }
 
 /** Delegation configuration for a vault */

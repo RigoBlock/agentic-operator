@@ -33,11 +33,12 @@ function showDelegatedConfirmation(tx, note) {
     tradeHtml = `<div class="trade-meta">${escapeHtml(tx.description || 'Execute transaction')} · ${CHAIN_NAMES[tx.chainId] || tx.chainId}</div>`;
   }
 
-  // Determine default sponsorship state for this transaction:
-  // per-chain setting > global setting > true
-  const defaultSponsored = delegationState?.chainSponsoredGas !== undefined
-    ? delegationState.chainSponsoredGas
-    : (delegationState?.sponsoredGas !== false);
+  // Determine default sponsorship state for THIS transaction's chain:
+  // per-chain map > legacy current-chain value (only if tx is on the current
+  // chain) > global setting > true
+  const defaultSponsored = delegationState?.chainsSponsoredGas?.[String(tx.chainId)]
+    ?? (tx.chainId === currentChainId ? delegationState?.chainSponsoredGas : undefined)
+    ?? (delegationState?.sponsoredGas !== false);
 
   const metricsHtml = formatTxMetrics(tx);
   const noteHtml = note ? `<div class="tx-fallback-note">${escapeHtml(note)}</div>` : '';
@@ -163,7 +164,7 @@ async function confirmDelegatedExecution(btn) {
         if (err.code === 'AGENT_NOT_DELEGATED') {
           extraBtn = `<button class="btn-agent-exec approve" style="background:var(--accent);" onclick="openDelegationSetup(${tx.chainId});this.closest('.msg').remove()">Update Delegation</button>`;
         } else if (err.code === 'SPONSORED_FAILED') {
-          extraBtn = `<button class="btn-agent-exec approve" style="background:var(--accent);" onclick="openSettings();document.getElementById('sponsor-toggle').checked=false;toggleSponsoredGas(false);">Disable Sponsored Gas</button>`;
+          extraBtn = `<button class="btn-agent-exec approve" style="background:var(--accent);" onclick="openSettings();toggleSponsoredGas(false, ${tx.chainId});">Disable Sponsored Gas</button>`;
         }
         actionsDiv.innerHTML = extraBtn +
           `<button class="btn-agent-exec approve" onclick="signManualTxCard(this)">Sign with Wallet</button>

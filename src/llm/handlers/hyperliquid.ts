@@ -185,7 +185,7 @@ export async function handle_hyperliquid_deposit(
       `✅ Hyperliquid deposit ready`,
       `Amount: ${amount} USDC (from HyperEVM → Core perp account)`,
       `This activates the Core account if it isn't active yet.`,
-      `Note: NAV-sensitive vault operations pause for ~128s after the deposit while HyperCore settles.`,
+      `Note: NAV is locked for a few seconds after the deposit while HyperCore settles.`,
       cappedNote,
       ...(actionLine ? [actionLine] : []),
     ].filter(Boolean).join("\n"),
@@ -580,7 +580,7 @@ export async function handle_hyperliquid_spot_send(
     message: [
       `✅ Hyperliquid withdrawal step 2 ready`,
       `Bridges ${amount} USDC from the Core spot account back to the vault on HyperEVM.`,
-      `Note: the bridged USDC lands in the vault wallet after HyperCore settlement (~128s).`,
+      `Note: the bridged USDC lands in the vault wallet after a few seconds of HyperCore settlement.`,
       ...(actionLine ? [actionLine] : []),
     ].filter(Boolean).join("\n"),
     transaction,

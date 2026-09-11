@@ -28,6 +28,7 @@ import {
   getActiveChains,
   getDelegableSelectors,
   checkDelegationOnChain,
+  getChainDelegatee,
   isDelegationActive,
   prepareRevocation,
 } from "../services/delegation.js";
@@ -79,6 +80,17 @@ delegation.post("/setup", async (c) => {
     // The expected set is resolved against the chain's Authority: only selectors
     // with an adapter mapping on this chain are ever delegated.
     const expectedSelectors = await getDelegableSelectors(body.chainId);
+
+    // On HyperEVM (999) the primary delegatee is the sma-b smart-account
+    // address. Status/delta checks must run against it — the agent EOA's
+    // delegation there is a fallback only. Before the sca address is stored
+    // (first-time setup) there is nothing meaningful to delta-check: the
+    // updateDelegation tx will grant every in-scope selector to both addresses.
+    const existingConfig = await getDelegationConfig(c.env.KV, body.vaultAddress);
+    const storedScaAddress = body.chainId === 999
+      ? existingConfig?.chains?.["999"]?.scaAddress
+      : undefined;
+
     let onlySelectors: Hex[] | undefined;
     if (body.undelegatedSelectors && body.undelegatedSelectors.length > 0 &&
         body.undelegatedSelectors.length < expectedSelectors.length) {
@@ -88,15 +100,16 @@ delegation.post("/setup", async (c) => {
         expectedSelectors.some((e) => e.toLowerCase() === s.toLowerCase()),
       );
       onlySelectors = inScope.length > 0 ? inScope : undefined;
-    } else if (!body.undelegatedSelectors) {
+    } else if (!body.undelegatedSelectors && !storedScaAddress) {
       // No hint from caller — check on-chain (first-time setup or caller didn't pass it)
       try {
         const agentInfo = await getAgentWalletInfo(c.env.KV, body.vaultAddress);
         if (agentInfo?.address) {
+          const delegatee = getChainDelegatee(existingConfig, body.chainId, agentInfo.address as Address);
           const { undelegatedSelectors } = await checkDelegationOnChain(
             body.chainId,
             body.vaultAddress as Address,
-            agentInfo.address,
+            delegatee,
             expectedSelectors,
           );
           if (undelegatedSelectors.length > 0 && undelegatedSelectors.length < expectedSelectors.length) {
@@ -121,6 +134,8 @@ delegation.post("/setup", async (c) => {
 
     return c.json({
       agentAddress: result.agentAddress,
+      // HyperEVM (999) only: the sma-b smart-account address co-delegated on-chain
+      scaAddress: result.scaAddress ?? null,
       transaction: result.transaction,
       selectors: result.selectors,
       // Wallet-change fields — present only when CDP credentials rotated
@@ -304,7 +319,9 @@ delegation.get("/status", async (c) => {
   const activeChains = config ? getActiveChains(config) : [];
   const chainDelegation = chainId ? config?.chains?.[String(chainId)] : undefined;
 
-  // Optional on-chain verification for the requested chain
+  // Optional on-chain verification for the requested chain.
+  // On HyperEVM the check runs against the sca address (the primary delegatee),
+  // not the agent EOA — see getChainDelegatee.
   let onChainStatus = null;
   if (verifyOnChain && walletInfo?.address && chainId && vaultAddress) {
     try {
@@ -312,7 +329,7 @@ delegation.get("/status", async (c) => {
       onChainStatus = await checkDelegationOnChain(
         chainId,
         vaultAddress as Address,
-        walletInfo.address,
+        getChainDelegatee(config, chainId, walletInfo.address as Address),
         selectors,
       );
     } catch (err) {
@@ -329,7 +346,7 @@ delegation.get("/status", async (c) => {
         const status = await checkDelegationOnChain(
           cid,
           vaultAddress as Address,
-          walletInfo.address,
+          getChainDelegatee(config, cid, walletInfo.address as Address),
           await getDelegableSelectors(cid),
         );
         return {
@@ -349,10 +366,20 @@ delegation.get("/status", async (c) => {
     }
   }
 
-  // Resolve per-chain sponsoredGas: chain-specific override, or global default
+  // Resolve per-chain sponsoredGas: chain-specific override wins; otherwise the
+  // global default applies.
   const chainSponsoredGas = chainDelegation?.sponsoredGas !== undefined
     ? chainDelegation.sponsoredGas
     : (config?.sponsoredGas ?? true);
+
+  // Per-chain sponsoredGas map (KV config only, no RPC) so the UI can render
+  // one toggle per chain where delegation is active.
+  const chainsSponsoredGas: Record<string, boolean> = {};
+  if (config?.chains) {
+    for (const [cid, cd] of Object.entries(config.chains)) {
+      chainsSponsoredGas[cid] = cd.sponsoredGas ?? (config.sponsoredGas ?? true);
+    }
+  }
 
   // Check Telegram pairing status via operator address (only when verify=true
   // so we have a synced wallet and can infer the operator address from vault owner)
@@ -369,12 +396,23 @@ delegation.get("/status", async (c) => {
     }
   }
 
+  // HyperEVM coherence: sponsored gas is enabled but the sma-b sponsored account
+  // is not set up yet. The UI surfaces a one-time 'Update' action; transactions
+  // would otherwise fail at prepare time with an actionable error.
+  const sponsoredSetupMissing =
+    chainId === 999 &&
+    chainSponsoredGas === true &&
+    !!chainDelegation &&
+    !chainDelegation.scaAddress;
+
   return c.json({
     enabled: config?.enabled || false,
     agentAddress: walletInfo?.address || null,
     activeChains,
     sponsoredGas: config?.sponsoredGas ?? true,
     chainSponsoredGas,
+    chainsSponsoredGas,
+    sponsoredSetupMissing,
     // Consider delegation active on-chain if at least one selector is delegated
     // (some selectors may be missing for newly-added adapters, but the vault is functional)
     isActiveOnChain: verifyOnChain
@@ -389,6 +427,9 @@ delegation.get("/status", async (c) => {
           delegatedSelectors: chainDelegation.delegatedSelectors,
           delegateTxHash: chainDelegation.delegateTxHash,
           sponsoredGas: chainDelegation.sponsoredGas,
+          // HyperEVM: the sma-b smart-account address — the on-chain delegatee
+          // the sponsored path sends from (null on other chains)
+          scaAddress: chainDelegation.scaAddress ?? null,
         }
       : null,
     allChainsStatus,

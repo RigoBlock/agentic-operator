@@ -177,8 +177,7 @@ export function updateDelegationUI(state) {
   const telegramStatusText = document.getElementById('telegram-status-text');
   const agentAddr = document.getElementById('agent-addr');
   const balanceEl = document.getElementById('agent-balance-display');
-  const sponsorLabel = document.getElementById('sponsor-toggle-label');
-  const sponsorToggle = document.getElementById('sponsor-toggle');
+  const sponsorToggles = document.getElementById('sponsor-toggles');
 
   const anyDelegated = state && state.agentAddress && (state.delegatedChains || []).length > 0;
 
@@ -198,7 +197,7 @@ export function updateDelegationUI(state) {
     if (chatModeInactive) chatModeInactive.style.display = 'none';
     agentAddr.style.display = 'none';
     balanceEl.style.display = 'none';
-    if (sponsorLabel) sponsorLabel.style.display = 'none';
+    if (sponsorToggles) sponsorToggles.style.display = 'none';
 
   } else {
     // Use on-chain status if available, fall back to KV status
@@ -241,6 +240,13 @@ export function updateDelegationUI(state) {
       setupBtn.style.display = '';
       setupBtn.textContent = 'Delegate';
       setupBtn.title = 'Set up delegation on this chain';
+      setupBtn.onclick = () => window.openDelegationSetup(currentChainId);
+    } else if (state.sponsoredSetupMissing) {
+      // HyperEVM: sponsored gas is on but the sponsored agent account is not
+      // delegated yet — one Update transaction fixes it (and unblocks prepare).
+      setupBtn.style.display = '';
+      setupBtn.textContent = 'Update (gas sponsorship)';
+      setupBtn.title = 'Sponsored gas on HyperEVM needs a one-time delegation update to the sponsored agent account';
       setupBtn.onclick = () => window.openDelegationSetup(currentChainId);
     } else if (anyChainNeedsSetup || !state.allChainsStatus) {
       setupBtn.style.display = '';
@@ -290,24 +296,45 @@ export function updateDelegationUI(state) {
       balanceEl.style.display = 'none';
     }
 
-    // Gas sponsoring toggle — per-chain, only visible when active on current chain
-    if (sponsorLabel && sponsorToggle) {
-      if (isOnChain) {
-        const chainSponsored = state.chainSponsoredGas !== undefined ? state.chainSponsoredGas : (state.sponsoredGas !== false);
-        sponsorToggle.checked = chainSponsored;
-        const sponsorText = document.getElementById('sponsor-toggle-text');
-        if (sponsorText) sponsorText.textContent = `Sponsored gas (${CHAIN_NAMES[currentChainId] || currentChainId})`;
-        sponsorLabel.style.display = '';
+    // Gas sponsoring — one row: "Sponsored" label, chain selector, toggle.
+    // Per-chain values come from the backend chainsSponsoredGas map; fall back
+    // to the legacy chainSponsoredGas (current chain only) / sponsoredGas (global).
+    if (sponsorToggles) {
+      const activeSet = new Set(state.activeChains || []);
+      if (isOnChain) activeSet.add(currentChainId);
+      const chains = MAINNET_CHAINS_LIST.filter(c => activeSet.has(c.id));
+      const select = document.getElementById('sponsor-chain-select');
+      const toggle = document.getElementById('sponsor-chain-toggle');
+      if (chains.length > 0 && select && toggle) {
+        const prev = Number(select.value) || 0;
+        select.innerHTML = chains.map(c =>
+          `<option value="${c.id}">${c.name}</option>`).join('');
+        select.value = String(chains.some(c => c.id === prev) ? prev : chains[0].id);
+        const updateToggle = () => {
+          const cid = Number(select.value);
+          toggle.checked = state.chainsSponsoredGas?.[String(cid)]
+            ?? (cid === currentChainId ? state.chainSponsoredGas : undefined)
+            ?? (state.sponsoredGas !== false);
+        };
+        updateToggle();
+        select.onchange = updateToggle;
+        toggle.onchange = () => toggleSponsoredGas(toggle.checked, Number(select.value));
+        sponsorToggles.style.display = 'flex';
       } else {
-        sponsorLabel.style.display = 'none';
+        sponsorToggles.style.display = 'none';
       }
     }
 
     if (state.agentAddress) {
       const addr = state.agentAddress;
+      const sca = state.chainDelegation?.scaAddress;
       const short = addr.slice(0, 6) + '\u2026' + addr.slice(-4);
-      agentAddr.textContent = `Agent: ${short}`;
-      agentAddr.title = `${addr} — click to copy`;
+      agentAddr.textContent = sca
+        ? `Agent: ${short} · HyperEVM account: ${sca.slice(0, 6)}\u2026${sca.slice(-4)}`
+        : `Agent: ${short}`;
+      agentAddr.title = sca
+        ? `${addr} (signer) — HyperEVM sponsored account: ${sca}`
+        : `${addr} — click to copy`;
       agentAddr.dataset.address = addr;
       agentAddr.onclick = () => copyToClipboard(addr);
       agentAddr.style.display = '';
@@ -367,7 +394,7 @@ export function updateDelegationUI(state) {
   loadExecMode();
 }
 
-export async function toggleSponsoredGas(checked) {
+export async function toggleSponsoredGas(checked, chainId = currentChainId) {
   const vault = vaultInput.value.trim();
   if (!vault || !connectedAddress) return;
   try {
@@ -377,7 +404,7 @@ export async function toggleSponsoredGas(checked) {
       body: JSON.stringify({
         operatorAddress: connectedAddress,
         vaultAddress: vault,
-        chainId: currentChainId,
+        chainId,
         sponsoredGas: checked,
         authSignature,
         authTimestamp,
@@ -386,19 +413,19 @@ export async function toggleSponsoredGas(checked) {
     if (!res.ok) throw new Error('Failed to update');
     // Update cached state
     if (delegationState) {
-      delegationState.chainSponsoredGas = checked;
-      if (delegationState.allChainsStatus) {
-        const cs = delegationState.allChainsStatus[String(currentChainId)];
-        if (cs) cs.sponsoredGas = checked;
-      }
+      delegationState.chainsSponsoredGas = delegationState.chainsSponsoredGas || {};
+      delegationState.chainsSponsoredGas[String(chainId)] = checked;
+      if (chainId === currentChainId) delegationState.chainSponsoredGas = checked;
     }
-    const chainName = CHAIN_NAMES[currentChainId] || currentChainId;
+    const chainName = CHAIN_NAMES[chainId] || chainId;
     window.appendMessage('system', checked
       ? `Gas sponsoring enabled on ${chainName} — no agent funding needed.`
-      : `Gas sponsoring disabled on ${chainName} — agent will pay gas from its own ETH balance.`);
+      : `Gas sponsoring disabled on ${chainName} — agent will pay gas from its own native-token balance.`);
   } catch (err) {
     window.appendMessage('system', `Failed to update gas setting: ${err.message}`);
-    document.getElementById('sponsor-toggle').checked = !checked; // revert
+    const sel = document.getElementById('sponsor-chain-select');
+    const cb = document.getElementById('sponsor-chain-toggle');
+    if (cb && sel && Number(sel.value) === chainId) cb.checked = !checked; // revert
   }
 }
 

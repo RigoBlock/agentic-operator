@@ -43,12 +43,21 @@ import {
   unmarkChainDelegated,
 } from "./agentWallet.js";
 import { getRpcProvider } from "./rpcClient.js";
+import { getScaAddress } from "./scaAccount.js";
 
 // ── KV key helpers ────────────────────────────────────────────────────
 
 function delegationConfigKey(vaultAddress: string): string {
   return `delegation:${vaultAddress.toLowerCase()}`;
 }
+
+/**
+ * KV prefix for agent-wallet reverse lookup: agentAddress → vaultAddress.
+ * Written at delegation confirm time (agent EOA and, on HyperEVM, the sma-b
+ * smart-account address) so the gas-policy webhook can resolve a UserOp sender
+ * to its vault. Consumed by src/routes/gasPolicy.ts.
+ */
+export const AGENT_REVERSE_KEY = "agent-reverse:";
 
 // ── Selector list ─────────────────────────────────────────────────────
 
@@ -116,6 +125,26 @@ export async function getAgentDelegatedSelectors(
 // ── Public API ────────────────────────────────────────────────────────
 
 /**
+ * Resolve the delegatee that on-chain status checks must query for a chain.
+ *
+ * On HyperEVM (999) the PRIMARY delegatee is the sma-b smart-account address
+ * (the sponsored path's UserOp sender). The agent EOA's delegation there is a
+ * direct-broadcast fallback only and is never status-checked. On every other
+ * chain the agent EOA is the delegatee.
+ */
+export function getChainDelegatee(
+  config: DelegationConfig | null,
+  chainId: number,
+  agentAddress: Address,
+): Address {
+  if (chainId === 999) {
+    const scaAddress = config?.chains?.["999"]?.scaAddress;
+    if (scaAddress) return scaAddress as Address;
+  }
+  return agentAddress;
+}
+
+/**
  * Get the delegation config for a vault.
  */
 export async function getDelegationConfig(
@@ -165,6 +194,8 @@ export async function prepareDelegation(
 ): Promise<{
   agentAddress: Address;
   selectors: Hex[];
+  /** HyperEVM (999) only: the deterministic sma-b smart-account address, co-delegated on-chain. */
+  scaAddress?: Address;
   transaction: {
     to: Address;
     data: Hex;
@@ -193,20 +224,36 @@ export async function prepareDelegation(
   //    We must delegate ALL selectors to the new wallet, not just a delta.
   const selectors = (walletChanged || !onlySelectors) ? await getDelegableSelectors(chainId) : onlySelectors;
 
-  // 3. Encode pool.updateDelegation(Delegation[]) for the NEW agent
-  const delegations = selectors.map((selector) => ({
-    delegated: walletResult.address,
-    selector: selector as `0x${string}`,
-    isDelegated: true,
-  }));
+  // 3. HyperEVM (999): Alchemy's Wallet API has no EIP-7702 mode there, so the
+  //    sponsored route is the sma-b smart account derived from the agent EOA
+  //    (agent key remains the sole signer — Alchemy never holds it). Derive it
+  //    fresh and co-delegate: one updateDelegation call granting the chain's
+  //    selector set to BOTH the agent EOA (direct-broadcast fallback) and the
+  //    sca address (sponsored primary).
+  let scaAddress: Address | undefined;
+  if (chainId === 999) {
+    scaAddress = await getScaAddress(walletResult.address, env.ALCHEMY_API_KEY);
+  }
+
+  // 4. Encode pool.updateDelegation(Delegation[]) for the NEW agent
+  const delegationEntries = scaAddress
+    ? selectors.flatMap((selector) => ([
+        { delegated: walletResult.address, selector: selector as `0x${string}`, isDelegated: true },
+        { delegated: scaAddress as `0x${string}`, selector: selector as `0x${string}`, isDelegated: true },
+      ]))
+    : selectors.map((selector) => ({
+        delegated: walletResult.address,
+        selector: selector as `0x${string}`,
+        isDelegated: true,
+      }));
 
   const delegateData = encodeFunctionData({
     abi: VAULT_DELEGATION_ABI,
     functionName: "updateDelegation",
-    args: [delegations],
+    args: [delegationEntries],
   });
 
-  // 4. If the agent wallet changed, also build a revocation tx for the OLD agent.
+  // 5. If the agent wallet changed, also build a revocation tx for the OLD agent.
   //    The operator must send this BEFORE the new delegation tx so the old agent
   //    loses access immediately.
   let revocationTransaction: {
@@ -235,12 +282,15 @@ export async function prepareDelegation(
   return {
     agentAddress: walletResult.address,
     selectors,
+    scaAddress,
     transaction: {
       to: vaultAddress,
       data: delegateData,
       value: "0x0",
       chainId,
-      description: `Delegate ${selectors.length} vault functions to agent ${walletResult.address.slice(0, 6)}…${walletResult.address.slice(-4)}`,
+      description: scaAddress
+        ? `Delegate ${selectors.length} vault functions to agent ${walletResult.address.slice(0, 6)}…${walletResult.address.slice(-4)} and its HyperEVM sponsored account ${scaAddress.slice(0, 6)}…${scaAddress.slice(-4)}`
+        : `Delegate ${selectors.length} vault functions to agent ${walletResult.address.slice(0, 6)}…${walletResult.address.slice(-4)}`,
     },
     walletChanged,
     previousAgentAddress: previousAddress,
@@ -268,10 +318,20 @@ export async function confirmDelegation(
 ): Promise<DelegationConfig> {
   const existing = await getDelegationConfig(env.KV, vaultAddress);
 
+  // HyperEVM (999): persist the sma-b smart-account address (deterministic per
+  // agent EOA) and write its reverse lookup so the gas-policy webhook can
+  // resolve the sca UserOp sender to this vault.
+  let scaAddress: string | undefined;
+  if (chainId === 999) {
+    scaAddress = (await getScaAddress(agentAddress, env.ALCHEMY_API_KEY)).toLowerCase();
+    await env.KV.put(`${AGENT_REVERSE_KEY}${scaAddress}`, vaultAddress.toLowerCase());
+  }
+
   const chainDelegation: ChainDelegation = {
     confirmedAt: Date.now(),
     delegatedSelectors: selectors,
     delegateTxHash: txHash,
+    ...(scaAddress ? { scaAddress } : {}),
   };
 
   const config: DelegationConfig = {
@@ -328,6 +388,29 @@ export async function checkDelegationOnChain(
     delegatedSelectors: delegated,
     undelegatedSelectors: undelegated,
   };
+}
+
+/**
+ * Resolve the per-chain execution sender: the address that will actually
+ * broadcast (and therefore must be the tx `from`).
+ *
+ * On HyperEVM (999), when sponsored gas is effectively ON and the sma-b
+ * smart-account address is stored, the sca address is the sender (sponsored
+ * UserOps send `from` the sma-b account, signed by the agent key). Otherwise
+ * the agent EOA broadcasts directly.
+ */
+export function selectChainExecutor(
+  chainDelegation: ChainDelegation,
+  config: DelegationConfig,
+  chainId: number,
+): Address {
+  if (chainId === 999 && chainDelegation.scaAddress) {
+    const sponsoredEffective = chainDelegation.sponsoredGas !== undefined
+      ? chainDelegation.sponsoredGas
+      : (config.sponsoredGas ?? true);
+    if (sponsoredEffective) return chainDelegation.scaAddress as Address;
+  }
+  return config.agentAddress;
 }
 
 /**

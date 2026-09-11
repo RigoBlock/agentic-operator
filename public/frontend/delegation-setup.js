@@ -189,6 +189,29 @@ async function startDelegationSetup() {
         infoEl.style.display = '';
       }
 
+      // HyperEVM (999): the backend co-delegates the sma-b smart-account
+      // address (sponsored gas account derived from the agent wallet). Show it
+      // so the operator sees the exact delegatee before signing.
+      if (setupData.scaAddress && !document.getElementById('delegation-sca-row')) {
+        const sca = String(setupData.scaAddress);
+        const infoEl = document.getElementById('delegation-agent-info');
+        const scaRow = document.createElement('div');
+        scaRow.className = 'row';
+        scaRow.id = 'delegation-sca-row';
+        const scaLabel = document.createElement('span');
+        scaLabel.className = 'label';
+        scaLabel.textContent = 'HyperEVM Agent Account';
+        const scaValue = document.createElement('span');
+        scaValue.className = 'value copyable-addr';
+        scaValue.title = 'Click to copy';
+        scaValue.textContent = sca;
+        scaValue.addEventListener('click', function() { copyToClipboard(sca); });
+        scaRow.appendChild(scaLabel);
+        scaRow.appendChild(scaValue);
+        infoEl.appendChild(scaRow);
+        infoEl.style.display = '';
+      }
+
       // ── Step 2: Switch wallet to this chain ──
       rowStatus.textContent = 'Switching chain…';
       const targetHex = '0x' + chainId.toString(16);

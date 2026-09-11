@@ -9,7 +9,9 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { encodeFunctionData, encodeFunctionResult, type Hex } from "viem";
-import { RIGOBLOCK_VAULT_ABI } from "../src/abi/rigoblockVault.js";
+import { RIGOBLOCK_VAULT_ABI, ALLOWED_VAULT_SELECTORS } from "../src/abi/rigoblockVault.js";
+import { RIGOBLOCK_HYPERLIQUID_ABI, HL_ACTIONS } from "../src/abi/hyperliquid.js";
+import { encodeHlAction } from "../src/services/hyperliquidTrading.js";
 
 const UPDATE_SELECTOR = encodeFunctionData({
   abi: RIGOBLOCK_VAULT_ABI,
@@ -91,7 +93,7 @@ describe("NAV Shield impact logic", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockState.readContract.mockReset();
-    // readContract serves totalSupply (1n) and the vault owner address.
+    // readContract serves the vault owner address (only when no knownOwner is passed).
     mockState.readContract.mockImplementation(async (args: { functionName: string }) =>
       args.functionName === "owner" ? OWNER : 1n,
     );
@@ -156,18 +158,18 @@ describe("NAV Shield impact logic", () => {
     expect(result.verified).toBe(true);
   });
 
-  it("allows first deposit when vault has no outstanding shares (totalSupply = 0)", async () => {
-    mockState.readContract.mockImplementation(async (args: { functionName: string }) =>
-      args.functionName === "owner" ? OWNER : 0n,
-    );
+  it("still simulates when raw totalSupply is 0 (virtual supply may be non-zero)", async () => {
+    // Raw ERC-20 supply can be 0 while virtual supply (cross-chain transfers)
+    // keeps NAV live — updateUnitaryValue handles it on-chain, so the shield
+    // must never skip based on totalSupply alone.
+    setupClient(10000n, 9000n);
     const result = await checkNavImpact(
       VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
     );
     expect(result.allowed).toBe(true);
-    expect(result.verified).toBe(false);
-    expect(result.code).toBe("UNVERIFIED");
-    expect(result.reason).toContain("no outstanding shares");
-    expect(mockState.call).not.toHaveBeenCalled();
+    expect(result.verified).toBe(true);
+    expect(result.code).toBeUndefined();
+    expect(mockState.call).toHaveBeenCalledTimes(2);
   });
 
   it("fails closed when pre-swap NAV cannot be read", async () => {
@@ -266,8 +268,9 @@ describe("NAV Shield impact logic", () => {
     const readNames = mockState.readContract.mock.calls.map(
       (c) => (c[0] as { functionName: string }).functionName,
     );
-    expect(readNames).not.toContain("owner");
-    expect(readNames).toContain("totalSupply");
+    // No on-chain reads at all: owner comes from the caller, and totalSupply
+    // is never read (the shield never skips based on supply).
+    expect(readNames).toEqual([]);
     const calls = mockState.call.mock.calls.map((c) => c[0] as { account: string });
     expect(calls.every((c) => c.account === OWNER)).toBe(true);
   });
@@ -283,4 +286,146 @@ describe("NAV Shield impact logic", () => {
     expect(mockState.call).not.toHaveBeenCalled();
   });
 
+});
+
+describe("NAV Shield — HyperEVM → HyperCore interactions (NAV-neutral selectors)", () => {
+  const HL_DEPOSIT_SELECTOR = ALLOWED_VAULT_SELECTORS.hlDeposit;
+  const HL_DEPOSIT_DATA = (HL_DEPOSIT_SELECTOR + "00".repeat(36)) as Hex;
+  const HL_SEND_RAW_ACTION_SELECTOR = ALLOWED_VAULT_SELECTORS.hlSendRawAction;
+  const HL_CHAIN = 999;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockState.readContract.mockReset();
+    mockState.readContract.mockImplementation(async (args: { functionName: string }) =>
+      args.functionName === "owner" ? OWNER : 1n,
+    );
+    mockState.call.mockReset();
+  });
+
+  it("simulates the raw deposit instead of multicall([deposit, update]) — composition would always revert NavLocked", async () => {
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      const selector = args.data.slice(0, 10);
+      if (selector === UPDATE_SELECTOR) return { data: encodeNavReturn(10000n) };
+      if (selector === HL_DEPOSIT_SELECTOR) return { data: "0x" };
+      throw new Error(`unexpected eth_call data: ${selector}`);
+    });
+
+    const result = await checkNavImpact(
+      VAULT, HL_DEPOSIT_DATA, 0n, HL_CHAIN, OWNER, createMockKV(),
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("NAV_NEUTRAL");
+    // The multicall composition must never be attempted for HyperCore txs.
+    const calledSelectors = mockState.call.mock.calls.map(
+      (c) => (c[0] as { data: Hex }).data.slice(0, 10),
+    );
+    expect(calledSelectors).not.toContain(MULTICALL_SELECTOR);
+    expect(calledSelectors).toContain(HL_DEPOSIT_SELECTOR);
+  });
+
+  it("depositFor takes the same raw-tx path", async () => {
+    const data = (ALLOWED_VAULT_SELECTORS.hlDepositFor + "00".repeat(52)) as Hex;
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      const selector = args.data.slice(0, 10);
+      if (selector === UPDATE_SELECTOR) return { data: encodeNavReturn(10000n) };
+      if (selector === ALLOWED_VAULT_SELECTORS.hlDepositFor) return { data: "0x" };
+      throw new Error(`unexpected eth_call data: ${selector}`);
+    });
+
+    const result = await checkNavImpact(VAULT, data, 0n, HL_CHAIN, OWNER, createMockKV());
+
+    expect(result.allowed).toBe(true);
+    expect(result.code).toBe("NAV_NEUTRAL");
+  });
+
+  it("sendRawAction LIMIT ORDER keeps the full multicall shield — kill-switch: trading halts when NAV is below threshold", async () => {
+    // 11% NAV drop → BLOCKED. The order settles async on Core (invisible to the
+    // simulation), but the shield's job for orders is the kill-switch, not
+    // measuring the fill.
+    setupClient(10000n, 8900n);
+    const orderData = encodeFunctionData({
+      abi: RIGOBLOCK_HYPERLIQUID_ABI,
+      functionName: "sendRawAction",
+      args: [encodeHlAction(HL_ACTIONS.limitOrder, ("0x" + "00".repeat(96)) as Hex)],
+    });
+
+    const result = await checkNavImpact(VAULT, orderData, 0n, HL_CHAIN, OWNER, createMockKV());
+
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe("BLOCKED");
+    expect(result.verified).toBe(true);
+    const calledSelectors = mockState.call.mock.calls.map(
+      (c) => (c[0] as { data: Hex }).data.slice(0, 10),
+    );
+    expect(calledSelectors).toContain(MULTICALL_SELECTOR);
+  });
+
+  it("sendRawAction SPOT_SEND takes the raw-tx path — a Core→HyperEVM withdrawal locks NAV but cannot impact it", async () => {
+    const spotSendData = encodeFunctionData({
+      abi: RIGOBLOCK_HYPERLIQUID_ABI,
+      functionName: "sendRawAction",
+      args: [encodeHlAction(HL_ACTIONS.spotSend, ("0x" + "00".repeat(96)) as Hex)],
+    });
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      const selector = args.data.slice(0, 10);
+      if (selector === UPDATE_SELECTOR) return { data: encodeNavReturn(10000n) };
+      if (selector === HL_SEND_RAW_ACTION_SELECTOR) return { data: "0x" };
+      throw new Error(`unexpected eth_call data: ${selector}`);
+    });
+
+    const result = await checkNavImpact(VAULT, spotSendData, 0n, HL_CHAIN, OWNER, createMockKV());
+
+    expect(result.allowed).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("NAV_NEUTRAL");
+    const calledSelectors = mockState.call.mock.calls.map(
+      (c) => (c[0] as { data: Hex }).data.slice(0, 10),
+    );
+    expect(calledSelectors).not.toContain(MULTICALL_SELECTOR);
+    expect(calledSelectors).toContain(HL_SEND_RAW_ACTION_SELECTOR);
+  });
+
+  it("sendRawAction with an undecodable payload keeps the full shield — fail closed, never skip the kill-switch", async () => {
+    setupClient(10000n, 9900n);
+    const garbage = (HL_SEND_RAW_ACTION_SELECTOR + "00".repeat(10)) as Hex;
+
+    const result = await checkNavImpact(VAULT, garbage, 0n, HL_CHAIN, OWNER, createMockKV());
+
+    expect(result.verified).toBe(true);
+  });
+
+  it("a HyperCore tx reverting with NavLocked (active settlement window) is TRADE_REVERTS with the labeled reason", async () => {
+    const navLockedErr = Object.assign(new Error("execution reverted"), {
+      data: "0x207719d0",
+    });
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      const selector = args.data.slice(0, 10);
+      if (selector === UPDATE_SELECTOR) return { data: encodeNavReturn(10000n) };
+      if (selector === HL_DEPOSIT_SELECTOR) throw navLockedErr;
+      throw new Error(`unexpected eth_call data: ${selector}`);
+    });
+
+    const result = await checkNavImpact(
+      VAULT, HL_DEPOSIT_DATA, 0n, HL_CHAIN, OWNER, createMockKV(),
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe("TRADE_REVERTS");
+    expect(result.reason).toContain("settlement window");
+  });
+
+  it("a HyperCore selector on another chain still uses the normal multicall path", async () => {
+    setupClient(10000n, 9900n);
+
+    const result = await checkNavImpact(
+      VAULT, HL_DEPOSIT_DATA, 0n, CHAIN_ID, OWNER, createMockKV(),
+    );
+
+    // On non-HyperEVM chains the selector is not Hyperliquid's method (selector
+    // sets are chain-specific); the shield treats it as a normal tx.
+    expect(result.verified).toBe(true);
+  });
 });

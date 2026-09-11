@@ -14,12 +14,20 @@ vi.mock("../src/services/rpcClient.js", () => ({
   getRpcProvider: mockGetRpcProvider,
 }));
 
-vi.mock("../src/services/delegation.js", () => ({
-  getDelegationConfig: vi.fn(),
-  getChainDelegation: vi.fn(),
-  saveDelegationConfig: vi.fn(),
-  getAgentDelegatedSelectors: vi.fn(),
-  getDelegableSelectors: vi.fn(async () => ["0x12345678"]),
+vi.mock("../src/services/delegation.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/services/delegation.js")>();
+  return {
+    ...actual,
+    getDelegationConfig: vi.fn(),
+    getChainDelegation: vi.fn(),
+    saveDelegationConfig: vi.fn(),
+    getAgentDelegatedSelectors: vi.fn(),
+    getDelegableSelectors: vi.fn(async () => ["0x12345678"]),
+  };
+});
+
+vi.mock("../src/services/scaAccount.js", () => ({
+  getScaAddress: vi.fn(),
 }));
 
 vi.mock("../src/services/agentWallet.js", () => ({
@@ -102,7 +110,7 @@ describe("prepareTransaction with NAV shield disabled", () => {
     );
   });
 
-  it("still estimates gas and keeps a warning when NAV impact is unverified", async () => {
+  it("runs the NAV simulation even at zero raw supply (no skip) and estimates gas", async () => {
     const draft = {
       to: VAULT,
       data: "0x12345678" as Hex,
@@ -110,6 +118,27 @@ describe("prepareTransaction with NAV shield disabled", () => {
       chainId: CHAIN_ID,
       description: "First deposit",
     };
+
+    // The shield never skips based on supply, so the provider must serve the
+    // two eth_calls: updateUnitaryValue (pre-NAV) and multicall (post-NAV).
+    const updateSelector = encodeFunctionData({
+      abi: RIGOBLOCK_VAULT_ABI, functionName: "updateUnitaryValue",
+    }).slice(0, 10);
+    const navReturn = encodeFunctionResult({
+      abi: RIGOBLOCK_VAULT_ABI, functionName: "updateUnitaryValue",
+      result: [10_000n, 10_000_000n, 0n] as any,
+    });
+    mockGetRpcProvider.mockReturnValue({
+      ...makePublicClient(),
+      call: vi.fn(async (args: { data: Hex }) => ({
+        data: args.data.slice(0, 10) === updateSelector
+          ? navReturn
+          : encodeFunctionResult({
+              abi: RIGOBLOCK_VAULT_ABI, functionName: "multicall",
+              result: ["0x", navReturn] as any,
+            }),
+      })),
+    });
 
     const result = await prepareTransaction(
       { KV: makeKV(null) } as any,
@@ -127,7 +156,7 @@ describe("prepareTransaction with NAV shield disabled", () => {
     expect(result.tx.gas).not.toBe("0x0");
     expect(result.tx.maxFeePerGas).not.toBe("0x0");
     expect(result.tx.maxPriorityFeePerGas).not.toBe("0x0");
-    expect(result.warning).toContain("NAV verification unavailable");
+    expect(result.warning).toBeUndefined();
     expect(result.tx.navShieldChecked).toBe(true);
   });
 });
@@ -167,8 +196,10 @@ describe("prepareTransaction delegated executor selection (per-chain)", () => {
     vi.mocked(getChainDelegation).mockResolvedValue({
       confirmedAt: 1, delegatedSelectors: ["0x12345678"],
     } as never);
+    // Sponsored OFF: on HyperEVM without a stored sca the agent EOA is the
+    // direct-broadcast sender (sponsored ON without sca fails closed — covered above).
     vi.mocked(getDelegationConfig).mockResolvedValue({
-      enabled: true, agentAddress: AGENT,
+      enabled: true, agentAddress: AGENT, sponsoredGas: false,
     } as never);
 
     const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
@@ -227,23 +258,29 @@ describe("prepareTransaction delegated executor selection (per-chain)", () => {
   it("recovers agent execution from on-chain delegation when KV misses the tx chain", async () => {
     // KV desync (empty/stale KV, chain delegated outside this UI): KV has no
     // record, but on-chain delegation is active — must NOT fall back to the
-    // operator/MetaMask path.
+    // operator/MetaMask path. On HyperEVM the recovered executor is the sma-b
+    // account (sponsored primary); the heal stores the derived sca address.
+    const SCA = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;
     const { getChainDelegation, getDelegationConfig, getAgentDelegatedSelectors, saveDelegationConfig } =
       await import("../src/services/delegation.js");
+    const { getScaAddress } = await import("../src/services/scaAccount.js");
     const { createAgentWallet, markChainDelegated } = await import("../src/services/agentWallet.js");
     vi.mocked(getChainDelegation).mockResolvedValue(null);
     vi.mocked(getDelegationConfig).mockResolvedValue({
       enabled: true, agentAddress: AGENT, operatorAddress: OPERATOR, chains: {},
     } as never);
-    // On-chain: the agent holds the (only) delegable selector for this chain.
+    vi.mocked(getScaAddress).mockResolvedValue(SCA);
+    // On-chain: the primary delegatee (sca) holds the delegable selector.
     vi.mocked(getAgentDelegatedSelectors).mockResolvedValue(["0x12345678"] as never);
 
     const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
 
-    expect(result.tx.from).toBe(AGENT);
+    expect(result.tx.from).toBe(SCA);
     // KV heal: config merged + chain marked so /api/delegation/execute and the
     // UI's mode detection take the fast path next time.
     expect(saveDelegationConfig).toHaveBeenCalled();
+    const healedConfig = vi.mocked(saveDelegationConfig).mock.calls[0][1];
+    expect(healedConfig.chains["999"].scaAddress).toBe(SCA.toLowerCase());
     expect(markChainDelegated).toHaveBeenCalledWith(expect.anything(), VAULT, HYPER_EVM);
     expect(createAgentWallet).not.toHaveBeenCalled(); // agent known from config
   });
@@ -319,9 +356,9 @@ describe("prepareTransaction NAV-shield sender selection (auth security)", () =>
       maxFeePerGas: 1_000_000_000n,
       maxPriorityFeePerGas: 100_000_000n,
     });
-    // On-chain reality: the vault has supply and is owned by OWNER (≠ OPERATOR).
+    // On-chain reality: the vault is owned by OWNER (≠ OPERATOR). totalSupply
+    // is never read — the NAV shield never skips based on supply.
     mockReadContract.mockImplementation(async (args: { functionName: string }) => {
-      if (args.functionName === "totalSupply") return 1n;
       if (args.functionName === "owner") return OWNER;
       return 0n;
     });
@@ -388,5 +425,109 @@ describe("prepareTransaction NAV-shield sender selection (auth security)", () =>
     expect(accounts.length).toBeGreaterThan(0);
     expect(accounts.every((a) => a === OWNER.toLowerCase())).toBe(true);
     expect(accounts).not.toContain(OPERATOR.toLowerCase());
+  });
+});
+
+
+describe("prepareTransaction HyperEVM (999) sma-b executor selection", () => {
+  const AGENT = "0x3333333333333333333333333333333333333333" as Address;
+  const SCA = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;
+  const HYPER_EVM = 999;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEstimateGas.mockResolvedValue(100_000n);
+    mockEstimateFeesPerGas.mockResolvedValue({
+      maxFeePerGas: 1_000_000_000n,
+      maxPriorityFeePerGas: 100_000_000n,
+    });
+    mockReadContract.mockResolvedValue(0n);
+    mockGetRpcProvider.mockReturnValue(makePublicClient());
+  });
+
+  const draft = {
+    to: VAULT,
+    data: "0x12345678" as Hex,
+    value: "0x0" as Hex,
+    chainId: HYPER_EVM,
+    description: "Hyperliquid deposit",
+  };
+  const delegatedCtx = {
+    vaultAddress: VAULT,
+    chainId: 1,
+    operatorAddress: OPERATOR,
+    operatorVerified: true,
+    executionMode: "delegated" as const,
+  };
+
+  async function mockDelegation(scaAddress?: string, sponsoredGas?: boolean) {
+    const { getChainDelegation, getDelegationConfig } = await import("../src/services/delegation.js");
+    vi.mocked(getChainDelegation).mockResolvedValue({
+      confirmedAt: 1, delegatedSelectors: ["0x12345678"],
+      ...(scaAddress ? { scaAddress } : {}),
+      ...(sponsoredGas !== undefined ? { sponsoredGas } : {}),
+    } as never);
+    vi.mocked(getDelegationConfig).mockResolvedValue({
+      enabled: true, agentAddress: AGENT, sponsoredGas: true,
+    } as never);
+  }
+
+  it("uses the sca address as from (NAV shield + estimateGas) when sponsored is ON and sca is stored", async () => {
+    await mockDelegation(SCA, true);
+
+    const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
+
+    expect(result.tx.from).toBe(SCA);
+    expect(mockEstimateGas).toHaveBeenCalledWith(
+      expect.objectContaining({ account: SCA }),
+    );
+  });
+
+  it("uses the agent EOA when sponsored is OFF even with a stored sca", async () => {
+    await mockDelegation(SCA, false);
+
+    const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
+
+    expect(result.tx.from).toBe(AGENT);
+    expect(mockEstimateGas).toHaveBeenCalledWith(
+      expect.objectContaining({ account: AGENT }),
+    );
+  });
+
+  it("fails with an actionable setup error when sponsored is ON but no sca is stored yet", async () => {
+    // Silent EOA downgrade here caused the exact confusion this guards against:
+    // the UI showed sponsored gas while execution hit the direct-path balance check.
+    await mockDelegation(undefined, true);
+
+    await expect(
+      prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft),
+    ).rejects.toMatchObject({
+      code: "PREPARATION_FAILED",
+      message: expect.stringContaining("run 'Update' for HyperEVM once"),
+    });
+    expect(mockEstimateGas).not.toHaveBeenCalled();
+  });
+
+  it("uses the agent EOA when no sca is stored and sponsored is OFF", async () => {
+    await mockDelegation(undefined, false);
+
+    const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
+
+    expect(result.tx.from).toBe(AGENT);
+    expect(mockEstimateGas).toHaveBeenCalledWith(
+      expect.objectContaining({ account: AGENT }),
+    );
+  });
+
+  it("uses the agent EOA on other chains even when a sca address is stored", async () => {
+    await mockDelegation(SCA, true);
+
+    const result = await prepareTransaction(
+      { KV: makeKV("0") } as any,
+      delegatedCtx,
+      { ...draft, chainId: 42161, description: "GMX order" },
+    );
+
+    expect(result.tx.from).toBe(AGENT);
   });
 });

@@ -137,39 +137,50 @@ describe("executeSponsoredCalls gas parameter overrides", () => {
   });
 });
 
-describe("executeSponsoredCalls smart account activation (HyperEVM)", () => {
+describe("executeSponsoredCalls chains without Wallet-API 7702 support (HyperEVM)", () => {
   const NOT_CREATED_ERROR = new Error(
     "EIP-7702 is not enabled on HyperEVM. You must call wallet_requestAccount " +
     "to create a smart contract account address to use on this network.",
   );
 
-  it("activates via requestAccount once and retries when prepareCalls reports the account is missing", async () => {
-    const prepareCalls = vi.fn()
-      .mockRejectedValueOnce(NOT_CREATED_ERROR)
-      .mockResolvedValue({ prepared: true });
-    const requestAccount = vi.fn().mockResolvedValue({ address: AGENT_ACCOUNT.address });
+  it("fails fast with an actionable error instead of retrying (prepareCalls)", async () => {
+    const prepareCalls = vi.fn().mockRejectedValue(NOT_CREATED_ERROR);
+    const requestAccount = vi.fn();
     mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls, requestAccount }));
 
-    const result = await executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]);
+    await expect(
+      executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]),
+    ).rejects.toThrow("Sponsored gas is not available on chain 999");
 
-    expect(requestAccount).toHaveBeenCalledTimes(1);
-    expect(requestAccount).toHaveBeenCalledWith({ creationHint: { accountType: "7702" } });
-    expect(prepareCalls).toHaveBeenCalledTimes(2);
-    expect(result.status).toBe("success");
+    // wallet_requestAccount cannot activate on this chain — it must NOT be called.
+    expect(requestAccount).not.toHaveBeenCalled();
+    expect(prepareCalls).toHaveBeenCalledTimes(1);
   });
 
   it("matches the error when nested in an RPC error cause chain", async () => {
     const rpcError = new Error("RPC Request failed.", { cause: NOT_CREATED_ERROR });
-    const prepareCalls = vi.fn()
-      .mockRejectedValueOnce(rpcError)
-      .mockResolvedValue({ prepared: true });
-    const requestAccount = vi.fn().mockResolvedValue({ address: AGENT_ACCOUNT.address });
+    const prepareCalls = vi.fn().mockRejectedValue(rpcError);
+    const requestAccount = vi.fn();
     mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls, requestAccount }));
 
-    await executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]);
+    await expect(
+      executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]),
+    ).rejects.toThrow("Sponsored gas is not available on chain 999");
 
-    expect(requestAccount).toHaveBeenCalledTimes(1);
-    expect(prepareCalls).toHaveBeenCalledTimes(2);
+    expect(requestAccount).not.toHaveBeenCalled();
+  });
+
+  it("fails fast when sendPreparedCalls (not prepareCalls) reports the missing account", async () => {
+    const sendPreparedCalls = vi.fn().mockRejectedValue(NOT_CREATED_ERROR);
+    const requestAccount = vi.fn();
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ sendPreparedCalls, requestAccount }));
+
+    await expect(
+      executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]),
+    ).rejects.toThrow("Sponsored gas is not available on chain 999");
+
+    expect(requestAccount).not.toHaveBeenCalled();
+    expect(sendPreparedCalls).toHaveBeenCalledTimes(1);
   });
 
   it("does not call requestAccount when prepareCalls succeeds directly", async () => {
@@ -183,7 +194,7 @@ describe("executeSponsoredCalls smart account activation (HyperEVM)", () => {
     expect(prepareCalls).toHaveBeenCalledTimes(1);
   });
 
-  it("rethrows non-activation errors without calling requestAccount or retrying", async () => {
+  it("rethrows non-activation errors unchanged", async () => {
     const prepareCalls = vi.fn().mockRejectedValue(new Error("paymaster policy rejected"));
     const requestAccount = vi.fn();
     mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls, requestAccount }));
@@ -195,17 +206,29 @@ describe("executeSponsoredCalls smart account activation (HyperEVM)", () => {
     expect(requestAccount).not.toHaveBeenCalled();
     expect(prepareCalls).toHaveBeenCalledTimes(1);
   });
+});
 
-  it("propagates the error when requestAccount itself fails", async () => {
-    const prepareCalls = vi.fn().mockRejectedValue(NOT_CREATED_ERROR);
-    const requestAccount = vi.fn().mockRejectedValue(new Error("activation rejected"));
-    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls, requestAccount }));
+describe("executeSponsoredCalls sma-b fromAddress (HyperEVM non-7702 route)", () => {
+  const SCA_ADDRESS = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;
 
-    await expect(
-      executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]),
-    ).rejects.toThrow("activation rejected");
+  it("uses fromAddress as the prepareCalls `from` when provided", async () => {
+    const prepareCalls = vi.fn().mockResolvedValue({ prepared: true });
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls }));
+
+    await executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL], undefined, undefined, undefined, SCA_ADDRESS);
 
     expect(prepareCalls).toHaveBeenCalledTimes(1);
+    expect(prepareCalls.mock.calls[0][0].from).toBe(SCA_ADDRESS);
+  });
+
+  it("defaults prepareCalls `from` to the signer address when fromAddress is omitted", async () => {
+    const prepareCalls = vi.fn().mockResolvedValue({ prepared: true });
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls }));
+
+    await executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]);
+
+    expect(prepareCalls).toHaveBeenCalledTimes(1);
+    expect(prepareCalls.mock.calls[0][0].from).toBe(AGENT_ACCOUNT.address);
   });
 });
 

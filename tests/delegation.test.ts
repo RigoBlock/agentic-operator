@@ -1,7 +1,7 @@
 /**
  * Delegation tests — selector map, default selectors, selective revocation.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ALLOWED_VAULT_SELECTORS, VAULT_DELEGATION_ABI } from "../src/abi/rigoblockVault.js";
 import {
   getDelegableSelectors,
@@ -13,6 +13,8 @@ import {
   prepareSelectiveRevocation,
   isDelegationActive,
   getActiveChains,
+  getChainDelegatee,
+  selectChainExecutor,
 } from "../src/services/delegation.js";
 import { getRpcProvider } from "../src/services/rpcClient.js";
 import { decodeAbiParameters, decodeFunctionData, type Hex } from "viem";
@@ -495,5 +497,203 @@ describe("getActiveChains", () => {
     expect(chains).toContain(1);
     expect(chains).toContain(8453);
     expect(chains).toHaveLength(2);
+  });
+});
+
+
+// ── HyperEVM (999) sma-b delegation ───────────────────────────────────
+
+describe("HyperEVM (999) sma-b delegation", () => {
+  const HYPER_EVM = 999;
+  const SCA_ADDRESS = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as `0x${string}`;
+
+  function makeAlchemyEnv(kv: KVNamespace): any {
+    return {
+      ...makeEnv(kv),
+      ALCHEMY_API_KEY: "test-alchemy-key",
+    };
+  }
+
+  /** Mock the wallet_requestAccount JSON-RPC behind getScaAddress (fetch). */
+  function mockScaRpc(accountAddress: string | null = SCA_ADDRESS) {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => accountAddress
+        ? { result: { accountAddress } }
+        : { result: {} },
+    }));
+  }
+
+  /** HyperEVM Authority reality: only the 4 HyperEVM selectors are mapped. */
+  function mockHyperEvmAuthority() {
+    mockAuthorityMappings({
+      [ALLOWED_VAULT_SELECTORS.hlDeposit.toLowerCase()]: ADAPTER_ADDRESS,
+      [ALLOWED_VAULT_SELECTORS.hlDepositFor.toLowerCase()]: ADAPTER_ADDRESS,
+      [ALLOWED_VAULT_SELECTORS.hlSendRawAction.toLowerCase()]: ADAPTER_ADDRESS,
+      [ALLOWED_VAULT_SELECTORS.depositV3.toLowerCase()]: ADAPTER_ADDRESS,
+    }, ZERO_ADDRESS);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe("prepareDelegation", () => {
+    it("grants the 4 HyperEVM selectors to BOTH the agent EOA and the sca address in one updateDelegation tx", async () => {
+      mockHyperEvmAuthority();
+      mockScaRpc();
+      const kv = makeKV();
+
+      const result = await prepareDelegation(makeAlchemyEnv(kv), OPERATOR, VAULT, HYPER_EVM);
+
+      expect(result.scaAddress).toBe(SCA_ADDRESS);
+      expect(result.transaction.to).toBe(VAULT);
+
+      const decoded = decodeFunctionData({
+        abi: VAULT_DELEGATION_ABI,
+        data: result.transaction.data as Hex,
+      });
+      expect(decoded.functionName).toBe("updateDelegation");
+      const delegations = decoded.args[0] as readonly { delegated: string; selector: string; isDelegated: boolean }[];
+      expect(delegations).toHaveLength(8); // 4 selectors × 2 delegatees
+
+      const expectedSelectors = [
+        ALLOWED_VAULT_SELECTORS.hlDeposit.toLowerCase(),
+        ALLOWED_VAULT_SELECTORS.hlDepositFor.toLowerCase(),
+        ALLOWED_VAULT_SELECTORS.hlSendRawAction.toLowerCase(),
+        ALLOWED_VAULT_SELECTORS.depositV3.toLowerCase(),
+      ];
+      for (const selector of expectedSelectors) {
+        const entries = delegations.filter((d) => d.selector.toLowerCase() === selector);
+        expect(entries, `selector ${selector}`).toHaveLength(2);
+        expect(entries.every((e) => e.isDelegated)).toBe(true);
+        const delegatees = entries.map((e) => e.delegated.toLowerCase()).sort();
+        expect(delegatees).toEqual([AGENT_ADDRESS.toLowerCase(), SCA_ADDRESS.toLowerCase()].sort());
+      }
+    });
+
+    it("fails closed when the sca address cannot be derived", async () => {
+      mockHyperEvmAuthority();
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+      const kv = makeKV();
+
+      await expect(
+        prepareDelegation(makeAlchemyEnv(kv), OPERATOR, VAULT, HYPER_EVM),
+      ).rejects.toThrow();
+    });
+
+    it("does not touch other chains (no scaAddress, single delegatee)", async () => {
+      mockAuthorityMappings({});
+      const kv = makeKV();
+
+      const result = await prepareDelegation(makeEnv(kv), OPERATOR, VAULT, CHAIN_ID);
+
+      expect(result.scaAddress).toBeUndefined();
+      const decoded = decodeFunctionData({
+        abi: VAULT_DELEGATION_ABI,
+        data: result.transaction.data as Hex,
+      });
+      const delegations = decoded.args[0] as readonly { delegated: string; isDelegated: boolean }[];
+      expect(delegations.every((d) => d.delegated.toLowerCase() === AGENT_ADDRESS.toLowerCase())).toBe(true);
+    });
+  });
+
+  describe("confirmDelegation", () => {
+    it("persists scaAddress and writes the reverse lookup on HyperEVM", async () => {
+      mockScaRpc();
+      const kv = makeKV();
+      const selectors = ALL_SELECTORS;
+      const txHash = "0x999txhash" as Hex;
+
+      await confirmDelegation(makeAlchemyEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, HYPER_EVM, selectors, txHash);
+
+      const config = await getDelegationConfig(kv, VAULT);
+      expect(config!.chains[String(HYPER_EVM)].scaAddress).toBe(SCA_ADDRESS.toLowerCase());
+
+      // Gas-policy webhook reverse lookup: sca address → vault
+      const reverse = await kv.get(`agent-reverse:${SCA_ADDRESS.toLowerCase()}`);
+      expect(reverse).toBe(VAULT.toLowerCase());
+    });
+
+    it("does not write sca state on other chains", async () => {
+      const kv = makeKV();
+
+      await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, CHAIN_ID, ALL_SELECTORS, "0xarbtx" as Hex);
+
+      const config = await getDelegationConfig(kv, VAULT);
+      expect(config!.chains[String(CHAIN_ID)].scaAddress).toBeUndefined();
+      expect(await kv.get(`agent-reverse:${SCA_ADDRESS.toLowerCase()}`)).toBeNull();
+    });
+  });
+
+  describe("getChainDelegatee (on-chain status delegatee)", () => {
+    it("queries the sca address as delegatee on 999 when stored", () => {
+      const config = {
+        enabled: true,
+        agentAddress: AGENT_ADDRESS,
+        operatorAddress: OPERATOR,
+        vaultAddress: VAULT,
+        sponsoredGas: true,
+        chains: {
+          "999": { confirmedAt: 1, delegatedSelectors: [], scaAddress: SCA_ADDRESS },
+        },
+      } as any;
+
+      expect(getChainDelegatee(config, 999, AGENT_ADDRESS).toLowerCase()).toBe(SCA_ADDRESS.toLowerCase());
+    });
+
+    it("falls back to the agent EOA when no sca is stored", () => {
+      expect(getChainDelegatee(null, 999, AGENT_ADDRESS).toLowerCase()).toBe(AGENT_ADDRESS.toLowerCase());
+    });
+
+    it("never uses the sca address on other chains", () => {
+      const config = {
+        enabled: true,
+        agentAddress: AGENT_ADDRESS,
+        operatorAddress: OPERATOR,
+        vaultAddress: VAULT,
+        sponsoredGas: true,
+        chains: {
+          "999": { confirmedAt: 1, delegatedSelectors: [], scaAddress: SCA_ADDRESS },
+        },
+      } as any;
+
+      expect(getChainDelegatee(config, 42161, AGENT_ADDRESS).toLowerCase()).toBe(AGENT_ADDRESS.toLowerCase());
+    });
+  });
+
+  describe("selectChainExecutor (HyperEVM sender selection)", () => {
+    const baseConfig = {
+      enabled: true,
+      agentAddress: AGENT_ADDRESS,
+      operatorAddress: OPERATOR,
+      vaultAddress: VAULT,
+      sponsoredGas: true,
+      chains: {},
+    } as any;
+
+    it("sends from the sca address on 999 when sponsored is ON and sca is stored", () => {
+      const chainDelegation = { confirmedAt: 1, delegatedSelectors: [], scaAddress: SCA_ADDRESS };
+      expect(selectChainExecutor(chainDelegation, baseConfig, 999).toLowerCase())
+        .toBe(SCA_ADDRESS.toLowerCase());
+    });
+
+    it("falls back to the agent EOA on 999 when sponsored is OFF", () => {
+      const chainDelegation = { confirmedAt: 1, delegatedSelectors: [], scaAddress: SCA_ADDRESS, sponsoredGas: false };
+      expect(selectChainExecutor(chainDelegation, baseConfig, 999).toLowerCase())
+        .toBe(AGENT_ADDRESS.toLowerCase());
+    });
+
+    it("falls back to the agent EOA on 999 when no sca is stored yet", () => {
+      const chainDelegation = { confirmedAt: 1, delegatedSelectors: [] };
+      expect(selectChainExecutor(chainDelegation, baseConfig, 999).toLowerCase())
+        .toBe(AGENT_ADDRESS.toLowerCase());
+    });
+
+    it("uses the agent EOA on other chains even when a sca is stored", () => {
+      const chainDelegation = { confirmedAt: 1, delegatedSelectors: [], scaAddress: SCA_ADDRESS };
+      expect(selectChainExecutor(chainDelegation, baseConfig, 42161).toLowerCase())
+        .toBe(AGENT_ADDRESS.toLowerCase());
+    });
   });
 });

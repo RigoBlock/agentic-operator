@@ -149,6 +149,18 @@ export function restoreChat() {
     const rendered = new Set();
     const cachedPositions = getLastGmxPositions();
     for (const msg of conversationHistory) {
+      // Repair entries persisted before the echo fix: content stored as
+      // "<text>\n\n<text>" (tool result duplicated the reply). Collapse only
+      // when the content is byte-for-byte two identical halves.
+      if (msg.role === 'assistant' && typeof msg.content === 'string') {
+        const c = msg.content;
+        const half = (c.length - 2) / 2;
+        if (Number.isInteger(half) && half > 0 &&
+            c.slice(half, half + 2) === '\n\n' &&
+            c.slice(0, half) === c.slice(half + 2)) {
+          msg.content = c.slice(0, half);
+        }
+      }
       const key = `${msg.role}:${msg.content}`;
       if (rendered.has(key)) continue;
       rendered.add(key);

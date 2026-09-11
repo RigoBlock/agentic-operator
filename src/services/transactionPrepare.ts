@@ -20,11 +20,13 @@ import {
   saveDelegationConfig,
   getAgentDelegatedSelectors,
   getDelegableSelectors,
+  selectChainExecutor,
 } from "./delegation.js";
 import { createAgentWallet, markChainDelegated } from "./agentWallet.js";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { checkNavImpact, getNavShieldThreshold } from "./navGuard.js";
 import { getRpcProvider } from "./rpcClient.js";
+import { getScaAddress } from "./scaAccount.js";
 import { ExecutionError } from "./executionError.js";
 import { estimateGasFees, type GasFees } from "./gas.js";
 import { getRevertDataFromError, traceRevertReason } from "./errorDecoder.js";
@@ -55,11 +57,30 @@ async function resolveDelegatedExecutorFromChain(
       ?? (await createAgentWallet(env.KV, vaultAddress, env)).address;
     if (!agentAddress) return null;
 
+    // HyperEVM (999): the primary delegatee is the sma-b smart-account address.
+    // Use the stored one, else derive it fresh (deterministic per agent EOA) —
+    // on-chain delegation granted to the agent alone does not cover the
+    // sponsored path on 999.
+    let scaAddress: string | undefined = config?.chains?.["999"]?.scaAddress;
+    if (chainId === 999 && !scaAddress) {
+      try {
+        const derived = await getScaAddress(agentAddress as Address, env.ALCHEMY_API_KEY);
+        if (derived) scaAddress = derived.toLowerCase();
+      } catch (scaErr) {
+        console.warn(
+          `[prepare] Could not derive the HyperEVM sponsored account address: ` +
+          `${scaErr instanceof Error ? scaErr.message : String(scaErr)}`,
+        );
+      }
+      if (!scaAddress) return null;
+    }
+    const delegatee = scaAddress ?? agentAddress;
+
     // Authority resolution and the vault delegation read are independent —
     // issue them together so viem batches them into a single HTTP round-trip.
     const [delegableSelectors, onChainSelectors] = await Promise.all([
       getDelegableSelectors(chainId),
-      getAgentDelegatedSelectors(chainId, vaultAddress as Address, agentAddress),
+      getAgentDelegatedSelectors(chainId, vaultAddress as Address, delegatee as Address),
     ]);
     if (!onChainSelectors) return null;
     const onChainSet = new Set<string>(onChainSelectors);
@@ -86,6 +107,7 @@ async function resolveDelegatedExecutorFromChain(
           [String(chainId)]: {
             confirmedAt: Date.now(),
             delegatedSelectors: delegatedSelectors,
+            ...(chainId === 999 && scaAddress ? { scaAddress } : {}),
           },
         },
       };
@@ -94,6 +116,10 @@ async function resolveDelegatedExecutorFromChain(
     } catch (healErr) {
       console.warn("[prepare] Delegation KV heal failed (non-fatal):", healErr);
     }
+    // On HyperEVM with sponsored gas effectively ON, the healed executor is the
+    // sma-b account (sponsored primary); otherwise the agent EOA (fallback).
+    const healedSponsored = config?.sponsoredGas ?? true;
+    if (chainId === 999 && scaAddress && healedSponsored) return scaAddress as Address;
     return agentAddress;
   } catch {
     return null;
@@ -148,7 +174,27 @@ export async function prepareTransaction(
           "DELEGATION_NOT_CONFIGURED",
         );
       }
-      executor = config.agentAddress;
+      // On HyperEVM (999), sponsored gas ON + a stored sma-b account means the
+      // sca address is the sender; otherwise the agent EOA broadcasts directly.
+      //
+      // Sponsored ON without a stored sca is a hard error, not a silent downgrade:
+      // preparing an agent-EOA tx while the UI shows sponsored gas enabled would
+      // surface a confusing direct-path balance failure at execution time. The
+      // one-time fix is the HyperEVM delegation Update (Settings → Delegation).
+      if (draft.chainId === 999 && !chainDelegation.scaAddress) {
+        const sponsoredEffectiveOn999 = chainDelegation.sponsoredGas !== undefined
+          ? chainDelegation.sponsoredGas
+          : (config.sponsoredGas ?? true);
+        if (sponsoredEffectiveOn999) {
+          throw new ExecutionError(
+            "Sponsored gas is enabled on HyperEVM, but the sponsored agent account is not set up for this vault yet. " +
+            "Open Settings → Delegation and run 'Update' for HyperEVM once (one on-chain transaction), " +
+            "or turn off 'Sponsored gas (HyperEVM)' to execute with the agent wallet paying gas.",
+            "PREPARATION_FAILED",
+          );
+        }
+      }
+      executor = selectChainExecutor(chainDelegation, config, draft.chainId);
     } else {
       // KV has no record for this chain — check on-chain before downgrading.
       // A delegated operator must never get a silent MetaMask popup because
@@ -187,7 +233,6 @@ export async function prepareTransaction(
     ctx.vaultAddress.toLowerCase() !== ZERO_ADDRESS.toLowerCase() &&
     tx.to.toLowerCase() === ctx.vaultAddress.toLowerCase();
 
-  let navShieldWarning: string | undefined;
   if (isVaultTarget) {
     const storedNavThreshold = env.KV && ctx.operatorAddress
       ? await getNavShieldThreshold(env.KV, ctx.operatorAddress)
@@ -218,10 +263,6 @@ export async function prepareTransaction(
         navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
         "NAV_SHIELD_BLOCKED",
       );
-    }
-
-    if (navResult.code === "UNVERIFIED") {
-      navShieldWarning = `⚠️ NAV verification unavailable — could not measure NAV impact (${navResult.reason || "unknown reason"}). Proceeding with gas estimate only.`;
     }
 
     tx.navShieldChecked = true;
@@ -277,5 +318,5 @@ export async function prepareTransaction(
     tx.navShieldChecked = true;
   }
 
-  return { tx, ...(navShieldWarning ? { warning: navShieldWarning } : {}) };
+  return { tx };
 }
