@@ -57,8 +57,8 @@ import {
 } from './wallet.js';
 
 import {
-  slippageKey, slippageOverrideKey, shieldKey, shieldToleranceKey, navShieldKey,
-  getSlippageBps, onSlippageChange, onSwapShieldToleranceChange,
+  slippageKey, slippageOverrideKey, shieldKey, shieldToleranceKey, navShieldKey, syncToleranceKey,
+  getSlippageBps, onSlippageChange, onSyncToleranceChange, onSwapShieldToleranceChange,
   resetSwapShieldTolerance, getNavShieldPct, onNavShieldThresholdChange,
   resetNavShieldThreshold, disableNavShieldThreshold, updateNavShieldUiState, isNavShieldDisabled,
   startShieldTimer, restoreTradeSettings,
@@ -133,6 +133,7 @@ window.onAiProviderChange = onAiProviderChange;
 window.toggleTestnet = toggleTestnet;
 window.applyTestnetState = applyTestnetState;
 window.onSlippageChange = onSlippageChange;
+window.onSyncToleranceChange = onSyncToleranceChange;
 window.onSwapShieldToleranceChange = onSwapShieldToleranceChange;
 window.resetSwapShieldTolerance = resetSwapShieldTolerance;
 window.onNavShieldThresholdChange = onNavShieldThresholdChange;

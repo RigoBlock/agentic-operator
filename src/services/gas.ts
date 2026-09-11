@@ -17,13 +17,15 @@ import { parseGwei, formatGwei, type PublicClient, type Chain, type Hex } from "
  * the priority fee is fully paid to the block builder — so a rogue high value
  * directly drains the agent wallet. These caps ensure bounded worst-case cost
  * even if the RPC returns an absurd priority fee estimate.
- *
- * Mainnet uses a small, fixed-ish priority fee cap (0.01 gwei) because it is a
- * minimal part of the total fee and we want fast inclusion. Other chains use the
- * RPC-estimated priority fee, clamped to their cap.
+ * Mainnet uses a small fixed priority fee (0.01 gwei) for agent-paid direct
+ * broadcasts: mainnet RPCs routinely estimate 0, which leaves transactions
+ * un-incentivized. The fixed fee is below Alchemy's minimum for sponsored
+ * UserOps, so on mainnet (and any future `priorityIsFixed` chain) sponsored
+ * execution passes no fee overrides and Alchemy prices the UserOp instead.
+ * All other chains use the RPC-estimated priority fee, clamped to their cap.
  */
-export const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint }> = {
-  1:        { maxFeePerGas: parseGwei("5"),    maxPriorityFee: parseGwei("0.01") },
+export const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bigint; priorityIsFixed?: boolean }> = {
+  1:        { maxFeePerGas: parseGwei("5"),    maxPriorityFee: parseGwei("0.01"), priorityIsFixed: true },
   10:       { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
   56:       { maxFeePerGas: parseGwei("0.2"),  maxPriorityFee: parseGwei("0.1") },
   130:      { maxFeePerGas: parseGwei("0.04"), maxPriorityFee: parseGwei("0.01") },
@@ -37,6 +39,17 @@ export const GAS_CAPS: Record<number, { maxFeePerGas: bigint; maxPriorityFee: bi
 };
 
 const BASE_FEE_MULTIPLIER = 1.5;
+
+/**
+ * Whether sponsored (Alchemy paymaster) execution on this chain must pass NO
+ * fee overrides so Alchemy prices the UserOp itself. True for `priorityIsFixed`
+ * chains: the fixed agent-paid priority fee is below the paymaster minimum and
+ * would get the bundle rejected. The gas-policy webhook's daily USD spending
+ * limit remains the binding cap on cost.
+ */
+export function alchemyPricesSponsoredFees(chainId: number): boolean {
+  return GAS_CAPS[chainId]?.priorityIsFixed === true;
+}
 
 /** Default fee bump percentage for transaction replacement. */
 export const RESUBMIT_FEE_BUMP_PCT = 15n; // 15% bump
@@ -92,7 +105,9 @@ export async function estimateGasFees(
     throw new Error(`Chain ${chainId} returned an invalid EIP-1559 fee estimate.`);
   }
 
-  let priorityFee = estimated.maxPriorityFeePerGas;
+  let priorityFee = caps.priorityIsFixed
+    ? caps.maxPriorityFee
+    : estimated.maxPriorityFeePerGas;
   if (priorityFee > caps.maxPriorityFee) {
     priorityFee = caps.maxPriorityFee;
   }
@@ -126,15 +141,21 @@ export function bumpGasFees(
   }
 
   const bumpedMaxFee = fees.maxFeePerGas + (fees.maxFeePerGas * bumpPct) / 100n;
-  const bumpedPriority = fees.maxPriorityFeePerGas + (fees.maxPriorityFeePerGas * bumpPct) / 100n;
+  const bumpedPriority = caps.priorityIsFixed
+    ? caps.maxPriorityFee
+    : fees.maxPriorityFeePerGas + (fees.maxPriorityFeePerGas * bumpPct) / 100n;
 
   return {
     maxFeePerGas: bumpedMaxFee < caps.maxFeePerGas ? bumpedMaxFee : caps.maxFeePerGas,
-    maxPriorityFeePerGas: bumpedPriority < caps.maxPriorityFee ? bumpedPriority : caps.maxPriorityFee,
+    maxPriorityFeePerGas: caps.priorityIsFixed
+      ? caps.maxPriorityFee
+      : bumpedPriority < caps.maxPriorityFee ? bumpedPriority : caps.maxPriorityFee,
   };
 }
 
-/** Clamp a fee estimate to the chain-specific caps and ensure maxFee >= priorityFee. */
+/** Clamp a fee estimate to the chain-specific caps and ensure maxFee >= priorityFee.
+ *  Chains with `priorityIsFixed` use the configured priority fee as-is (floored,
+ *  not just capped) — a stored 0-priority transaction is repaired on mainnet. */
 export function clampGasFees(
   fees: GasFees,
   chainId: number,
@@ -142,9 +163,11 @@ export function clampGasFees(
   const caps = GAS_CAPS[chainId];
   if (!caps) return fees;
 
-  const priority = fees.maxPriorityFeePerGas < caps.maxPriorityFee
-    ? fees.maxPriorityFeePerGas
-    : caps.maxPriorityFee;
+  const priority = caps.priorityIsFixed
+    ? caps.maxPriorityFee
+    : fees.maxPriorityFeePerGas < caps.maxPriorityFee
+      ? fees.maxPriorityFeePerGas
+      : caps.maxPriorityFee;
 
   let maxFee = fees.maxFeePerGas;
   if (maxFee < priority) maxFee = priority;

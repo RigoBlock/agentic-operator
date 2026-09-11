@@ -45,7 +45,7 @@ enabling sandwich attacks that extract ~10% per day within NAV shield limits.
 RULE: The NAV shield (10% max drop check) runs BEFORE every transaction
       is returned or broadcast — for ALL transaction types including swaps,
       LP operations, AND cross-chain bridges. It protects ALL execution modes:
-        - Manual: runs when building unsigned calldata (prepareTransaction in execution.ts)
+        - Manual: runs when building unsigned calldata (prepareTransaction in transactionPrepare.ts)
         - Delegated: runs once when finalizing calldata, then reused at broadcast time (execution.ts)
       It is outside the agent's control surface. Do NOT add code paths that skip it.
       When NAV can be measured: FAIL-CLOSED (block if drop > threshold).
@@ -61,22 +61,21 @@ RULE: The NAV shield (10% max drop check) runs BEFORE every transaction
 - **Broadcast check** reuses the already-finalized gas and NAV result; if a transaction
   was not finalized upstream, `prepareTransaction()` is invoked once before broadcast.
 - Both call the same `checkNavImpact()` from `navGuard.ts`
-- It simulates atomically via `multicall([tx, updateUnitaryValue])` on the RPC
+- It reads NAV via plain `eth_call` (never `eth_simulateV1` — Nitro synthetic
+  blocks produce false-positive reverts that real execution does not have):
+  `updateUnitaryValue()` for the pre-swap NAV, then
+  `multicall([tx, updateUnitaryValue])` from the address that will actually
+  execute the transaction (the agent wallet in delegated mode, the operator in
+  manual mode) for the post-swap NAV, in a single atomic call.
 - **Uses `updateUnitaryValue()`** (the actual contract NAV algorithm via `eth_call`),
   NOT `getNavDataView()`. The view function (ENavView) has an edge case bug where it
   returns `unitaryValue=0` when `effectiveSupply > 0` AND `totalValue <= 0`, while
   the actual contract (`_updateNav` in MixinPoolValue) preserves the stored value.
-- **Simulation runs as the OPERATOR (vault owner)**, not the agent wallet.
-  Reason: `multicall` is intentionally NOT in the agent's delegated selectors
-  (delegating it would let the agent compose arbitrary vault calls). The operator
-  is always authorized, so the multicall succeeds. This is NOT a shortcut — the
-  actual trade is still broadcast by the agent using only its whitelisted selectors.
 - Three distinct outcomes with separate error codes:
   1. **NAV drops > 10%** → `allowed: false, code: 'BLOCKED'` → `NAV_SHIELD_BLOCKED`
-  2. **Swap itself reverts** → `allowed: false, code: 'TRADE_REVERTS'` → `SIMULATION_FAILED`
-  3. **Multicall fails but swap passes** → `allowed: true, verified: false, code: 'UNVERIFIED'`
-     — the trade is valid but NAV impact couldn't be measured. This should NOT be the
-     normal path (investigate if it fires — likely an adapter or RPC issue).
+  2. **Transaction itself reverts** → `allowed: false, code: 'TRADE_REVERTS'` → `SIMULATION_FAILED`
+  3. **No outstanding shares** (first deposit) → `allowed: true, verified: false, code: 'UNVERIFIED'`
+     — there is no unit price to protect yet.
 - If the pre-swap NAV read fails → BLOCK (not skip)
 - **NEVER** add `multicall` to `ALLOWED_VAULT_SELECTORS` / delegated selectors
 - **NEVER** add a flag, env var, or config to disable the NAV shield entirely
@@ -205,6 +204,17 @@ RULE: Cron-triggered strategies default to manual mode (notify via Telegram,
 
 ## CODING RULES
 
+### Code discipline (mandatory)
+
+No fallback layers and no special-case handling: when a method produces wrong
+results, fix the root cause or replace the method — do not wrap it in
+cross-checks, retries-with-alternate-paths, or "best effort" branches that guess.
+Deterministic validation and business logic belong in tools/services, never in
+the LLM. User-facing text contains only labels and numbers the code actually
+knows: never raw function selectors, snake_case tool names, or guessed causes
+(a raw revert selector is acceptable only when the revert cannot be decoded).
+If a fact is not available to the code, say what is known — do not invent it.
+
 ### Security-Critical Code Paths
 
 These files contain security-critical logic. Changes require extra care:
@@ -306,12 +316,13 @@ External Agent                    Our Worker                     CDP Facilitator
    slippage, sandwiches it on-chain. **Mitigated:** NAV shield blocks trades that
    drop unit value > 10%. Slippage defaults to 1% (100bps).
 
-3. **NAV shield bypass via multicall failure:** If `multicall` simulation fails
-   (vault doesn't support it on a given chain), the shield tries the swap alone
-   as a diagnostic. If the swap itself reverts → `SIMULATION_FAILED` (trade is
-   bad). If the swap passes → execution proceeds with `verified: false` (NAV
-   impact unknown). The 10% check is a safety net that only activates when
-   multicall simulation is available.
+3. **NAV shield bypass via simulation failure:** There is no bypass path. The
+   shield's only simulation primitive is `eth_call` — the same primitive real
+   execution uses — so a revert in `multicall([tx, updateUnitaryValue])` means the
+   transaction genuinely reverts on-chain (`TRADE_REVERTS` → blocked). `eth_simulateV1`
+   is deliberately NOT used: Nitro synthetic blocks produce false-positive reverts
+   that a plain `eth_call` and real execution do not have. If the check produces
+   wrong results, fix the root cause — never add fallback layers that guess.
 
 4. **Agent wallet key compromise:** Attacker with CDP credentials could sign as
    agent wallets. **Mitigated:** CDP manages keys server-side; credentials are

@@ -122,12 +122,16 @@ const SLIPPAGE_OVERRIDE_STORAGE_KEY = 'rigoblock_slippage_override_explicit';
 const SHIELD_STORAGE_KEY = 'rigoblock_swap_shield';
 const SHIELD_TOLERANCE_KEY = 'rigoblock_swap_shield_tolerance';
 const NAV_SHIELD_STORAGE_KEY = 'rigoblock_nav_shield_pct';
+const SYNC_TOLERANCE_STORAGE_KEY = 'rigoblock_sync_tolerance_pct';
 const DEFAULT_SLIPPAGE_BPS = 100;
 const MIN_SLIPPAGE_BPS = 10;
 const MAX_SLIPPAGE_BPS = 500;
 const DEFAULT_NAV_SHIELD_PCT = 10;
 const MIN_NAV_SHIELD_PCT = 1;
 const MAX_NAV_SHIELD_PCT = 100;
+const DEFAULT_SYNC_TOLERANCE_PCT = 1;
+const MIN_SYNC_TOLERANCE_PCT = 0.1;
+const MAX_SYNC_TOLERANCE_PCT = 100;
 
 // Key helpers -- namespaced per connected address so switching wallets
 // never shows a stale override that belongs to a different operator.
@@ -136,6 +140,7 @@ function slippageOverrideKey() { return SLIPPAGE_OVERRIDE_STORAGE_KEY + '_' + (c
 function shieldKey() { return SHIELD_STORAGE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
 function shieldToleranceKey() { return SHIELD_TOLERANCE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
 function navShieldKey() { return NAV_SHIELD_STORAGE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
+function syncToleranceKey() { return SYNC_TOLERANCE_STORAGE_KEY + '_' + (connectedAddress || 'anon').toLowerCase(); }
 
 function getSlippageBps() {
   const stored = localStorage.getItem(slippageKey());
@@ -170,6 +175,53 @@ function onSlippageChange() {
   const bps = Math.round(pct * 100);
   localStorage.setItem(slippageKey(), String(bps));
   localStorage.setItem(slippageOverrideKey(), 'true');
+}
+
+async function onSyncToleranceChange() {
+  const input = document.getElementById('sync-tolerance');
+  const pct = parseFloat(input.value);
+  if (isNaN(pct) || pct < MIN_SYNC_TOLERANCE_PCT || pct > MAX_SYNC_TOLERANCE_PCT) {
+    alert(`Sync tolerance must be between ${MIN_SYNC_TOLERANCE_PCT}% and ${MAX_SYNC_TOLERANCE_PCT}%.`);
+    const stored = localStorage.getItem(syncToleranceKey());
+    input.value = stored ?? String(DEFAULT_SYNC_TOLERANCE_PCT);
+    return;
+  }
+
+  if (!connectedAddress || !vaultInput.value.trim()) {
+    appendMessage('system', 'Connect a wallet and enter a vault address before changing sync tolerance.');
+    const stored = localStorage.getItem(syncToleranceKey());
+    input.value = stored ?? String(DEFAULT_SYNC_TOLERANCE_PCT);
+    return;
+  }
+
+  input.disabled = true;
+  try {
+    const res = await fetch('/api/settings/sync-tolerance', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        tolerance: `${pct}%`,
+        vaultAddress: vaultInput.value.trim(),
+        chainId: currentChainId,
+        operatorAddress: connectedAddress,
+        authSignature, authTimestamp,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    localStorage.setItem(syncToleranceKey(), String(pct));
+    appendMessage('system', `Sync tolerance set to ${pct}%.`);
+  } catch (err) {
+    appendMessage('system', `Failed to set sync tolerance: ${err instanceof Error ? err.message : String(err)}`);
+    const stored = localStorage.getItem(syncToleranceKey());
+    input.value = stored ?? String(DEFAULT_SYNC_TOLERANCE_PCT);
+  } finally {
+    input.disabled = false;
+  }
 }
 
 async function onSwapShieldToleranceChange() {
@@ -527,6 +579,11 @@ function restoreTradeSettings() {
   const navPct = getNavShieldPct();
   document.getElementById('nav-shield-threshold').value = String(navPct);
   updateNavShieldUiState(navPct === 0);
+
+  // Restore sync tolerance (server-side setting; localStorage mirrors the last
+  // value this wallet saved so the panel reflects the persisted default)
+  document.getElementById('sync-tolerance').value =
+    localStorage.getItem(syncToleranceKey()) ?? String(DEFAULT_SYNC_TOLERANCE_PCT);
 }
 
 function toggleTestnet() {
@@ -556,10 +613,12 @@ export {
   SLIPPAGE_STORAGE_KEY, SLIPPAGE_OVERRIDE_STORAGE_KEY,
   SHIELD_STORAGE_KEY, SHIELD_TOLERANCE_KEY,
   NAV_SHIELD_STORAGE_KEY,
+  SYNC_TOLERANCE_STORAGE_KEY,
   DEFAULT_SLIPPAGE_BPS, MIN_SLIPPAGE_BPS, MAX_SLIPPAGE_BPS,
   DEFAULT_NAV_SHIELD_PCT, MIN_NAV_SHIELD_PCT, MAX_NAV_SHIELD_PCT,
-  slippageKey, slippageOverrideKey, shieldKey, shieldToleranceKey, navShieldKey,
-  getSlippageBps, onSlippageChange,
+  DEFAULT_SYNC_TOLERANCE_PCT, MIN_SYNC_TOLERANCE_PCT, MAX_SYNC_TOLERANCE_PCT,
+  slippageKey, slippageOverrideKey, shieldKey, shieldToleranceKey, navShieldKey, syncToleranceKey,
+  getSlippageBps, onSlippageChange, onSyncToleranceChange,
   onSwapShieldToleranceChange, resetSwapShieldTolerance,
   getNavShieldPct, onNavShieldThresholdChange, resetNavShieldThreshold, disableNavShieldThreshold,
   updateNavShieldUiState, isNavShieldDisabled,

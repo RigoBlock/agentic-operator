@@ -34,6 +34,7 @@ import { getRpcProvider, ALCHEMY_ORIGIN } from "./rpcClient.js";
 import {
   bumpGasFees,
   getTransactionFees,
+  alchemyPricesSponsoredFees,
   RESUBMIT_FEE_BUMP_PCT,
   type GasFees,
 } from "./gas.js";
@@ -373,8 +374,15 @@ async function sponsoredAgentTransaction(
   // broadcast. If Alchemy rejects the fee parameters (e.g. they became stale while
   // the user was reviewing), we retry once without fee overrides so Alchemy can
   // estimate fresh UserOp fees — but only as a fallback, never as the default.
+  //
+  // Exception — chains with a fixed priority fee (mainnet): the fixed fee exists
+  // for the agent-paid direct-broadcast path; it is below Alchemy's minimum for
+  // sponsored UserOps and the paymaster would reject the bundle. There we let
+  // Alchemy price the UserOp from the start (no fee overrides at all). The daily
+  // USD spending limit enforced by the gas-policy webhook remains the binding cap.
   const callGasLimit = BigInt(tx.gas);
   const fees = getTransactionFees(tx, chainId);
+  const alchemyPricesFees = alchemyPricesSponsoredFees(chainId);
 
   const calls: WalletCall[] = [{
     to: tx.to as Address,
@@ -383,31 +391,41 @@ async function sponsoredAgentTransaction(
   }];
 
   let result: Awaited<ReturnType<typeof executeSponsoredCalls>>;
-  try {
+  if (alchemyPricesFees) {
     result = await executeSponsoredCalls(
       agentAccount,
       chainId,
       gasPolicyId,
       calls,
       callGasLimit,
-      fees.maxFeePerGas,
-      fees.maxPriorityFeePerGas,
     );
-  } catch (firstErr) {
-    const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
-    const isFeeRejection = /invalid parameters|fee too low|underpriced|max fee per gas/i.test(firstMsg);
-    if (!isFeeRejection) throw firstErr;
+  } else {
+    try {
+      result = await executeSponsoredCalls(
+        agentAccount,
+        chainId,
+        gasPolicyId,
+        calls,
+        callGasLimit,
+        fees.maxFeePerGas,
+        fees.maxPriorityFeePerGas,
+      );
+    } catch (firstErr) {
+      const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      const isFeeRejection = /invalid parameters|fee too low|underpriced|max fee per gas/i.test(firstMsg);
+      if (!isFeeRejection) throw firstErr;
 
-    console.warn(
-      `[execution] Sponsored call rejected with stored fees (${formatGwei(fees.maxFeePerGas)} / ${formatGwei(fees.maxPriorityFeePerGas)} gwei), retrying without fee overrides: ${sanitizeError(firstMsg)}`,
-    );
-    result = await executeSponsoredCalls(
-      agentAccount,
-      chainId,
-      gasPolicyId,
-      calls,
-      callGasLimit,
-    );
+      console.warn(
+        `[execution] Sponsored call rejected with stored fees (${formatGwei(fees.maxFeePerGas)} / ${formatGwei(fees.maxPriorityFeePerGas)} gwei), retrying without fee overrides: ${sanitizeError(firstMsg)}`,
+      );
+      result = await executeSponsoredCalls(
+        agentAccount,
+        chainId,
+        gasPolicyId,
+        calls,
+        callGasLimit,
+      );
+    }
   }
 
   // ── Step 2: Record actual gas spend if we have a receipt ──

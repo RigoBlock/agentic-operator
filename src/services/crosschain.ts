@@ -26,7 +26,7 @@
  * The target has no unit; it is interpreted on each chain as the target number
  * of base-token units per pool token (e.g. 2.45 ETH on Ethereum, 2.45 POL on
  * Polygon, 2.45 BNB on BSC). NAV sync moves value from chains above the target
- * to chains below the target, using stablecoins when base assets differ.
+ * to chains below the target.
  *
  * NOTE: The oracle conversions use spot prices (`observe([0,1])`), not TWAP.
  * This is acceptable for the off-chain NAV aggregation and rebalancing use case
@@ -57,7 +57,7 @@ import {
 } from "viem";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { ERC20_ABI } from "../abi/erc20.js";
-import { getRpcUrl, getNativeTokenSymbol, getWrappedNativeAddress } from "../config.js";
+import { getRpcUrl, getNativeTokenSymbol } from "../config.js";
 import {
   OpType,
   ACROSS_SPOKE_POOL,
@@ -68,10 +68,11 @@ import {
   type BridgeableToken,
   type BridgeableTokenType,
 } from "./crosschainConfig.js";
-import { getVaultTokenBalance, getVaultTokenBalancesBulk } from "./vault.js";
+import { getVaultTokenBalance, getVaultTokenBalancesBulk, getPoolData, getVaultInfo } from "./vault.js";
 import type { EffectivePoolState } from "./vault.js";
 import { getRpcProvider } from "./rpcClient.js";
 import { convertTokenAmountViaOracle } from "./oraclePrice.js";
+import { getRevertDataFromError } from "./errorDecoder.js";
 import { getDelegationConfig, getActiveChains } from "./delegation.js";
 import { mapWithConcurrency, mapWithConcurrencySettled } from "./concurrency.js";
 import type { DelegationConfig } from "../types.js";
@@ -86,6 +87,45 @@ const DEFAULT_FILL_DEADLINE_SECS = 6 * 60 * 60; // 21 600
 
 /** Default NAV tolerance for Sync ops (100 bps = 1%) */
 const DEFAULT_NAV_TOLERANCE_BPS = 100;
+
+/** NavImpactTooHigh() selector — the on-chain revert when a sync exceeds navTolerance */
+const NAV_IMPACT_TOO_HIGH_SELECTOR = "0x3471741b";
+
+/** KV key prefix for the operator's stored default sync tolerance */
+const SYNC_TOLERANCE_KEY_PREFIX = "sync-tolerance:";
+
+export const MIN_SYNC_TOLERANCE_BPS = 10;    // 0.1%
+export const MAX_SYNC_TOLERANCE_BPS = 10000; // 100% (on-chain MAX_NAV_TOLERANCE_BPS)
+
+/**
+ * Get the operator's stored default sync tolerance (bps).
+ * Returns null if not set (caller should use DEFAULT_NAV_TOLERANCE_BPS).
+ */
+export async function getStoredSyncTolerance(
+  kv: KVNamespace,
+  operatorAddress: string,
+): Promise<number | null> {
+  const raw = await kv.get(`${SYNC_TOLERANCE_KEY_PREFIX}${operatorAddress.toLowerCase()}`);
+  if (!raw) return null;
+  const val = Number(raw);
+  if (!Number.isInteger(val) || val < MIN_SYNC_TOLERANCE_BPS || val > MAX_SYNC_TOLERANCE_BPS) return null;
+  return val;
+}
+
+/** Persist the operator's default sync tolerance (bps). */
+export async function setStoredSyncTolerance(
+  kv: KVNamespace,
+  operatorAddress: string,
+  toleranceBps: number,
+): Promise<void> {
+  if (!Number.isInteger(toleranceBps) || toleranceBps < MIN_SYNC_TOLERANCE_BPS || toleranceBps > MAX_SYNC_TOLERANCE_BPS) {
+    throw new Error(
+      `Sync tolerance must be between ${MIN_SYNC_TOLERANCE_BPS / 100}% (${MIN_SYNC_TOLERANCE_BPS} bps) ` +
+      `and ${MAX_SYNC_TOLERANCE_BPS / 100}% (${MAX_SYNC_TOLERANCE_BPS} bps).`,
+    );
+  }
+  await kv.put(`${SYNC_TOLERANCE_KEY_PREFIX}${operatorAddress.toLowerCase()}`, String(toleranceBps));
+}
 
 // NOTE: There is NO off-chain cap on bridge amount for Transfer ops.
 // The on-chain contract enforces NavImpactLib.MINIMUM_SUPPLY_RATIO = 20
@@ -202,6 +242,11 @@ export interface AggregatedNav {
  *  keep rebalance ops smaller for safety. */
 const MAX_REBALANCE_BRIDGE_PCT = 50n;
 
+/** Skip rebalance operations whose value is below this — bridging a couple of
+ *  dollars costs more in fees than it moves. Priced with the static
+ *  conservative token price floor, so the estimate is intentionally harsh. */
+const MIN_REBALANCE_BRIDGE_USD = 2n;
+
 export interface BridgeRecommendation {
   srcChainId: number;
   srcChainName: string;
@@ -216,7 +261,7 @@ export interface BridgeRecommendation {
   estimatedTime?: string;
   /** Estimated NAV impact on source chain (%) */
   navImpactPct?: string;
-  /** true if the amount was capped to stay within the NAV shield limit */
+  /** true if the amount was capped at MAX_REBALANCE_BRIDGE_PCT (50%) of source-chain value */
   capped?: boolean;
 }
 
@@ -328,32 +373,6 @@ function getBaseTokenSymbol(chainId: number, baseToken: Address): string {
   );
   return match?.symbol || "ERC20";
 }
-
-/**
- * Determine whether two base tokens on two chains represent the same asset.
- * - Native tokens (zero address) are compared by native symbol (ETH, BNB, POL, ...).
- * - Non-native tokens are compared by exact address.
- * No canonical wrapping assumptions are made.
- */
-function isNativeBaseToken(chainId: number, baseToken: Address): boolean {
-  const zeroAddr = "0x0000000000000000000000000000000000000000";
-  if (baseToken.toLowerCase() === zeroAddr) return true;
-  const wrapped = getWrappedNativeAddress(chainId);
-  return wrapped ? baseToken.toLowerCase() === wrapped.toLowerCase() : false;
-}
-
-export function sameBaseAsset(chainIdA: number, baseA: Address, chainIdB: number, baseB: Address): boolean {
-  const aIsNative = isNativeBaseToken(chainIdA, baseA);
-  const bIsNative = isNativeBaseToken(chainIdB, baseB);
-  if (aIsNative && bIsNative) {
-    return getNativeTokenSymbol(chainIdA) === getNativeTokenSymbol(chainIdB);
-  }
-  if (!aIsNative && !bIsNative) {
-    return baseA.toLowerCase() === baseB.toLowerCase();
-  }
-  return false;
-}
-
 
 /**
  * Read a single chain's NAV + token balances. Non-throwing — captures errors.
@@ -541,6 +560,7 @@ async function readChainSnapshot(
       delegationActive,
     };
   } catch (err) {
+    console.error(`[crosschain] readChainSnapshot ${chainId} failed:`, err);
     return {
       chainId,
       chainName: name,
@@ -582,13 +602,18 @@ export async function buildRebalancePlan(params: {
     params.kv,
   );
 
-  // Auto-select target chain if not specified: the one with the most value
+  // Auto-select target chain if not specified: the one holding the most value.
+  // Compare in USDC-normalized terms — raw base-token totals are NOT comparable
+  // across chains (3,800 POL numerically outweighs 62 ETH), which used to pick
+  // cheap-unit chains like Polygon over the actual largest holding.
   let targetChainId = params.targetChainId;
+  const autoSelectedTarget = !targetChainId;
   if (!targetChainId) {
     let maxValue = 0n;
     for (const snap of nav.chains) {
-      if (snap.totalValue > maxValue) {
-        maxValue = snap.totalValue;
+      if (snap.error) continue;
+      if (snap.totalUsdcNormalized > maxValue) {
+        maxValue = snap.totalUsdcNormalized;
         targetChainId = snap.chainId;
       }
     }
@@ -620,9 +645,14 @@ export async function buildRebalancePlan(params: {
       if (!targetTypes.has(bal.token.type)) continue;
       if (bal.balance === 0n) continue;
 
-      // Estimate this token's share of the chain's NAV.
       // Normalise token balance to 18 decimals for comparison with totalValue.
       const normalised = bal.balance * (10n ** (18n - BigInt(bal.token.decimals)));
+
+      // Skip dust — bridging it costs more in fees than it moves.
+      const floorUsd = getStaticTokenPriceFloor(bal.token.type);
+      const usdValue = (normalised * BigInt(floorUsd)) / (10n ** 18n);
+      if (usdValue < MIN_REBALANCE_BRIDGE_USD) continue;
+
       let bridgeAmount = bal.balance;
       let bridgeFormatted = bal.balanceFormatted;
       let capped = false;
@@ -684,8 +714,12 @@ export async function buildRebalancePlan(params: {
   // Build summary
   const totalOps = operations.length;
   const summary = totalOps === 0
-    ? `All bridgeable tokens are already on ${targetName}. No rebalancing needed.`
-    : `Rebalance to ${targetName}: ${totalOps} bridge operation${totalOps > 1 ? "s" : ""} needed.`;
+    ? `All bridgeable tokens are already on ${targetName}` +
+      (autoSelectedTarget ? ` (auto-selected: chain holding the most vault value)` : "") +
+      ". No rebalancing needed."
+    : `Rebalance to ${targetName}` +
+      (autoSelectedTarget ? ` (auto-selected: chain holding the most vault value)` : "") +
+      `: ${totalOps} bridge operation${totalOps > 1 ? "s" : ""} needed.`;
 
   return {
     nav,
@@ -717,10 +751,13 @@ export async function buildRebalancePlan(params: {
  * ~500K for transfers) with 3-5x safety margin. A percentage cap
  * (MAX_OVERHEAD_BPS) prevents disproportionate deduction on small amounts.
  *
- * NOTE: When operatorAddress is provided, buildCrosschainTransfer/buildCrosschainSync
- * simulate depositV3 via debug_traceCall to extract the expanded destination message,
- * then re-query Across with recipient+message for accurate gas-inclusive fees.
- * The static overheads below are only used as a fallback when simulation is unavailable.
+ * NOTE: buildCrosschainTransfer/buildCrosschainSync always simulate depositV3
+ * via debug_traceCall to extract the expanded destination message, then
+ * re-query Across with recipient+message for accurate gas-inclusive fees.
+ * Both simulation and re-quote are fatal on failure — a deposit quoted
+ * without its real message underprices the fill and strands funds in escrow.
+ * The static overheads below are therefore used only for the initial
+ * pre-simulation quote, never for a deposit that gets built.
  */
 const AINTENTS_GAS_OVERHEAD_USD: Record<number, number> = {
   1:     0.50,   // Ethereum — 500K gas, variable gwei, conservative
@@ -760,6 +797,75 @@ function getStaticTokenPriceFloor(tokenType: BridgeableTokenType): number {
 }
 
 /**
+ * Known destination-fill revert selectors, for readable error messages.
+ * The Across API's SIMULATION_ERROR carries the raw hex of the destination
+ * fill revert; these let us name the interesting ones instead of dumping
+ * an opaque selector on the operator.
+ */
+const KNOWN_REVERT_SELECTORS: Record<string, string> = {
+  // MulticallHandler wrapper — encodes the failing call index + the calls array.
+  "0xe462c440": "CallReverted",
+  // Vault NAV-integrity check (ECrosschain._validateNavIntegrity): requires
+  // netTotalValue == expectedAssets with EXACT equality. The fresh NAV
+  // recomputation and the stored-snapshot + oracle-conversion path can differ
+  // by 1 wei (independent roundings), which hard-reverts the destination fill.
+  "0x549eefae": "NavManipulationDetected",
+  // Vault donation-lock state mismatch (ECrosschain.donate two-phase lock).
+  "0x37b5cf12": "DonationLock",
+};
+
+/**
+ * Turn a raw Across API error body into an operator-readable message.
+ * For SIMULATION_ERROR (destination fill revert), extract the failing
+ * selector(s) so the operator sees WHY the bridge would fail on-chain.
+ */
+export function describeAcrossApiError(status: number, body: string): string {
+  let code: string | undefined;
+  let message: string | undefined;
+  try {
+    const parsed = JSON.parse(body) as { code?: string; message?: string };
+    code = parsed.code;
+    message = parsed.message;
+  } catch {
+    // Non-JSON body — fall through to raw slicing.
+  }
+
+  if (code !== "SIMULATION_ERROR" || !message) {
+    return `Across API error (${status})${code ? ` [${code}]` : ""}: ${(message ?? body).slice(0, 200)}`;
+  }
+
+  // message shape: "execution reverted: 0x<full revert payload hex>"
+  const hexMatch = message.match(/0x([0-9a-fA-F]{8,})/);
+  if (!hexMatch) {
+    return `Across could not simulate the destination fill: ${message.slice(0, 200)}`;
+  }
+
+  const hex = hexMatch[0].toLowerCase();
+  const selector = hex.slice(0, 10);
+  const named = KNOWN_REVERT_SELECTORS[selector] ?? selector;
+
+  let detail = named;
+  if (selector === "0xe462c440") {
+    // CallReverted(uint256 callIndex, (address,bytes,uint256)[] calls) —
+    // the failing call index is the first word; scan the payload for any
+    // other known inner selector (the real revert reason of that call).
+    const callIndex = hex.length >= 74 ? BigInt(`0x${hex.slice(10, 74)}`) : null;
+    const inner = Object.keys(KNOWN_REVERT_SELECTORS)
+      .filter((s) => s !== "0xe462c440")
+      .find((s) => hex.includes(s.slice(2)));
+    detail = `CallReverted at call ${callIndex?.toString() ?? "?"}` +
+      (inner ? `: ${KNOWN_REVERT_SELECTORS[inner]}` : "");
+  }
+
+  return (
+    `Across could not simulate the destination fill — the relayer's call into the vault ` +
+    `reverted (${detail}). The bridge would fail on-chain; no funds move. ` +
+    `A common cause is the vault's exact-equality NAV check (NavManipulationDetected) ` +
+    `differing by 1 wei between the fresh NAV recomputation and the oracle-conversion path.`
+  );
+}
+
+/**
  * Fetch suggested fees from the Across API.
  *
  * Uses the `app.across.to/api/suggested-fees` endpoint with:
@@ -793,9 +899,7 @@ export async function getAcrossSuggestedFees(
   const resp = await fetch(url.toString());
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
-    throw new Error(
-      `Across API error (${resp.status}): ${body.slice(0, 200)}`,
-    );
+    throw new Error(describeAcrossApiError(resp.status, body));
   }
 
   const data = (await resp.json()) as {
@@ -1104,97 +1208,90 @@ interface CallFrame {
  * The simulation runs as the vault owner (operator) since depositV3 requires
  * vault authorization.
  *
- * @returns The recipient and message from FundsDeposited, or null if simulation fails.
+ * @returns The recipient and message from FundsDeposited.
+ * @throws Error describing why the expanded message could not be extracted.
+ *   Callers must treat this as fatal: quoting without the real message
+ *   underprices the destination fill and strands funds in escrow.
  */
 export async function simulateDepositV3ForMessage(params: {
   vaultAddress: Address;
   calldata: Hex;
   srcChainId: number;
   operatorAddress: Address;
-}): Promise<{ recipient: Hex; message: Hex } | null> {
+}): Promise<{ recipient: Hex; message: Hex }> {
   const rpcUrl = getRpcUrl(params.srcChainId);
   if (!rpcUrl) {
-    console.warn("[Crosschain] No Alchemy RPC for simulation, skipping depositV3 trace");
-    return null;
+    throw new Error("no Alchemy RPC available for the source chain");
   }
 
-  try {
-    const response = await fetch(rpcUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Origin": ALCHEMY_ORIGIN,
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "debug_traceCall",
-        params: [
-          {
-            from: params.operatorAddress,
-            to: params.vaultAddress,
-            data: params.calldata,
-          },
-          "latest",
-          {
-            tracer: "callTracer",
-            tracerConfig: { withLog: true },
-          },
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      console.warn(`[Crosschain] debug_traceCall HTTP ${response.status}`);
-      return null;
-    }
-
-    const json = await response.json() as { result?: CallFrame; error?: { message: string } };
-    if (json.error || !json.result) {
-      console.warn(`[Crosschain] debug_traceCall error: ${json.error?.message || "no result"}`);
-      return null;
-    }
-
-    // Recursively search all call frames for the FundsDeposited log
-    const log = findLogByTopic(json.result, FUNDS_DEPOSITED_TOPIC);
-    if (!log) {
-      console.warn("[Crosschain] FundsDeposited event not found in trace");
-      return null;
-    }
-
-    // Decode the non-indexed params from event data.
-    // FundsDeposited data layout (V3 SpokePool with bytes32 addresses):
-    //   bytes32 inputToken, bytes32 outputToken, uint256 inputAmount,
-    //   uint256 outputAmount, uint32 quoteTimestamp, uint32 fillDeadline,
-    //   uint32 exclusivityDeadline, bytes32 recipient, bytes32 exclusiveRelayer,
-    //   bytes message
-    const decoded = decodeAbiParameters(
-      [
-        { name: "inputToken", type: "bytes32" },
-        { name: "outputToken", type: "bytes32" },
-        { name: "inputAmount", type: "uint256" },
-        { name: "outputAmount", type: "uint256" },
-        { name: "quoteTimestamp", type: "uint32" },
-        { name: "fillDeadline", type: "uint32" },
-        { name: "exclusivityDeadline", type: "uint32" },
-        { name: "recipient", type: "bytes32" },
-        { name: "exclusiveRelayer", type: "bytes32" },
-        { name: "message", type: "bytes" },
+  const response = await fetch(rpcUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Origin": ALCHEMY_ORIGIN,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "debug_traceCall",
+      params: [
+        {
+          from: params.operatorAddress,
+          to: params.vaultAddress,
+          data: params.calldata,
+        },
+        "latest",
+        {
+          tracer: "callTracer",
+          tracerConfig: { withLog: true },
+        },
       ],
-      log.data as Hex,
-    );
+    }),
+  });
 
-    // recipient is bytes32 — extract the address from the last 20 bytes
-    const recipientBytes32 = decoded[7] as Hex;
-    const recipientAddr = ("0x" + recipientBytes32.slice(-40)) as Hex;
-    const message = decoded[9] as Hex;
-
-
-    return { recipient: recipientAddr, message };
-  } catch (err) {
-    console.warn(`[Crosschain] depositV3 simulation failed: ${err instanceof Error ? err.message : err}`);
-    return null;
+  if (!response.ok) {
+    throw new Error(`debug_traceCall HTTP ${response.status}`);
   }
+
+  const json = await response.json() as { result?: CallFrame; error?: { message: string } };
+  if (json.error || !json.result) {
+    throw new Error(`debug_traceCall error: ${json.error?.message || "no result"}`);
+  }
+
+  // Recursively search all call frames for the FundsDeposited log
+  const log = findLogByTopic(json.result, FUNDS_DEPOSITED_TOPIC);
+  if (!log) {
+    throw new Error("FundsDeposited event not found in trace");
+  }
+
+  // Decode the non-indexed params from event data.
+  // FundsDeposited data layout (V3 SpokePool with bytes32 addresses):
+  //   bytes32 inputToken, bytes32 outputToken, uint256 inputAmount,
+  //   uint256 outputAmount, uint32 quoteTimestamp, uint32 fillDeadline,
+  //   uint32 exclusivityDeadline, bytes32 recipient, bytes32 exclusiveRelayer,
+  //   bytes message
+  const decoded = decodeAbiParameters(
+    [
+      { name: "inputToken", type: "bytes32" },
+      { name: "outputToken", type: "bytes32" },
+      { name: "inputAmount", type: "uint256" },
+      { name: "outputAmount", type: "uint256" },
+      { name: "quoteTimestamp", type: "uint32" },
+      { name: "fillDeadline", type: "uint32" },
+      { name: "exclusivityDeadline", type: "uint32" },
+      { name: "recipient", type: "bytes32" },
+      { name: "exclusiveRelayer", type: "bytes32" },
+      { name: "message", type: "bytes" },
+    ],
+    log.data as Hex,
+  );
+
+  // recipient is bytes32 — extract the address from the last 20 bytes
+  const recipientBytes32 = decoded[7] as Hex;
+  const recipientAddr = ("0x" + recipientBytes32.slice(-40)) as Hex;
+  const message = decoded[9] as Hex;
+
+  return { recipient: recipientAddr, message };
 }
 
 /** Recursively find a log with a specific topic[0] in a callTracer frame tree. */
@@ -1231,7 +1328,8 @@ export async function buildCrosschainTransfer(params: {
   amount: string;       // human-readable
   useNativeEth?: boolean;  // true = vault wraps native ETH→WETH via sourceNativeAmount
   shouldUnwrapOnDestination?: boolean;
-  /** Operator address for depositV3 simulation (extracts destination message) */
+  /** Operator address for depositV3 simulation (extracts destination message).
+   *  Falls back to the on-chain vault owner when absent. */
   operatorAddress?: Address;
 }): Promise<{
   quote: CrosschainQuote;
@@ -1318,52 +1416,62 @@ export async function buildCrosschainTransfer(params: {
   });
 
   // Phase 2: Simulate depositV3 to extract the expanded destination message,
-  // then re-quote with accurate gas estimation from the Across API.
-  if (params.operatorAddress) {
-    const simResult = await simulateDepositV3ForMessage({
+  // then re-quote with accurate gas estimation from the Across API. The
+  // simulation must run as the vault owner — the authenticated operator when
+  // present, otherwise the on-chain owner fetched from the vault — because
+  // depositV3 requires vault authorization. A failed simulation or a failed
+  // destination re-quote is fatal: quoting without the real message
+  // underprices the fill and strands funds in escrow.
+  const simSender = params.operatorAddress ??
+    (await getVaultInfo(params.srcChainId, params.vaultAddress)).owner;
+  let simResult: { recipient: Hex; message: Hex };
+  try {
+    simResult = await simulateDepositV3ForMessage({
       vaultAddress: params.vaultAddress,
       calldata,
       srcChainId: params.srcChainId,
-      operatorAddress: params.operatorAddress,
+      operatorAddress: simSender,
     });
-    if (simResult) {
-      // Re-quote with accurate destination fill simulation. If Across cannot
-      // simulate the fill, the destination call would very likely also revert
-      // on-chain — fail with context rather than silently falling back to the
-      // optimistic quote (a deposit that never fills strands funds in escrow).
-      try {
-        quote = await getCrosschainQuote(
-          params.srcChainId,
-          params.dstChainId,
-          params.tokenSymbol,
-          bridgeAmount,
-          { recipient: simResult.recipient as Address, message: simResult.message },
-        );
-      } catch (err) {
-        throw new Error(
-          `Across could not simulate the destination fill on ${chainName(params.dstChainId)} ` +
-          `(the relayer's call into the vault reverted). The bridge would likely fail on-chain. ` +
-          `Details: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      // Rebuild calldata with the accurate outputAmount
-      calldata = buildDepositV3Calldata({
-        vaultAddress: params.vaultAddress,
-        inputToken: quote.inputToken.address,
-        outputToken: quote.outputToken.address,
-        inputAmount: quote.inputAmountRaw,
-        outputAmount: quote.outputAmountRaw,
-        destinationChainId: params.dstChainId,
-        quoteTimestamp: quote.fee.quoteTimestamp,
-        exclusiveRelayer: quote.fee.exclusiveRelayer,
-        exclusivityDeadline: quote.fee.exclusivityDeadline,
-        opType: OpType.Transfer,
-        navToleranceBps: DEFAULT_NAV_TOLERANCE_BPS,
-        sourceNativeAmount: useNative ? inputAmountRaw : undefined,
-        shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
-      });
-    }
+  } catch (err) {
+    throw new Error(
+      `Source-chain simulation failed on ${chainName(params.srcChainId)}: ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    );
   }
+  // Re-quote with accurate destination fill simulation. If Across cannot
+  // simulate the fill, the destination call would very likely also revert
+  // on-chain — fail with context rather than silently falling back to the
+  // optimistic quote.
+  try {
+    quote = await getCrosschainQuote(
+      params.srcChainId,
+      params.dstChainId,
+      params.tokenSymbol,
+      bridgeAmount,
+      { recipient: simResult.recipient as Address, message: simResult.message },
+    );
+  } catch (err) {
+    throw new Error(
+      `Destination fill simulation failed on ${chainName(params.dstChainId)}: ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  // Rebuild calldata with the accurate outputAmount
+  calldata = buildDepositV3Calldata({
+    vaultAddress: params.vaultAddress,
+    inputToken: quote.inputToken.address,
+    outputToken: quote.outputToken.address,
+    inputAmount: quote.inputAmountRaw,
+    outputAmount: quote.outputAmountRaw,
+    destinationChainId: params.dstChainId,
+    quoteTimestamp: quote.fee.quoteTimestamp,
+    exclusiveRelayer: quote.fee.exclusiveRelayer,
+    exclusivityDeadline: quote.fee.exclusivityDeadline,
+    opType: OpType.Transfer,
+    navToleranceBps: DEFAULT_NAV_TOLERANCE_BPS,
+    sourceNativeAmount: useNative ? inputAmountRaw : undefined,
+    shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
+  });
 
   const srcName = chainName(params.srcChainId);
   const dstName = chainName(params.dstChainId);
@@ -1456,12 +1564,20 @@ export interface NavEqualizationResult {
  * Simulates multicall([depositV3, updateUnitaryValue]) on the source chain to
  * obtain the post-sync unitary value. Returns pre/post values and the signed
  * impact percentage (negative = NAV dropped).
+ *
+ * When the projection multicall itself reverts with NavImpactTooHigh (the sync
+ * exceeds the on-chain tolerance), the revert carries no numbers — so the drop
+ * is computed from the pre-sync NAV instead: a sync moves tokens out without
+ * reducing supply, so the unit-price drop equals value leaving / net total value.
+ * Callers must pass inputTokenAddress/inputAmountRaw to enable this fallback.
  */
 export async function projectSyncNavImpact(params: {
   vaultAddress: Address;
   srcChainId: number;
   depositV3Calldata: Hex;
   operatorAddress?: Address;
+  inputTokenAddress?: Address;
+  inputAmountRaw?: bigint;
 }): Promise<{
   preUnitaryValue: string;
   postUnitaryValue: string;
@@ -1472,6 +1588,7 @@ export async function projectSyncNavImpact(params: {
 
   // Pre-sync NAV
   let preNav: bigint;
+  let preNetTotalValue: bigint;
   try {
     const preCall = await publicClient.call({
       to: params.vaultAddress,
@@ -1487,6 +1604,7 @@ export async function projectSyncNavImpact(params: {
       data: preCall.data,
     }) as { unitaryValue: bigint; netTotalValue: bigint; netTotalLiabilities: bigint };
     preNav = preResult.unitaryValue;
+    preNetTotalValue = preResult.netTotalValue;
   } catch {
     return undefined;
   }
@@ -1534,7 +1652,35 @@ export async function projectSyncNavImpact(params: {
       postUnitaryValue: postNav.toString(),
       impactPct: (Number(impactBps) / 100).toFixed(4),
     };
-  } catch {
+  } catch (err) {
+    // NavImpactTooHigh carries no arguments — compute the projected drop from
+    // the pre-sync NAV so the caller can fail fast with the real numbers.
+    const revertData = getRevertDataFromError(err);
+    if (
+      revertData?.slice(0, 10) === NAV_IMPACT_TOO_HIGH_SELECTOR &&
+      params.inputTokenAddress &&
+      params.inputAmountRaw &&
+      preNetTotalValue > 0n
+    ) {
+      try {
+        const pool = await getPoolData(params.srcChainId, params.vaultAddress);
+        const outRaw = await convertTokenAmountViaOracle(
+          params.srcChainId,
+          params.inputTokenAddress,
+          params.inputAmountRaw,
+          pool.baseToken,
+        );
+        // outRaw is in base-token (pool) decimals — the same scale as netTotalValue.
+        const dropBps = (outRaw * 10000n) / preNetTotalValue;
+        return {
+          preUnitaryValue: preNav.toString(),
+          postUnitaryValue: "0",
+          impactPct: (-Number(dropBps) / 100).toFixed(4),
+        };
+      } catch {
+        return undefined;
+      }
+    }
     return undefined;
   }
 }
@@ -1548,8 +1694,8 @@ export async function projectSyncNavImpact(params: {
  * direction, token, and amount from live pool state.
  *
  * Uses getAggregatedNav() to read the full multi-chain state and compute the
- * group target in USDC as the common denominator. NAV sync only makes sense
- * between chains that share the same base asset (ETH↔ETH, USDC↔USDC, ...).
+ * group target in USDC as the common denominator, so pools with different base
+ * assets (ETH↔USDC, WETH↔USDT, ...) can still be equalized.
  *
  * The bridge amount in USDC is:
  *   bridgeUsdc = min(srcDeviation, −dstDeviation)
@@ -1676,11 +1822,6 @@ export async function computeNavEqualization(params: {
     baseTokenType = "WETH"; // native token (ETH/BNB) → WETH
   }
 
-  const crossBaseAsset = !sameBaseAsset(
-    srcSnapFinal.chainId, srcSnapFinal.baseToken,
-    dstSnapFinal.chainId, dstSnapFinal.baseToken,
-  );
-
   let candidates = srcTokens.filter((t) => dstTokenTypes.has(t.type));
   if (params.preferredToken) {
     const pref = params.preferredToken.toUpperCase();
@@ -1688,8 +1829,8 @@ export async function computeNavEqualization(params: {
     if (filtered.length > 0) candidates = filtered;
   }
 
-  // Prefer base token when both chains share the same base asset (1:1 value transfer).
-  // For cross-base-asset syncs, force stablecoins to avoid mismatched bridge tokens.
+  // Preference order: base-token-type match first (1:1 value transfer), then
+  // stablecoins, then any other bridgeable token the destination supports.
   let bestToken: BridgeableToken | undefined;
   let bestBalance = 0n;
   let isBaseMatch = false;
@@ -1708,8 +1849,6 @@ export async function computeNavEqualization(params: {
     const isBT = candidate.type === baseTokenType;
     const isStable = candidate.type === "USDC" || candidate.type === "USDT";
 
-    if (crossBaseAsset && !isStable) continue;
-
     if (isBT && balance > 0n && (!isBaseMatch || balance > bestBalance)) {
       bestToken = candidate;
       bestBalance = balance;
@@ -1725,10 +1864,15 @@ export async function computeNavEqualization(params: {
   }
 
   if (!bestToken || bestBalance === 0n) {
-    const available = candidates.map((t) => t.symbol).join(", ");
+    const checked = candidates
+      .map((t) => {
+        const bal = candidateBalances.get(t.address.toLowerCase()) ?? 0n;
+        return `${t.symbol}: ${formatUnits(bal, t.decimals)}`;
+      })
+      .join(", ");
     throw new Error(
       `No bridgeable token with balance on ${chainName(srcChainId)} for NAV equalization. ` +
-      `Checked: ${available || "none bridgeable"}.`,
+      `Checked balances — ${checked || "none bridgeable"}.`,
     );
   }
 
@@ -1865,9 +2009,16 @@ export async function buildCrosschainSync(params: {
   tokenSymbol?: string;   // required when amount is provided; preferred token when equalizing
   amount?: string;        // omit for deterministic NAV equalization
   navToleranceBps?: number;
+  /**
+   * Operator's stored default sync tolerance (bps), already resolved from KV by
+   * the caller. Used only when no explicit navToleranceBps is given AND the
+   * amount was operator-specified (equalization mode sizes its own tolerance).
+   */
+  defaultNavToleranceBps?: number;
   useNativeEth?: boolean; // true = vault wraps native ETH→WETH via sourceNativeAmount
   shouldUnwrapOnDestination?: boolean;
-  /** Operator address for depositV3 simulation (extracts destination message) */
+  /** Operator address for depositV3 simulation (extracts destination message).
+   *  Falls back to the on-chain vault owner when absent. */
   operatorAddress?: Address;
 }): Promise<{
   quote: CrosschainQuote;
@@ -1879,6 +2030,8 @@ export async function buildCrosschainSync(params: {
     postUnitaryValue: string;
     impactPct: string;
   };
+  /** Effective sync tolerance (bps) baked into the calldata */
+  navToleranceBps: number;
 }> {
   if (params.srcChainId === params.dstChainId) {
     throw new Error("Cross-chain sync requires different source and destination chains.");
@@ -1988,10 +2141,11 @@ export async function buildCrosschainSync(params: {
   // bridge amount is intentionally sized to shift NAV, so the tolerance must accommodate
   // the expected impact. We use the pre-bridge divergence + 200 bps margin, capped at
   // the on-chain MAX_NAV_TOLERANCE_BPS (10000 = 100%).
+  // For operator-specified amounts: explicit param > operator's stored default > 1%.
   const toleranceBps = params.navToleranceBps
     ?? (navEqualization
       ? Math.min(navEqualization.divergenceBps + 200, 10000)
-      : DEFAULT_NAV_TOLERANCE_BPS);
+      : (params.defaultNavToleranceBps ?? DEFAULT_NAV_TOLERANCE_BPS));
 
   // Build initial calldata (shared buildDepositV3Calldata, only opType + tolerance differ)
   let calldata = buildDepositV3Calldata({
@@ -2011,47 +2165,57 @@ export async function buildCrosschainSync(params: {
   });
 
   // Phase 2: Simulate depositV3 to extract the expanded destination message,
-  // then re-quote with accurate gas estimation from the Across API.
-  if (params.operatorAddress) {
-    const simResult = await simulateDepositV3ForMessage({
+  // then re-quote with accurate gas estimation from the Across API. The
+  // simulation must run as the vault owner — the authenticated operator when
+  // present, otherwise the on-chain owner fetched from the vault — because
+  // depositV3 requires vault authorization. A failed simulation or a failed
+  // destination re-quote is fatal: quoting without the real message
+  // underprices the fill and strands funds in escrow.
+  const simSender = params.operatorAddress ??
+    (await getVaultInfo(srcChainId, params.vaultAddress)).owner;
+  let simResult: { recipient: Hex; message: Hex };
+  try {
+    simResult = await simulateDepositV3ForMessage({
       vaultAddress: params.vaultAddress,
       calldata,
       srcChainId,
-      operatorAddress: params.operatorAddress,
+      operatorAddress: simSender,
     });
-    if (simResult) {
-      try {
-        quote = await getCrosschainQuote(
-          srcChainId,
-          dstChainId,
-          tokenSymbol,
-          amount,
-          { recipient: simResult.recipient as Address, message: simResult.message },
-        );
-      } catch (err) {
-        throw new Error(
-          `Across could not simulate the destination fill on ${chainName(dstChainId)} ` +
-          `(the relayer's call into the vault reverted). The bridge would likely fail on-chain. ` +
-          `Details: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      calldata = buildDepositV3Calldata({
-        vaultAddress: params.vaultAddress,
-        inputToken: quote.inputToken.address,
-        outputToken: quote.outputToken.address,
-        inputAmount: quote.inputAmountRaw,
-        outputAmount: quote.outputAmountRaw,
-        destinationChainId: dstChainId,
-        quoteTimestamp: quote.fee.quoteTimestamp,
-        exclusiveRelayer: quote.fee.exclusiveRelayer,
-        exclusivityDeadline: quote.fee.exclusivityDeadline,
-        opType: OpType.Sync,
-        navToleranceBps: toleranceBps,
-        sourceNativeAmount: useNative ? inputAmountRaw : undefined,
-        shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
-      });
-    }
+  } catch (err) {
+    throw new Error(
+      `Source-chain simulation failed on ${chainName(srcChainId)}: ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    );
   }
+  try {
+    quote = await getCrosschainQuote(
+      srcChainId,
+      dstChainId,
+      tokenSymbol,
+      amount,
+      { recipient: simResult.recipient as Address, message: simResult.message },
+    );
+  } catch (err) {
+    throw new Error(
+      `Destination fill simulation failed on ${chainName(dstChainId)}: ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  calldata = buildDepositV3Calldata({
+    vaultAddress: params.vaultAddress,
+    inputToken: quote.inputToken.address,
+    outputToken: quote.outputToken.address,
+    inputAmount: quote.inputAmountRaw,
+    outputAmount: quote.outputAmountRaw,
+    destinationChainId: dstChainId,
+    quoteTimestamp: quote.fee.quoteTimestamp,
+    exclusiveRelayer: quote.fee.exclusiveRelayer,
+    exclusivityDeadline: quote.fee.exclusivityDeadline,
+    opType: OpType.Sync,
+    navToleranceBps: toleranceBps,
+    sourceNativeAmount: useNative ? inputAmountRaw : undefined,
+    shouldUnwrapOnDestination: params.shouldUnwrapOnDestination,
+  });
 
   const srcName = chainName(srcChainId);
   const dstName = chainName(dstChainId);
@@ -2083,6 +2247,8 @@ export async function buildCrosschainSync(params: {
         srcChainId,
         depositV3Calldata: calldata,
         operatorAddress: params.operatorAddress,
+        inputTokenAddress: quote.inputToken.address,
+        inputAmountRaw: quote.inputAmountRaw,
       })
     : undefined;
 
@@ -2090,7 +2256,22 @@ export async function buildCrosschainSync(params: {
     description += ` | Projected ${srcName} NAV impact: ${Number(navImpact.impactPct).toFixed(2)}%`;
   }
 
-  return { quote, calldata, description, navEqualization, navImpact };
+  // Fail fast when the projected source-chain unit-price drop exceeds the sync
+  // tolerance: the on-chain depositV3 would revert with NavImpactTooHigh anyway,
+  // so surface the exact numbers now instead of a raw revert at execution time.
+  if (navImpact && navImpact.preUnitaryValue !== "0" && !navEqualization) {
+    const impactPct = Number(navImpact.impactPct);
+    if (impactPct < 0 && Math.abs(impactPct) * 100 > toleranceBps) {
+      throw new Error(
+        `This sync moves ~${Math.abs(impactPct).toFixed(2)}% of the ${srcName} pool's NAV ` +
+        `(${amount} ${quote.inputToken.symbol}), above the sync tolerance of ${(toleranceBps / 100).toFixed(2)}%. ` +
+        `Reduce the amount, or raise the sync tolerance in Settings → Trading or with /synctolerance ` +
+        `(e.g. "set sync tolerance to 3%").`,
+      );
+    }
+  }
+
+  return { quote, calldata, description, navEqualization, navImpact, navToleranceBps: toleranceBps };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────

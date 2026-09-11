@@ -19,6 +19,7 @@ import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { sanitizeError } from "../config.js";
 import {
   handle_set_default_slippage,
+  handle_set_default_sync_tolerance,
   handle_set_swap_shield_tolerance,
   handle_enable_swap_shield,
   handle_set_nav_shield_threshold,
@@ -74,6 +75,21 @@ settings.post("/slippage", async (c) => {
     const body = await c.req.json<SettingsBody & { slippage: string }>();
     const ctx = await verifyOperatorAndBuildContext(body);
     const result = await handle_set_default_slippage(c.env, ctx, { slippage: body.slippage }, "set_default_slippage");
+    return c.json({ ok: true, message: result.message });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return c.json({ error: err.message }, err.status as 401 | 403);
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: sanitizeError(msg) }, 400);
+  }
+});
+
+settings.post("/sync-tolerance", async (c) => {
+  try {
+    const body = await c.req.json<SettingsBody & { tolerance: string }>();
+    const ctx = await verifyOperatorAndBuildContext(body);
+    const result = await handle_set_default_sync_tolerance(c.env, ctx, { tolerance: body.tolerance }, "set_default_sync_tolerance");
     return c.json({ ok: true, message: result.message });
   } catch (err) {
     if (err instanceof AuthError) {

@@ -7,13 +7,10 @@
  *
  * ## How it works
  *
- * 1. Read current NAV via `updateUnitaryValue()` simulation on the vault
- * 2. Simulate a vault `multicall([swap, updateUnitaryValue])` via `eth_call`
- *    — this captures the post-swap NAV in a single atomic simulation
- *    — the simulation runs as the vault OPERATOR (not the agent wallet),
- *      because `multicall` is not in the agent's delegated selectors.
- *      The operator is the vault owner and is always authorized for any
- *      selector, so the multicall succeeds.
+ * 1. Read current NAV via `updateUnitaryValue()` eth_call on the vault
+ * 2. eth_call a vault `multicall([tx, updateUnitaryValue])` from the address
+ *    that will actually execute the transaction — this captures the post-swap
+ *    NAV in a single atomic simulation
  * 3. Compare post-swap unitaryValue vs pre-swap unitaryValue
  * 4. If drop > MAX_NAV_DROP_PCT, reject the transaction
  * 5. RECOVERY RULE: trades that improve or hold the current unitaryValue are
@@ -50,14 +47,9 @@
  * failure), the shield returns `allowed: false`. We NEVER allow a
  * transaction when we can't even read the vault's current NAV.
  *
- * However, if the multicall simulation fails but the swap ALONE
- * simulates successfully, we return `allowed: true, verified: false`.
- * This means: "the trade is valid but NAV impact could not be measured
- * atomically" — the caller decides whether to proceed (execution.ts
- * logs a warning and continues). This should NOT be the normal path —
- * the operator address is always authorized for multicall. If this
- * fires, investigate why multicall is failing (RPC issue, adapter
- * not installed on this vault, etc.).
+ * If the multicall reverts, the transaction itself would revert on-chain,
+ * so the shield returns `allowed: false` with code TRADE_REVERTS and the
+ * decoded revert reason.
  */
 
 import {
@@ -65,9 +57,7 @@ import {
   decodeFunctionResult,
   type Address,
   type Hex,
-  type PublicClient,
 } from "viem";
-import { simulateCalls } from "viem/actions";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
 import { getRpcProvider } from "./rpcClient.js";
 import { decodeRevertData, getRevertDataFromError } from "./errorDecoder.js";
@@ -184,8 +174,8 @@ export interface NavShieldResult {
   reason?: string;
   /** Distinguishes WHY the result is what it is:
    *  - 'BLOCKED'       — NAV would drop more than the threshold
-   *  - 'TRADE_REVERTS' — the swap itself reverts on-chain (not a NAV issue)
-   *  - 'UNVERIFIED'    — multicall simulation failed but swap is valid; NAV unknown
+   *  - 'TRADE_REVERTS' — the transaction itself reverts on-chain (not a NAV issue)
+   *  - 'UNVERIFIED'    — no outstanding shares yet; nothing to protect
    *  - 'DISABLED'      — operator intentionally disabled the NAV shield temporarily
    *  - undefined       — allowed, NAV verified OK
    */
@@ -223,28 +213,35 @@ function decodeUpdateUnitaryValue(data: Hex): NavData {
 }
 
 /**
- * Format a simulation error for human-readable output, including any raw revert
- * data and the decoded error if it matches a known ABI.
+ * Format a simulation error for human-readable output.
+ * When the revert data decodes against a known ABI, only the decoded reason is
+ * shown — the raw selector is surfaced exclusively for undecoded reverts.
  */
 function formatSimulationError(err: unknown, prefix: string): string {
   const msg = err instanceof Error ? err.message : String(err);
   const revertData = getRevertDataFromError(err);
   const decoded = revertData ? decodeRevertData(revertData) : null;
-  const parts: string[] = [`${prefix}: ${msg}`];
-  if (decoded) parts.push(`Decoded revert: ${decoded}`);
-  if (revertData && !decoded) parts.push(`Raw revert data: ${revertData}`);
-  return parts.join(" | ");
+
+  let detail: string;
+  if (decoded) {
+    detail = decoded.replace(/^Contract reverted: /, "");
+  } else if (revertData) {
+    detail = `Raw revert data: ${revertData}`;
+  } else if (/returned no data/i.test(msg)) {
+    // viem wraps empty-data reverts in a misleading "returned no data" decoding
+    // error — say what actually happened instead.
+    detail = "the transaction reverted on-chain without a revert reason";
+  } else {
+    detail = msg;
+  }
+
+  return `${prefix}: ${detail}`;
 }
 
-/** Build a TRADE_REVERTS result from a swap simulation failure. */
-function handleSwapSimulationFailure(
-  err: unknown,
-  preUnitaryValue: bigint,
-  _chainId: number,
-): NavShieldResult {
+/** Build a TRADE_REVERTS result from a failed multicall eth_call. */
+function buildTradeRevertsResult(err: unknown, preUnitaryValue: bigint): NavShieldResult {
   const reason = formatSimulationError(err, "Trade simulation failed — the transaction would revert on-chain");
   console.error(`[NavShield] ✗ TRADE_REVERTS: ${reason}`);
-
   return {
     allowed: false,
     verified: false,
@@ -394,11 +391,10 @@ async function evaluateNavImpact(
  * Check if a transaction would drop the vault's NAV per unit by more
  * than the allowed threshold.
  *
- * Uses eth_simulateV1 from the address that will actually execute the transaction.
- * This gives us:
- *   - the pre-swap unitary value
- *   - whether the transaction succeeds as the executor
- *   - the post-swap unitary value
+ * Uses plain `eth_call` from the address that will actually execute the
+ * transaction:
+ *   - `updateUnitaryValue()` for the pre-swap unitary value
+ *   - `multicall([tx, updateUnitaryValue])` for the post-swap unitary value
  *
  * RECOVERY RULE: trades that improve or hold the current unitaryValue are
  * always allowed, even when the vault is below the 24h baseline. Only trades
@@ -460,43 +456,50 @@ export async function checkNavImpact(
       abi: RIGOBLOCK_VAULT_ABI,
       functionName: "updateUnitaryValue",
     });
+    const multicallData = encodeFunctionData({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "multicall",
+      args: [[txData, updateNavCalldata]],
+    });
 
-    const preNavCall = { to: vaultAddress, data: updateNavCalldata };
-    const swapCall = { to: vaultAddress, data: txData, value: txValue };
-    const postNavCall = { to: vaultAddress, data: updateNavCalldata };
-
-    // Run both simulations concurrently. viem's HTTP transport batches independent
+    // Run both eth_calls concurrently. viem's HTTP transport batches independent
     // JSON-RPC requests into a single HTTP call, so this is still one round-trip.
-    const [preSim, swapSim] = await Promise.all([
-      simulateCalls(publicClient, {
+    const [preSettled, multiSettled] = await Promise.allSettled([
+      publicClient.call({
         account: executorAddress,
-        calls: [preNavCall],
+        to: vaultAddress,
+        data: updateNavCalldata,
       }),
-      simulateCalls(publicClient, {
+      publicClient.call({
         account: executorAddress,
-        calls: [swapCall, postNavCall],
+        to: vaultAddress,
+        data: multicallData,
+        value: txValue,
       }),
     ]);
 
-    // Pre-swap NAV
-    const preResult = preSim.results[0];
-    if (preResult.status !== "success") {
-      throw new Error(formatSimulationError(preResult.error, "Pre-swap NAV read failed"));
+    if (preSettled.status === "rejected") {
+      throw preSettled.reason instanceof Error
+        ? preSettled.reason
+        : new Error(String(preSettled.reason));
     }
-    const preNav = decodeUpdateUnitaryValue(preResult.data);
+    const preNav = decodeUpdateUnitaryValue(preSettled.value.data!);
 
-    // Swap execution
-    const swapResult = swapSim.results[0];
-    if (swapResult.status !== "success") {
-      return handleSwapSimulationFailure(swapResult.error, preNav.unitaryValue, chainId);
+    if (multiSettled.status === "rejected") {
+      return buildTradeRevertsResult(
+        multiSettled.reason,
+        preNav.unitaryValue,
+      );
     }
 
-    // Post-swap NAV
-    const postResult = swapSim.results[1];
-    if (postResult.status !== "success") {
-      throw new Error(formatSimulationError(postResult.error, "Post-swap NAV read failed"));
-    }
-    const postNav = decodeUpdateUnitaryValue(postResult.data);
+    // multicall returns bytes[] — one result per inner call. The last one is
+    // the updateUnitaryValue return data.
+    const innerResults = decodeFunctionResult({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "multicall",
+      data: multiSettled.value.data!,
+    }) as Hex[];
+    const postNav = decodeUpdateUnitaryValue(innerResults[innerResults.length - 1]);
 
     return evaluateNavImpact(preNav, postNav, chainId, vaultAddress, kv, maxDropPct);
   } catch (err) {

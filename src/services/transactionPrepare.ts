@@ -202,7 +202,7 @@ export async function prepareTransaction(
 
     if (!navResult.allowed) {
       if (navResult.code === "TRADE_REVERTS") {
-        const warning = `⚠️ Simulation warning: ${navResult.reason || "transaction may revert on-chain"} — verify token approvals and vault adapter support before signing.`;
+        const warning = `⚠️ Simulation warning: ${navResult.reason || "the transaction would revert on-chain"}`;
         tx.revertWarning = warning;
         tx.navShieldChecked = true;
         return { tx, warning };
@@ -214,7 +214,7 @@ export async function prepareTransaction(
     }
 
     if (navResult.code === "UNVERIFIED") {
-      navShieldWarning = `⚠️ NAV verification unavailable — could not measure NAV impact atomically (${navResult.reason || "multicall simulation failed"}). Proceeding with gas estimate only.`;
+      navShieldWarning = `⚠️ NAV verification unavailable — could not measure NAV impact (${navResult.reason || "unknown reason"}). Proceeding with gas estimate only.`;
     }
 
     tx.navShieldChecked = true;

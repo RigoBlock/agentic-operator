@@ -140,9 +140,9 @@ function formatDecodedError(name: string, args: unknown): string {
     return `ActionNotAllowed(${sel} = ${actionName}) — Rigoblock A0xRouter rejected this 0x settler action.`;
   }
   if (name === "NavImpactTooHigh") {
-    return "NavImpactTooHigh — this operation would move too much value out of the vault in one transaction. " +
-      "For NAV sync this happens on the SOURCE chain because tokens leave but virtual supply is not reduced, so the source-chain unit price drops. " +
-      "Try a smaller amount, pass a higher navToleranceBps on the sync, or use crosschain_transfer instead of sync.";
+    return "NavImpactTooHigh — this operation would move too much value out of the vault in one transaction, " +
+      "dropping the source-chain unit price beyond the sync tolerance. " +
+      "Reduce the amount, or raise the sync tolerance in Settings → Trading or with /synctolerance.";
   }
   if (name === "EffectiveSupplyTooLow") {
     return "EffectiveSupplyTooLow — the vault's effective supply would fall below the on-chain minimum. Bridge a smaller amount.";

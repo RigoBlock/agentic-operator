@@ -7,6 +7,7 @@
  *   - /pool [name]     → switch active vault
  *   - /pools           → list paired vaults
  *   - /slippage <pct>  → set default slippage
+ *   - /synctolerance <pct> → set default sync tolerance (NAV syncs)
  *   - /swapshield <pct>|reset → set/reset swap-shield tolerance
  *   - /navshield <pct>|reset  → set/reset NAV-shield threshold
  *   - /clear           → reset conversation
@@ -25,6 +26,7 @@ import { formatUnits, type Address } from "viem";
 import { processChat, executeToolCall, toolLabel, type ToolResult } from "../llm/client.js";
 import {
   handle_set_default_slippage,
+  handle_set_default_sync_tolerance,
   handle_set_swap_shield_tolerance,
   handle_enable_swap_shield,
   handle_set_nav_shield_threshold,
@@ -101,6 +103,22 @@ function formatTelegramPct(value: unknown): string {
   return `${formatted}%`;
 }
 
+/** Telegram rejects messages over 4096 chars; keep error surfaces well under it. */
+const TG_ERROR_LIMIT = 1500;
+
+/**
+ * Truncate a user-facing message at a word boundary, with an explicit marker.
+ * A mid-word cut (e.g. "…revert on-chain: The cont…") hides the actionable tail
+ * of revert reasons. Short messages pass through untouched.
+ */
+export function truncateForDisplay(text: string, maxLen: number = TG_ERROR_LIMIT): string {
+  if (text.length <= maxLen) return text;
+  const cut = text.slice(0, maxLen);
+  const lastSpace = cut.lastIndexOf(" ");
+  const boundary = lastSpace > maxLen / 2 ? lastSpace : maxLen;
+  return `${cut.slice(0, boundary).trimEnd()} … [truncated]`;
+}
+
 /** Detect whether a reply contains a non-blocking safety warning that should
  *  change the confirmation header from "Trade ready" to "Trade ready with warning".
  */
@@ -168,7 +186,7 @@ function buildCompactTurnSummary(
 
   for (const tc of toolCalls ?? []) {
     if (!tc.error || !tc.result) continue;
-    const err = stripToolPrefix(tc.result).slice(0, 200);
+    const err = truncateForDisplay(stripToolPrefix(tc.result), 400);
     const args = tc.arguments || {};
     const tol = args.navToleranceBps
       ? ` (tolerance ${(Number(args.navToleranceBps) / 100).toFixed(2)}%)`
@@ -599,7 +617,7 @@ async function handleUpdate(env: Env, token: string, update: TgUpdate): Promise<
     const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
     if (chatId) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      await sendMessage(token, chatId, `⚠️ Internal error: ${escapeHtml(sanitizeError(msg).slice(0, 200))}`).catch(() => {});
+      await sendMessage(token, chatId, `⚠️ Internal error: ${escapeHtml(truncateForDisplay(sanitizeError(msg), 400))}`).catch(() => {});
     }
     // Don't re-throw — Telegram will retry endlessly
   }
@@ -777,6 +795,7 @@ async function handleMessage(
       }
 
       case "/slippage":
+      case "/synctolerance":
       case "/swapshield":
       case "/navshield": {
         const settingsUser = await getTelegramUser(env.KV, userId);
@@ -807,6 +826,14 @@ async function handleMessage(
               return;
             }
             result = await handle_set_default_slippage(env, settingsCtx, { slippage: value }, "set_default_slippage");
+          } else if (command === "/synctolerance") {
+            const value = args.join(" ").trim();
+            if (!value) {
+              await sendMessage(token, chatId,
+                "Usage: <code>/synctolerance 3%</code>\nValid range: 0.1% – 100%. Applies to NAV syncs with an explicit amount (default 1%). This is not the NAV shield (default 10%).");
+              return;
+            }
+            result = await handle_set_default_sync_tolerance(env, settingsCtx, { tolerance: value }, "set_default_sync_tolerance");
           } else if (command === "/swapshield") {
             const value = args.join(" ").trim().toLowerCase();
             if (!value) {
@@ -841,7 +868,7 @@ async function handleMessage(
           await sendMessage(token, chatId, formatForTelegram(result.message));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          await sendMessage(token, chatId, `⚠️ ${escapeHtml(sanitizeError(msg).slice(0, 300))}`);
+          await sendMessage(token, chatId, `⚠️ ${escapeHtml(truncateForDisplay(sanitizeError(msg)))}`);
         }
         return;
       }
@@ -1388,7 +1415,9 @@ async function handleMessage(
     console.error("[telegram] processChat error:", err);
     const rawMsg = err instanceof Error ? err.message : "Unknown error";
     const safeMsg = sanitizeError(rawMsg);
-    await sendMessage(token, chatId, `⚠️ Error: ${escapeHtml(safeMsg.slice(0, 200))}`);
+    // Surface the FULL revert reason — a hard mid-word cut here previously hid the
+    // actionable tail (e.g. "…revert on-chain: The cont…") from users.
+    await sendMessage(token, chatId, `⚠️ Error: ${escapeHtml(truncateForDisplay(safeMsg))}`);
   }
 }
 
@@ -1470,7 +1499,7 @@ async function handleCallbackQuery(
       console.error("[telegram] direct tool error:", err);
       const rawMsg = err instanceof Error ? err.message : "Unknown error";
       const safeMsg = sanitizeError(rawMsg);
-      await sendMessage(token, chatId, `⚠️ ${escapeHtml(safeMsg.slice(0, 300))}`);
+      await sendMessage(token, chatId, `⚠️ ${escapeHtml(truncateForDisplay(safeMsg))}`);
     }
     return;
   }
@@ -1627,8 +1656,8 @@ async function handleCallbackQuery(
       const safeMsg = sanitizeError(rawMsg);
       const fallbackToManual = execErr instanceof ExecutionError ? execErr.fallbackToManual : false;
       const display = fallbackToManual
-        ? `⚠️ <b>Automatic execution failed</b>\n\n${escapeHtml(safeMsg.slice(0, 400))}\n\nOpen <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to sign this transaction from your wallet, or fund the agent wallet with native currency so future trades execute automatically.`
-        : `⚠️ <b>Trade failed</b>\n\n${escapeHtml(safeMsg.slice(0, 300))}`;
+        ? `⚠️ <b>Automatic execution failed</b>\n\n${escapeHtml(truncateForDisplay(safeMsg))}\n\nOpen <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to sign this transaction from your wallet, or fund the agent wallet with native currency so future trades execute automatically.`
+        : `⚠️ <b>Trade failed</b>\n\n${escapeHtml(truncateForDisplay(safeMsg))}`;
       await editMessageText(token, chatId, messageId, display).catch(() => {});
       await updatePendingAssistantMessage(env.KV, userId, "Trade execution failed.");
     } finally {
@@ -1705,13 +1734,13 @@ function formatTelegramOutcomes(outcomes: TxExecOutcome[]): string {
         lines.push(`⚠️ ${escapeHtml(desc)} — delegation not set up on ${chainName}. Visit <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to activate.`);
       } else if (fallbackToManual || /sponsorship|sponsor|paymaster/i.test(error)) {
         lines.push(
-          `⚠️ ${escapeHtml(desc)}\n\n${escapeHtml(error.slice(0, 400))}\n\n` +
+          `⚠️ ${escapeHtml(desc)}\n\n${escapeHtml(truncateForDisplay(error))}\n\n` +
           `This transaction cannot be executed from Telegram. ` +
           `Open <a href="https://trader.rigoblock.com">trader.rigoblock.com</a> to sign it from your wallet, ` +
           `or fund your agent wallet with native currency so future trades execute automatically.`,
         );
       } else {
-        lines.push(`⚠️ ${escapeHtml(desc)} — ${escapeHtml(error.slice(0, 150))}`);
+        lines.push(`⚠️ ${escapeHtml(desc)} — ${escapeHtml(truncateForDisplay(error, 300))}`);
       }
     }
   }
@@ -1830,6 +1859,7 @@ async function sendHelpMessage(token: string, chatId: number): Promise<void> {
     "/pool &lt;name&gt; — switch active vault",
     "/addpool &lt;0xAddr&gt; — add vault by address",
     "/slippage &lt;0.5%&gt; — set default slippage",
+    "/synctolerance &lt;3%&gt; — set default sync tolerance (NAV syncs, default 1%)",
     "/swapshield &lt;30%&gt; | reset — temporary oracle-divergence tolerance",
     "/navshield &lt;15%&gt; | reset — temporary max NAV drop threshold (10 min)",
     "/mode [autonomous|confirm] — toggle auto-execute or confirm",

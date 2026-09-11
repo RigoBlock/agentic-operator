@@ -12,6 +12,11 @@ import {
   MAX_SLIPPAGE_BPS,
 } from "../../services/swapShield.js";
 import {
+  setStoredSyncTolerance,
+  MIN_SYNC_TOLERANCE_BPS,
+  MAX_SYNC_TOLERANCE_BPS,
+} from "../../services/crosschain.js";
+import {
   setNavShieldThreshold,
   clearNavShieldThreshold,
   DEFAULT_MAX_NAV_DROP_PCT,
@@ -89,6 +94,61 @@ export async function handle_set_default_slippage(
   await setStoredSlippage(env.KV, ctx.operatorAddress!, bps);
   return {
     message: `✅ Default slippage set to ${bps / 100}% (${bps} bps). This applies to all future swaps until changed.`,
+  };
+
+}
+
+export async function handle_set_default_sync_tolerance(
+  env: Env,
+  ctx: RequestContext,
+  args: Record<string, unknown>,
+  toolName: string,
+): Promise<ToolResult> {
+  ensureOperatorOnly(ctx, toolName);
+
+  const raw = String(args.tolerance ?? "").trim();
+  let bps: number;
+  const percentMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/i);
+  const bpsMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*bps$/i);
+  const plainMatch = raw.match(/^([0-9]+(?:\.[0-9]+)?)$/);
+  if (percentMatch) {
+    const num = parseFloat(percentMatch[1]);
+    if (isNaN(num) || num <= 0) {
+      throw new Error("Invalid sync tolerance value. Provide a positive number (e.g., '1%', '100bps', or '1').");
+    }
+    bps = Math.round(num * 100);
+  } else if (bpsMatch) {
+    const num = parseFloat(bpsMatch[1]);
+    if (isNaN(num) || num <= 0) {
+      throw new Error("Invalid sync tolerance value. Provide a positive number (e.g., '1%', '100bps', or '1').");
+    }
+    if (!Number.isInteger(num)) {
+      throw new Error(`Non-integer bps value '${raw}' is ambiguous — did you mean ${Math.round(num)}bps or ${num}%? Use the '%' suffix for percentages.`);
+    }
+    bps = num;
+  } else if (plainMatch) {
+    const num = parseFloat(plainMatch[1]);
+    if (isNaN(num) || num <= 0) {
+      throw new Error("Invalid sync tolerance value. Provide a positive number (e.g., '1%', '100bps', or '1').");
+    }
+    if (Number.isInteger(num) && num >= MIN_SYNC_TOLERANCE_BPS && num <= MAX_SYNC_TOLERANCE_BPS) {
+      bps = Math.round(num);
+    } else {
+      bps = Math.round(num * 100);
+    }
+  } else {
+    throw new Error("Invalid sync tolerance value. Use a positive number, optionally suffixed with '%' or 'bps' (e.g., '1%', '100bps', or '1').");
+  }
+  if (bps < MIN_SYNC_TOLERANCE_BPS || bps > MAX_SYNC_TOLERANCE_BPS) {
+    throw new Error(
+      `Sync tolerance must be between ${MIN_SYNC_TOLERANCE_BPS / 100}% and ${MAX_SYNC_TOLERANCE_BPS / 100}%. ` +
+      `Got: ${bps / 100}% (${bps} bps).`,
+    );
+  }
+  await setStoredSyncTolerance(env.KV, ctx.operatorAddress!, bps);
+  return {
+    message: `✅ Default sync tolerance set to ${bps / 100}% (${bps} bps). This applies to NAV syncs with an explicit amount until changed. ` +
+      `The NAV shield (default 10%) still protects every trade independently.`,
   };
 
 }

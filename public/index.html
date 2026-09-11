@@ -96,6 +96,14 @@
               <span>%</span>
             </div>
           </div>
+          <!-- Sync Tolerance -->
+          <div class="trading-param">
+            <label>Sync Tolerance <span class="tooltip" data-tooltip="Maximum source-chain unit-price drop allowed for a NAV sync with an explicit amount. Default 1%, up to 100%. This is separate from the NAV Shield.">ⓘ</span></label>
+            <div class="param-input-wrap">
+              <input id="sync-tolerance" type="number" min="0.1" max="100" step="0.1" value="1" onchange="onSyncToleranceChange()" />
+              <span>%</span>
+            </div>
+          </div>
           <!-- Swap Shield -->
           <div class="trading-param">
             <label>Swap Shield <span class="tooltip" data-tooltip="Maximum divergence from the on-chain oracle price in either direction. Default 5%, up to 50%. Resets after 10 min.">ⓘ</span></label>

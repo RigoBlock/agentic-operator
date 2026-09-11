@@ -59,11 +59,11 @@ const MENU_TITLES: Record<string, string> = {
   get_lp_positions: "View LP positions",
   collect_lp_fees: "Collect LP fees",
   burn_position: "Burn position NFT",
-  crosschain_transfer: "Cross-chain transfer",
-  crosschain_sync: "Cross-chain NAV sync",
+  crosschain_transfer: "Cross-chain transfer (you set amount)",
+  crosschain_sync: "Sync NAV between two chains (amount computed automatically)",
   get_crosschain_quote: "Bridge quote",
   get_aggregated_nav: "Aggregated multi-chain NAV",
-  get_rebalance_plan: "Rebalance plan",
+  get_rebalance_plan: "Rebalance plan (analysis only, no transactions)",
   verify_bridge_arrival: "Check bridge arrival",
 };
 
@@ -317,8 +317,10 @@ export async function handle_get_tool_menu(
 
   let message = `Here are the ${category} tools. Pick one and fill in the fields — it runs directly, no agent involved.`;
   if (toolNames === CROSSCHAIN_MENU) {
-    message += ` Supported bridgeable tokens per chain: ${crosschainTokenSummary()}. ` +
-      `Native ETH can bridge as WETH — set "Use native ETH" to true on WETH transfers and the vault wraps ETH automatically.`;
+    message += `\n\nBridgeable tokens by chain: ${crosschainTokenSummary()}.`;
+    message += `\nHyperEVM is USDC-only — any other token on a route to or from it is rejected with an error naming USDC as the alternative.`;
+    message += `\nNative ETH can bridge as WETH — set "Use native ETH" to true on WETH transfers and the vault wraps ETH automatically.`;
+    message += `\n"Sync NAV between two chains" computes the exact equalizing amount itself — leave Amount empty.`;
   }
 
   return {

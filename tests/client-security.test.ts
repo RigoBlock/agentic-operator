@@ -139,6 +139,10 @@ describe("tool auth category membership", () => {
     expect(OPERATOR_VERIFIED_TOOLS.has("set_default_slippage")).toBe(true);
   });
 
+  it("set_default_sync_tolerance is in OPERATOR_VERIFIED_TOOLS", () => {
+    expect(OPERATOR_VERIFIED_TOOLS.has("set_default_sync_tolerance")).toBe(true);
+  });
+
   it("set_swap_shield_tolerance is in OPERATOR_VERIFIED_TOOLS", () => {
     expect(OPERATOR_VERIFIED_TOOLS.has("set_swap_shield_tolerance")).toBe(true);
   });

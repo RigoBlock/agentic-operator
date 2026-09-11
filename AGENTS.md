@@ -71,7 +71,7 @@ Every delegated transaction passes:
 1. **Operator auth** — signature + on-chain ownership.
 2. **Delegation check** — active on-chain delegation for the exact selector.
 3. **7-point validation** — config enabled, target == vault, selector whitelisted, agent wallet matches, `eth_call` simulation succeeds, gas balance sufficient, gas within per-chain caps.
-4. **NAV shield** — simulates `multicall([tx, updateUnitaryValue])`; blocks if post-swap unit value drops > configured threshold (default 10%, temporarily configurable 1%–100% for 10 minutes).
+4. **NAV shield** — `eth_call` of `multicall([tx, updateUnitaryValue])` from the actual executor; blocks if post-swap unit value drops > configured threshold (default 10%, temporarily configurable 1%–100% for 10 minutes).
 5. **Slippage protection** — default 1% (100 bps), clamped to 0.1%–5%.
 6. **Swap shield** — compares DEX quote vs BackgeoOracle 5-minute TWAP; blocks if divergence exceeds 5% (or operator's temporary tolerance).
 
@@ -195,6 +195,16 @@ Semantics you must know:
 | BNB Chain | 56 | `bsc` |
 | Unichain | 130 | `unichain` |
 | HyperEVM | 999 | `hyperevm` |
+
+---
+
+## Code Discipline
+
+Rules for every code change to this service:
+
+1. **No fallbacks, no special-case layers.** If a method produces wrong results, fix the root cause or replace the method. Do not wrap it in cross-checks, alternate-path retries, or "best effort" branches that guess. (Example: the NAV shield uses `eth_call` of `multicall([tx, updateUnitaryValue])` from the actual executor — the same primitive real execution uses — because `eth_simulateV1` produces synthetic-block false positives on Nitro chains. There is no simulator cross-check fallback.)
+2. **Deterministic validation lives in tools/services, not in the LLM.** Amounts, tolerances, routes, and safety checks are computed in code; the LLM only routes to the right tool.
+3. **User-facing text uses only labels and numbers the code knows.** Never raw function selectors, snake_case tool names, or guessed causes (a raw revert selector is acceptable only when the revert cannot be decoded). If a fact is unavailable, say what is known instead of inventing it.
 
 ---
 

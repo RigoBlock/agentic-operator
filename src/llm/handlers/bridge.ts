@@ -14,6 +14,7 @@ import { type Address, type Hex } from "viem";
 import {
   getCrosschainQuote, buildCrosschainTransfer, buildCrosschainSync,
   getAggregatedNav, buildRebalancePlan, chainName as crosschainChainName,
+  getStoredSyncTolerance,
 } from "../../services/crosschain.js";
 import {
   friendlyError, resolveChainArg, resolveChainName, txActionLine,
@@ -145,6 +146,12 @@ export async function handle_crosschain_sync(
     );
   }
 
+  // Resolve the operator's stored default sync tolerance (explicit navToleranceBps
+  // argument still wins; equalization mode sizes its own tolerance).
+  const storedSyncTolerance = ctx.operatorVerified && env.KV && ctx.operatorAddress
+    ? await getStoredSyncTolerance(env.KV, ctx.operatorAddress)
+    : null;
+
   const result = await buildCrosschainSync({
     vaultAddress: ctx.vaultAddress as Address,
     srcChainId: userSrcChainId,
@@ -152,6 +159,7 @@ export async function handle_crosschain_sync(
     tokenSymbol,
     amount,
     navToleranceBps,
+    defaultNavToleranceBps: storedSyncTolerance ?? undefined,
     useNativeEth,
     shouldUnwrapOnDestination,
     operatorAddress: ctx.operatorAddress,
@@ -192,9 +200,8 @@ export async function handle_crosschain_sync(
     description: result.description,
   };
 
-  const toleranceDisplay = navToleranceBps
-    ? `${(navToleranceBps / 100).toFixed(2)}%`
-    : "1.00% (default)";
+  const toleranceDisplay = `${(result.navToleranceBps / 100).toFixed(2)}%` +
+    (navToleranceBps ? "" : storedSyncTolerance !== null ? " (your default)" : " (default)");
 
   const message = [
     `✅ NAV sync ready`,
@@ -335,7 +342,7 @@ export async function handle_get_rebalance_plan(
   const opLines = plan.operations.map((op, i) => {
     const fee = op.estimatedFeePct || "N/A";
     const time = op.estimatedTime || "N/A";
-    const cappedNote = op.capped ? " ⚠️ capped to stay within 10% NAV shield" : "";
+    const cappedNote = op.capped ? " ⚠️ capped at 50% of chain value (partial rebalance)" : "";
     return `  ${i + 1}. ${op.srcChainName} → ${plan.targetChainName}: ${op.amount} ${op.tokenType} (fee: ${fee}, ~${time})${cappedNote}`;
   });
 

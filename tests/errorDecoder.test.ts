@@ -18,7 +18,9 @@ describe("decodeRevertData", () => {
     const decoded = decodeRevertData(data);
     expect(decoded).toBeTruthy();
     expect(decoded).toMatch(/NavImpactTooHigh/i);
-    expect(decoded).toMatch(/virtual supply is not reduced/i);
+    expect(decoded).toMatch(/sync tolerance/i);
+    // Must never conflate the sync tolerance with the NAV shield threshold.
+    expect(decoded).not.toMatch(/navToleranceBps/i);
   });
 
   it("decodes EffectiveSupplyTooLow", () => {

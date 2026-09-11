@@ -14,6 +14,7 @@ import { handle_get_token_balance } from "./vault.js";
 import { handle_verify_bridge_arrival } from "./vault.js";
 import { handle_switch_chain } from "./vault.js";
 import { handle_set_default_slippage } from "./settings.js";
+import { handle_set_default_sync_tolerance } from "./settings.js";
 import { handle_set_swap_shield_tolerance } from "./settings.js";
 import { handle_enable_swap_shield } from "./settings.js";
 import { handle_set_nav_shield_threshold } from "./settings.js";
@@ -71,6 +72,7 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "verify_bridge_arrival": handle_verify_bridge_arrival,
   "switch_chain": handle_switch_chain,
   "set_default_slippage": handle_set_default_slippage,
+  "set_default_sync_tolerance": handle_set_default_sync_tolerance,
   "set_swap_shield_tolerance": handle_set_swap_shield_tolerance,
   "enable_swap_shield": handle_enable_swap_shield,
   "set_nav_shield_threshold": handle_set_nav_shield_threshold,

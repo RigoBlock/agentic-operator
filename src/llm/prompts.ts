@@ -282,7 +282,7 @@ INTENT → ARGS:
 
   bridge: `CROSS-CHAIN (Across Protocol):
 - "bridge/transfer/move N TOKEN from X to Y" → crosschain_transfer — call DIRECTLY in one step (quote + transaction together).
-- "sync ..." → crosschain_sync: with an explicit amount+token it bridges exactly that; WITHOUT an amount the tool computes the NAV-equalizing amount itself — never invent one. If it fails on NavImpactTooHigh, the error asks for navToleranceBps — ask the user for a value and call the tool again with it.
+- "sync ..." → crosschain_sync: with an explicit amount+token it bridges exactly that; WITHOUT an amount the tool computes the NAV-equalizing amount itself — never invent one. Each sync allows a limited source-chain unit-price drop: the sync tolerance (default 1%, operator-configurable up to 100% via "set sync tolerance to X%" / /synctolerance) — do NOT confuse it with the NAV shield (default 10%, "nav shield threshold"). If a sync fails on NavImpactTooHigh, suggest a smaller amount or a higher sync tolerance and ask the operator which they prefer.
 - "how much to bridge" → get_crosschain_quote | NAV across chains → get_aggregated_nav | consolidation plan → get_rebalance_plan | check arrival → verify_bridge_arrival
 - ETH bridges: token="WETH" + useNativeEth=true; set shouldUnwrapOnDestination=true to receive native ETH on the destination.
 - Always pass real chain names/IDs — never placeholders.`,

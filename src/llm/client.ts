@@ -113,6 +113,7 @@ export function isVerifiedOperatorContext(
 export const OPERATOR_VERIFIED_TOOLS = new Set<string>([
   // Operator-scoped KV mutations — safety settings must never be mutable by x402 agents
   "set_default_slippage",
+  "set_default_sync_tolerance",
   "set_swap_shield_tolerance",
   "enable_swap_shield",
   "set_nav_shield_threshold",
@@ -986,6 +987,7 @@ ${executionModeNote}${contextDocsBlock}`;
     tryFastPathSwapShieldToggle(effectiveMsg) ||
     tryFastPathNavShieldThreshold(effectiveMsg) ||
     tryFastPathSlippage(effectiveMsg) ||
+    tryFastPathSyncTolerance(effectiveMsg) ||
     tryFastPathBridge(effectiveMsg) ||
     tryFastPathCrosschainSync(effectiveMsg) ||
     tryFastPathTwapCreate(effectiveMsg) ||
@@ -2060,6 +2062,21 @@ export function tryFastPathSlippage(msg: string): FastPathResult | null {
   const match = m.match(/^(?:set\s+(?:default\s+)?)?slippage(?:\s+to)?\s+([0-9]+(?:\.[0-9]+)?)%?$/i);
   if (match) {
     return { name: "set_default_slippage", args: { slippage: `${match[1]}%` } };
+  }
+  return null;
+}
+
+// ── Fast-path: default sync tolerance ────────────────────────────────
+
+/**
+ * Detect default sync tolerance commands like:
+ *   "set sync tolerance to 3%" / "sync tolerance 3%" / "default sync tolerance 1%"
+ */
+export function tryFastPathSyncTolerance(msg: string): FastPathResult | null {
+  const m = msg.toLowerCase().trim();
+  const match = m.match(/^(?:set\s+)?(?:default\s+)?sync\s+tolerance(?:\s+to)?\s+([0-9]+(?:\.[0-9]+)?)%?$/i);
+  if (match) {
+    return { name: "set_default_sync_tolerance", args: { tolerance: `${match[1]}%` } };
   }
   return null;
 }

@@ -1,31 +1,32 @@
 /**
  * NAV Shield impact logic tests.
  *
- * These tests exercise checkNavImpact in isolation by mocking the unified
- * eth_simulateV1 simulation. They focus on threshold enforcement and the
+ * These tests exercise checkNavImpact in isolation by mocking the RPC
+ * provider's `call` (eth_call). They focus on threshold enforcement and the
  * partial-recovery rule: trades that improve the current unitaryValue are
  * allowed even if the vault is still below the 24h baseline.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { encodeFunctionResult, type Hex } from "viem";
-import { RIGOBLOCK_VAULT_ABI } from "../src/abi/rigoblockVault.js";
+import { encodeFunctionData, encodeFunctionResult, type Hex } from "viem";
+import { RIGOBLOCK_VAULT_ABI, ALLOWED_VAULT_SELECTORS } from "../src/abi/rigoblockVault.js";
 
 const UPDATE_SELECTOR = encodeFunctionData({
   abi: RIGOBLOCK_VAULT_ABI,
   functionName: "updateUnitaryValue",
 }).slice(0, 10);
 
-import { encodeFunctionData } from "viem";
+const MULTICALL_SELECTOR = ALLOWED_VAULT_SELECTORS.multicall;
 
-// ── Hoist mocks before the module under test imports getRpcProvider / simulateCalls ──
+// ── Hoist mocks before the module under test imports getRpcProvider ──
 const mockState = vi.hoisted(() => {
-  const simulateCalls = vi.fn();
   const readContract = vi.fn(async () => 1n);
-  const getRpcProvider = vi.fn(() => ({ simulateCalls, readContract } as any));
+  // eth_call only — checkNavImpact must not use eth_simulateV1 (Nitro false positives).
+  const call = vi.fn();
+  const getRpcProvider = vi.fn(() => ({ readContract, call } as any));
   return {
-    simulateCalls,
     readContract,
+    call,
     getRpcProvider,
   };
 });
@@ -33,16 +34,6 @@ const mockState = vi.hoisted(() => {
 vi.mock("../src/services/rpcClient.js", () => ({
   getRpcProvider: mockState.getRpcProvider,
 }));
-
-vi.mock("viem/actions", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("viem/actions")>();
-  return {
-    ...actual,
-    simulateCalls: mockState.simulateCalls,
-  };
-});
-
-const mockSimulateCalls = mockState.simulateCalls;
 
 import { checkNavImpact } from "../src/services/navGuard.js";
 
@@ -56,6 +47,14 @@ function encodeNavReturn(unitaryValue: bigint): Hex {
     abi: RIGOBLOCK_VAULT_ABI,
     functionName: "updateUnitaryValue",
     result: [unitaryValue, unitaryValue * 1000n, 0n] as any,
+  });
+}
+
+function encodeMulticallReturn(postUnitaryValue: bigint): Hex {
+  return encodeFunctionResult({
+    abi: RIGOBLOCK_VAULT_ABI,
+    functionName: "multicall",
+    result: ["0x", encodeNavReturn(postUnitaryValue)] as any,
   });
 }
 
@@ -73,45 +72,13 @@ function createMockKV(baseline?: { unitaryValue: string; recordedAt: number }): 
   } as unknown as KVNamespace;
 }
 
-function makePreNavSimulateResult(preUnitaryValue: bigint) {
-  return {
-    results: [
-      { status: "success" as const, data: encodeNavReturn(preUnitaryValue), gasUsed: 50_000n },
-    ],
-  };
-}
-
-function makeSwapNavSimulateResult(
-  postUnitaryValue: bigint,
-  swapReverts = false,
-) {
-  const swapResult = swapReverts
-    ? {
-        status: "failure" as const,
-        error: new Error("execution reverted: swap failed"),
-        data: "0x" as Hex,
-        gasUsed: 0n,
-      }
-    : {
-        status: "success" as const,
-        data: "0x" as Hex,
-        gasUsed: 100_000n,
-      };
-
-  return {
-    results: [
-      swapResult,
-      { status: "success" as const, data: encodeNavReturn(postUnitaryValue), gasUsed: 50_000n },
-    ],
-  };
-}
-
-function setupClient(preUnitaryValue: bigint, postUnitaryValue: bigint, swapReverts = false) {
-  mockSimulateCalls.mockImplementation(async (_client: unknown, args: { calls: unknown[] }) => {
-    if (args.calls.length === 1) {
-      return makePreNavSimulateResult(preUnitaryValue);
-    }
-    return makeSwapNavSimulateResult(postUnitaryValue, swapReverts);
+/** Route eth_calls by selector: updateUnitaryValue → pre NAV, multicall → post NAV. */
+function setupClient(preUnitaryValue: bigint, postUnitaryValue: bigint) {
+  mockState.call.mockImplementation(async (args: { data: Hex }) => {
+    const selector = args.data.slice(0, 10);
+    if (selector === UPDATE_SELECTOR) return { data: encodeNavReturn(preUnitaryValue) };
+    if (selector === MULTICALL_SELECTOR) return { data: encodeMulticallReturn(postUnitaryValue) };
+    throw new Error(`unexpected eth_call data: ${selector}`);
   });
 }
 
@@ -120,6 +87,8 @@ describe("NAV Shield impact logic", () => {
     vi.clearAllMocks();
     mockState.readContract.mockReset();
     mockState.readContract.mockResolvedValue(1n);
+    mockState.call.mockReset();
+    mockState.call.mockRejectedValue(new Error("execution reverted"));
   });
 
   it("allows a trade within the max NAV drop threshold", async () => {
@@ -131,7 +100,6 @@ describe("NAV Shield impact logic", () => {
     expect(result.verified).toBe(true);
     expect(result.dropPct).toBe("10.0000");
     expect(result.impactPct).toBe("-10.0000");
-    expect(mockSimulateCalls).toHaveBeenCalledTimes(2);
   });
 
   it("blocks a trade that exceeds the max NAV drop threshold", async () => {
@@ -189,11 +157,11 @@ describe("NAV Shield impact logic", () => {
     expect(result.verified).toBe(false);
     expect(result.code).toBe("UNVERIFIED");
     expect(result.reason).toContain("no outstanding shares");
-    expect(mockSimulateCalls).not.toHaveBeenCalled();
+    expect(mockState.call).not.toHaveBeenCalled();
   });
 
   it("fails closed when pre-swap NAV cannot be read", async () => {
-    mockSimulateCalls.mockRejectedValue(new Error("RPC timeout"));
+    mockState.call.mockRejectedValue(new Error("RPC timeout"));
     const result = await checkNavImpact(
       VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
     );
@@ -202,14 +170,77 @@ describe("NAV Shield impact logic", () => {
     expect(result.reason).toContain("Cannot simulate vault NAV impact");
   });
 
-  it("reports TRADE_REVERTS when the swap itself fails", async () => {
-    setupClient(10000n, 10000n, true);
+  it("reports TRADE_REVERTS when the multicall eth_call reverts", async () => {
+    setupClient(10000n, 10000n);
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      const selector = args.data.slice(0, 10);
+      if (selector === UPDATE_SELECTOR) return { data: encodeNavReturn(10000n) };
+      throw new Error("execution reverted");
+    });
     const result = await checkNavImpact(
       VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
     );
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("TRADE_REVERTS");
     expect(result.reason).toContain("would revert on-chain");
+  });
+
+  it("surfaces the decoded revert reason from the multicall eth_call", async () => {
+    // Regression (prod, crosschain sync 5000 USDC arb→eth): the multicall eth_call
+    // reverts with NavImpactTooHigh (0x3471741b) — a genuine revert. The decoded
+    // reason must reach the user.
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      const selector = args.data.slice(0, 10);
+      if (selector === UPDATE_SELECTOR) return { data: encodeNavReturn(10000n) };
+      const navImpactError = Object.assign(new Error("execution reverted"), {
+        data: "0x3471741b",
+      });
+      throw navImpactError;
+    });
+    const result = await checkNavImpact(
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe("TRADE_REVERTS");
+    expect(result.reason).toContain("NavImpactTooHigh");
+  });
+
+  it("normalizes viem's misleading 'returned no data' wrapper for empty reverts", async () => {
+    // viem reports empty revert data as 'The contract function "<unknown>" returned
+    // no data ("0x")' — which read like a decoding artifact, not a revert.
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      const selector = args.data.slice(0, 10);
+      if (selector === UPDATE_SELECTOR) return { data: encodeNavReturn(10000n) };
+      throw new Error('The contract function "<unknown>" returned no data ("0x").');
+    });
+    const result = await checkNavImpact(
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe("TRADE_REVERTS");
+    expect(result.reason).toContain("reverted on-chain without a revert reason");
+    expect(result.reason).not.toContain("returned no data");
+  });
+
+  it("uses only eth_call from the executor — no eth_simulateV1", async () => {
+    // The NAV shield must be pure eth_call: eth_simulateV1 produces false positives
+    // on Nitro chains (synthetic block diverges from real execution).
+    setupClient(10000n, 9900n);
+    const result = await checkNavImpact(
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+    );
+    expect(result.allowed).toBe(true);
+    expect(result.verified).toBe(true);
+    expect(result.impactPct).toBe("-1.0000");
+    // Exactly two eth_calls: updateUnitaryValue (pre) + multicall ([swap, updateUnitaryValue]).
+    expect(mockState.call).toHaveBeenCalledTimes(2);
+    const calls = mockState.call.mock.calls.map((c) => c[0] as { account: string; to: string; data: Hex });
+    expect(calls.every((c) => c.account === EXECUTOR && c.to === VAULT)).toBe(true);
+    const selectors = calls.map((c) => c.data.slice(0, 10)).sort();
+    expect(selectors).toEqual([UPDATE_SELECTOR, MULTICALL_SELECTOR].sort());
+    // The multicall must wrap [swapData, updateUnitaryValue] so the post-NAV is atomic.
+    const multicallCall = calls.find((c) => c.data.slice(0, 10) === MULTICALL_SELECTOR)!;
+    expect(multicallCall.data).toContain(SWAP_DATA.slice(2));
   });
 
   it("skips simulation when the operator has disabled the NAV shield", async () => {
@@ -220,7 +251,7 @@ describe("NAV Shield impact logic", () => {
     expect(result.verified).toBe(false);
     expect(result.code).toBe("DISABLED");
     expect(result.reason).toContain("disabled");
-    expect(mockSimulateCalls).not.toHaveBeenCalled();
+    expect(mockState.call).not.toHaveBeenCalled();
   });
 
 });

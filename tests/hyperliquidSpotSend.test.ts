@@ -27,7 +27,7 @@ vi.mock("../src/services/hyperliquid.js", async (importOriginal) => {
   };
 });
 
-const VAULT = "0xefa4bdf566ae50537a507863612638680420645c" as const;
+const VAULT = "0x1111111111111111111111111111111111111111" as const;
 const OPERATOR = "0xcccc000000000000000000000000000000000003" as const;
 
 function makeCtx(): RequestContext {

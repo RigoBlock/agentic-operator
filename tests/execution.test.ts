@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 import { parseGwei, type PublicClient } from "viem";
 import { formatOutcomesMarkdown } from "../src/services/execution.js";
 import { ExecutionError } from "../src/services/executionError.js";
-import { estimateGasFees } from "../src/services/gas.js";
+import { estimateGasFees, bumpGasFees, clampGasFees } from "../src/services/gas.js";
 import { handle_check_pending_tx } from "../src/llm/handlers/delegation.js";
 import type { Env, RequestContext } from "../src/types.js";
 
@@ -215,6 +215,61 @@ describe("estimateGasFees gas market handling", () => {
 
     expect(fees.maxPriorityFeePerGas).toBe(0n);
     expect(fees.maxFeePerGas).toBe(parseGwei("0.04")); // Arbitrum cap
+  });
+
+  it("mainnet uses the configured 0.01 gwei priority fee even when the RPC estimates 0", async () => {
+    const publicClient = makeClient({
+      maxFeePerGas: parseGwei("2"),
+      maxPriorityFeePerGas: 0n,
+    });
+
+    const fees = await estimateGasFees(publicClient, 1);
+
+    expect(fees.maxPriorityFeePerGas).toBe(parseGwei("0.01"));
+    expect(fees.maxFeePerGas).toBe(parseGwei("2"));
+  });
+
+  it("mainnet keeps the fixed priority fee when the RPC estimates below it", async () => {
+    const publicClient = makeClient({
+      maxFeePerGas: parseGwei("2"),
+      maxPriorityFeePerGas: parseGwei("0.002"),
+    });
+
+    const fees = await estimateGasFees(publicClient, 1);
+
+    expect(fees.maxPriorityFeePerGas).toBe(parseGwei("0.01"));
+  });
+
+  it("mainnet clamps a stored 0-priority transaction up to the fixed fee", async () => {
+    const fees = clampGasFees(
+      { maxFeePerGas: parseGwei("2"), maxPriorityFeePerGas: 0n },
+      1,
+    );
+
+    expect(fees.maxPriorityFeePerGas).toBe(parseGwei("0.01"));
+    expect(fees.maxFeePerGas).toBe(parseGwei("2"));
+  });
+
+  it("mainnet resubmit bump keeps the fixed priority fee unchanged", () => {
+    const fees = bumpGasFees(
+      { maxFeePerGas: parseGwei("2"), maxPriorityFeePerGas: parseGwei("0.01") },
+      1,
+    );
+
+    expect(fees.maxPriorityFeePerGas).toBe(parseGwei("0.01"));
+  });
+
+  it("only fixed-priority chains let Alchemy price sponsored UserOps", async () => {
+    const { alchemyPricesSponsoredFees, GAS_CAPS } = await import("../src/services/gas.js");
+
+    expect(alchemyPricesSponsoredFees(1)).toBe(true);
+    expect(alchemyPricesSponsoredFees(42161)).toBe(false);
+    expect(alchemyPricesSponsoredFees(8453)).toBe(false);
+    expect(alchemyPricesSponsoredFees(999999)).toBe(false);
+    // Exactly the chains flagged priorityIsFixed use the sponsored no-override path.
+    for (const [id, caps] of Object.entries(GAS_CAPS)) {
+      expect(alchemyPricesSponsoredFees(Number(id))).toBe(caps.priorityIsFixed === true);
+    }
   });
 
   it("throws if estimateFeesPerGas fails", async () => {

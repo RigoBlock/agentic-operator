@@ -213,7 +213,7 @@ describe("sendRawAction calldata", () => {
 
 
 describe("handle_hyperliquid_limit_order minimum notional", () => {
-  const VAULT = "0xefa4bdf566ae50537a507863612638680420645c" as const;
+  const VAULT = "0x1111111111111111111111111111111111111111" as const;
   const OPERATOR = "0xcA9F5049c1Ea8FC78574f94B7Cf5bE5fEE354C31" as const;
 
   function stubHlApi() {

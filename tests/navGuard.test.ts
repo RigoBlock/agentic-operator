@@ -12,10 +12,15 @@ import {
   DISABLED_NAV_DROP_PCT,
 } from "../src/services/navGuard.js";
 import {
+  getStoredSyncTolerance,
+  setStoredSyncTolerance,
+} from "../src/services/crosschain.js";
+import {
   handle_set_nav_shield_threshold,
   handle_enable_nav_shield,
   disable_nav_shield,
   handle_set_default_slippage,
+  handle_set_default_sync_tolerance,
   handle_set_swap_shield_tolerance,
   handle_enable_swap_shield,
 } from "../src/llm/handlers/settings.js";
@@ -23,6 +28,7 @@ import {
   tryFastPathSwapShieldToggle,
   tryFastPathNavShieldThreshold,
   tryFastPathSlippage,
+  tryFastPathSyncTolerance,
 } from "../src/llm/client.js";
 import type { RequestContext } from "../src/types.js";
 
@@ -252,6 +258,36 @@ describe("Settings — operator-only restriction", () => {
     ).rejects.toThrow("can only be used by the vault operator");
   });
 
+  it("rejects sync tolerance change from unverified operators", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ operatorVerified: false });
+    await expect(
+      handle_set_default_sync_tolerance(env, ctx, { tolerance: "3%" }, "set_default_sync_tolerance"),
+    ).rejects.toThrow("can only be used by the vault operator");
+  });
+
+  it("stores sync tolerance from verified operators", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ isBrowserRequest: false });
+    const result = await handle_set_default_sync_tolerance(env, ctx, { tolerance: "3%" }, "set_default_sync_tolerance");
+    expect(result.message).toContain("3%");
+    expect(await getStoredSyncTolerance(kv, OPERATOR)).toBe(300);
+  });
+
+  it("rejects sync tolerance outside 0.1% – 100%", async () => {
+    const env = makeEnv(kv);
+    const ctx = makeCtx({ isBrowserRequest: false });
+    await expect(
+      handle_set_default_sync_tolerance(env, ctx, { tolerance: "0.05%" }, "set_default_sync_tolerance"),
+    ).rejects.toThrow("Sync tolerance must be between");
+    await expect(
+      handle_set_default_sync_tolerance(env, ctx, { tolerance: "150%" }, "set_default_sync_tolerance"),
+    ).rejects.toThrow("Sync tolerance must be between");
+    await expect(
+      setStoredSyncTolerance(kv, OPERATOR, 50.5),
+    ).rejects.toThrow("Sync tolerance must be between");
+  });
+
   it("allows swap shield tolerance from Telegram (verified operator)", async () => {
     const env = makeEnv(kv);
     const ctx = makeCtx({ isBrowserRequest: false });
@@ -322,5 +358,22 @@ describe("Settings fast-path parsers", () => {
       args: { slippage: "1%" },
     });
     expect(tryFastPathSlippage("random message")).toBeNull();
+  });
+
+  it("parses sync tolerance commands", () => {
+    expect(tryFastPathSyncTolerance("set sync tolerance to 3%")).toEqual({
+      name: "set_default_sync_tolerance",
+      args: { tolerance: "3%" },
+    });
+    expect(tryFastPathSyncTolerance("sync tolerance 1%")).toEqual({
+      name: "set_default_sync_tolerance",
+      args: { tolerance: "1%" },
+    });
+    expect(tryFastPathSyncTolerance("set default sync tolerance 5%")).toEqual({
+      name: "set_default_sync_tolerance",
+      args: { tolerance: "5%" },
+    });
+    expect(tryFastPathSyncTolerance("sync nav from arbitrum to base")).toBeNull();
+    expect(tryFastPathSyncTolerance("random message")).toBeNull();
   });
 });

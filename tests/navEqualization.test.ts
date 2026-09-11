@@ -7,11 +7,13 @@
  * so the destination chain never overshoots.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { Address } from "viem";
+import { encodeFunctionResult, type Address } from "viem";
+import { RIGOBLOCK_VAULT_ABI } from "../src/abi/rigoblockVault.js";
 
 const mockGetEffectivePoolState = vi.hoisted(() => vi.fn());
 const mockGetVaultTokenBalance = vi.hoisted(() => vi.fn());
 const mockGetVaultTokenBalancesBulk = vi.hoisted(() => vi.fn());
+const mockGetPoolData = vi.hoisted(() => vi.fn());
 const mockGetClient = vi.hoisted(() => vi.fn());
 const mockConvertTokenAmountViaOracle = vi.hoisted(() => vi.fn());
 const mockGetDelegationConfig = vi.hoisted(() => vi.fn());
@@ -21,6 +23,7 @@ vi.mock("../src/services/vault.js", () => ({
   getEffectivePoolState: mockGetEffectivePoolState,
   getVaultTokenBalance: mockGetVaultTokenBalance,
   getVaultTokenBalancesBulk: mockGetVaultTokenBalancesBulk,
+  getPoolData: mockGetPoolData,
 }));
 
 vi.mock("../src/services/rpcClient.js", () => ({
@@ -36,9 +39,9 @@ vi.mock("../src/services/delegation.js", () => ({
   getActiveChains: mockGetActiveChains,
 }));
 
-const { computeNavEqualization } = await import("../src/services/crosschain.js");
+const { computeNavEqualization, projectSyncNavImpact } = await import("../src/services/crosschain.js");
 
-const VAULT = "0xEfa4bDf566aE50537A507863612638680420645C" as Address;
+const VAULT = "0x1111111111111111111111111111111111111111" as Address;
 const zeroAddr = "0x0000000000000000000000000000000000000000" as Address;
 
 function makeKV(): KVNamespace {
@@ -229,5 +232,172 @@ describe("computeNavEqualization", () => {
     expect(result.directionAutoSwapped).toBe(true);
     expect(result.srcChainId).toBe(1);
     expect(result.dstChainId).toBe(42161);
+  });
+});
+
+describe("cross-base sync token selection", () => {
+  // Ethereum pool base = WETH, BSC pool base = USDT → cross-base route. Token
+  // selection is purely preference order (base-type match, then stable, then
+  // others) regardless of the pools' base assets.
+  const WETH_MAINNET = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" as Address;
+  const USDT_BSC = "0x55d398326f99059fF775485246999027B3197955" as Address;
+  const BSC_USDC = "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d";
+  const SIX_DEC_USDC = new Set([
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".toLowerCase(), // Ethereum
+  ]);
+
+  // Oracle at 1:1. BSC USDC/USDT are 18-dec, so base(18-dec) → BSC USDC is a
+  // plain 1:1 in 18-dec units; 6-dec chains keep the 1e12 scaling.
+  function mockCrossBaseOracle() {
+    mockConvertTokenAmountViaOracle.mockImplementation(
+      async (_c: number, from: unknown, amount: bigint, to: unknown) => {
+        const fromIsUsdc = SIX_DEC_USDC.has(String(from).toLowerCase());
+        const toIsUsdc = SIX_DEC_USDC.has(String(to).toLowerCase());
+        if (String(to).toLowerCase() === BSC_USDC.toLowerCase() && !fromIsUsdc) {
+          return amount;
+        }
+        if (fromIsUsdc && !toIsUsdc) return amount * 1_000_000_000_000n;
+        if (!fromIsUsdc && toIsUsdc) return amount / 1_000_000_000_000n;
+        return amount;
+      },
+    );
+  }
+
+  function mockCrossBaseStates() {
+    mockGetEffectivePoolState.mockImplementation(async (chainId: number) => {
+      if (chainId === 1) {
+        return {
+          unitaryValue: 4_000_000_000_000_000_000n,
+          netTotalValue: 4_000_000_000_000_000_000n,
+          effectiveSupply: 1_000_000_000_000_000_000n,
+          decimals: 18,
+          baseToken: WETH_MAINNET,
+        };
+      }
+      if (chainId === 56) {
+        return {
+          unitaryValue: 2_000_000_000_000_000_000n,
+          netTotalValue: 100_000_000_000_000_000_000n,
+          effectiveSupply: 50_000_000_000_000_000_000n,
+          decimals: 18,
+          baseToken: USDT_BSC,
+        };
+      }
+      return null;
+    });
+  }
+
+  it("selects a preferred WETH on a cross-base route and converts via oracle", async () => {
+    mockCrossBaseStates();
+    mockCrossBaseOracle();
+    const result = await computeNavEqualization({
+      vaultAddress: VAULT,
+      userSrcChainId: 1,
+      userDstChainId: 56,
+      preferredToken: "WETH",
+    });
+    expect(result.bridgeToken.type).toBe("WETH");
+    expect(result.bridgeToken.symbol).toBe("WETH");
+    // WETH is priced through the USDC oracle reference, not blocked by base-asset policy.
+    const usdcToWeth = mockConvertTokenAmountViaOracle.mock.calls.find(
+      ([_c, from, , to]) =>
+        String(from).toLowerCase() === "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" &&
+        String(to).toLowerCase() === WETH_MAINNET.toLowerCase(),
+    );
+    expect(usdcToWeth).toBeDefined();
+  });
+
+  it("selects by normal preference order on a cross-base route without a preference", async () => {
+    mockCrossBaseStates();
+    mockCrossBaseOracle();
+    const result = await computeNavEqualization({
+      vaultAddress: VAULT,
+      userSrcChainId: 1,
+      userDstChainId: 56,
+    });
+    // All balances equal (default mock): the base-token-type match (WETH) beats
+    // the stable tier even though the destination pool's base is USDT.
+    expect(result.bridgeToken.type).toBe("WETH");
+  });
+
+  it("lists checked tokens and actual balances when nothing has balance", async () => {
+    mockCrossBaseStates();
+    mockCrossBaseOracle();
+    mockGetVaultTokenBalancesBulk.mockResolvedValue(new Map<string, bigint>());
+    const err = await computeNavEqualization({
+      vaultAddress: VAULT,
+      userSrcChainId: 1,
+      userDstChainId: 56,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/Checked balances — USDC: 0, USDT: 0, WETH: 0/);
+  });
+});
+
+describe("projectSyncNavImpact — NavImpactTooHigh fallback", () => {
+  const UPDATE_SELECTOR = "0xe7d8724e"; // updateUnitaryValue()
+  const OPERATOR = "0xcccc000000000000000000000000000000000099" as Address;
+  const WETH_ARB = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1" as Address;
+
+  function encodeNavReturn(unitaryValue: bigint, netTotalValue: bigint) {
+    return encodeFunctionResult({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "updateUnitaryValue",
+      result: [unitaryValue, netTotalValue, 0n] as any,
+    });
+  }
+
+  it("computes the projected drop from pre-sync NAV when the multicall reverts", async () => {
+    mockGetClient.mockImplementation(() => ({
+      call: vi.fn(async (args: { data: string }) => {
+        if (args.data.slice(0, 10) === UPDATE_SELECTOR) {
+          // unitaryValue 2, netTotalValue 100,000 (18-dec base token)
+          return { data: encodeNavReturn(2_000_000_000_000_000_000n, 100_000_000_000_000_000_000_000n) };
+        }
+        // multicall([depositV3, updateUnitaryValue]) → genuine NavImpactTooHigh
+        throw Object.assign(new Error("execution reverted"), { data: "0x3471741b" });
+      }),
+    }));
+    mockGetPoolData.mockResolvedValue({
+      name: "T", symbol: "T", decimals: 18, owner: OPERATOR, baseToken: WETH_ARB,
+    });
+    // Oracle 1:1 numerically: 5000 USDC (6-dec) → 5000 WETH (18-dec)
+    mockConvertTokenAmountViaOracle.mockImplementation(
+      async (_c: number, _f: unknown, amount: bigint) => amount * 1_000_000_000_000n,
+    );
+
+    const res = await projectSyncNavImpact({
+      vaultAddress: VAULT,
+      srcChainId: 42161,
+      depositV3Calldata: "0xdeadbeef" as `0x${string}`,
+      operatorAddress: OPERATOR,
+      inputTokenAddress: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address, // USDC arb
+      inputAmountRaw: 5_000_000_000n, // 5000 USDC (6-dec)
+    });
+
+    expect(res).toBeDefined();
+    // 5000 out of 100,000 total → -5% projected unit-price drop
+    expect(res!.impactPct).toBe("-5.0000");
+    expect(res!.preUnitaryValue).toBe("2000000000000000000");
+  });
+
+  it("returns undefined when the revert is not NavImpactTooHigh", async () => {
+    mockGetClient.mockImplementation(() => ({
+      call: vi.fn(async (args: { data: string }) => {
+        if (args.data.slice(0, 10) === UPDATE_SELECTOR) {
+          return { data: encodeNavReturn(2_000_000_000_000_000_000n, 100_000_000_000_000_000_000_000n) };
+        }
+        throw Object.assign(new Error("execution reverted"), { data: "0xdeadbeef" });
+      }),
+    }));
+    const res = await projectSyncNavImpact({
+      vaultAddress: VAULT,
+      srcChainId: 42161,
+      depositV3Calldata: "0xdeadbeef" as `0x${string}`,
+      operatorAddress: OPERATOR,
+      inputTokenAddress: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address,
+      inputAmountRaw: 5_000_000_000n,
+    });
+    expect(res).toBeUndefined();
   });
 });

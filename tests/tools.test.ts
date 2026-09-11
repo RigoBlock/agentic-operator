@@ -65,6 +65,7 @@ const REQUIRED_TOOLS = [
   "switch_chain",
   // Trading settings
   "set_default_slippage",
+  "set_default_sync_tolerance",
   "set_swap_shield_tolerance",
   "enable_swap_shield",
   "set_nav_shield_threshold",
@@ -179,7 +180,7 @@ describe("get_tool_menu handler", () => {
       expect.arrayContaining(["destinationChain", "token", "amount"]),
     );
     // The menu message carries the per-chain bridgeable token list
-    expect(result.message).toContain("Supported bridgeable tokens per chain");
+    expect(result.message).toContain("Bridgeable tokens by chain");
   });
 
   it("lists available categories for unknown or missing category", async () => {

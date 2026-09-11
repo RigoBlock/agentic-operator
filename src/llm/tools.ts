@@ -844,7 +844,8 @@ export const TOOL_DEFINITIONS = [
           navToleranceBps: {
             type: "number",
             description:
-              "On-chain NAV impact tolerance for the sync, in basis points (default: 100 = 1%). " +
+              "On-chain NAV impact tolerance for the sync, in basis points (default: 100 = 1%, or the " +
+              "operator's stored default set via Settings → Trading, /synctolerance, or set_default_sync_tolerance). " +
               "This is encoded into the depositV3 SourceMessageParams and checked by the AIntents contract on the SOURCE chain: " +
               "because a sync moves tokens out without burning virtual supply, the source-chain unit price drops, and the contract rejects the tx if the drop exceeds this tolerance. " +
               "Raise this (e.g. to 500-1000 bps = 5-10%) if the sync amount is large relative to vault NAV. " +
@@ -1434,6 +1435,32 @@ export const TOOL_DEFINITIONS = [
   {
     type: "function" as const,
     function: {
+      name: "set_default_sync_tolerance",
+      description:
+        "Set the default sync tolerance for NAV syncs with an explicit amount — the maximum allowed " +
+        "source-chain unit-price drop per sync (default 1%). This is NOT the NAV shield (default 10%): " +
+        "it only applies to crosschain_sync, while the NAV shield protects every trade. " +
+        "Accepts a percentage (e.g., '3%' for 3%), basis points with suffix (e.g., '300bps'), " +
+        "or a plain number: integers in [10, 10000] are treated as bps, decimals as percentages. " +
+        "Valid range: 0.1% (10 bps) to 100% (10000 bps). Persists until changed.",
+      parameters: {
+        type: "object",
+        properties: {
+          tolerance: {
+            type: "string",
+            description:
+              "Sync tolerance — use '%' suffix for percentage (e.g., '3%' for 3%), " +
+              "'bps' suffix for basis points (e.g., '300bps' for 3%), or a plain number: " +
+              "integers 10–10000 are treated as bps, other values as percentages.",
+          },
+        },
+        required: ["tolerance"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "set_swap_shield_tolerance",
       description:
         "Temporarily raise the Swap Shield tolerance (max divergence from oracle) for 10 minutes. " +
@@ -1584,6 +1611,7 @@ export const TOOL_DEFINITIONS = [
 /** Tools that the LLM agent must never be allowed to invoke (operator-scoped mutations). */
 const AGENT_EXCLUDED_TOOLS = new Set<string>([
   "set_default_slippage",
+  "set_default_sync_tolerance",
   "set_swap_shield_tolerance",
   "enable_swap_shield",
   "set_nav_shield_threshold",

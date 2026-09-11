@@ -36,7 +36,7 @@ vi.mock("../src/services/delegation.js", () => ({
 const { getAggregatedNav, chainName } = await import("../src/services/crosschain.js");
 const { SUPPORTED_CHAINS } = await import("../src/config.js");
 
-const VAULT = "0xEfa4bDf566aE50537A507863612638680420645C" as Address;
+const VAULT = "0x1111111111111111111111111111111111111111" as Address;
 const zeroAddr = "0x0000000000000000000000000000000000000000" as Address;
 
 function makeKV(): KVNamespace {
