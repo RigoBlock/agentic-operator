@@ -344,18 +344,13 @@ async function broadcastAgentTransaction(
 /**
  * Execute a transaction via Alchemy Smart Wallet with gas sponsoring.
  *
- * Uses @account-kit/wallet-client's createSmartWalletClient + sendCalls.
- * The SDK handles EVERYTHING internally:
- *   - wallet_requestAccount (maps signer → SCA)
- *   - wallet_prepareCalls (builds UserOp, detects 7702 delegation)
- *   - Signing (7702 auth + UserOp)
- *   - wallet_sendPreparedCalls (submits bundle)
- *   - wallet_getCallsStatus (polls until confirmed)
- *
- * We only:
- *   1. Estimate gas on-chain via eth_estimateGas (catches reverts before submission)
- *   2. Call executeSponsoredCalls() — one function, handles everything
- *   3. Map the result to ExecutionResult
+ * Uses @account-kit/wallet-client's createSmartWalletClient and the low-level
+ * prepareCalls → signPreparedCalls → sendPreparedCalls flow (bundler.ts), which
+ * gives us control over gas parameter overrides. The SDK does NOT create the
+ * smart account automatically: on chains where Alchemy requires it to exist
+ * before wallet_prepareCalls (HyperEVM), bundler.ts activates it via
+ * wallet_requestAccount — a one-time, Alchemy-sponsored transaction; the signer
+ * only produces an off-chain EIP-7702 authorization and never needs native gas.
  */
 async function sponsoredAgentTransaction(
   agentAccount: LocalAccount,

@@ -55,12 +55,14 @@ const MOCK_CALL_ID = "0x9991089191de07f4d5d16967279af8c3e67eab9ed1d9213bf7392eff
 
 function makeMockClient(overrides: {
   prepareCalls?: () => Promise<unknown>;
+  requestAccount?: () => Promise<unknown>;
   signPreparedCalls?: () => Promise<unknown>;
   sendPreparedCalls?: () => Promise<{ id: string }>;
   waitForCallsStatus?: () => Promise<unknown>;
 } = {}) {
   return {
     prepareCalls: overrides.prepareCalls || vi.fn().mockResolvedValue({ prepared: true }),
+    requestAccount: overrides.requestAccount || vi.fn().mockResolvedValue({ address: AGENT_ACCOUNT.address }),
     signPreparedCalls: overrides.signPreparedCalls || vi.fn().mockResolvedValue({ signed: true }),
     sendPreparedCalls: overrides.sendPreparedCalls || vi.fn().mockResolvedValue({ id: MOCK_CALL_ID }),
     waitForCallsStatus: overrides.waitForCallsStatus || vi.fn().mockResolvedValue({ status: "success", receipts: [] }),
@@ -132,6 +134,78 @@ describe("executeSponsoredCalls gas parameter overrides", () => {
     const capabilities = prepareCalls.mock.calls[0][0].capabilities as Record<string, unknown>;
     expect(capabilities.gasParamsOverride).toBeUndefined();
     expect(capabilities.paymasterService).toEqual({ policyId: "policy-id" });
+  });
+});
+
+describe("executeSponsoredCalls smart account activation (HyperEVM)", () => {
+  const NOT_CREATED_ERROR = new Error(
+    "EIP-7702 is not enabled on HyperEVM. You must call wallet_requestAccount " +
+    "to create a smart contract account address to use on this network.",
+  );
+
+  it("activates via requestAccount once and retries when prepareCalls reports the account is missing", async () => {
+    const prepareCalls = vi.fn()
+      .mockRejectedValueOnce(NOT_CREATED_ERROR)
+      .mockResolvedValue({ prepared: true });
+    const requestAccount = vi.fn().mockResolvedValue({ address: AGENT_ACCOUNT.address });
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls, requestAccount }));
+
+    const result = await executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]);
+
+    expect(requestAccount).toHaveBeenCalledTimes(1);
+    expect(requestAccount).toHaveBeenCalledWith({ creationHint: { accountType: "7702" } });
+    expect(prepareCalls).toHaveBeenCalledTimes(2);
+    expect(result.status).toBe("success");
+  });
+
+  it("matches the error when nested in an RPC error cause chain", async () => {
+    const rpcError = new Error("RPC Request failed.", { cause: NOT_CREATED_ERROR });
+    const prepareCalls = vi.fn()
+      .mockRejectedValueOnce(rpcError)
+      .mockResolvedValue({ prepared: true });
+    const requestAccount = vi.fn().mockResolvedValue({ address: AGENT_ACCOUNT.address });
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls, requestAccount }));
+
+    await executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]);
+
+    expect(requestAccount).toHaveBeenCalledTimes(1);
+    expect(prepareCalls).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not call requestAccount when prepareCalls succeeds directly", async () => {
+    const prepareCalls = vi.fn().mockResolvedValue({ prepared: true });
+    const requestAccount = vi.fn();
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls, requestAccount }));
+
+    await executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]);
+
+    expect(requestAccount).not.toHaveBeenCalled();
+    expect(prepareCalls).toHaveBeenCalledTimes(1);
+  });
+
+  it("rethrows non-activation errors without calling requestAccount or retrying", async () => {
+    const prepareCalls = vi.fn().mockRejectedValue(new Error("paymaster policy rejected"));
+    const requestAccount = vi.fn();
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls, requestAccount }));
+
+    await expect(
+      executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]),
+    ).rejects.toThrow("paymaster policy rejected");
+
+    expect(requestAccount).not.toHaveBeenCalled();
+    expect(prepareCalls).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates the error when requestAccount itself fails", async () => {
+    const prepareCalls = vi.fn().mockRejectedValue(NOT_CREATED_ERROR);
+    const requestAccount = vi.fn().mockRejectedValue(new Error("activation rejected"));
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient({ prepareCalls, requestAccount }));
+
+    await expect(
+      executeSponsoredCalls(AGENT_ACCOUNT, 999, "policy-id", [CALL]),
+    ).rejects.toThrow("activation rejected");
+
+    expect(prepareCalls).toHaveBeenCalledTimes(1);
   });
 });
 

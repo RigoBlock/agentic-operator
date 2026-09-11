@@ -168,6 +168,31 @@ export function normalizeCallId(raw: unknown): { callId: string; userOpHash?: He
   return { callId, userOpHash, warnings };
 }
 
+// ── Smart Account Activation ─────────────────────────────────────────
+
+/**
+ * Alchemy rejects wallet_prepareCalls when the signer's smart account has not
+ * been created on that chain yet (e.g. HyperEVM, where the EIP-7702
+ * authorization cannot be embedded in the UserOp):
+ *   "EIP-7702 is not enabled on HyperEVM. You must call wallet_requestAccount
+ *    to create a smart contract account address to use on this network."
+ *
+ * Walks the error cause chain because viem nests RPC error messages.
+ */
+function isSmartAccountNotCreatedError(err: unknown): boolean {
+  let current: unknown = err;
+  while (current) {
+    if (
+      current instanceof Error &&
+      /EIP-7702 is not enabled|wallet_requestAccount/i.test(current.message)
+    ) {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 // ── Execute Sponsored Calls ──────────────────────────────────────────
 
 /**
@@ -176,7 +201,10 @@ export function normalizeCallId(raw: unknown): { callId: string; userOpHash?: He
  * Follows the exact SDK quickstart flow:
  *   1. Create signer via LocalAccountSigner
  *   2. Create client via createSmartWalletClient
- *   3. prepareCalls()        — build UserOp + detect 7702 delegation
+ *   3. prepareCalls()        — build UserOp + detect 7702 delegation. On chains
+ *      that require the smart account to exist first (HyperEVM), the resulting
+ *      "EIP-7702 is not enabled" error triggers requestAccount() — a one-time,
+ *      Alchemy-sponsored activation — and prepareCalls is retried once.
  *   4. signPreparedCalls()   — sign authorization + UserOp
  *   5. sendPreparedCalls()   — submit to bundler
  *   6. waitForCallsStatus()  — poll for confirmation
@@ -238,7 +266,7 @@ export async function executeSponsoredCalls(
     if (Object.keys(gasOverrides).length > 0) {
       capabilities.gasParamsOverride = gasOverrides;
     }
-    const preparedCalls = await client.prepareCalls({
+    const prepareParams = {
       calls: calls.map(c => ({
         to: c.to,
         data: c.data || ("0x" as Hex),
@@ -246,7 +274,26 @@ export async function executeSponsoredCalls(
       })),
       from: signerAddress,
       capabilities,
-    });
+    };
+    // On chains where Alchemy cannot embed the EIP-7702 authorization in the
+    // UserOp (HyperEVM), the smart account must exist on-chain before
+    // wallet_prepareCalls works. wallet_requestAccount performs this one-time
+    // activation: the signer only produces an off-chain EIP-7702 authorization
+    // and Alchemy submits+sponsors the activation transaction, so the wallet
+    // never needs native gas. The error therefore occurs at most once per
+    // wallet per chain — after activation, prepareCalls succeeds directly.
+    let preparedCalls: Awaited<ReturnType<typeof client.prepareCalls>>;
+    try {
+      preparedCalls = await client.prepareCalls(prepareParams);
+    } catch (err) {
+      if (!isSmartAccountNotCreatedError(err)) throw err;
+      console.warn(
+        `[bundler] Smart account not created on chain ${chainId} — ` +
+        `activating via wallet_requestAccount (sponsored) and retrying once.`,
+      );
+      await client.requestAccount({ creationHint: { accountType: "7702" } });
+      preparedCalls = await client.prepareCalls(prepareParams);
+    }
 
     // ── Step 4: Sign the prepared calls ──
     const signedCalls = await client.signPreparedCalls(preparedCalls);
