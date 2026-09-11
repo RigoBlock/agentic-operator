@@ -8,14 +8,25 @@
  * ## How it works
  *
  * 1. Read current NAV via `updateUnitaryValue()` eth_call on the vault
- * 2. eth_call a vault `multicall([tx, updateUnitaryValue])` from the address
- *    that will actually execute the transaction — this captures the post-swap
- *    NAV in a single atomic simulation
+ * 2. eth_call a vault `multicall([tx, updateUnitaryValue])` from the vault
+ *    owner — this captures the post-swap NAV in a single atomic simulation
  * 3. Compare post-swap unitaryValue vs pre-swap unitaryValue
  * 4. If drop > MAX_NAV_DROP_PCT, reject the transaction
  * 5. RECOVERY RULE: trades that improve or hold the current unitaryValue are
  *    always allowed, even if the vault is still below the 24h baseline.
  * 6. Store the 24-hour baseline in KV for rolling protection
+ *
+ * ## Why the simulation runs from the vault owner and NOT the executor
+ *
+ * The simulation is caller-independent: selector delegation is enforced by the
+ * 7-point execution validation before this shield runs, and no whitelisted
+ * adapter branches on msg.sender (the only msg.sender use in any adapter is an
+ * event emission). The outer multicall selector hits the vault fallback's
+ * write-mode gate, which the pool owner always passes — so simulating from the
+ * vault owner needs no multicall delegation. Delegating multicall would grant
+ * the agent nothing extra (each inner call is individually selector-checked and
+ * core admin methods are onlyOwner), so the multicall selectors are not in the
+ * delegation whitelist at all.
  *
  * ## Why updateUnitaryValue() instead of getNavDataView()
  *
@@ -47,9 +58,11 @@
  * failure), the shield returns `allowed: false`. We NEVER allow a
  * transaction when we can't even read the vault's current NAV.
  *
- * If the multicall reverts, the transaction itself would revert on-chain,
- * so the shield returns `allowed: false` with code TRADE_REVERTS and the
- * decoded revert reason.
+ * If the multicall reverts, the transaction itself would revert on-chain for
+ * any legitimate executor (the simulation is caller-independent; selector
+ * delegation is validated separately before this shield runs), so the shield
+ * returns `allowed: false` with code TRADE_REVERTS and the decoded revert
+ * reason.
  */
 
 import {
@@ -391,10 +404,15 @@ async function evaluateNavImpact(
  * Check if a transaction would drop the vault's NAV per unit by more
  * than the allowed threshold.
  *
- * Uses plain `eth_call` from the address that will actually execute the
- * transaction:
+ * Uses plain `eth_call` from the vault owner (see module header: the
+ * simulation is caller-independent and the owner always passes the fallback
+ * write-mode gate, so no multicall delegation is required):
  *   - `updateUnitaryValue()` for the pre-swap unitary value
  *   - `multicall([tx, updateUnitaryValue])` for the post-swap unitary value
+ *
+ * `knownOwner`: callers that already verified vault ownership pass the owner
+ * address (no extra RPC read); otherwise it is read on-chain, batched with the
+ * totalSupply read into one round-trip.
  *
  * RECOVERY RULE: trades that improve or hold the current unitaryValue are
  * always allowed, even when the vault is below the 24h baseline. Only trades
@@ -405,7 +423,7 @@ export async function checkNavImpact(
   txData: Hex,
   txValue: bigint,
   chainId: number,
-  executorAddress: Address,
+  knownOwner?: Address,
   kv?: KVNamespace,
   maxDropPct: bigint = DEFAULT_MAX_NAV_DROP_PCT,
 ): Promise<NavShieldResult> {
@@ -428,30 +446,46 @@ export async function checkNavImpact(
   }
 
   // First deposit: no outstanding shares means no unitary value to protect.
-  try {
-    const totalSupply = await publicClient.readContract({
+  // totalSupply and owner are independent reads, issued together so viem's HTTP
+  // transport batches them into a single round-trip. `knownOwner` lets callers
+  // that already verified vault ownership (operatorVerified) skip the owner read
+  // entirely — latency-critical on the execution path.
+  const [supplyResult, ownerResult] = await Promise.allSettled([
+    publicClient.readContract({
       address: vaultAddress,
       abi: RIGOBLOCK_VAULT_ABI,
       functionName: "totalSupply",
-    });
-    if (totalSupply === 0n) {
-      return {
-        allowed: true,
-        verified: false,
-        code: 'UNVERIFIED',
-        preNavUnitaryValue: "0",
-        postNavUnitaryValue: "0",
-        dropPct: "0",
-        impactPct: "0",
-        reason: "no outstanding shares — first deposit, skipping NAV shield.",
-      };
-    }
-  } catch (err) {
+    }),
+    knownOwner
+      ? Promise.resolve(knownOwner)
+      : publicClient.readContract({
+          address: vaultAddress,
+          abi: RIGOBLOCK_VAULT_ABI,
+          functionName: "owner",
+        }),
+  ]);
+
+  if (supplyResult.status === "fulfilled" && supplyResult.value === 0n) {
+    return {
+      allowed: true,
+      verified: false,
+      code: 'UNVERIFIED',
+      preNavUnitaryValue: "0",
+      postNavUnitaryValue: "0",
+      dropPct: "0",
+      impactPct: "0",
+      reason: "no outstanding shares — first deposit, skipping NAV shield.",
+    };
+  }
+  if (supplyResult.status === "rejected") {
     // If totalSupply cannot be read, fall through to simulation and let it fail closed.
-    console.warn("[NavShield] totalSupply read failed (falling through):", err);
+    console.warn("[NavShield] totalSupply read failed (falling through):", supplyResult.reason);
   }
 
   try {
+    if (ownerResult.status === "rejected") throw ownerResult.reason;
+    const vaultOwner = ownerResult.value as Address;
+
     const updateNavCalldata = encodeFunctionData({
       abi: RIGOBLOCK_VAULT_ABI,
       functionName: "updateUnitaryValue",
@@ -462,16 +496,17 @@ export async function checkNavImpact(
       args: [[txData, updateNavCalldata]],
     });
 
-    // Run both eth_calls concurrently. viem's HTTP transport batches independent
-    // JSON-RPC requests into a single HTTP call, so this is still one round-trip.
+    // Run both eth_calls concurrently from the vault owner. viem's HTTP
+    // transport batches independent JSON-RPC requests into a single HTTP call,
+    // so this is still one round-trip.
     const [preSettled, multiSettled] = await Promise.allSettled([
       publicClient.call({
-        account: executorAddress,
+        account: vaultOwner,
         to: vaultAddress,
         data: updateNavCalldata,
       }),
       publicClient.call({
-        account: executorAddress,
+        account: vaultOwner,
         to: vaultAddress,
         data: multicallData,
         value: txValue,

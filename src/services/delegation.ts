@@ -34,6 +34,8 @@ import type { Address, Hex } from "viem";
 import { encodeFunctionData } from "viem";
 import type { DelegationConfig, ChainDelegation, Env } from "../types.js";
 import { ALLOWED_VAULT_SELECTORS, VAULT_DELEGATION_ABI } from "../abi/rigoblockVault.js";
+import { AUTHORITY_ADDRESS, AUTHORITY_ABI } from "../abi/authority.js";
+import { ZERO_ADDRESS } from "../config.js";
 import {
   getAgentWalletInfo,
   createAgentWallet,
@@ -51,10 +53,64 @@ function delegationConfigKey(vaultAddress: string): string {
 // ── Selector list ─────────────────────────────────────────────────────
 
 /**
- * Build the list of vault function selectors the agent should be delegated for.
+ * Build the list of vault function selectors the agent should be delegated for
+ * on a given chain: every whitelisted adapter selector that the chain's
+ * Authority actually maps to an adapter, and nothing else.
+ *
+ * A selector with no adapter mapping is inert (the vault fallback reverts on
+ * it before delegation is even consulted), so granting it only widens the
+ * attack surface for free if governance later maps the selector on that chain.
+ * Resolution is ground truth from the Authority — one multicall — so new
+ * adapters and chains need no code changes here.
+ *
+ * Fails closed: if the Authority cannot be read, throws instead of guessing.
  */
-export function buildDefaultSelectors(): Hex[] {
-  return Object.values(ALLOWED_VAULT_SELECTORS) as Hex[];
+export async function getDelegableSelectors(chainId: number): Promise<Hex[]> {
+  const publicClient = getRpcProvider(chainId);
+  const all = Object.values(ALLOWED_VAULT_SELECTORS);
+
+  const results = await publicClient.multicall({
+    contracts: all.map((selector) => ({
+      address: AUTHORITY_ADDRESS,
+      abi: AUTHORITY_ABI,
+      functionName: "getApplicationAdapter" as const,
+      args: [selector],
+    })),
+  });
+
+  return all.filter((_, i) => {
+    const r = results[i];
+    if (r.status !== "success") {
+      throw new Error(
+        `Failed to resolve adapter mapping for selector ${all[i]} on chain ${chainId}: ${r.error?.message ?? "unknown"}`,
+      );
+    }
+    return (r.result as string).toLowerCase() !== ZERO_ADDRESS;
+  });
+}
+
+/**
+ * Read the selectors a vault has actually delegated to an agent, straight from
+ * the vault (ground truth for execution). Returns null when the vault cannot be
+ * read (no code at the address, or the vault predates the delegation views).
+ */
+export async function getAgentDelegatedSelectors(
+  chainId: number,
+  vaultAddress: Address,
+  agentAddress: Address,
+): Promise<Hex[] | null> {
+  const publicClient = getRpcProvider(chainId);
+  try {
+    const result = await publicClient.readContract({
+      address: vaultAddress,
+      abi: VAULT_DELEGATION_ABI,
+      functionName: "getDelegatedSelectors",
+      args: [agentAddress],
+    });
+    return (result as readonly string[]).map((s) => s.toLowerCase() as Hex);
+  } catch {
+    return null;
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────
@@ -132,10 +188,10 @@ export async function prepareDelegation(
   const walletResult = await createAgentWallet(env.KV, vaultAddress, env);
   const { walletChanged, previousAddress } = walletResult;
 
-  // 2. Build selector list — use only missing selectors for delta updates, all for fresh setup.
+  // 2. Build selector list — use only missing selectors for delta updates, all in-scope ones for fresh setup.
   //    CRITICAL: when the wallet changed, the new agent address has ZERO delegation on-chain.
   //    We must delegate ALL selectors to the new wallet, not just a delta.
-  const selectors = (walletChanged || !onlySelectors) ? buildDefaultSelectors() : onlySelectors;
+  const selectors = (walletChanged || !onlySelectors) ? await getDelegableSelectors(chainId) : onlySelectors;
 
   // 3. Encode pool.updateDelegation(Delegation[]) for the NEW agent
   const delegations = selectors.map((selector) => ({
@@ -252,37 +308,26 @@ export async function checkDelegationOnChain(
   delegatedSelectors: Hex[];
   undelegatedSelectors: Hex[];
 }> {
-  const publicClient = getRpcProvider(chainId);
+  const onChainSelectors = await getAgentDelegatedSelectors(chainId, vaultAddress, agentAddress);
 
-  try {
-    // Single call: get all selectors delegated to the agent
-    const result = await publicClient.readContract({
-      address: vaultAddress,
-      abi: VAULT_DELEGATION_ABI,
-      functionName: "getDelegatedSelectors",
-      args: [agentAddress],
-    });
-
-    const onChainSelectors = new Set(
-      (result as readonly string[]).map((s: string) => s.toLowerCase()),
-    );
-
-    const delegated = selectors.filter((s) => onChainSelectors.has(s.toLowerCase()));
-    const undelegated = selectors.filter((s) => !onChainSelectors.has(s.toLowerCase()));
-
-    return {
-      allDelegated: undelegated.length === 0,
-      delegatedSelectors: delegated,
-      undelegatedSelectors: undelegated,
-    };
-  } catch {
-    // Contract may not support the view (old version) — treat as not delegated
+  // Vault may not support the view (old version) — treat as not delegated
+  if (onChainSelectors === null) {
     return {
       allDelegated: false,
       delegatedSelectors: [],
       undelegatedSelectors: selectors,
     };
   }
+
+  const onChainSet = new Set<string>(onChainSelectors);
+  const delegated = selectors.filter((s) => onChainSet.has(s.toLowerCase()));
+  const undelegated = selectors.filter((s) => !onChainSet.has(s.toLowerCase()));
+
+  return {
+    allDelegated: undelegated.length === 0,
+    delegatedSelectors: delegated,
+    undelegatedSelectors: undelegated,
+  };
 }
 
 /**

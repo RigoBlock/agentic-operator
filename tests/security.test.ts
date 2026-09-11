@@ -10,10 +10,45 @@
  *
  * These are the tests that, if they fail, mean real financial loss is possible.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ALLOWED_VAULT_SELECTORS } from "../src/abi/rigoblockVault.js";
-import { buildDefaultSelectors } from "../src/services/delegation.js";
+import { getDelegableSelectors } from "../src/services/delegation.js";
+import { getRpcProvider } from "../src/services/rpcClient.js";
 import { keccak256, toBytes } from "viem";
+
+// getDelegableSelectors reads the chain's Authority via getRpcProvider — mock it
+// to mirror verified on-chain reality: HyperEVM maps only AHyperliquid + AMulticall
+// + AIntents selectors; the other chains map everything in the whitelist. The
+// AMulticall selectors intentionally STAY mapped here: Authority-mapping alone is
+// not enough — the delegation whitelist must also include them, and it deliberately
+// does not (the NAV shield simulates multicall from the vault owner instead).
+vi.mock("../src/services/rpcClient.js", () => ({
+  getRpcProvider: vi.fn(),
+}));
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const ADAPTER_ADDRESS = "0x00000000000000000000000000000000000000Aa";
+const HYPEREVM_MAPPED = new Set([
+  ALLOWED_VAULT_SELECTORS.hlDeposit,
+  ALLOWED_VAULT_SELECTORS.hlDepositFor,
+  ALLOWED_VAULT_SELECTORS.hlSendRawAction,
+  "0xac9650d8", // multicall(bytes[]) — mapped on-chain, NOT whitelisted
+  "0x5ae401dc", // multicall(uint256,bytes[]) — mapped on-chain, NOT whitelisted
+  "0x1f0464d1", // multicall(bytes32,bytes[]) — mapped on-chain, NOT whitelisted
+  ALLOWED_VAULT_SELECTORS.depositV3,
+]);
+
+beforeEach(() => {
+  (getRpcProvider as ReturnType<typeof vi.fn>).mockImplementation((chainId: number) => ({
+    multicall: async ({ contracts }: { contracts: { args: unknown[] }[] }) =>
+      contracts.map((c) => ({
+        status: "success" as const,
+        result: chainId === 999 && !HYPEREVM_MAPPED.has(c.args[0] as `0x${string}`)
+          ? ZERO_ADDRESS
+          : ADAPTER_ADDRESS,
+      })),
+  }));
+});
 
 // ── Dangerous selectors that must NEVER be delegated ──
 
@@ -61,23 +96,46 @@ describe("selector whitelist security", () => {
     }
   });
 
-  it("buildDefaultSelectors only returns whitelisted selectors", () => {
-    const defaults = buildDefaultSelectors();
+  it("getDelegableSelectors only returns whitelisted selectors", async () => {
+    // Whatever the Authority maps, the result must be a subset of ALLOWED_VAULT_SELECTORS.
     const allowed = new Set(
       Object.values(ALLOWED_VAULT_SELECTORS).map((s) => s.toLowerCase()),
     );
-    for (const selector of defaults) {
-      expect(
-        allowed.has(selector.toLowerCase()),
-        `Selector ${selector} is in defaults but not in ALLOWED_VAULT_SELECTORS`,
-      ).toBe(true);
+    for (const chainId of [1, 8453, 42161, 999, 56, 137, 10, 130]) {
+      const selectors = await getDelegableSelectors(chainId);
+      for (const selector of selectors) {
+        expect(
+          allowed.has(selector.toLowerCase()),
+          `Selector ${selector} is delegable but not in ALLOWED_VAULT_SELECTORS`,
+        ).toBe(true);
+      }
     }
   });
 
-  it("buildDefaultSelectors returns ALL whitelisted selectors (no subset)", () => {
-    const defaults = buildDefaultSelectors().map((s) => s.toLowerCase());
-    const all = Object.values(ALLOWED_VAULT_SELECTORS).map((s) => s.toLowerCase());
-    expect(defaults.sort()).toEqual(all.sort());
+  it("selectors without an adapter mapping are never delegable", async () => {
+    // HyperEVM reality (verified on-chain): only AHyperliquid, AMulticall and
+    // AIntents selectors are mapped. Everything else must be excluded — no inert grants.
+    const selectors = await getDelegableSelectors(999);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.createIncreaseOrder);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.execute);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.modifyLiquidities);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.zeroXExecute);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.wrapETH);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.unwrapWETH9);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.stake);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.unstake);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.undelegateStake);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.withdrawDelegatorRewards);
+    // The mapped ones are included.
+    expect(selectors).toContain(ALLOWED_VAULT_SELECTORS.hlDeposit);
+    expect(selectors).toContain(ALLOWED_VAULT_SELECTORS.hlDepositFor);
+    expect(selectors).toContain(ALLOWED_VAULT_SELECTORS.hlSendRawAction);
+    expect(selectors).toContain(ALLOWED_VAULT_SELECTORS.depositV3);
+    // The AMulticall selectors are Authority-mapped on HyperEVM but NOT whitelisted —
+    // the NAV shield simulates multicall from the vault owner, so they are excluded.
+    expect(selectors.map((s) => s.toLowerCase())).not.toContain("0xac9650d8");
+    expect(selectors.map((s) => s.toLowerCase())).not.toContain("0x5ae401dc");
+    expect(selectors.map((s) => s.toLowerCase())).not.toContain("0x1f0464d1");
   });
 });
 
@@ -124,9 +182,6 @@ describe("execution validation invariants", () => {
       "0x3593564c": "execute(bytes,bytes[],uint256)",         // Uniswap UniversalRouter
       "0x24856bc3": "execute(bytes,bytes[])",                  // Uniswap UniversalRouter (no deadline)
       "0xdd46508f": "modifyLiquidities(bytes,uint256)",        // Uniswap v4 LP
-      "0xac9650d8": "multicall(bytes[])",                        // Vault multicall
-      "0x5ae401dc": "multicall(uint256,bytes[])",                // Vault multicall (deadline)
-      "0x1f0464d1": "multicall(bytes32,bytes[])",                // Vault multicall (hash)
       "0x2213bc0b": "execute(address,address,uint256,address,bytes)", // 0x AllowanceHolder
       "0x7489ec23": "cancelOrder(bytes32)",                    // GMX
       "0xe9249b57": "claimCollateral(address[],address[],uint256[],address[])", // GMX

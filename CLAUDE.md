@@ -64,9 +64,17 @@ RULE: The NAV shield (10% max drop check) runs BEFORE every transaction
 - It reads NAV via plain `eth_call` (never `eth_simulateV1` — Nitro synthetic
   blocks produce false-positive reverts that real execution does not have):
   `updateUnitaryValue()` for the pre-swap NAV, then
-  `multicall([tx, updateUnitaryValue])` from the address that will actually
-  execute the transaction (the agent wallet in delegated mode, the operator in
-  manual mode) for the post-swap NAV, in a single atomic call.
+  `multicall([tx, updateUnitaryValue])` **from the vault owner** for the post-swap
+  NAV, in a single atomic call. Verified callers pass the owner address in (no
+  extra RPC read); otherwise it is read on-chain, batched with the `totalSupply`
+  read into one round-trip.
+- The simulation is caller-independent and runs from the vault owner on purpose:
+  the outer multicall selector hits the vault fallback's write-mode gate, which the
+  owner always passes, so no multicall delegation is needed. Selector delegation is
+  enforced by the 7-point execution validation before the shield runs, and no
+  whitelisted adapter branches on `msg.sender` (the only `msg.sender` use in any
+  adapter is an event emission), so owner-simulation is state-equivalent to
+  agent-execution for every legitimately delegated tx.
 - **Uses `updateUnitaryValue()`** (the actual contract NAV algorithm via `eth_call`),
   NOT `getNavDataView()`. The view function (ENavView) has an edge case bug where it
   returns `unitaryValue=0` when `effectiveSupply > 0` AND `totalValue <= 0`, while
@@ -77,7 +85,26 @@ RULE: The NAV shield (10% max drop check) runs BEFORE every transaction
   3. **No outstanding shares** (first deposit) → `allowed: true, verified: false, code: 'UNVERIFIED'`
      — there is no unit price to protect yet.
 - If the pre-swap NAV read fails → BLOCK (not skip)
-- **NEVER** add `multicall` to `ALLOWED_VAULT_SELECTORS` / delegated selectors
+- Delegation is scoped by ground truth from the chain's Authority contract: only
+  whitelisted selectors that `getApplicationAdapter(selector)` maps to a non-zero
+  adapter on that chain are ever delegated (`getDelegableSelectors` in
+  `services/delegation.ts`). Selectors with no mapping are inert — never grant them.
+- The AMulticall variants (`multicall`, `multicallDeadline`, `multicallHash`) are
+  deliberately NOT in the delegation whitelist, and no execution flow multicalls.
+  The NAV shield simulates `multicall([tx, updateUnitaryValue])` from the vault
+  owner (who always passes the fallback write-mode gate), so no multicall
+  delegation is needed on-chain. Do not re-add them to the whitelist.
+- Even if multicall were ever delegated, it would NOT widen the agent's effective
+  authority: the adapter delegatecalls each inner call back through the vault
+  fallback, so every inner selector is individually delegation-checked, and admin
+  methods (`setOwner`, `updateDelegation`, ...) are core `onlyOwner` — they
+  direct-dispatch in the proxy, never reach the delegation check, and revert with
+  `PoolCallerIsNotOwner` for the agent even inside a multicall. Proven by
+  `MulticallDelegationSecurityFork.t.sol` in v3-contracts (8 fork tests on
+  mainnet: takeover via multicall, self-granting delegations via multicall,
+  non-delegated adapter selectors via multicall, and self-granting operator all
+  revert or are inert). Those tests are kept as executable documentation in case
+  multicall delegation is ever reconsidered.
 - **NEVER** add a flag, env var, or config to disable the NAV shield entirely
 - **NEVER** skip the NAV shield for any transaction type (including bridges)
 - **NEVER** confuse "trade reverts" with "NAV shield blocked" — use the correct error code

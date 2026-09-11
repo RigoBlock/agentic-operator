@@ -404,13 +404,12 @@ export const ALLOWED_VAULT_SELECTORS = {
   execute: "0x24856bc3" as `0x${string}`,
   // modifyLiquidities(bytes,uint256)
   modifyLiquidities: "0xdd46508f" as `0x${string}`,
-  // ── Multicall variants (vault adapter wraps individual calls, each checked against its own selector) ──
-  // multicall(bytes[])
-  multicall: "0xac9650d8" as `0x${string}`,
-  // multicall(uint256,bytes[])
-  multicallDeadline: "0x5ae401dc" as `0x${string}`,
-  // multicall(bytes32,bytes[])
-  multicallHash: "0x1f0464d1" as `0x${string}`,
+  // ── Multicall variants are deliberately NOT here. The NAV shield simulates
+  // multicall([tx, updateUnitaryValue]) via eth_call FROM THE VAULT OWNER, who
+  // always passes the fallback write-mode gate, so no multicall delegation is
+  // needed. Execution never uses multicall (every flow has a single-entry-point
+  // adapter). The AMulticall ABI fragment above is kept solely for that
+  // simulation. See MulticallDelegationSecurityFork.t.sol in v3-contracts. ──
   // ── 0x Aggregator (IA0x / AllowanceHolder) ──
   // exec(address,address,uint256,address,bytes) — A0xRouter / AllowanceHolder entry point
   zeroXExecute: "0x2213bc0b" as `0x${string}`,

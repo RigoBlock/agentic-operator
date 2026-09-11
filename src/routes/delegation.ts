@@ -26,7 +26,7 @@ import {
   getDelegationConfig,
   saveDelegationConfig,
   getActiveChains,
-  buildDefaultSelectors,
+  getDelegableSelectors,
   checkDelegationOnChain,
   isDelegationActive,
   prepareRevocation,
@@ -76,10 +76,18 @@ delegation.post("/setup", async (c) => {
     // updateDelegation is additive — only pass missing selectors for delta updates.
     // If the caller already has them from a /status response, use those directly.
     // Otherwise fall back to a fresh on-chain check (first-time setup has no prior status).
+    // The expected set is resolved against the chain's Authority: only selectors
+    // with an adapter mapping on this chain are ever delegated.
+    const expectedSelectors = await getDelegableSelectors(body.chainId);
     let onlySelectors: Hex[] | undefined;
     if (body.undelegatedSelectors && body.undelegatedSelectors.length > 0 &&
-        body.undelegatedSelectors.length < buildDefaultSelectors().length) {
-      onlySelectors = body.undelegatedSelectors as Hex[];
+        body.undelegatedSelectors.length < expectedSelectors.length) {
+      // Intersect with the in-scope set — a stale caller hint must never
+      // re-propose selectors this chain's Authority does not map.
+      const inScope = (body.undelegatedSelectors as Hex[]).filter((s) =>
+        expectedSelectors.some((e) => e.toLowerCase() === s.toLowerCase()),
+      );
+      onlySelectors = inScope.length > 0 ? inScope : undefined;
     } else if (!body.undelegatedSelectors) {
       // No hint from caller — check on-chain (first-time setup or caller didn't pass it)
       try {
@@ -89,13 +97,13 @@ delegation.post("/setup", async (c) => {
             body.chainId,
             body.vaultAddress as Address,
             agentInfo.address,
-            buildDefaultSelectors(),
+            expectedSelectors,
           );
-          if (undelegatedSelectors.length > 0 && undelegatedSelectors.length < buildDefaultSelectors().length) {
+          if (undelegatedSelectors.length > 0 && undelegatedSelectors.length < expectedSelectors.length) {
             onlySelectors = undelegatedSelectors;
           }
         }
-      } catch { /* fresh setup — use all selectors */ }
+      } catch { /* fresh setup — use all in-scope selectors */ }
     }
 
     const result = await prepareDelegation(
@@ -170,7 +178,7 @@ delegation.post("/confirm", async (c) => {
       return c.json({ error: "No agent wallet found. Call /setup first." }, 400);
     }
 
-    const selectors = (body.selectors?.map((s) => s as Hex)) || buildDefaultSelectors();
+    const selectors = (body.selectors?.map((s) => s as Hex)) || await getDelegableSelectors(body.chainId);
 
     const config = await confirmDelegation(
       c.env,
@@ -300,7 +308,7 @@ delegation.get("/status", async (c) => {
   let onChainStatus = null;
   if (verifyOnChain && walletInfo?.address && chainId && vaultAddress) {
     try {
-      const selectors = buildDefaultSelectors();
+      const selectors = await getDelegableSelectors(chainId);
       onChainStatus = await checkDelegationOnChain(
         chainId,
         vaultAddress as Address,
@@ -315,7 +323,6 @@ delegation.get("/status", async (c) => {
   // allChains=true: check EVERY supported mainnet chain in parallel
   let allChainsStatus: Record<string, { delegatedCount: number; missingCount: number; allDelegated: boolean }> | null = null;
   if (allChains && walletInfo?.address && vaultAddress) {
-    const selectors = buildDefaultSelectors();
     const mainnetChainIds = SUPPORTED_CHAINS.map((c) => c.id);
     const results = await Promise.allSettled(
       mainnetChainIds.map(async (cid) => {
@@ -323,7 +330,7 @@ delegation.get("/status", async (c) => {
           cid,
           vaultAddress as Address,
           walletInfo.address,
-          selectors,
+          await getDelegableSelectors(cid),
         );
         return {
           chainId: cid,

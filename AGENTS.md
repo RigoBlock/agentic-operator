@@ -71,7 +71,7 @@ Every delegated transaction passes:
 1. **Operator auth** — signature + on-chain ownership.
 2. **Delegation check** — active on-chain delegation for the exact selector.
 3. **7-point validation** — config enabled, target == vault, selector whitelisted, agent wallet matches, `eth_call` simulation succeeds, gas balance sufficient, gas within per-chain caps.
-4. **NAV shield** — `eth_call` of `multicall([tx, updateUnitaryValue])` from the actual executor; blocks if post-swap unit value drops > configured threshold (default 10%, temporarily configurable 1%–100% for 10 minutes).
+4. **NAV shield** — `eth_call` of `multicall([tx, updateUnitaryValue])` from the vault owner (the simulation is caller-independent: selector delegation is enforced by validation, and the owner always passes the fallback write-mode gate, so no multicall delegation exists); blocks if post-swap unit value drops > configured threshold (default 10%, temporarily configurable 1%–100% for 10 minutes).
 5. **Slippage protection** — default 1% (100 bps), clamped to 0.1%–5%.
 6. **Swap shield** — compares DEX quote vs BackgeoOracle 5-minute TWAP; blocks if divergence exceeds 5% (or operator's temporary tolerance).
 
@@ -88,6 +88,7 @@ External agents cannot change slippage, swap-shield tolerance, or NAV-shield thr
 | Execute swaps with >5% oracle divergence | Swap shield blocks it (unless operator raised tolerance) |
 | Bypass slippage protection | Enforced in calldata building |
 | Call arbitrary contracts / functions | Target must be the vault; selector whitelist |
+| Escalate privileges via multicall | Multicall is not delegated at all — the NAV shield simulates it from the vault owner. Even if it were, every inner call re-enters the vault fallback and is individually selector-checked, and admin methods (`setOwner`, `updateDelegation`) are core `onlyOwner` and revert for the agent even inside a multicall (proven by `MulticallDelegationSecurityFork.t.sol` in v3-contracts) |
 | Spend more than per-chain gas caps | Hard-coded caps |
 | Modify delegation or safety settings | Only the vault owner can |
 

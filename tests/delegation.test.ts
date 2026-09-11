@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ALLOWED_VAULT_SELECTORS, VAULT_DELEGATION_ABI } from "../src/abi/rigoblockVault.js";
 import {
-  buildDefaultSelectors,
+  getDelegableSelectors,
   prepareDelegation,
   confirmDelegation,
   revokeDelegation,
@@ -14,6 +14,7 @@ import {
   isDelegationActive,
   getActiveChains,
 } from "../src/services/delegation.js";
+import { getRpcProvider } from "../src/services/rpcClient.js";
 import { decodeAbiParameters, decodeFunctionData, type Hex } from "viem";
 
 // ── Mock KV Namespace ─────────────────────────────────────────────────
@@ -43,6 +44,32 @@ vi.mock("../src/services/agentWallet.js", () => ({
   unmarkChainDelegated: vi.fn().mockResolvedValue(undefined),
   deleteAgentWallet: vi.fn().mockResolvedValue(undefined),
 }));
+
+// getDelegableSelectors reads the chain's Authority via getRpcProvider — mock it.
+vi.mock("../src/services/rpcClient.js", () => ({
+  getRpcProvider: vi.fn(),
+}));
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const ADAPTER_ADDRESS = "0x00000000000000000000000000000000000000Aa";
+
+/** Mock the Authority multicall: map selector (lowercase) → adapter address; unlisted selectors get `defaultAddress`. */
+function mockAuthorityMappings(map: Record<string, string>, defaultAddress: string = ADAPTER_ADDRESS) {
+  (getRpcProvider as ReturnType<typeof vi.fn>).mockReturnValue({
+    multicall: async ({ contracts }: { contracts: { args: unknown[] }[] }) =>
+      contracts.map((c) => ({
+        status: "success" as const,
+        result: map[(c.args[0] as string).toLowerCase()] ?? defaultAddress,
+      })),
+  });
+}
+
+const ALL_SELECTORS = Object.values(ALLOWED_VAULT_SELECTORS) as Hex[];
+
+beforeEach(() => {
+  // Default: Authority maps every whitelisted selector (e.g. Arbitrum today).
+  mockAuthorityMappings({});
+});
 
 const AGENT_ADDRESS = MOCK_AGENT as `0x${string}`;
 
@@ -121,21 +148,54 @@ describe("ALLOWED_VAULT_SELECTORS", () => {
   });
 });
 
-describe("buildDefaultSelectors", () => {
-  it("returns all selectors from ALLOWED_VAULT_SELECTORS", () => {
-    const defaults = buildDefaultSelectors();
-    const allSelectors = Object.values(ALLOWED_VAULT_SELECTORS);
-    expect(defaults).toHaveLength(allSelectors.length);
-    for (const selector of allSelectors) {
-      expect(defaults).toContain(selector);
+describe("getDelegableSelectors", () => {
+  it("returns all whitelisted selectors when the Authority maps all of them", async () => {
+    mockAuthorityMappings({});
+    const selectors = await getDelegableSelectors(42161);
+    const all = Object.values(ALLOWED_VAULT_SELECTORS);
+    expect(selectors).toHaveLength(all.length);
+    for (const selector of all) {
+      expect(selectors).toContain(selector);
+      expect(selectors.every((s) => all.includes(s))).toBe(true);
     }
   });
 
-  it("returns Hex[] values (0x-prefixed)", () => {
-    const defaults = buildDefaultSelectors();
-    for (const s of defaults) {
-      expect(s).toMatch(/^0x[a-fA-F0-9]{8}$/);
-    }
+  it("excludes selectors the Authority does not map on that chain", async () => {
+    // HyperEVM reality: only AHyperliquid and AIntents selectors are mapped AND
+    // whitelisted. The AMulticall selectors are mapped on-chain (kept in the mock
+    // on purpose) but are NOT in the delegation whitelist — the NAV shield
+    // simulates multicall from the vault owner, so they must be excluded too.
+    mockAuthorityMappings({
+      [ALLOWED_VAULT_SELECTORS.hlDeposit.toLowerCase()]: ADAPTER_ADDRESS,
+      [ALLOWED_VAULT_SELECTORS.hlDepositFor.toLowerCase()]: ADAPTER_ADDRESS,
+      [ALLOWED_VAULT_SELECTORS.hlSendRawAction.toLowerCase()]: ADAPTER_ADDRESS,
+      "0xac9650d8": ADAPTER_ADDRESS, // multicall(bytes[]) — mapped on-chain, never delegated
+      "0x5ae401dc": ADAPTER_ADDRESS, // multicall(uint256,bytes[]) — mapped on-chain, never delegated
+      "0x1f0464d1": ADAPTER_ADDRESS, // multicall(bytes32,bytes[]) — mapped on-chain, never delegated
+      [ALLOWED_VAULT_SELECTORS.depositV3.toLowerCase()]: ADAPTER_ADDRESS,
+    }, ZERO_ADDRESS);
+    const selectors = await getDelegableSelectors(999);
+    expect(selectors).toHaveLength(4);
+    expect(selectors).toContain(ALLOWED_VAULT_SELECTORS.hlDeposit);
+    expect(selectors).toContain(ALLOWED_VAULT_SELECTORS.hlSendRawAction);
+    // GMX, Uniswap v4, 0x, wrap, staking selectors are NOT mapped on HyperEVM — never delegate them.
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.createIncreaseOrder);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.execute);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.zeroXExecute);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.wrapETH);
+    expect(selectors).not.toContain(ALLOWED_VAULT_SELECTORS.stake);
+    // Mapped on-chain but not whitelisted — never delegate them either.
+    const lower = selectors.map((s) => s.toLowerCase());
+    expect(lower).not.toContain("0xac9650d8");
+    expect(lower).not.toContain("0x5ae401dc");
+    expect(lower).not.toContain("0x1f0464d1");
+  });
+
+  it("throws (fails closed) when the Authority cannot be read", async () => {
+    (getRpcProvider as ReturnType<typeof vi.fn>).mockReturnValue({
+      multicall: async () => [{ status: "failure", error: new Error("rpc down") }],
+    });
+    await expect(getDelegableSelectors(1)).rejects.toThrow(/Failed to resolve adapter mapping/);
   });
 });
 
@@ -190,7 +250,13 @@ describe("prepareDelegation", () => {
     expect(decoded.functionName).toBe("updateDelegation");
   });
 
-  it("delegation array includes all ALLOWED_VAULT_SELECTORS with isDelegated=true", async () => {
+  it("delegation array includes all in-scope selectors with isDelegated=true", async () => {
+    // Arbitrum reality: every adapter selector is mapped except AHyperliquid's.
+    mockAuthorityMappings({
+      [ALLOWED_VAULT_SELECTORS.hlDeposit.toLowerCase()]: ZERO_ADDRESS,
+      [ALLOWED_VAULT_SELECTORS.hlDepositFor.toLowerCase()]: ZERO_ADDRESS,
+      [ALLOWED_VAULT_SELECTORS.hlSendRawAction.toLowerCase()]: ZERO_ADDRESS,
+    });
     const kv = makeKV();
     const result = await prepareDelegation(makeEnv(kv), OPERATOR, VAULT, CHAIN_ID);
 
@@ -207,19 +273,28 @@ describe("prepareDelegation", () => {
       expect(d.isDelegated).toBe(true);
     }
 
-    // All ALLOWED_VAULT_SELECTORS must be present
+    // Mapped selectors (incl. GMX on Arbitrum) are present…
     const encodedSelectors = delegations.map(d => d.selector.toLowerCase());
-    for (const selector of Object.values(ALLOWED_VAULT_SELECTORS)) {
-      expect(encodedSelectors).toContain(selector.toLowerCase());
-    }
+    expect(encodedSelectors).toContain(ALLOWED_VAULT_SELECTORS.createIncreaseOrder.toLowerCase());
+    expect(encodedSelectors).toHaveLength(ALL_SELECTORS.length - 3);
+    // …and selectors without an adapter mapping on this chain are never granted.
+    expect(encodedSelectors).not.toContain(ALLOWED_VAULT_SELECTORS.hlDeposit.toLowerCase());
+    expect(encodedSelectors).not.toContain(ALLOWED_VAULT_SELECTORS.hlDepositFor.toLowerCase());
+    expect(encodedSelectors).not.toContain(ALLOWED_VAULT_SELECTORS.hlSendRawAction.toLowerCase());
+    // The AMulticall selectors are never granted either — the NAV shield simulates
+    // multicall from the vault owner, so no multicall delegation exists.
+    expect(encodedSelectors).not.toContain("0xac9650d8");
+    expect(encodedSelectors).not.toContain("0x5ae401dc");
+    expect(encodedSelectors).not.toContain("0x1f0464d1");
   });
 
-  it("returns the full selector list matching buildDefaultSelectors()", async () => {
+  it("returns the full in-scope selector list from the Authority", async () => {
+    mockAuthorityMappings({}); // everything mapped
     const kv = makeKV();
     const result = await prepareDelegation(makeEnv(kv), OPERATOR, VAULT, CHAIN_ID);
-    const defaults = buildDefaultSelectors();
-    expect(result.selectors).toHaveLength(defaults.length);
-    for (const s of defaults) {
+    const expected = await getDelegableSelectors(CHAIN_ID);
+    expect(result.selectors).toHaveLength(expected.length);
+    for (const s of expected) {
       expect(result.selectors.map(x => x.toLowerCase())).toContain(s.toLowerCase());
     }
   });
@@ -228,7 +303,7 @@ describe("prepareDelegation", () => {
 describe("confirmDelegation + getDelegationConfig", () => {
   it("saves config to KV and enables delegation for the chain", async () => {
     const kv = makeKV();
-    const selectors = buildDefaultSelectors();
+    const selectors = ALL_SELECTORS;
     const txHash = "0xabcdef1234567890" as Hex;
 
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, CHAIN_ID, selectors, txHash);
@@ -244,7 +319,7 @@ describe("confirmDelegation + getDelegationConfig", () => {
 
   it("merges new chain without overwriting existing chains", async () => {
     const kv = makeKV();
-    const selectors = buildDefaultSelectors();
+    const selectors = ALL_SELECTORS;
     const txHash1 = "0xchain1txhash" as Hex;
     const txHash2 = "0xchain2txhash" as Hex;
 
@@ -261,8 +336,8 @@ describe("confirmDelegation + getDelegationConfig", () => {
 
   it("updating existing chain replaces its selector set (for new selectors)", async () => {
     const kv = makeKV();
-    const originalSelectors = buildDefaultSelectors().slice(0, 5);
-    const newSelectors = buildDefaultSelectors();
+    const originalSelectors = ALL_SELECTORS.slice(0, 5);
+    const newSelectors = ALL_SELECTORS;
 
     // Initial delegation with partial selectors
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, CHAIN_ID, originalSelectors, "0xhash1" as Hex);
@@ -279,7 +354,7 @@ describe("confirmDelegation + getDelegationConfig", () => {
 describe("revokeDelegation (all chains)", () => {
   it("disables delegation and clears all chains", async () => {
     const kv = makeKV();
-    const selectors = buildDefaultSelectors();
+    const selectors = ALL_SELECTORS;
 
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, CHAIN_ID, selectors, "0xtxhash" as Hex);
     await revokeDelegation(kv, VAULT);
@@ -299,7 +374,7 @@ describe("revokeDelegation (all chains)", () => {
 describe("revokeDelegationOnChain (single chain)", () => {
   it("removes the specified chain but keeps others", async () => {
     const kv = makeKV();
-    const selectors = buildDefaultSelectors();
+    const selectors = ALL_SELECTORS;
 
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, 1, selectors, "0xtx1" as Hex);
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, 42161, selectors, "0xtx2" as Hex);
@@ -314,7 +389,7 @@ describe("revokeDelegationOnChain (single chain)", () => {
 
   it("disables delegation when the last chain is removed", async () => {
     const kv = makeKV();
-    const selectors = buildDefaultSelectors();
+    const selectors = ALL_SELECTORS;
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, CHAIN_ID, selectors, "0xtxhash" as Hex);
 
     await revokeDelegationOnChain(kv, VAULT, CHAIN_ID);
@@ -328,7 +403,7 @@ describe("revokeDelegationOnChain (single chain)", () => {
 describe("isDelegationActive", () => {
   it("returns true when delegation is active on the given chain", async () => {
     const kv = makeKV();
-    const selectors = buildDefaultSelectors();
+    const selectors = ALL_SELECTORS;
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, CHAIN_ID, selectors, "0xtx" as Hex);
     expect(await isDelegationActive(kv, VAULT, CHAIN_ID)).toBe(true);
   });
@@ -340,7 +415,7 @@ describe("isDelegationActive", () => {
 
   it("returns false after global revocation", async () => {
     const kv = makeKV();
-    const selectors = buildDefaultSelectors();
+    const selectors = ALL_SELECTORS;
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, CHAIN_ID, selectors, "0xtx" as Hex);
     await revokeDelegation(kv, VAULT);
     expect(await isDelegationActive(kv, VAULT, CHAIN_ID)).toBe(false);
@@ -348,7 +423,7 @@ describe("isDelegationActive", () => {
 
   it("returns false after chain-specific revocation", async () => {
     const kv = makeKV();
-    const selectors = buildDefaultSelectors();
+    const selectors = ALL_SELECTORS;
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, CHAIN_ID, selectors, "0xtx" as Hex);
     await revokeDelegationOnChain(kv, VAULT, CHAIN_ID);
     expect(await isDelegationActive(kv, VAULT, CHAIN_ID)).toBe(false);
@@ -411,7 +486,7 @@ describe("prepareRevocation", () => {
 describe("getActiveChains", () => {
   it("returns chain IDs where delegation is active", async () => {
     const kv = makeKV();
-    const selectors = buildDefaultSelectors();
+    const selectors = ALL_SELECTORS;
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, 1, selectors, "0xtx1" as Hex);
     await confirmDelegation(makeEnv(kv), OPERATOR, VAULT, AGENT_ADDRESS, 8453, selectors, "0xtx2" as Hex);
 

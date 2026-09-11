@@ -18,8 +18,8 @@ import {
   getChainDelegation,
   getDelegationConfig,
   saveDelegationConfig,
-  checkDelegationOnChain,
-  buildDefaultSelectors,
+  getAgentDelegatedSelectors,
+  getDelegableSelectors,
 } from "./delegation.js";
 import { createAgentWallet, markChainDelegated } from "./agentWallet.js";
 import { RIGOBLOCK_VAULT_ABI } from "../abi/rigoblockVault.js";
@@ -55,13 +55,16 @@ async function resolveDelegatedExecutorFromChain(
       ?? (await createAgentWallet(env.KV, vaultAddress, env)).address;
     if (!agentAddress) return null;
 
-    const status = await checkDelegationOnChain(
-      chainId,
-      vaultAddress as Address,
-      agentAddress,
-      buildDefaultSelectors(),
-    );
-    if (status.delegatedSelectors.length === 0) return null;
+    // Authority resolution and the vault delegation read are independent —
+    // issue them together so viem batches them into a single HTTP round-trip.
+    const [delegableSelectors, onChainSelectors] = await Promise.all([
+      getDelegableSelectors(chainId),
+      getAgentDelegatedSelectors(chainId, vaultAddress as Address, agentAddress),
+    ]);
+    if (!onChainSelectors) return null;
+    const onChainSet = new Set<string>(onChainSelectors);
+    const delegatedSelectors = delegableSelectors.filter((s) => onChainSet.has(s.toLowerCase()));
+    if (delegatedSelectors.length === 0) return null;
 
     // Heal KV (best-effort) so subsequent prepares and /api/delegation/execute
     // take the fast path and the UI sees the chain as delegated.
@@ -82,7 +85,7 @@ async function resolveDelegatedExecutorFromChain(
           ...(config?.chains ?? {}),
           [String(chainId)]: {
             confirmedAt: Date.now(),
-            delegatedSelectors: status.delegatedSelectors,
+            delegatedSelectors: delegatedSelectors,
           },
         },
       };
@@ -195,7 +198,11 @@ export async function prepareTransaction(
       tx.data,
       txValue,
       tx.chainId,
-      executor,
+      // The authenticated operator IS the vault owner (verifyOperatorAuth), so
+      // pass it and skip the on-chain owner read on this latency-critical path.
+      ctx.operatorVerified && ctx.operatorAddress
+        ? (ctx.operatorAddress as Address)
+        : undefined,
       env.KV,
       storedNavThreshold ?? undefined,
     );

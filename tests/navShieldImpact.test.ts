@@ -9,18 +9,23 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { encodeFunctionData, encodeFunctionResult, type Hex } from "viem";
-import { RIGOBLOCK_VAULT_ABI, ALLOWED_VAULT_SELECTORS } from "../src/abi/rigoblockVault.js";
+import { RIGOBLOCK_VAULT_ABI } from "../src/abi/rigoblockVault.js";
 
 const UPDATE_SELECTOR = encodeFunctionData({
   abi: RIGOBLOCK_VAULT_ABI,
   functionName: "updateUnitaryValue",
 }).slice(0, 10);
 
-const MULTICALL_SELECTOR = ALLOWED_VAULT_SELECTORS.multicall;
+// multicall(bytes[]) — no longer in the delegation whitelist, but the NAV
+// shield still simulates multicall([tx, updateUnitaryValue]) from the vault
+// owner to read the post-swap NAV atomically.
+const MULTICALL_SELECTOR = "0xac9650d8" as Hex;
 
 // ── Hoist mocks before the module under test imports getRpcProvider ──
 const mockState = vi.hoisted(() => {
-  const readContract = vi.fn(async () => 1n);
+  const readContract = vi.fn(
+    async (_args: { functionName: string }): Promise<bigint | `0x${string}`> => 1n,
+  );
   // eth_call only — checkNavImpact must not use eth_simulateV1 (Nitro false positives).
   const call = vi.fn();
   const getRpcProvider = vi.fn(() => ({ readContract, call } as any));
@@ -38,7 +43,7 @@ vi.mock("../src/services/rpcClient.js", () => ({
 import { checkNavImpact } from "../src/services/navGuard.js";
 
 const VAULT = "0x1111111111111111111111111111111111111111" as `0x${string}`;
-const EXECUTOR = "0x2222222222222222222222222222222222222222" as `0x${string}`;
+const OWNER = "0x2222222222222222222222222222222222222222" as `0x${string}`;
 const CHAIN_ID = 42161;
 const SWAP_DATA = "0xdeadbeef" as Hex;
 
@@ -86,7 +91,10 @@ describe("NAV Shield impact logic", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockState.readContract.mockReset();
-    mockState.readContract.mockResolvedValue(1n);
+    // readContract serves totalSupply (1n) and the vault owner address.
+    mockState.readContract.mockImplementation(async (args: { functionName: string }) =>
+      args.functionName === "owner" ? OWNER : 1n,
+    );
     mockState.call.mockReset();
     mockState.call.mockRejectedValue(new Error("execution reverted"));
   });
@@ -94,7 +102,7 @@ describe("NAV Shield impact logic", () => {
   it("allows a trade within the max NAV drop threshold", async () => {
     setupClient(10000n, 9000n);
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
@@ -105,7 +113,7 @@ describe("NAV Shield impact logic", () => {
   it("blocks a trade that exceeds the max NAV drop threshold", async () => {
     setupClient(10000n, 8900n);
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
     );
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("BLOCKED");
@@ -118,7 +126,7 @@ describe("NAV Shield impact logic", () => {
     setupClient(8000n, 8500n);
     const kv = createMockKV({ unitaryValue: "10000", recordedAt: Date.now() });
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, kv,
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, kv,
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
@@ -131,7 +139,7 @@ describe("NAV Shield impact logic", () => {
     setupClient(8000n, 7500n);
     const kv = createMockKV({ unitaryValue: "10000", recordedAt: Date.now() });
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, kv,
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, kv,
     );
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("BLOCKED");
@@ -142,16 +150,18 @@ describe("NAV Shield impact logic", () => {
   it("allows trading in an empty vault (unitaryValue = 0)", async () => {
     setupClient(0n, 0n);
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
   });
 
   it("allows first deposit when vault has no outstanding shares (totalSupply = 0)", async () => {
-    mockState.readContract.mockResolvedValue(0n);
+    mockState.readContract.mockImplementation(async (args: { functionName: string }) =>
+      args.functionName === "owner" ? OWNER : 0n,
+    );
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);
@@ -163,7 +173,7 @@ describe("NAV Shield impact logic", () => {
   it("fails closed when pre-swap NAV cannot be read", async () => {
     mockState.call.mockRejectedValue(new Error("RPC timeout"));
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
     );
     expect(result.allowed).toBe(false);
     expect(result.verified).toBe(false);
@@ -178,7 +188,7 @@ describe("NAV Shield impact logic", () => {
       throw new Error("execution reverted");
     });
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
     );
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("TRADE_REVERTS");
@@ -198,7 +208,7 @@ describe("NAV Shield impact logic", () => {
       throw navImpactError;
     });
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
     );
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("TRADE_REVERTS");
@@ -214,7 +224,7 @@ describe("NAV Shield impact logic", () => {
       throw new Error('The contract function "<unknown>" returned no data ("0x").');
     });
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
     );
     expect(result.allowed).toBe(false);
     expect(result.code).toBe("TRADE_REVERTS");
@@ -222,12 +232,14 @@ describe("NAV Shield impact logic", () => {
     expect(result.reason).not.toContain("returned no data");
   });
 
-  it("uses only eth_call from the executor — no eth_simulateV1", async () => {
+  it("uses only eth_call from the vault owner — no eth_simulateV1", async () => {
     // The NAV shield must be pure eth_call: eth_simulateV1 produces false positives
-    // on Nitro chains (synthetic block diverges from real execution).
+    // on Nitro chains (synthetic block diverges from real execution). The calls run
+    // from the vault owner, who always passes the fallback write-mode gate — no
+    // multicall delegation is required.
     setupClient(10000n, 9900n);
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(),
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(true);
@@ -235,7 +247,7 @@ describe("NAV Shield impact logic", () => {
     // Exactly two eth_calls: updateUnitaryValue (pre) + multicall ([swap, updateUnitaryValue]).
     expect(mockState.call).toHaveBeenCalledTimes(2);
     const calls = mockState.call.mock.calls.map((c) => c[0] as { account: string; to: string; data: Hex });
-    expect(calls.every((c) => c.account === EXECUTOR && c.to === VAULT)).toBe(true);
+    expect(calls.every((c) => c.account === OWNER && c.to === VAULT)).toBe(true);
     const selectors = calls.map((c) => c.data.slice(0, 10)).sort();
     expect(selectors).toEqual([UPDATE_SELECTOR, MULTICALL_SELECTOR].sort());
     // The multicall must wrap [swapData, updateUnitaryValue] so the post-NAV is atomic.
@@ -243,9 +255,26 @@ describe("NAV Shield impact logic", () => {
     expect(multicallCall.data).toContain(SWAP_DATA.slice(2));
   });
 
+  it("skips the on-chain owner read when the caller passes a verified owner", async () => {
+    // Latency: the authenticated operator IS the vault owner (verifyOperatorAuth),
+    // so the caller passes it in and readContract must never be asked for "owner".
+    setupClient(10000n, 9900n);
+    const result = await checkNavImpact(
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, OWNER, createMockKV(),
+    );
+    expect(result.allowed).toBe(true);
+    const readNames = mockState.readContract.mock.calls.map(
+      (c) => (c[0] as { functionName: string }).functionName,
+    );
+    expect(readNames).not.toContain("owner");
+    expect(readNames).toContain("totalSupply");
+    const calls = mockState.call.mock.calls.map((c) => c[0] as { account: string });
+    expect(calls.every((c) => c.account === OWNER)).toBe(true);
+  });
+
   it("skips simulation when the operator has disabled the NAV shield", async () => {
     const result = await checkNavImpact(
-      VAULT, SWAP_DATA, 0n, CHAIN_ID, EXECUTOR, createMockKV(), 0n,
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(), 0n,
     );
     expect(result.allowed).toBe(true);
     expect(result.verified).toBe(false);

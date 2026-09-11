@@ -1584,6 +1584,8 @@ export async function projectSyncNavImpact(params: {
   impactPct: string;
 } | undefined> {
   const publicClient = getRpcProvider(params.srcChainId);
+  // The operator is the vault owner, who always passes the fallback write-mode
+  // gate — the multicall simulation needs no multicall delegation.
   const sender = params.operatorAddress ?? params.vaultAddress;
 
   // Pre-sync NAV
