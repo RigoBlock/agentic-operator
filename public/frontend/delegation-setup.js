@@ -42,8 +42,15 @@ async function openDelegationSetup(targetChainId) {
 
   // Ensure we have all-chain status before opening the modal
   if (!delegationState?.allChainsStatus) {
-    document.getElementById('delegation-setup-status').textContent = 'Checking delegation status across all chains…';
-    await fetchAllDelegationStatuses(vault);
+    const statusEl = document.getElementById('delegation-setup-status');
+    statusEl.style.color = 'var(--accent)';
+    statusEl.textContent = 'Checking delegation status across all chains…';
+    const fetched = await fetchAllDelegationStatuses(vault);
+    statusEl.textContent = '';
+    if (!fetched) {
+      statusEl.style.color = 'var(--warn)';
+      statusEl.textContent = 'Could not check status on all chains — chain list may be inaccurate.';
+    }
   }
 
   const allChainsStatus = delegationState?.allChainsStatus || {};
