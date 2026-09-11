@@ -182,7 +182,7 @@
 
       <div class="delegation-step">
         <h4><span class="step-num">1</span> Agent Wallet</h4>
-        <p>A dedicated wallet will be created for the agent to execute transactions on your behalf. Its keys are managed securely by Coinbase CDP.</p>
+        <p>A dedicated wallet will be created for the agent to execute transactions on your behalf.</p>
         <div id="delegation-agent-info" class="delegation-info" style="display:none;"></div>
       </div>
 
@@ -194,12 +194,7 @@
 
       <div class="delegation-step">
         <h4><span class="step-num">3</span> Delegated Functions</h4>
-        <p>Each chain transaction calls <code>updateDelegation()</code> granting the agent permission to:</p>
-        <ul id="delegation-caveats" class="caveat-list">
-          <li>Uniswap execute / modifyLiquidities</li>
-          <li>0x Aggregator execute</li>
-          <li>GMX v2 create / update / cancel orders, claim fees</li>
-        </ul>
+        <p>Each chain transaction calls <code>updateDelegation()</code> granting the agent permission to execute on your behalf. Admin functions are never delegated.</p>
       </div>
 
       <div id="delegation-setup-status" style="font-size: 14px; margin-bottom: 8px;"></div>
