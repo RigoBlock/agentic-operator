@@ -20,15 +20,16 @@ import { Hono } from "hono";
 import type { Env, AppVariables } from "../types.js";
 import type { Address } from "viem";
 import { getOracleSwapMetrics } from "../services/swapShield.js";
+import { resolveUniversalRouterVersion } from "../services/routerVersion.js";
 import { sanitizeError } from "../config.js";
 
 const TRADING_API_URL = "https://trade-api.gateway.uniswap.org/v1";
 
-function getHeaders(env: Env): Record<string, string> {
+function getHeaders(env: Env, routerVersion: string): Record<string, string> {
   return {
     "Content-Type": "application/json",
     "x-api-key": env.UNISWAP_API_KEY,
-    "x-universal-router-version": "2.0",
+    "x-universal-router-version": routerVersion,
   };
 }
 
@@ -47,12 +48,19 @@ quoteUniswap.post("/", async (c) => {
     return c.json({ error: "Invalid JSON body." }, 400);
   }
 
-  // Forward to Uniswap Trading API — body is passed verbatim, no stripping
+  // Forward to Uniswap Trading API — body is passed verbatim, no stripping.
+  // The router version header follows the live Authority adapter mapping for
+  // the requested chain; without a chainId we default to the pre-upgrade 2.0.
+  const rawChainId = body.tokenInChainId ?? body.chainId;
+  const routerVersion = typeof rawChainId === "number"
+    ? await resolveUniversalRouterVersion(rawChainId)
+    : "2.0";
+
   let upstreamRes: Response;
   try {
     upstreamRes = await fetch(`${TRADING_API_URL}/quote`, {
       method: "POST",
-      headers: getHeaders(c.env),
+      headers: getHeaders(c.env, routerVersion),
       body: JSON.stringify(body),
     });
   } catch (err) {
@@ -73,7 +81,7 @@ quoteUniswap.post("/", async (c) => {
   // ── Oracle enrichment ──
   const tokenIn = String(body.tokenIn || "") as Address;
   const tokenOut = String(body.tokenOut || "") as Address;
-  const rawChainId = body.tokenInChainId ?? body.chainId;
+  // rawChainId was resolved above for the router-version header.
 
   let enrichment;
   try {

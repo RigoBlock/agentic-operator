@@ -11,12 +11,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 
-const { mockEnrich } = vi.hoisted(() => ({
+const { mockEnrich, mockResolveVersion } = vi.hoisted(() => ({
   mockEnrich: vi.fn(),
+  mockResolveVersion: vi.fn(),
 }));
 
 vi.mock("../src/services/swapShield.js", () => ({
   getOracleSwapMetrics: mockEnrich,
+}));
+
+vi.mock("../src/services/routerVersion.js", () => ({
+  resolveUniversalRouterVersion: mockResolveVersion,
 }));
 
 import { quoteUniswap } from "../src/routes/quoteUniswap.js";
@@ -53,6 +58,8 @@ function mockEnv(): Record<string, string> {
 describe("POST /api/quote/uniswap", () => {
   beforeEach(() => {
     mockEnrich.mockReset();
+    mockResolveVersion.mockReset();
+    mockResolveVersion.mockResolvedValue("2.0");
     vi.stubGlobal("fetch", vi.fn());
   });
 

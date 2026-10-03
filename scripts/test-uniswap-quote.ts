@@ -145,7 +145,7 @@ async function main() {
     headers: {
       "Content-Type": "application/json",
       "x-api-key": apiKey,
-      "x-universal-router-version": "2.0",
+      "x-universal-router-version": "2.1.2",
     },
     body: JSON.stringify(body),
   });

@@ -23,6 +23,7 @@ import type { Env, SwapIntent } from "../types.js";
 import { resolveTokenAddress } from "../config.js";
 import { parseUnits } from "viem";
 import { getTokenDecimals } from "./vault.js";
+import { resolveUniversalRouterVersion, type UniversalRouterVersion } from "./routerVersion.js";
 
 const TRADING_API_URL = "https://trade-api.gateway.uniswap.org/v1";
 
@@ -66,12 +67,17 @@ async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 2, ti
 
 /**
  * Headers required for all Trading API requests.
+ *
+ * The router version follows the live Authority adapter mapping for the
+ * request's chain (see routerVersion.ts) — the adapter upgrade from UR 2.0
+ * to 2.1.2 is an on-chain governance action, and the calldata encoding must
+ * match whichever router the vault adapter will actually call.
  */
-function getHeaders(env: Env): Record<string, string> {
+function getHeaders(env: Env, routerVersion: UniversalRouterVersion): Record<string, string> {
   return {
     "Content-Type": "application/json",
     "x-api-key": env.UNISWAP_API_KEY,
-    "x-universal-router-version": "2.0",
+    "x-universal-router-version": routerVersion,
   };
 }
 
@@ -174,7 +180,7 @@ export async function getUniswapQuote(
 
   const res = await fetchWithRetry(`${TRADING_API_URL}/quote`, {
     method: "POST",
-    headers: getHeaders(env),
+    headers: getHeaders(env, await resolveUniversalRouterVersion(chainId)),
     body: JSON.stringify(body),
   });
 
@@ -240,6 +246,7 @@ export async function getUniswapQuote(
 export async function getUniswapSwapCalldata(
   env: Env,
   quoteResponse: Record<string, unknown>,
+  chainId: number,
 ): Promise<UniswapSwapTx> {
   // Strip null fields that the API rejects
   const { permitData, permitTransaction, ...cleanQuote } = quoteResponse;
@@ -248,7 +255,7 @@ export async function getUniswapSwapCalldata(
 
   const res = await fetchWithRetry(`${TRADING_API_URL}/swap`, {
     method: "POST",
-    headers: getHeaders(env),
+    headers: getHeaders(env, await resolveUniversalRouterVersion(chainId)),
     body: JSON.stringify(swapRequest),
   });
 

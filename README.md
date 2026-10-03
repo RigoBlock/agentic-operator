@@ -116,7 +116,7 @@ Features:
 - Routing types: CLASSIC, DUTCH_V2, PRIORITY, WRAP/UNWRAP, CHAINED
 - Both exact-input and exact-output supported
 - Native ETH pools (V4-native, distinct from WETH)
-- Uses `x-universal-router-version: 2.0` header
+- `x-universal-router-version` pinned per chain (2.0 or 2.1.2), resolved from the live Rigoblock Authority adapter mapping — follows the governance adapter upgrade automatically
 
 ### GMX V2 (Perpetuals)
 

@@ -312,7 +312,7 @@ async function buildVaultSwapWithUniswap(
     );
   }
 
-  const swapTx = await getUniswapSwapCalldata(env, quote._raw);
+  const swapTx = await getUniswapSwapCalldata(env, quote._raw, ctx.chainId);
 
   const decoded = decodeFunctionData({
     abi: RIGOBLOCK_VAULT_ABI,
