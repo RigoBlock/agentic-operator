@@ -133,7 +133,26 @@ describe("executeSponsoredCalls gas parameter overrides", () => {
 
     const capabilities = prepareCalls.mock.calls[0][0].capabilities as Record<string, unknown>;
     expect(capabilities.gasParamsOverride).toBeUndefined();
-    expect(capabilities.paymasterService).toEqual({ policyId: "policy-id" });
+    // The policy rides at client level (merged into prepare AND send), not
+    // in per-request capabilities — required for BSO (Gas Sponsorship) policies.
+    expect(capabilities.paymasterService).toBeUndefined();
+  });
+
+  it("passes the policy ID at client level so it rides on prepare AND send", async () => {
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient());
+
+    await executeSponsoredCalls(AGENT_ACCOUNT, 8453, "policy-id", [CALL]);
+
+    expect(mockCreateSmartWalletClient).toHaveBeenCalledTimes(1);
+    expect(mockCreateSmartWalletClient.mock.calls[0][0].policyId).toBe("policy-id");
+  });
+
+  it("omits the client-level policy ID when an empty policyId is passed", async () => {
+    mockCreateSmartWalletClient.mockReturnValue(makeMockClient());
+
+    await executeSponsoredCalls(AGENT_ACCOUNT, 8453, "", [CALL]);
+
+    expect(mockCreateSmartWalletClient.mock.calls[0][0].policyId).toBeUndefined();
   });
 });
 

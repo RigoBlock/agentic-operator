@@ -13,7 +13,12 @@
  *   6. client.waitForCallsStatus() — polls until confirmed
  *
  * EIP-7702 delegation is AUTOMATIC when `from` is the signer address.
- * Gas sponsorship is via `paymasterService` in capabilities.
+ * Gas sponsorship is via the client-level `policyId`, which the SDK merges
+ * into BOTH wallet_prepareCalls and wallet_sendPreparedCalls. This matters for
+ * Gas Sponsorship (Bundler Sponsored Operations) policies: prepare returns a
+ * UserOp with all three gas fields zeroed (the bundler fills them under the
+ * policy), so the send MUST also carry the policy or the bundler treats it as
+ * an unsponsored UserOp and precheck rejects preVerificationGas = 0.
  */
 
 import {
@@ -252,15 +257,15 @@ export async function executeSponsoredCalls(
       transport,
       chain: alchemyChain,
       signer,
+      // Client-level policy: merged into every request (prepare AND send).
+      // Required for Gas Sponsorship (BSO) policies — see header comment.
+      ...(policyId ? { policyId } : {}),
     });
 
     // ── Step 3: Prepare calls ──
+    // The policy rides at client level (merged into prepare AND send).
     // Alchemy expects gas-parameter overrides as hex strings, not decimal strings.
-    const capabilities: Record<string, unknown> = {
-      paymasterService: {
-        policyId,
-      },
-    };
+    const capabilities: Record<string, unknown> = {};
     const gasOverrides: Record<string, string> = {};
     if (callGasLimit && callGasLimit > 0n) {
       gasOverrides.callGasLimit = `0x${callGasLimit.toString(16)}`;
