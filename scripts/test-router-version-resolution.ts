@@ -9,7 +9,7 @@ import { createPublicClient, http } from "viem";
 import { readFileSync } from "fs";
 import { base, arbitrum, mainnet, bsc, optimism, polygon } from "viem/chains";
 import { AUTHORITY_ADDRESS, AUTHORITY_ABI } from "../src/abi/authority.js";
-import { AUNISWAP_ROUTER_ADAPTERS } from "../src/services/routerVersion.js";
+import { UR2_ADAPTERS } from "../src/services/routerVersion.js";
 
 function loadAlchemyKey(): string {
   try {
@@ -40,7 +40,7 @@ async function main() {
   const selector = "0x3593564c" as `0x${string}`;
   for (const [chainIdStr, { chain, slug }] of Object.entries(CHAINS)) {
     const chainId = Number(chainIdStr);
-    const adapters = AUNISWAP_ROUTER_ADAPTERS[chainId];
+    const ur2Adapter = UR2_ADAPTERS[chainId];
     const client = createPublicClient({
       chain,
       transport: http(`https://${slug}.g.alchemy.com/v2/${apiKey}`, {
@@ -57,9 +57,9 @@ async function main() {
       })) as string;
       const a = adapter.toLowerCase();
       const version =
-        a === adapters.upgraded.toLowerCase() ? "2.1.2 (upgraded)" :
-        a === adapters.current.toLowerCase() ? "2.0 (current)" :
-        "UNKNOWN — defaults to 2.0";
+        a === ur2Adapter.toLowerCase() ? "2.0 (UR2 adapter — current)" :
+        a === "0x0000000000000000000000000000000000000000" ? "2.0 (unmapped)" :
+        "2.1.2 (not the UR2 adapter)";
       console.log(`chain ${chainId}: adapter ${adapter} → ${version}`);
     } catch (err) {
       console.log(`chain ${chainId}: read failed (${err instanceof Error ? err.message.split("\n")[0] : err}) → defaults to 2.0`);
