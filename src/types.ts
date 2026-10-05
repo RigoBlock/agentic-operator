@@ -39,11 +39,9 @@ export interface Env {
   // KV namespace (stores per-user vault lists, delegation config, agent wallets)
   KV: KVNamespace;
 
-  // Vars (wrangler.toml [vars])
-  // No more VAULT_ADDRESS / CHAIN_ID here — they come from the frontend per-request.
-
   // Workers AI binding (configured in wrangler.toml [ai] — zero-config, no secrets needed)
   AI?: Ai;
+  AI_GATEWAY_ID?: string;
 
   // Secrets (wrangler secret put)
   OPENAI_API_KEY?: string;  // Optional — fallback if AI binding not available

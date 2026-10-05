@@ -341,7 +341,9 @@ async function callWorkersAI(
   messages: OpenAI.ChatCompletionMessageParam[],
   tools?: OpenAI.ChatCompletionTool[],
   onStreamEvent?: (event: StreamEvent) => void,
+  gatewayId?: string,
 ): Promise<OpenAI.ChatCompletion> {
+  const gatewayOpts = gatewayId ? { gateway: { id: gatewayId } } : undefined;
   // Workers AI rejects null content (which the OpenAI spec allows for assistant
   // messages that contain tool_calls). Normalise to "" before sending so the
   // model receives a valid message structure in multi-turn tool loops.
@@ -368,7 +370,7 @@ async function callWorkersAI(
           max_tokens: 16384,
           stream: true,
           ...(isKimi ? { chat_template_kwargs: { thinking: { type: "enabled" } } } : {}),
-        });
+        }, gatewayOpts);
 
         // Parse the SSE stream and emit reasoning tokens in real-time
         const reader = (stream as ReadableStream).getReader();
@@ -605,7 +607,7 @@ async function callWorkersAI(
       ...(tools ? { tools: tools as any } : {}),
       max_tokens: isKimi ? 8192 : 4096,
       ...(isKimi ? { chat_template_kwargs: { thinking: { type: "enabled" } } } : {}),
-    }),
+    }, gatewayOpts),
     40_000,
     "Workers AI",
   )) as any;
@@ -838,6 +840,7 @@ export async function processChat(
         params.messages,
         params.tools,
         shouldStream ? onStreamEvent : undefined,
+        env.AI_GATEWAY_ID,
       );
     }
     return openai!.chat.completions.create(params);

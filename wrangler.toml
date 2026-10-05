@@ -8,7 +8,8 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 preview_urls = true
 
-# No [vars] needed — vault address and chain come from the frontend per-request.
+[vars]
+AI_GATEWAY_ID = "dragon"
 
 # Workers AI binding — enables zero-config LLM access (no API tokens needed).
 # The Worker authenticates automatically via the binding.
