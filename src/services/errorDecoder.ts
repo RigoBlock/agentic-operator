@@ -76,6 +76,10 @@ const COMMON_ERRORS = [
 
   // Rigoblock pool (MixinPoolValue / NavImpactLib)
   { name: "NavLocked", type: "error", inputs: [] },
+
+  // Rigoblock AHyperliquid (HyperEVM)
+  { name: "AccountNotActivated", type: "error", inputs: [] },
+  { name: "PrecompileLib__CoreUserExistsPrecompileFailed", type: "error", inputs: [] },
 ];
 
 /** Names for 0x Settler action selectors that A0xRouter may report via ActionNotAllowed. */

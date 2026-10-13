@@ -1,19 +1,18 @@
 /**
- * Hyperliquid account reads — HyperEVM read precompiles + Hyperliquid Core info API.
+ * Hyperliquid account reads — two complementary paths:
  *
- * Two complementary read paths, per the protocol design:
- *
- * 1. HyperEVM read precompiles (on-chain, used for NAV-critical values):
- *    - accountMarginSummary(0, vault) → perp account value / notional / margin (USDC, 6 decimals)
- *    - spotBalance(vault, USDC)       → Core spot USDC balance (8 decimals, "core wei")
- *    - coreUserExists(vault)          → whether the Core account is activated
+ * 1. HyperEVM read precompiles (NAV-critical values): accountMarginSummary → perp
+ *    account value / notional / margin (USDC, 6 decimals); spotBalance → Core spot
+ *    USDC (8 decimals, "core wei"). Precompiles take raw abi.encode args, no selector.
  *
  * 2. Hyperliquid Core info API (https://api.hyperliquid.xyz/info) — the ONLY source
- *    for per-position state (entry/mark/liq prices, declared leverage, unrealized PnL,
- *    open orders). Core perp account internals are not exposed on HyperEVM precompiles.
+ *    for per-position state and open orders.
  *
- * Decimal conventions (see src/abi/hyperliquid.ts header):
- *   perp account USDC = 6 decimals; Core spot USDC = 8 decimals; prices = 8-decimal fixed point.
+ * Account activation is NOT readable from the info API: clearinghouseState and
+ * spotClearinghouseState return zeroed/empty success responses for non-activated
+ * accounts (verified 2026-10-13). Activation is enforced on-chain by the adapter
+ * (AccountNotActivated) at every transaction simulation; there is no service-side
+ * activation check.
  */
 
 import { decodeAbiParameters, encodeAbiParameters, formatUnits, parseUnits, type Address } from "viem";
@@ -109,19 +108,14 @@ export interface HlPrecompileBalances {
   perpAccountValue: bigint;
   perpNtlPos: bigint;
   perpMarginUsed: bigint;
-  perpRawUsd: bigint;
   /** Core spot USDC balance (8 decimals, "core wei"). */
   spotUsdcWei: bigint;
-  spotUsdcHoldWei: bigint;
-  /** Whether the vault has an activated HyperCore account. */
-  activated: boolean;
 }
 
 /**
  * HyperEVM read precompiles take raw abi.encode(args) input — WITHOUT the
  * 4-byte function selector a normal contract call prepends. Sending a selector
- * makes the precompile revert with PrecompileError, which is why selector-based
- * `simulateContract` reads always degraded to zero/false here.
+ * makes the precompile revert with PrecompileError.
  * See: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm/interacting-with-hypercore
  */
 const HL_PRECOMPILE_PARAMS = {
@@ -133,6 +127,7 @@ const HL_PRECOMPILE_PARAMS = {
     in: [{ type: "address" }, { type: "uint64" }] as const,
     out: [{ type: "uint64" }, { type: "uint64" }, { type: "uint64" }] as const,
   },
+  // Returns abi.encode(CoreUserExists) — a single bool, same encoding as abi.encode(bool).
   coreUserExists: {
     in: [{ type: "address" }] as const,
     out: [{ type: "bool" }] as const,
@@ -152,43 +147,64 @@ async function callReadPrecompile(
 
 /** Read the on-chain HyperEVM precompiles. Failing reads degrade to zero instead of throwing. */
 export async function getHyperliquidPrecompileBalances(vaultAddress: Address): Promise<HlPrecompileBalances> {
-  const zero: HlPrecompileBalances = {
-    perpAccountValue: 0n,
-    perpNtlPos: 0n,
-    perpMarginUsed: 0n,
-    perpRawUsd: 0n,
-    spotUsdcWei: 0n,
-    spotUsdcHoldWei: 0n,
-    activated: false,
-  };
-
-  const [summary, spot, exists] = await Promise.all([
+  const [summary, spotUsdcWei] = await Promise.all([
     callReadPrecompile(HL_PRECOMPILES.accountMarginSummary, HL_PRECOMPILE_PARAMS.marginSummary, [HL_DEFAULT_PERP_DEX, vaultAddress])
-      .then((r) => r as [bigint, bigint, bigint, bigint])
-      .catch(() => [0n, 0n, 0n, 0n] as [bigint, bigint, bigint, bigint]),
+      .then((r) => r as readonly [bigint, bigint, bigint, bigint])
+      .catch(() => null),
     // The spotBalance precompile reverts (PrecompileError) for accounts with no
     // spot entry, so fall back to the Core info API for the same USDC value.
     callReadPrecompile(HL_PRECOMPILES.spotBalance, HL_PRECOMPILE_PARAMS.spotBalance, [vaultAddress, HL_USDC_TOKEN_INDEX])
-      .then((r) => r as [bigint, bigint, bigint])
+      .then((r) => (r as readonly [bigint, bigint, bigint])[0])
       .catch(async () => {
         const spotState = await fetchSpotClearinghouseState(vaultAddress).catch(() => null);
         const usdc = spotState?.balances.find((b) => b.token === Number(HL_USDC_TOKEN_INDEX));
-        return [usdc ? parseUnits(usdc.total, 8) : 0n, usdc ? parseUnits(usdc.hold, 8) : 0n, 0n] as [bigint, bigint, bigint];
+        return usdc ? parseUnits(usdc.total, 8) : 0n;
       }),
-    callReadPrecompile(HL_PRECOMPILES.coreUserExists, HL_PRECOMPILE_PARAMS.coreUserExists, [vaultAddress])
-      .then((r) => r[0] as boolean)
-      .catch(() => false),
   ]);
 
   return {
-    perpAccountValue: summary[0],
-    perpMarginUsed: summary[1],
-    perpNtlPos: summary[2],
-    perpRawUsd: summary[3],
-    spotUsdcWei: spot[0],
-    spotUsdcHoldWei: spot[1],
-    activated: exists,
+    perpAccountValue: summary?.[0] ?? 0n,
+    perpMarginUsed: summary?.[1] ?? 0n,
+    perpNtlPos: summary?.[2] ?? 0n,
+    spotUsdcWei,
   };
+}
+
+// ── Core account activation ───────────────────────────────────────────
+
+const ACTIVATION_TTL_MS = 5 * 60 * 1000;
+const activationCache = new Map<string, { at: number; activated: boolean }>();
+
+/**
+ * Whether the vault has an activated HyperCore account, read DIRECTLY from the
+ * coreUserExists precompile (raw eth_call to 0x810 — not a simulation, not via
+ * the vault or adapter). Cached per vault for ACTIVATION_TTL_MS so a session
+ * pays for at most one read.
+ *
+ * Returns null when the read itself fails (node hiccup) — callers must treat
+ * null as "unknown, don't prompt", never as "not activated", so a flaky read
+ * can never block or mislead.
+ */
+export async function getHyperliquidAccountActivation(vaultAddress: Address): Promise<boolean | null> {
+  const key = vaultAddress.toLowerCase();
+  const hit = activationCache.get(key);
+  if (hit && Date.now() - hit.at < ACTIVATION_TTL_MS) return hit.activated;
+
+  const activated = await callReadPrecompile(
+    HL_PRECOMPILES.coreUserExists,
+    HL_PRECOMPILE_PARAMS.coreUserExists,
+    [vaultAddress],
+  )
+    .then((r) => Boolean(r[0]))
+    .catch(() => null);
+
+  if (activated !== null) activationCache.set(key, { at: Date.now(), activated });
+  return activated;
+}
+
+/** Record a freshly activated account (hyperliquid_deposit activates on-chain). */
+export function markHyperliquidAccountActivated(vaultAddress: Address): void {
+  activationCache.set(vaultAddress.toLowerCase(), { at: Date.now(), activated: true });
 }
 
 // ── Core info API account state ───────────────────────────────────────
@@ -217,8 +233,7 @@ export interface HlApiMarginSummary {
 export interface HlClearinghouseState {
   marginSummary: HlApiMarginSummary;
   withdrawable: string;
-  assetPositions: Array<{ position: HlApiPosition; type: string }>;
-  time: number;
+  assetPositions: Array<{ position: HlApiPosition }>;
 }
 
 export interface HlSpotBalanceEntry {
@@ -238,7 +253,6 @@ export interface HlOpenOrder {
   cloid?: string | null;
   tif?: string;
   reduceOnly?: boolean;
-  isPositionTaker?: boolean;
   orderType?: string;
   origSz?: string;
   timestamp?: number;
@@ -271,10 +285,6 @@ export interface HlUserFill {
   dir: string;
   /** Realized PnL on closing fills. */
   closedPnl: string;
-  oid: number;
-  /** Taker fill crossed the spread. */
-  crossed: boolean;
-  fee: string;
 }
 
 /** Recent fills for a Core account (newest first, exchange-limited window). */
@@ -323,7 +333,6 @@ export interface HyperliquidOpenOrder {
 
 export interface HyperliquidAccountSummary {
   vaultAddress: Address;
-  activated: boolean;
   /** Perp account value (USDC, 6 decimals) — from the HyperEVM precompile (NAV-critical read). */
   perpAccountValueUsd: string;
   /** Total open notional (USDC, 6 decimals) — from the precompile. */
@@ -429,44 +438,39 @@ export async function getHyperliquidAccountSummary(vaultAddress: Address): Promi
     getHyperliquidPrecompileBalances(vaultAddress),
   ]);
 
-  // The API calls are best-effort: the account may not be activated yet, in which
-  // case clearinghouseState errors and we fall back to precompile-only data.
+  // Best-effort: the API returns zeroed state for non-activated accounts, so no
+  // activation signal here — activation is enforced by the adapter on-chain.
   const [chState, orders] = await Promise.all([
     fetchClearinghouseState(vaultAddress).catch(() => null),
     fetchOpenOrders(vaultAddress).catch(() => [] as HlOpenOrder[]),
   ]);
 
-  const coinIndex = new Map<string, number>();
-  meta.universe.forEach((u, i) => coinIndex.set(u.name.toUpperCase(), i));
-  const szDecimalsOf = (coin: string) => meta.universe[coinIndex.get(coin.toUpperCase()) ?? -1]?.szDecimals ?? 6;
+  const coinIndex = new Map(meta.universe.map((u, i) => [u.name.toUpperCase(), i]));
+  const idxOf = (coin: string) => coinIndex.get(coin.toUpperCase()) ?? -1;
+  const szDecimalsOf = (coin: string) => meta.universe[idxOf(coin)]?.szDecimals ?? 6;
 
-  const positions: HyperliquidPosition[] = (chState?.assetPositions ?? [])
-    .map((ap) => normalizeHlPosition(ap.position, coinIndex.get(ap.position.coin.toUpperCase()) ?? -1, szDecimalsOf(ap.position.coin)))
+  const positions = (chState?.assetPositions ?? [])
+    .map((ap) => normalizeHlPosition(ap.position, idxOf(ap.position.coin), szDecimalsOf(ap.position.coin)))
     .filter((p) => p.assetIndex >= 0 && p.absSizeToken > 0);
-
-  const openOrders: HyperliquidOpenOrder[] = orders
-    .map((o) => normalizeHlOpenOrder(o, coinIndex.get(o.coin.toUpperCase()) ?? -1, szDecimalsOf(o.coin)))
+  const openOrders = orders
+    .map((o) => normalizeHlOpenOrder(o, idxOf(o.coin), szDecimalsOf(o.coin)))
     .filter((o) => o.assetIndex >= 0);
 
-  // Prefer precompile reads for the NAV-critical account values (they are the same
-  // values the vault NAV uses); fall back to the API margin summary.
+  // NAV-critical account values come from the precompiles (the same values the
+  // vault NAV uses); a failed precompile read degrades to zero.
   const perpAccountValue = Number(formatUnits(pre.perpAccountValue, 6));
   const perpNtlPos = Number(formatUnits(pre.perpNtlPos, 6));
-  const perpMarginUsed = Number(formatUnits(pre.perpMarginUsed, 6));
-  const withdrawable = chState ? parseFloat(chState.withdrawable) || 0 : 0;
-  const spotUsdcUsd = Number(formatUnits(pre.spotUsdcWei, 8));
-  const totalAccountValue = perpAccountValue + spotUsdcUsd;
+  const spotUsdc = Number(formatUnits(pre.spotUsdcWei, 8));
   const globalLeverage = perpAccountValue > 0 ? perpNtlPos / perpAccountValue : null;
 
   const summary: HyperliquidAccountSummary = {
     vaultAddress,
-    activated: pre.activated,
     perpAccountValueUsd: fmtUsd(perpAccountValue),
     perpNtlPosUsd: fmtUsd(perpNtlPos),
-    perpMarginUsedUsd: fmtUsd(perpMarginUsed),
-    withdrawableUsd: fmtUsd(withdrawable),
-    spotUsdcUsd: fmtUsd(spotUsdcUsd),
-    totalAccountValueUsd: fmtUsd(totalAccountValue),
+    perpMarginUsedUsd: fmtUsd(Number(formatUnits(pre.perpMarginUsed, 6))),
+    withdrawableUsd: fmtUsd(chState ? parseFloat(chState.withdrawable) || 0 : 0),
+    spotUsdcUsd: fmtUsd(spotUsdc),
+    totalAccountValueUsd: fmtUsd(perpAccountValue + spotUsdc),
     globalLeverage: globalLeverage != null ? `${globalLeverage.toFixed(2)}x` : null,
     positions,
     openOrders,
@@ -481,12 +485,8 @@ function formatHyperliquidReport(s: HyperliquidAccountSummary): string {
   lines.push("📊 Hyperliquid Account");
   lines.push("");
   lines.push(
-    s.activated
-      ? `HyperCore account: ✅ activated   |   ${HYPEREVM_USDC.slice(0, 6)}… USDC-only`
-      : `HyperCore account: ⏳ not activated — use hyperliquid_deposit to bridge USDC and activate it.`,
-  );
-  lines.push(
-    `Perp value: ${s.perpAccountValueUsd}   |   Spot (USDC): ${s.spotUsdcUsd}   |   Total: ${s.totalAccountValueUsd}` +
+    `HyperCore account (USDC-only, ${HYPEREVM_USDC.slice(0, 6)}…)   |   ` +
+      `Perp value: ${s.perpAccountValueUsd}   |   Spot (USDC): ${s.spotUsdcUsd}   |   Total: ${s.totalAccountValueUsd}` +
       (s.globalLeverage ? `   |   Global leverage: ${s.globalLeverage}` : "") +
       (s.withdrawableUsd !== "$0.00" ? `   |   Withdrawable: ${s.withdrawableUsd}` : ""),
   );

@@ -5,14 +5,27 @@
  * payloads to the report shape. tryFastPathHyperliquid mirrors the deterministic
  * GMX fast paths: unambiguous "hyperliquid"-keyword commands bypass the LLM.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   normalizeHlPosition,
   normalizeHlOpenOrder,
+  getHyperliquidAccountActivation,
+  markHyperliquidAccountActivated,
   type HlApiPosition,
   type HlOpenOrder,
 } from "../src/services/hyperliquid.js";
 import { tryFastPathHyperliquid } from "../src/llm/client.js";
+
+const { mockCall } = vi.hoisted(() => ({ mockCall: vi.fn() }));
+
+vi.mock("../src/services/rpcClient.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/services/rpcClient.js")>();
+  return { ...actual, getRpcProvider: () => ({ call: mockCall }) };
+});
+
+const CORE_USER_EXISTS_PRECOMPILE = "0x0000000000000000000000000000000000000810";
+const TRUE_WORD = `0x${"0".repeat(63)}1`;
+const FALSE_WORD = `0x${"0".repeat(64)}`;
 
 describe("normalizeHlPosition", () => {
   const base: HlApiPosition = {
@@ -130,5 +143,53 @@ describe("tryFastPathHyperliquid", () => {
     expect(tryFastPathHyperliquid("close my BTC long")).toBeNull();
     expect(tryFastPathHyperliquid("show my positions")).toBeNull();
     expect(tryFastPathHyperliquid("deposit 500 usdc to gmx")).toBeNull();
+  });
+});
+
+describe("getHyperliquidAccountActivation", () => {
+  beforeEach(() => mockCall.mockReset());
+
+  it("reads the coreUserExists precompile directly (raw call to 0x810, no vault)", async () => {
+    mockCall.mockResolvedValue({ data: TRUE_WORD });
+    const vault = "0x2222222222222222222222222222222222222222" as const;
+
+    await expect(getHyperliquidAccountActivation(vault)).resolves.toBe(true);
+    expect(mockCall).toHaveBeenCalledWith(
+      expect.objectContaining({ to: CORE_USER_EXISTS_PRECOMPILE }),
+    );
+  });
+
+  it("returns false when the precompile reports no Core user", async () => {
+    mockCall.mockResolvedValue({ data: FALSE_WORD });
+    const vault = "0x3333333333333333333333333333333333333333" as const;
+
+    await expect(getHyperliquidAccountActivation(vault)).resolves.toBe(false);
+  });
+
+  it("caches per vault: one RPC read per vault per TTL window", async () => {
+    mockCall.mockResolvedValue({ data: TRUE_WORD });
+    const vault = "0x4444444444444444444444444444444444444444" as const;
+
+    await getHyperliquidAccountActivation(vault);
+    await getHyperliquidAccountActivation(vault);
+    expect(mockCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns null on read failure and does not cache the failure", async () => {
+    const vault = "0x5555555555555555555555555555555555555555" as const;
+    mockCall.mockRejectedValueOnce(new Error("node hiccup"));
+
+    await expect(getHyperliquidAccountActivation(vault)).resolves.toBeNull();
+
+    mockCall.mockResolvedValue({ data: TRUE_WORD });
+    await expect(getHyperliquidAccountActivation(vault)).resolves.toBe(true);
+  });
+
+  it("markHyperliquidAccountActivated records activation without an RPC read", async () => {
+    const vault = "0x6666666666666666666666666666666666666666" as const;
+    markHyperliquidAccountActivated(vault);
+
+    await expect(getHyperliquidAccountActivation(vault)).resolves.toBe(true);
+    expect(mockCall).not.toHaveBeenCalled();
   });
 });

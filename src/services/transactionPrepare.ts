@@ -275,7 +275,15 @@ export async function prepareTransaction(
   let fees: GasFees;
   try {
     [gasEstimate, fees] = await Promise.all([
-      publicClient.estimateGas({ account: executor, to: tx.to, data: tx.data, value: txValue }),
+      publicClient.estimateGas({
+        account: executor,
+        to: tx.to,
+        data: tx.data,
+        value: txValue,
+        // Always explicit: a bare eth_estimateGas (no block id — viem's default)
+        // intermittently reverts on HyperEVM precompile reads (0xafa95720).
+        blockTag: "latest",
+      }),
       estimateGasFees(publicClient, tx.chainId),
     ]);
   } catch (err) {
@@ -291,6 +299,11 @@ export async function prepareTransaction(
         value: txValue,
       });
       if (reason) msg = `${msg} — revert reason: ${reason}`;
+    }
+    // The AHyperliquid adapter enforces Core account activation on-chain; translate
+    // it into the fix. (Deposit is what activates a Core account.)
+    if (msg.includes("AccountNotActivated")) {
+      msg += " — the vault's HyperCore account is not activated. Run hyperliquid_deposit to bridge USDC into Hyperliquid; the deposit activates the account.";
     }
     // A bare revert from a delegated executor almost always means the agent wallet
     // is not authorized for this selector on this vault/chain — the vault's

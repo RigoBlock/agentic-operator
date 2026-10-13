@@ -34,16 +34,6 @@ export const HYPEREVM_CHAIN_ID = 999;
 /** EVM-side USDC on HyperEVM (6 decimals). */
 export const HYPEREVM_USDC = "0xb88339CB7199b77E23DB6E890353E22632Ba630f" as const;
 
-/**
- * CoreDepositWallet (Circle) — the ONLY supported HyperEVM → HyperCore deposit path
- * since Hyperliquid's native-USDC migration. Native USDC is a plain ERC20; calling
- * `deposit(...)` on it reverts with no reason. The AHyperliquid adapter must approve
- * USDC to this contract and call its `deposit(uint256 amount, uint32 destinationDex)`
- * (selector identical to the adapter's own deposit). Verify via spotMeta
- * `evmContract.address` for USDC. destinationDex: 0 = perps, type(uint32).max = spot.
- */
-export const HL_CORE_DEPOSIT_WALLET = "0x6b9e773128f453f5c2c60935ee2de2cbc5390a24" as const;
-
 /** USDC token index on HyperCore. */
 export const HL_USDC_TOKEN_INDEX = 0n;
 
@@ -74,15 +64,10 @@ export const HL_CORE_SPOT_ASSET_BASE = 10000;
 
 /**
  * System address for a Core token: base system address + token index
- * (CoreWriterLib.getSystemAddress; HYPE has a fixed special address but the
- * adapter only supports USDC, token index 0).
+ * (CoreWriterLib.getSystemAddress). USDC is token index 0, so its system
+ * address is the base itself — the only valid SPOT_SEND destination here.
  */
-export const HL_SYSTEM_ADDRESS_BASE = 0x2000000000000000000000000000000000000000n;
-export function getHlSystemAddress(tokenIndex: bigint): `0x${string}` {
-  return `0x${(HL_SYSTEM_ADDRESS_BASE + tokenIndex).toString(16).padStart(40, "0")}` as `0x${string}`;
-}
-/** USDC system address — the only valid SPOT_SEND destination for this adapter. */
-export const HL_USDC_SYSTEM_ADDRESS = getHlSystemAddress(HL_USDC_TOKEN_INDEX);
+export const HL_USDC_SYSTEM_ADDRESS = "0x2000000000000000000000000000000000000000";
 
 // ── AHyperliquid adapter ABI (called on the vault, like RIGOBLOCK_GMX_ABI) ──
 
@@ -118,37 +103,14 @@ export const RIGOBLOCK_HYPERLIQUID_ABI = [
 ] as const;
 
 // ── HyperEVM read precompiles (PrecompileLib / HLConstants) ───────────
+// NOTE: these precompiles take raw abi.encode(args) input WITHOUT a 4-byte
+// function selector — see callReadPrecompile in services/hyperliquid.ts.
 
 export const HL_PRECOMPILES = {
   spotBalance: "0x0000000000000000000000000000000000000801",
-  position2: "0x0000000000000000000000000000000000000813",
   accountMarginSummary: "0x000000000000000000000000000000000000080f",
   coreUserExists: "0x0000000000000000000000000000000000000810",
 } as const;
-
-/**
- * NOTE: HyperEVM read precompiles take raw abi.encode(args) input WITHOUT a
- * 4-byte function selector (selector-based calls revert with PrecompileError).
- * Call them via raw eth_call — see callReadPrecompile in services/hyperliquid.ts.
- */
-export const HL_POSITION_ABI = [
-  {
-    name: "position",
-    type: "function",
-    stateMutability: "view",
-    inputs: [
-      { name: "user", type: "address" },
-      { name: "perp", type: "uint32" },
-    ],
-    outputs: [
-      { name: "szi", type: "int64" },
-      { name: "entryNtl", type: "uint64" },
-      { name: "isolatedRawUsd", type: "int64" },
-      { name: "leverage", type: "uint32" },
-      { name: "isIsolated", type: "bool" },
-    ],
-  },
-] as const;
 
 // ── Hyperliquid Core info API ─────────────────────────────────────────
 

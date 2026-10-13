@@ -22,6 +22,7 @@ import { formatUnits, type Address } from "viem";
 import { HYPEREVM_CHAIN_ID, HYPEREVM_USDC, type HlTifName } from "../../abi/hyperliquid.js";
 import {
   getHyperliquidAccountSummary,
+  getHyperliquidAccountActivation,
   getHyperliquidMeta,
   getHyperliquidMids,
   getHyperliquidQuote,
@@ -81,9 +82,11 @@ export async function handle_hyperliquid_get_positions(
 ): Promise<ToolResult> {
   const chainSwitched = switchToHyperEVM(ctx);
   const summary = await getHyperliquidAccountSummary(ctx.vaultAddress as Address);
+  // Cached direct precompile read; null (read failure) means "don't prompt", never block.
+  const activation = await getHyperliquidAccountActivation(ctx.vaultAddress as Address);
 
   const suggestions: string[] = [];
-  if (!summary.activated) {
+  if (activation === false) {
     suggestions.push("Deposit USDC to Hyperliquid");
   }
   if (summary.positions.length > 0) {
@@ -96,13 +99,17 @@ export async function handle_hyperliquid_get_positions(
   }
 
   return {
-    message: summary.formattedReport,
+    message: [
+      activation === false
+        ? "⏳ HyperCore account not activated — run hyperliquid_deposit to bridge USDC into Hyperliquid; the deposit activates the account."
+        : null,
+      summary.formattedReport,
+    ].filter(Boolean).join("\n\n"),
     chainSwitch: chainSwitched,
     suggestions,
     metadata: {
       hyperliquidPositions: summary.positions,
       hyperliquidAccount: {
-        activated: summary.activated,
         perpAccountValueUsd: summary.perpAccountValueUsd,
         spotUsdcUsd: summary.spotUsdcUsd,
         totalAccountValueUsd: summary.totalAccountValueUsd,
@@ -390,6 +397,14 @@ export async function handle_hyperliquid_limit_order(
     }
   }
 
+  // Activation is prompt-only: a known-inactive account gets a warning, but the
+  // order is still drafted — an accidental stale read must never block trading.
+  const activation = await getHyperliquidAccountActivation(ctx.vaultAddress as Address);
+  const activationNote =
+    activation === false
+      ? "⚠️ HyperCore account not activated — this order will revert until you run hyperliquid_deposit to bridge USDC and activate the account."
+      : "";
+
   const calldata = buildHlLimitOrderCalldata({
     asset: assetIndex,
     isBuy,
@@ -423,6 +438,7 @@ export async function handle_hyperliquid_limit_order(
       `Leverage: ${position?.leverage?.value ? `${position.leverage.value}x (existing position)` : `not set — Hyperliquid defaults to cross margin; account leverage is shown in the positions report`}`,
       `Client order id (cloid): 0x${cloidArg.toString(16)} — quote it to cancel this order`,
       ...(marginNote ? [marginNote] : []),
+      ...(activationNote ? [activationNote] : []),
       ...(actionLine ? [actionLine] : []),
     ].filter(Boolean).join("\n"),
     transaction,

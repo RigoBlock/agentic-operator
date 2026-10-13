@@ -50,10 +50,7 @@ function precompileWithSpotUsdc(spotUsdcHuman: number) {
     perpAccountValue: 0n,
     perpNtlPos: 0n,
     perpMarginUsed: 0n,
-    perpRawUsd: 0n,
     spotUsdcWei: BigInt(Math.round(spotUsdcHuman * 1e8)),
-    spotUsdcHoldWei: 0n,
-    activated: true,
   };
 }
 

@@ -205,8 +205,10 @@ describe("prepareTransaction delegated executor selection (per-chain)", () => {
     const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
 
     expect(result.tx.from).toBe(AGENT);
+    // Estimation is pinned to an explicit block tag — a bare eth_estimateGas
+    // intermittently fails on HyperEVM precompile reads.
     expect(mockEstimateGas).toHaveBeenCalledWith(
-      expect.objectContaining({ account: AGENT }),
+      expect.objectContaining({ account: AGENT, blockTag: "latest" }),
     );
   });
 
@@ -218,7 +220,7 @@ describe("prepareTransaction delegated executor selection (per-chain)", () => {
 
     expect(result.tx.from).toBe(OPERATOR);
     expect(mockEstimateGas).toHaveBeenCalledWith(
-      expect.objectContaining({ account: OPERATOR }),
+      expect.objectContaining({ account: OPERATOR, blockTag: "latest" }),
     );
   });
 
@@ -472,15 +474,17 @@ describe("prepareTransaction HyperEVM (999) sma-b executor selection", () => {
     } as never);
   }
 
-  it("uses the sca address as from (NAV shield + estimateGas) when sponsored is ON and sca is stored", async () => {
+  it("uses the sca address as from with a deterministic gas limit when sponsored is ON and sca is stored", async () => {
     await mockDelegation(SCA, true);
 
     const result = await prepareTransaction({ KV: makeKV("0") } as any, delegatedCtx, draft);
 
     expect(result.tx.from).toBe(SCA);
     expect(mockEstimateGas).toHaveBeenCalledWith(
-      expect.objectContaining({ account: SCA }),
+      expect.objectContaining({ account: SCA, blockTag: "latest" }),
     );
+    expect(result.tx.gas).not.toBe("0x0");
+    expect(result.tx.maxFeePerGas).not.toBe("0x0");
   });
 
   it("uses the agent EOA when sponsored is OFF even with a stored sca", async () => {
@@ -490,7 +494,7 @@ describe("prepareTransaction HyperEVM (999) sma-b executor selection", () => {
 
     expect(result.tx.from).toBe(AGENT);
     expect(mockEstimateGas).toHaveBeenCalledWith(
-      expect.objectContaining({ account: AGENT }),
+      expect.objectContaining({ account: AGENT, blockTag: "latest" }),
     );
   });
 
@@ -515,7 +519,22 @@ describe("prepareTransaction HyperEVM (999) sma-b executor selection", () => {
 
     expect(result.tx.from).toBe(AGENT);
     expect(mockEstimateGas).toHaveBeenCalledWith(
-      expect.objectContaining({ account: AGENT }),
+      expect.objectContaining({ account: AGENT, blockTag: "latest" }),
+    );
+  });
+
+  it("pins the block tag when estimating on HyperEVM even for non-vault targets (e.g. Across SpokePool)", async () => {
+    await mockDelegation(SCA, true);
+
+    const result = await prepareTransaction(
+      { KV: makeKV("0") } as any,
+      delegatedCtx,
+      { ...draft, to: "0xdddddddddddddddddddddddddddddddddddddddd" as Address, description: "Across deposit" },
+    );
+
+    expect(result.tx.from).toBe(SCA);
+    expect(mockEstimateGas).toHaveBeenCalledWith(
+      expect.objectContaining({ account: SCA, blockTag: "latest" }),
     );
   });
 
