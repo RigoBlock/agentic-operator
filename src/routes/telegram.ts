@@ -79,7 +79,7 @@ import {
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { isDevEscapeHatchEnabled } from "../services/devMode.js";
 import { getVaultInfo } from "../services/vault.js";
-import { getHyperliquidMeta, resolveHlAssetIndex } from "../services/hyperliquid.js";
+import { resolveHlAssetIndex } from "../services/hyperliquid.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
 import type { TelegramVaultLink } from "../types.js";
 
@@ -515,7 +515,7 @@ export function parseTelegramDirectChip(label: string):
 // exactly like a typed command.
 
 interface HlTradeWizard {
-  step: "market" | "marketText" | "side" | "size" | "orderType" | "price" | "confirm";
+  step: "market" | "side" | "size" | "orderType" | "price" | "confirm";
   coin?: string;
   side?: "buy" | "sell";
   size?: string;
@@ -568,17 +568,8 @@ function wizardCancelRow(): WizardButton[] {
 }
 
 async function promptWizardMarket(token: string, chatId: number): Promise<void> {
-  const meta = await getHyperliquidMeta().catch(() => null);
-  const coins = meta
-    ? meta.universe.slice(0, 8).map((u) => u.name)
-    : ["BTC", "ETH", "SOL", "XRP", "DOGE", "LINK", "AVAX", "HYPE"];
-  const rows: WizardButton[][] = [];
-  for (let i = 0; i < coins.length; i += 2) {
-    rows.push(coins.slice(i, i + 2).map((c) => ({ text: c, callback_data: `wiz:hl:mkt:${c}` })));
-  }
-  rows.push([{ text: "✏️ Type a market", callback_data: "wiz:hl:mkt:other" }], wizardCancelRow());
-  await sendMessage(token, chatId, "📈 <b>New Hyperliquid trade</b> — pick a market:", {
-    replyMarkup: { inline_keyboard: rows },
+  await sendMessage(token, chatId, "📈 <b>New Hyperliquid trade</b> — which market?", {
+    replyMarkup: { inline_keyboard: [wizardCancelRow()] },
   });
 }
 
@@ -678,22 +669,6 @@ async function handleHlTradeWizardCallback(
     await finishHlTradeWizard(env, token, userId, chatId, state);
     return;
   }
-  if (data === "wiz:hl:mkt:other") {
-    state.step = "marketText";
-    await saveHlTradeWizard(env.KV, userId, state);
-    await sendMessage(token, chatId, "Type the market — e.g. <code>PEPE</code>.", {
-      replyMarkup: { inline_keyboard: [wizardCancelRow()] },
-    });
-    return;
-  }
-  const mkt = data.match(/^wiz:hl:mkt:([A-Z0-9]+)$/);
-  if (mkt) {
-    state.coin = mkt[1];
-    state.step = "side";
-    await saveHlTradeWizard(env.KV, userId, state);
-    await promptWizardSide(token, chatId, state.coin);
-    return;
-  }
   const side = data.match(/^wiz:hl:side:(buy|sell)$/);
   if (side) {
     state.side = side[1] as "buy" | "sell";
@@ -726,7 +701,7 @@ async function handleHlTradeWizardCallback(
 async function handleHlTradeWizardText(
   env: Env, token: string, userId: number, chatId: number, state: HlTradeWizard, text: string,
 ): Promise<boolean> {
-  if (state.step === "marketText") {
+  if (state.step === "market") {
     try {
       // resolveHlAssetIndex validates the market exists (core perp) and throws
       // an actionable error listing available markets otherwise.
@@ -734,7 +709,7 @@ async function handleHlTradeWizardText(
       state.coin = text.trim().toUpperCase();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      await sendMessage(token, chatId, `⚠️ ${escapeHtml(truncateForDisplay(sanitizeError(msg), 300))}`, {
+      await sendMessage(token, chatId, `⚠️ ${escapeHtml(truncateForDisplay(sanitizeError(msg), 300))}\nPick a market above or try another symbol.`, {
         replyMarkup: { inline_keyboard: [wizardCancelRow()] },
       });
       return true;
@@ -1685,30 +1660,26 @@ async function handleMessage(
     }
 
     // Tool menus (get_tool_menu) return structured cards for the web UI. Telegram
-    // renders them as compact boxes — title + summary + field labels, never raw
-    // tool names — with one inline button per card. Tapping a button routes the
-    // card title through the direct-chip flow: no-arg tools run immediately,
-    // others reply with a concrete usage template.
+    // renders ONLY the buttons — one per card, labeled with the human title.
+    // Telegram requires non-empty message text, so the body is just the category
+    // name. Tapping a button routes the title through the direct-chip flow:
+    // no-arg tools run immediately, others reply with a usage template or start
+    // a wizard.
     const toolCards = (response.metadata as
-      { toolCards?: { title: string; summary: string; fields?: { label: string }[] }[] } | undefined)?.toolCards;
+      { toolCards?: { title: string }[]; toolMenuCategory?: string } | undefined)?.toolCards;
     let menuKeyboard: TgInlineKeyboardMarkup | undefined;
     if (toolCards?.length) {
-      replyParts.push(
-        toolCards
-          .map((c) => {
-            const fields = c.fields?.length
-              ? `\n<i>Fields:</i> ${c.fields.map((f) => escapeHtml(f.label)).join(" · ")}`
-              : "";
-            return `<b>${escapeHtml(c.title)}</b>\n${escapeHtml(c.summary)}${fields}`;
-          })
-          .join("\n\n"),
-      );
       menuKeyboard = {
         inline_keyboard: toolCards.map((c) => [{
           text: c.title.slice(0, 64),
           callback_data: `say:${c.title.slice(0, 60)}`,
         }]),
       };
+      if (replyParts.length === 0) {
+        const cat = (response.metadata as { toolMenuCategory?: string } | undefined)
+          ?.toolMenuCategory ?? "tools";
+        replyParts.push(`<b>${escapeHtml(cat.charAt(0).toUpperCase() + cat.slice(1))}</b>`);
+      }
     }
 
     // Handle transactions through the unified TransactionFlow engine.

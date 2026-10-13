@@ -328,7 +328,7 @@ export async function handle_get_tool_menu(
 
   return {
     message,
-    metadata: { toolCards: cards },
+    metadata: { toolCards: cards, toolMenuCategory: category },
     selfContained: true,
   };
 }
