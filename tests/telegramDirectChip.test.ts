@@ -52,6 +52,39 @@ describe("parseTelegramDirectChip", () => {
     expect((result as { text: string }).text).toContain("cancel order 0xOrderKey");
   });
 
+  it("maps menu card titles of no-arg tools to direct invocation", () => {
+    expect(parseTelegramDirectChip("View Hyperliquid account"))
+      .toEqual({ type: "tool", toolName: "hyperliquid_get_positions", args: {} });
+    expect(parseTelegramDirectChip("Recent fills & open orders"))
+      .toEqual({ type: "tool", toolName: "hyperliquid_get_fills", args: {} });
+    expect(parseTelegramDirectChip("View GMX positions"))
+      .toEqual({ type: "tool", toolName: "gmx_get_positions", args: {} });
+    expect(parseTelegramDirectChip("View LP positions"))
+      .toEqual({ type: "tool", toolName: "get_lp_positions", args: {} });
+    expect(parseTelegramDirectChip("Aggregated multi-chain NAV"))
+      .toEqual({ type: "tool", toolName: "get_aggregated_nav", args: {} });
+    expect(parseTelegramDirectChip("Rebalance plan (analysis only, no transactions)"))
+      .toEqual({ type: "tool", toolName: "get_rebalance_plan", args: {} });
+  });
+
+  it("returns usage templates for menu card titles that need parameters", () => {
+    const trade = parseTelegramDirectChip("Trade (open / close position)");
+    expect(trade?.type).toBe("reply");
+    expect((trade as { text: string }).text).toContain("buy 0.5 BTC on hyperliquid");
+
+    const swap = parseTelegramDirectChip("Swap via Uniswap");
+    expect(swap?.type).toBe("reply");
+    expect((swap as { text: string }).text).toContain("swap 1 ETH to USDC via uniswap");
+
+    const sync = parseTelegramDirectChip("Sync NAV between two chains (amount computed automatically)");
+    expect(sync?.type).toBe("reply");
+    expect((sync as { text: string }).text).toContain("sync NAV between Base and Arbitrum");
+
+    const bridge = parseTelegramDirectChip("Cross-chain transfer (you set amount)");
+    expect(bridge?.type).toBe("reply");
+    expect((bridge as { text: string }).text).toContain("bridge 5 USDC from Base to Arbitrum");
+  });
+
   it("returns null for unknown chips", () => {
     expect(parseTelegramDirectChip("Random chip")).toBeNull();
   });

@@ -320,6 +320,192 @@ export function parseTelegramDirectChip(label: string):
     };
   }
 
+  // ── Tool-menu card titles (llm/handlers/menu.ts MENU_TITLES / menu entries).
+  // No-arg cards run the tool directly; the rest reply with a concrete template.
+
+  // No-arg cards → direct tool invocation
+  if (lower === "view hyperliquid account") {
+    return { type: "tool", toolName: "hyperliquid_get_positions", args: {} };
+  }
+  if (lower === "view hyperliquid markets") {
+    return { type: "tool", toolName: "hyperliquid_get_markets", args: {} };
+  }
+  if (lower === "recent fills & open orders") {
+    return { type: "tool", toolName: "hyperliquid_get_fills", args: {} };
+  }
+  if (lower === "view gmx positions") {
+    return { type: "tool", toolName: "gmx_get_positions", args: {} };
+  }
+  if (lower === "view gmx markets") {
+    return { type: "tool", toolName: "gmx_get_markets", args: {} };
+  }
+  if (lower === "claim funding fees") {
+    return { type: "tool", toolName: "gmx_claim_funding_fees", args: {} };
+  }
+  if (lower === "view lp positions") {
+    return { type: "tool", toolName: "get_lp_positions", args: {} };
+  }
+  if (lower === "aggregated multi-chain nav") {
+    return { type: "tool", toolName: "get_aggregated_nav", args: {} };
+  }
+  if (lower === "rebalance plan (analysis only, no transactions)") {
+    return { type: "tool", toolName: "get_rebalance_plan", args: {} };
+  }
+
+  // Param cards → concrete usage templates
+  if (lower === "trade (open / close position)") {
+    return {
+      type: "reply",
+      text:
+        "To trade on Hyperliquid, type one line, for example:\n" +
+        "• <code>buy 0.5 BTC on hyperliquid</code>\n" +
+        "• <code>sell $3000 of ETH as market</code>\n" +
+        "• <code>close my BTC position</code>",
+    };
+  }
+  if (lower === "withdraw ① perp → core spot") {
+    return {
+      type: "reply",
+      text:
+        "To withdraw from Hyperliquid, first move perp margin to Core spot (step 1 of 2):\n" +
+        "• <code>move 250 USDC from perps to spot on hyperliquid</code>",
+    };
+  }
+  if (lower === "withdraw ② core spot → hyperevm") {
+    return {
+      type: "reply",
+      text:
+        "Then bridge the Core spot USDC back to the vault (step 2 of 2):\n" +
+        "• <code>bridge 250 USDC from hyperliquid spot back to the vault</code>",
+    };
+  }
+  if (lower === "open / increase gmx position") {
+    return {
+      type: "reply",
+      text:
+        "To open or add to a GMX position, type e.g.:\n" +
+        "• <code>long 1000 ETHUSDC 5x</code>\n" +
+        "• <code>short 500 BTC 10x</code>",
+    };
+  }
+  if (lower === "close / decrease gmx position") {
+    return {
+      type: "reply",
+      text:
+        "To close or reduce a GMX position, type e.g.:\n" +
+        "• <code>close my ETH long on gmx</code>\n" +
+        "• <code>decrease my BTC short by 50%</code>",
+    };
+  }
+  if (lower === "cancel gmx order") {
+    return {
+      type: "reply",
+      text:
+        "To cancel a GMX order, type:\n" +
+        "<code>cancel my BTC order on gmx</code>\n" +
+        "Order keys are listed under Pending Orders in View GMX positions.",
+    };
+  }
+  if (lower === "update gmx order") {
+    return {
+      type: "reply",
+      text:
+        "To update a GMX order's size or trigger price, type e.g.:\n" +
+        "<code>update my BTC limit order on gmx, trigger 65000</code>",
+    };
+  }
+  if (lower === "swap tokens" || lower === "swap via 0x (aggregator)" || lower === "swap via uniswap") {
+    const via = lower.includes("0x") ? " via 0x" : lower.includes("uniswap") ? " via uniswap" : "";
+    return {
+      type: "reply",
+      text: `To swap vault tokens, type e.g.:\n• <code>swap 1 ETH to USDC${via}</code>`,
+    };
+  }
+  if (lower === "price quote (no transaction)") {
+    return {
+      type: "reply",
+      text: "To get a DEX price quote, type e.g.:\n<code>quote 1 ETH to USDC</code>",
+    };
+  }
+  if (lower === "refresh oracle price feed") {
+    return {
+      type: "reply",
+      text: "To refresh an oracle price feed, type e.g.:\n<code>refresh the ETH price feed</code>",
+    };
+  }
+  if (lower === "pool details (by pool id)") {
+    return {
+      type: "reply",
+      text:
+        "To view a Uniswap v4 pool's details, type:\n" +
+        "<code>pool details for &lt;poolId&gt;</code>\n" +
+        "Pool IDs are listed in View LP positions.",
+    };
+  }
+  if (lower === "add liquidity") {
+    return {
+      type: "reply",
+      text: "To add liquidity, type e.g.:\n<code>add 1 ETH and 3000 USDC liquidity, fee 0.30%</code>",
+    };
+  }
+  if (lower === "remove liquidity") {
+    return {
+      type: "reply",
+      text:
+        "To remove liquidity, type e.g.:\n" +
+        "<code>remove my ETH/USDC liquidity position 12345</code>\n" +
+        "Position IDs are listed in View LP positions.",
+    };
+  }
+  if (lower === "collect lp fees") {
+    return {
+      type: "reply",
+      text: "To collect LP fees, type e.g.:\n<code>collect fees from my ETH/USDC position 12345</code>",
+    };
+  }
+  if (lower === "burn position nft") {
+    return {
+      type: "reply",
+      text:
+        "To burn an emptied position NFT (0 liquidity and 0 fees), type:\n" +
+        "<code>burn position 12345</code>",
+    };
+  }
+  if (lower === "initialize uniswap v4 pool") {
+    return {
+      type: "reply",
+      text:
+        "To initialize a new pool, type e.g.:\n" +
+        "<code>initialize ETH/USDC pool, fee 0.30%, 1 ETH for initial price</code>",
+    };
+  }
+  if (lower === "cross-chain transfer (you set amount)") {
+    return {
+      type: "reply",
+      text: "To bridge tokens between chains, type e.g.:\n<code>bridge 5 USDC from Base to Arbitrum</code>",
+    };
+  }
+  if (lower === "sync nav between two chains (amount computed automatically)") {
+    return {
+      type: "reply",
+      text: "To equalize NAV between two chains, type e.g.:\n<code>sync NAV between Base and Arbitrum</code>",
+    };
+  }
+  if (lower === "bridge quote") {
+    return {
+      type: "reply",
+      text: "To quote a bridge transfer, type e.g.:\n<code>bridge quote 5 USDC from Base to Arbitrum</code>",
+    };
+  }
+  if (lower === "check bridge arrival") {
+    return {
+      type: "reply",
+      text:
+        "To check whether a bridge transfer arrived, type e.g.:\n" +
+        "<code>check bridge arrival for 0xTxHash on Arbitrum</code>",
+    };
+  }
+
   return null;
 }
 
@@ -1209,15 +1395,30 @@ async function handleMessage(
     }
 
     // Tool menus (get_tool_menu) return structured cards for the web UI. Telegram
-    // cannot render cards — list the tools as name + title so the operator can
-    // reply with a tool name to run it directly.
+    // renders them as compact boxes — title + summary + field labels, never raw
+    // tool names — with one inline button per card. Tapping a button routes the
+    // card title through the direct-chip flow: no-arg tools run immediately,
+    // others reply with a concrete usage template.
     const toolCards = (response.metadata as
-      { toolCards?: { title: string; toolName: string }[] } | undefined)?.toolCards;
+      { toolCards?: { title: string; summary: string; fields?: { label: string }[] }[] } | undefined)?.toolCards;
+    let menuKeyboard: TgInlineKeyboardMarkup | undefined;
     if (toolCards?.length) {
-      const list = toolCards
-        .map((c) => `• ${c.title} — <code>${c.toolName}</code>`)
-        .join("\n");
-      replyParts.push(`🧰 <b>Tools</b> — reply with a tool name to run it:\n${list}`);
+      replyParts.push(
+        toolCards
+          .map((c) => {
+            const fields = c.fields?.length
+              ? `\n<i>Fields:</i> ${c.fields.map((f) => escapeHtml(f.label)).join(" · ")}`
+              : "";
+            return `<b>${escapeHtml(c.title)}</b>\n${escapeHtml(c.summary)}${fields}`;
+          })
+          .join("\n\n"),
+      );
+      menuKeyboard = {
+        inline_keyboard: toolCards.map((c) => [{
+          text: c.title.slice(0, 64),
+          callback_data: `say:${c.title.slice(0, 60)}`,
+        }]),
+      };
     }
 
     // Handle transactions through the unified TransactionFlow engine.
@@ -1374,9 +1575,9 @@ async function handleMessage(
       const fullReply = replyParts.join("\n\n") || "Done.";
       const truncated = fullReply.length > 4000 ? fullReply.slice(0, 3990) + "…" : fullReply;
 
-      // Add suggestion chips as inline keyboard if present
-      let keyboard: TgInlineKeyboardMarkup | undefined;
-      if (response.suggestions?.length) {
+      // Menu boxes bring their own per-card keyboard; otherwise suggestion chips.
+      let keyboard: TgInlineKeyboardMarkup | undefined = menuKeyboard;
+      if (!keyboard && response.suggestions?.length) {
         keyboard = {
           inline_keyboard: [
             response.suggestions.slice(0, 3).map((s) => ({
