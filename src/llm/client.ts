@@ -2634,18 +2634,32 @@ export function tryFastPathHyperliquid(msg: string): FastPathResult | null {
     };
   }
 
-  // "long 0.5 BTC on hyperliquid" / "buy 0.5 BTC on hyperliquid" — open/increase with explicit size
-  const openMatch = m.match(/^(long|short|buy|sell)\s+([\d.,]+)\s+([A-Z]{2,10})(?:\/USD)?\s+on\s+hyperliquid[\s?.!]*$/i);
+  // "buy $3000 of BTC on hyperliquid" / "sell $2500 ETH @ 66000 on hyperliquid" — notional USD
+  const notionalMatch = m.match(/^(long|short|buy|sell)\s+\$([\d.,]+)\s*(?:usd|usdc)?(?:\s+of)?\s+([A-Z]{2,10})(?:\/USD)?\s+on\s+hyperliquid(?:\s+@\s*([\d.,]+))?[\s?.!]*$/i);
+  if (notionalMatch) {
+    const dir = notionalMatch[1].toLowerCase();
+    return {
+      name: "hyperliquid_limit_order",
+      args: {
+        coin: notionalMatch[3].toUpperCase(),
+        side: dir === "long" || dir === "buy" ? "buy" : "sell",
+        notionalUsd: notionalMatch[2].replace(/,/g, ""),
+        ...(notionalMatch[4] ? { price: notionalMatch[4].replace(/,/g, "") } : {}),
+      },
+    };
+  }
+
+  // "long 0.5 BTC on hyperliquid" / "buy 0.5 BTC on hyperliquid @ 67200" — open/increase with explicit size
+  const openMatch = m.match(/^(long|short|buy|sell)\s+([\d.,]+)\s+([A-Z]{2,10})(?:\/USD)?\s+on\s+hyperliquid(?:\s+@\s*([\d.,]+))?[\s?.!]*$/i);
   if (openMatch) {
     const dir = openMatch[1].toLowerCase();
-    const priceMatch = m.match(/@\s*([\d.,]+)/);
     return {
       name: "hyperliquid_limit_order",
       args: {
         coin: openMatch[3].toUpperCase(),
         side: dir === "long" || dir === "buy" ? "buy" : "sell",
         size: openMatch[2].replace(/,/g, ""),
-        ...(priceMatch ? { price: priceMatch[1].replace(/,/g, "") } : {}),
+        ...(openMatch[4] ? { price: openMatch[4].replace(/,/g, "") } : {}),
       },
     };
   }

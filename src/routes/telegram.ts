@@ -79,6 +79,7 @@ import {
 import { verifyOperatorAuth, AuthError } from "../services/auth.js";
 import { isDevEscapeHatchEnabled } from "../services/devMode.js";
 import { getVaultInfo } from "../services/vault.js";
+import { getHyperliquidMeta, resolveHlAssetIndex } from "../services/hyperliquid.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS, sanitizeError } from "../config.js";
 import type { TelegramVaultLink } from "../types.js";
 
@@ -244,10 +245,12 @@ export async function deleteAllPendingTxKeys(kv: KVNamespace, userId: string | n
 
 /**
  * Parse a suggestion-chip label to see if it should bypass the LLM entirely.
- * Returns a direct action (tool invocation or static reply) for known chips.
+ * Returns a direct action (tool invocation, wizard start, or static reply) for
+ * known chips.
  */
 export function parseTelegramDirectChip(label: string):
   | { type: "tool"; toolName: string; args: Record<string, unknown> }
+  | { type: "wizard"; wizard: "hl_trade" }
   | { type: "reply"; text: string }
   | null {
   const lower = label.toLowerCase().trim();
@@ -354,14 +357,7 @@ export function parseTelegramDirectChip(label: string):
 
   // Param cards → concrete usage templates
   if (lower === "trade (open / close position)") {
-    return {
-      type: "reply",
-      text:
-        "To trade on Hyperliquid, type one line, for example:\n" +
-        "• <code>buy 0.5 BTC on hyperliquid</code>\n" +
-        "• <code>sell $3000 of ETH as market</code>\n" +
-        "• <code>close my BTC position</code>",
-    };
+    return { type: "wizard", wizard: "hl_trade" };
   }
   if (lower === "withdraw ① perp → core spot") {
     return {
@@ -507,6 +503,290 @@ export function parseTelegramDirectChip(label: string):
   }
 
   return null;
+}
+
+// ── Hyperliquid trade wizard ──────────────────────────────────────────
+// Multi-step Telegram flow started from the "Trade (open / close position)"
+// menu card: market → direction → size (coin amount or $ notional) → market /
+// limit (+ price) → confirm. Button steps arrive as wiz:hl: callbacks; free-text
+// steps (market/size/price) are intercepted in handleMessage. Completing the
+// wizard synthesizes the standard one-line trade command and runs it through the
+// normal chat flow (fast path → tool → transaction flow), so execution behaves
+// exactly like a typed command.
+
+interface HlTradeWizard {
+  step: "market" | "marketText" | "side" | "size" | "orderType" | "price" | "confirm";
+  coin?: string;
+  side?: "buy" | "sell";
+  size?: string;
+  notionalUsd?: string;
+  orderType?: "market" | "limit";
+  price?: string;
+}
+
+type WizardButton = TgInlineKeyboardMarkup["inline_keyboard"][number][number];
+
+const hlTradeWizardKey = (userId: number | string): string => `tg-wiz-hl-trade:${userId}`;
+
+async function getHlTradeWizard(kv: KVNamespace, userId: number): Promise<HlTradeWizard | null> {
+  const raw = await kv.get(hlTradeWizardKey(userId));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as HlTradeWizard;
+  } catch {
+    return null;
+  }
+}
+
+async function saveHlTradeWizard(kv: KVNamespace, userId: number, state: HlTradeWizard): Promise<void> {
+  await kv.put(hlTradeWizardKey(userId), JSON.stringify(state), { expirationTtl: 600 });
+}
+
+/** One-line trade command in the exact fast-path format — deterministic execution. */
+export function buildHlTradeCommand(s: HlTradeWizard): string {
+  const dir = s.side === "buy" ? "buy" : "sell";
+  const amount = s.notionalUsd ? `$${s.notionalUsd}` : (s.size ?? "");
+  const ofWord = s.notionalUsd ? " of" : "";
+  const px = s.orderType === "limit" && s.price ? ` @ ${s.price}` : "";
+  return `${dir} ${amount}${ofWord} ${s.coin} on hyperliquid${px}`;
+}
+
+/** Human summary for the confirm step. */
+export function hlTradeWizardSummary(s: HlTradeWizard): string {
+  const dir = s.side === "buy" ? "Buy" : "Sell";
+  const amount = s.notionalUsd
+    ? `$${Number(s.notionalUsd).toLocaleString("en-US")} of ${s.coin}`
+    : `${s.size} ${s.coin}`;
+  const order = s.orderType === "limit"
+    ? `limit @ $${Number(s.price).toLocaleString("en-US")}`
+    : "market (IOC)";
+  return `${dir} ${amount} · ${order}`;
+}
+
+function wizardCancelRow(): WizardButton[] {
+  return [{ text: "❌ Cancel", callback_data: "wiz:hl:cancel" }];
+}
+
+async function promptWizardMarket(token: string, chatId: number): Promise<void> {
+  const meta = await getHyperliquidMeta().catch(() => null);
+  const coins = meta
+    ? meta.universe.slice(0, 8).map((u) => u.name)
+    : ["BTC", "ETH", "SOL", "XRP", "DOGE", "LINK", "AVAX", "HYPE"];
+  const rows: WizardButton[][] = [];
+  for (let i = 0; i < coins.length; i += 2) {
+    rows.push(coins.slice(i, i + 2).map((c) => ({ text: c, callback_data: `wiz:hl:mkt:${c}` })));
+  }
+  rows.push([{ text: "✏️ Type a market", callback_data: "wiz:hl:mkt:other" }], wizardCancelRow());
+  await sendMessage(token, chatId, "📈 <b>New Hyperliquid trade</b> — pick a market:", {
+    replyMarkup: { inline_keyboard: rows },
+  });
+}
+
+async function promptWizardSide(token: string, chatId: number, coin: string): Promise<void> {
+  await sendMessage(token, chatId, `<b>${escapeHtml(coin)}</b> — direction:`, {
+    replyMarkup: {
+      inline_keyboard: [
+        [{ text: "🟢 Buy / long", callback_data: "wiz:hl:side:buy" }],
+        [{ text: "🔴 Sell / short", callback_data: "wiz:hl:side:sell" }],
+        wizardCancelRow(),
+      ],
+    },
+  });
+}
+
+async function promptWizardSize(token: string, chatId: number): Promise<void> {
+  await sendMessage(
+    token, chatId,
+    "Size? <b>Reply with the amount</b> — e.g. <code>0.5</code> (coin amount) or <code>$3000</code> (notional USD).",
+    { replyMarkup: { inline_keyboard: [wizardCancelRow()] } },
+  );
+}
+
+async function promptWizardOrderType(token: string, chatId: number): Promise<void> {
+  await sendMessage(token, chatId, "Order type:", {
+    replyMarkup: {
+      inline_keyboard: [
+        [{ text: "⚡ Market", callback_data: "wiz:hl:type:market" }],
+        [{ text: "📌 Limit", callback_data: "wiz:hl:type:limit" }],
+        wizardCancelRow(),
+      ],
+    },
+  });
+}
+
+async function promptWizardPrice(token: string, chatId: number): Promise<void> {
+  await sendMessage(
+    token, chatId,
+    "Limit price in USD? <b>Reply with the price</b> — e.g. <code>67200</code>.",
+    { replyMarkup: { inline_keyboard: [wizardCancelRow()] } },
+  );
+}
+
+async function promptWizardConfirm(token: string, chatId: number, state: HlTradeWizard): Promise<void> {
+  await sendMessage(
+    token, chatId,
+    `📋 <b>Order summary</b>\n${escapeHtml(hlTradeWizardSummary(state))}\n\nPlace this order?`,
+    {
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "✅ Place order", callback_data: "wiz:hl:go" }],
+          [{ text: "🔁 Start over", callback_data: "wiz:hl:again" }],
+          wizardCancelRow(),
+        ],
+      },
+    },
+  );
+}
+
+async function startHlTradeWizard(env: Env, token: string, userId: number, chatId: number): Promise<void> {
+  await saveHlTradeWizard(env.KV, userId, { step: "market" });
+  await promptWizardMarket(token, chatId);
+}
+
+async function finishHlTradeWizard(
+  env: Env, token: string, userId: number, chatId: number, state: HlTradeWizard,
+): Promise<void> {
+  await env.KV.delete(hlTradeWizardKey(userId));
+  const command = buildHlTradeCommand(state);
+  await sendMessage(token, chatId, `➡️ <code>${escapeHtml(command)}</code>`);
+  // Run the synthesized command through the normal chat flow — the fast path
+  // executes the tool without an LLM round-trip and the standard TransactionFlow
+  // (Execute button / autonomous mode) applies.
+  await handleMessage(env, token, { message_id: 0, from: { id: userId }, chat: { id: chatId }, text: command });
+}
+
+async function handleHlTradeWizardCallback(
+  env: Env, token: string, userId: number, chatId: number, state: HlTradeWizard, data: string,
+): Promise<void> {
+  if (data === "wiz:hl:cancel") {
+    await env.KV.delete(hlTradeWizardKey(userId));
+    await sendMessage(token, chatId, "Trade setup cancelled.");
+    return;
+  }
+  if (data === "wiz:hl:again") {
+    await startHlTradeWizard(env, token, userId, chatId);
+    return;
+  }
+  if (data === "wiz:hl:go") {
+    const complete =
+      state.coin && state.side && (state.size || state.notionalUsd) && state.orderType &&
+      (state.orderType === "market" || state.price);
+    if (!complete) {
+      await startHlTradeWizard(env, token, userId, chatId);
+      return;
+    }
+    await finishHlTradeWizard(env, token, userId, chatId, state);
+    return;
+  }
+  if (data === "wiz:hl:mkt:other") {
+    state.step = "marketText";
+    await saveHlTradeWizard(env.KV, userId, state);
+    await sendMessage(token, chatId, "Type the market — e.g. <code>PEPE</code>.", {
+      replyMarkup: { inline_keyboard: [wizardCancelRow()] },
+    });
+    return;
+  }
+  const mkt = data.match(/^wiz:hl:mkt:([A-Z0-9]+)$/);
+  if (mkt) {
+    state.coin = mkt[1];
+    state.step = "side";
+    await saveHlTradeWizard(env.KV, userId, state);
+    await promptWizardSide(token, chatId, state.coin);
+    return;
+  }
+  const side = data.match(/^wiz:hl:side:(buy|sell)$/);
+  if (side) {
+    state.side = side[1] as "buy" | "sell";
+    state.step = "size";
+    await saveHlTradeWizard(env.KV, userId, state);
+    await promptWizardSize(token, chatId);
+    return;
+  }
+  const type = data.match(/^wiz:hl:type:(market|limit)$/);
+  if (type) {
+    state.orderType = type[1] as "market" | "limit";
+    if (state.orderType === "limit") {
+      state.step = "price";
+      await saveHlTradeWizard(env.KV, userId, state);
+      await promptWizardPrice(token, chatId);
+    } else {
+      state.step = "confirm";
+      await saveHlTradeWizard(env.KV, userId, state);
+      await promptWizardConfirm(token, chatId, state);
+    }
+    return;
+  }
+}
+
+/**
+ * Route a free-text chat message into an active wizard step (market/size/price).
+ * Returns true when the wizard consumed the message; false when the wizard state
+ * was stale (it is dropped and the message falls through to normal chat).
+ */
+async function handleHlTradeWizardText(
+  env: Env, token: string, userId: number, chatId: number, state: HlTradeWizard, text: string,
+): Promise<boolean> {
+  if (state.step === "marketText") {
+    try {
+      // resolveHlAssetIndex validates the market exists (core perp) and throws
+      // an actionable error listing available markets otherwise.
+      await resolveHlAssetIndex(text);
+      state.coin = text.trim().toUpperCase();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await sendMessage(token, chatId, `⚠️ ${escapeHtml(truncateForDisplay(sanitizeError(msg), 300))}`, {
+        replyMarkup: { inline_keyboard: [wizardCancelRow()] },
+      });
+      return true;
+    }
+    state.step = "side";
+    await saveHlTradeWizard(env.KV, userId, state);
+    await promptWizardSide(token, chatId, state.coin);
+    return true;
+  }
+
+  if (state.step === "size") {
+    const m = text.match(/^\s*\$?\s*([\d,]+(?:\.\d+)?)\s*(?:usd|usdc|usdt)?\s*$/i);
+    if (!m || Number(m[1].replace(/,/g, "")) <= 0) {
+      await sendMessage(
+        token, chatId,
+        "Reply with the amount — e.g. <code>0.5</code> (coin amount) or <code>$3000</code> (notional USD).",
+        { replyMarkup: { inline_keyboard: [wizardCancelRow()] } },
+      );
+      return true;
+    }
+    const value = m[1].replace(/,/g, "");
+    if (text.trim().startsWith("$") || /\b(?:usd|usdc|usdt)\b/i.test(text)) {
+      state.notionalUsd = value;
+      delete state.size;
+    } else {
+      state.size = value;
+      delete state.notionalUsd;
+    }
+    state.step = "orderType";
+    await saveHlTradeWizard(env.KV, userId, state);
+    await promptWizardOrderType(token, chatId);
+    return true;
+  }
+
+  if (state.step === "price") {
+    const m = text.match(/^\s*\$?\s*([\d,]+(?:\.\d+)?)\s*$/);
+    if (!m || Number(m[1].replace(/,/g, "")) <= 0) {
+      await sendMessage(token, chatId, "Reply with the limit price in USD — e.g. <code>67200</code>.", {
+        replyMarkup: { inline_keyboard: [wizardCancelRow()] },
+      });
+      return true;
+    }
+    state.price = m[1].replace(/,/g, "");
+    state.step = "confirm";
+    await saveHlTradeWizard(env.KV, userId, state);
+    await promptWizardConfirm(token, chatId, state);
+    return true;
+  }
+
+  // Stale or unknown step — drop the wizard and let the text reach normal chat.
+  await env.KV.delete(hlTradeWizardKey(userId));
+  return false;
 }
 
 /**
@@ -1077,6 +1357,7 @@ async function handleMessage(
           `tg-user:${userId}`,
           `tg-conv:${userId}`,
           `tg-model:${userId}`,
+          `tg-wiz-hl-trade:${userId}`,
         ];
         // Also clean up reverse lookups for all linked operators and the
         // unified execution-mode preference keys shared with the web UI.
@@ -1198,6 +1479,15 @@ async function handleMessage(
       default:
         // Unknown command — fall through to chat
         break;
+    }
+  }
+
+  // ── Active trade wizard: free-text steps (market/size/price) are routed here ──
+  if (text) {
+    const wizard = await getHlTradeWizard(env.KV, userId);
+    if (wizard) {
+      const consumed = await handleHlTradeWizardText(env, token, userId, chatId, wizard, text);
+      if (consumed) return;
     }
   }
 
@@ -1639,6 +1929,18 @@ async function handleCallbackQuery(
     return;
   }
 
+  // ── Trade wizard button steps ──
+  if (data.startsWith("wiz:hl:")) {
+    await answerCallbackQuery(token, query.id);
+    const state = await getHlTradeWizard(env.KV, userId);
+    if (!state) {
+      await sendMessage(token, chatId, "⏰ Trade setup expired — tap Trade on a tool menu to start over.");
+      return;
+    }
+    await handleHlTradeWizardCallback(env, token, userId, chatId, state, data);
+    return;
+  }
+
   // ── Suggestion chip: bypass the LLM for known direct-action chips ──
   if (data.startsWith("say:")) {
     const text = data.slice(4);
@@ -1660,6 +1962,12 @@ async function handleCallbackQuery(
 
     if (direct.type === "reply") {
       await sendMessage(token, chatId, direct.text);
+      return;
+    }
+
+    if (direct.type === "wizard") {
+      await answerCallbackQuery(token, query.id, "Let's set up your trade");
+      await startHlTradeWizard(env, token, userId, chatId);
       return;
     }
 

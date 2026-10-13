@@ -315,12 +315,15 @@ export async function handle_get_tool_menu(
     .map(buildCard)
     .filter((c): c is ToolCard => c !== null);
 
-  let message = `Here are the ${category} tools. Pick one and fill in the fields — it runs directly, no agent involved.`;
+  // The cards ARE the answer — the web UI and Telegram render them as boxes, so no
+  // filler sentence here. Only the crosschain menu carries essential routing notes.
+  let message = "";
   if (toolNames === CROSSCHAIN_MENU) {
-    message += `\n\nBridgeable tokens by chain: ${crosschainTokenSummary()}.`;
-    message += `\nHyperEVM is USDC-only — any other token on a route to or from it is rejected with an error naming USDC as the alternative.`;
-    message += `\nNative ETH can bridge as WETH — set "Use native ETH" to true on WETH transfers and the vault wraps ETH automatically.`;
-    message += `\n"Sync NAV between two chains" computes the exact equalizing amount itself — leave Amount empty.`;
+    message =
+      `Bridgeable tokens by chain: ${crosschainTokenSummary()}.` +
+      `\nHyperEVM is USDC-only — any other token on a route to or from it is rejected with an error naming USDC as the alternative.` +
+      `\nNative ETH can bridge as WETH — set "Use native ETH" to true on WETH transfers and the vault wraps ETH automatically.` +
+      `\n"Sync NAV between two chains" computes the exact equalizing amount itself — leave Amount empty.`;
   }
 
   return {

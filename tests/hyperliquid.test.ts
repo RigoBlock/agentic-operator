@@ -139,6 +139,13 @@ describe("tryFastPathHyperliquid", () => {
       .toEqual({ name: "hyperliquid_limit_order", args: { coin: "SOL", side: "sell", size: "10" } });
   });
 
+  it("routes open/increase with notional USD", () => {
+    expect(tryFastPathHyperliquid("buy $3000 of BTC on hyperliquid"))
+      .toEqual({ name: "hyperliquid_limit_order", args: { coin: "BTC", side: "buy", notionalUsd: "3000" } });
+    expect(tryFastPathHyperliquid("sell $2,500 of ETH on hyperliquid @ 6,600"))
+      .toEqual({ name: "hyperliquid_limit_order", args: { coin: "ETH", side: "sell", notionalUsd: "2500", price: "6600" } });
+  });
+
   it("ignores messages without the hyperliquid keyword (GMX keeps those)", () => {
     expect(tryFastPathHyperliquid("close my BTC long")).toBeNull();
     expect(tryFastPathHyperliquid("show my positions")).toBeNull();

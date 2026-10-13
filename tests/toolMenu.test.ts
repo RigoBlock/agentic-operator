@@ -52,7 +52,8 @@ describe("get_tool_menu via processChat", () => {
     const result = await processChat({} as Env, [{ role: "user", content: "open the hyperliquid menu for me" }], ctx);
 
     expect(result.finalModel).toBe("tooling");
-    expect(result.reply).toContain("hyperliquid tools");
+    // The cards ARE the answer — no filler sentence (the old "Here are the…" text is gone).
+    expect(result.reply ?? "").not.toContain("Here are the");
     const cards = (result.metadata as { toolCards: { toolName: string; fields: unknown[] }[] }).toolCards;
     expect(cards.length).toBeGreaterThan(0);
     expect(cards.map((c) => c.toolName)).toContain("hyperliquid_deposit");

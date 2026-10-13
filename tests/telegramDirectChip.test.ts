@@ -68,10 +68,6 @@ describe("parseTelegramDirectChip", () => {
   });
 
   it("returns usage templates for menu card titles that need parameters", () => {
-    const trade = parseTelegramDirectChip("Trade (open / close position)");
-    expect(trade?.type).toBe("reply");
-    expect((trade as { text: string }).text).toContain("buy 0.5 BTC on hyperliquid");
-
     const swap = parseTelegramDirectChip("Swap via Uniswap");
     expect(swap?.type).toBe("reply");
     expect((swap as { text: string }).text).toContain("swap 1 ETH to USDC via uniswap");
@@ -83,6 +79,11 @@ describe("parseTelegramDirectChip", () => {
     const bridge = parseTelegramDirectChip("Cross-chain transfer (you set amount)");
     expect(bridge?.type).toBe("reply");
     expect((bridge as { text: string }).text).toContain("bridge 5 USDC from Base to Arbitrum");
+  });
+
+  it("starts the trade wizard for the Trade menu card", () => {
+    expect(parseTelegramDirectChip("Trade (open / close position)"))
+      .toEqual({ type: "wizard", wizard: "hl_trade" });
   });
 
   it("returns null for unknown chips", () => {
