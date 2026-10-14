@@ -541,19 +541,23 @@ async function handleChatResponse(data, options = {}) {
       const stepPattern = /step\s+\d+\s*(of|\/)\s*\d+|next\s+(step|i['']ll|we['']ll)|after\s+this|then\s+(i['']ll|we['']ll)|following\s+step|first,?\s+.*then/i;
       setMultiStepActive(stepPattern.test(data.reply));
     }
-  } else if (!hasTx && data.toolCalls?.length > 0) {
+  } else if (!hasTx && (data.toolCalls?.length > 0 || data.metadata?.toolCards?.length > 0)) {
     const resultsText = data.toolCalls
       .filter(tc => !tc.error && tc.result)
       .map(tc => tc.result)
       .join('\n');
-    if (resultsText) {
+    // Tool menus (get_tool_menu) return an empty message with the cards in
+    // metadata — render the cards even when there is no text to show.
+    if (resultsText || data.metadata?.toolCards?.length > 0) {
       const extras = withModelTrace({ suggestions: data.suggestions, toolCards: data.metadata?.toolCards });
       if (data.metadata?.gmxPositions) {
-        extras.gmxPositions = data.metadata.gmxPositions;
+        extras.gmxPositions = data.metadata?.gmxPositions;
       }
       appendMessage('assistant', resultsText, extras);
-      conversationHistory.push({ role: 'assistant', content: resultsText });
-      persistChat();
+      if (resultsText) {
+        conversationHistory.push({ role: 'assistant', content: resultsText });
+        persistChat();
+      }
     }
   }
 

@@ -164,12 +164,23 @@ describe("tryFastPathToolMenu", () => {
     });
   });
 
+  it("routes 'show me my hyperliquid tools' to the hyperliquid category", () => {
+    expect(tryFastPathToolMenu("show me my hyperliquid tools")).toEqual({
+      name: "get_tool_menu",
+      args: { category: "hyperliquid" },
+    });
+  });
+
   it("routes category-less requests to get_tool_menu without a category", () => {
     expect(tryFastPathToolMenu("what tools do I have")).toEqual({
       name: "get_tool_menu",
       args: {},
     });
     expect(tryFastPathToolMenu("list all my tools")).toEqual({
+      name: "get_tool_menu",
+      args: {},
+    });
+    expect(tryFastPathToolMenu("show me all tools")).toEqual({
       name: "get_tool_menu",
       args: {},
     });

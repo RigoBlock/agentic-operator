@@ -2707,7 +2707,7 @@ export function tryFastPathPendingTx(msg: string): FastPathResult | null {
  */
 export function tryFastPathToolMenu(msg: string): FastPathResult | null {
   const m = msg.trim();
-  const catMatch = m.match(/^(?:what\s+are|show|list|get)\s+(?:my\s+)?(?!all\b)([a-z][a-z0-9]*(?:\s+[a-z][a-z0-9]*)*)\s+tools[\s?.!]*$/i);
+  const catMatch = m.match(/^(?:what\s+are|show|list|get)\s+(?:me\s+)?(?:my\s+)?(?!all\b|me\b)([a-z][a-z0-9]*(?:\s+[a-z][a-z0-9]*)*)\s+tools[\s?.!]*$/i);
   if (catMatch) {
     return { name: "get_tool_menu", args: { category: catMatch[1].trim().toLowerCase() } };
   }
