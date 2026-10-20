@@ -222,7 +222,11 @@ owner-signed execution only in v1):
   The first deposit auto-creates the vault's Core master account — no activation step.
 - `lighter_limit_order` / `lighter_market_order` / `lighter_cancel_order` /
   `lighter_cancel_all_orders` — `createOrder`/cancels. **Trading: the standard NAV shield
-  applies, never exempt.**
+  applies, never exempt.** Every order is hard-gated in the builder against the market's
+  on-chain minimums (READ_CORE 0x0005 `minBaseAmount` / `minQuoteAmount`, 6-dec USDC) —
+  below them Core would accept and cancel at matching. Margin adequacy is a handler WARNING
+  only (notional × assumed 20% initial margin vs Core collateral): the market-default IMF
+  is not readable on-chain and maker orders are not margin-rejected at placement.
 - `lighter_track_market` / `lighter_untrack_market` — pool-owner market tracking. The on-chain
   `trackMarket(uint16)` resolves size/price decimals from the adapter's own LighterConstants table
   (never calldata, never user input); the pool's `getLighterTrackedMarkets()` view (0x5239dd83)
@@ -233,9 +237,17 @@ the request — always surface the reqId and point to `lighter_get_request_statu
 order filled (an IOC/market order against an empty book is cancelled — the devnet ships without
 market makers). All Core state reads go through the READ_CORE precompile via `LIGHTER_RPC_URL` —
 no external Core REST API, no operator-side ledger: tracked markets and decimals come from the
-pool's on-chain view. The position read returns a raw 7-word tuple — the documented
-`(position, entryQuote, initialMarginFraction, totalOrderCount, totalPositionTiedOrderCount,
-marginMode, allocatedMargin)` layout WITHOUT a leading funding field.
+pool's on-chain view. The position read returns a raw 7-word tuple WITHOUT the leading funding
+field the current docs show, and the two order-count fields are served in REVERSE docs order:
+word3 = position-tied (SL/TP) order count, word4 = currently open order count. Lighter has no
+GTC — a resting limit order is `timeInForce = GTT` with a 5min…30d expiry; margin is always
+cross (the EVM entrypoint has no margin-mode field) at the market-default initial margin
+fraction, which is not readable on-chain. Resting maker orders are NOT margin-rejected at
+placement (Core accepts and may cancel them at matching time instead), so unfillable orders
+can sit on the book. A full open-order LIST is impossible on-chain (READ_CORE has no
+order-listing query); Lighter's Core REST API serves one, but its account/order endpoints
+require a Schnorr API key registered on the Core account, which the pool cannot register
+through the adapter — do not add an unauthenticated order-listing dependency.
 
 ---
 

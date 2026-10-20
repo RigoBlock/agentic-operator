@@ -651,7 +651,7 @@ export const TOOL_DEFINITIONS = [
         properties: {
           amount: {
             type: "string",
-            description: "USDC amount in human units (e.g. '500')",
+            description: "USDC amount, e.g. '500'",
           },
         },
         required: ["amount"],
@@ -671,7 +671,7 @@ export const TOOL_DEFINITIONS = [
         properties: {
           amount: {
             type: "string",
-            description: "USDC amount in human units (e.g. '250')",
+            description: "USDC amount, e.g. '250'",
           },
         },
         required: ["amount"],
@@ -693,31 +693,31 @@ export const TOOL_DEFINITIONS = [
         properties: {
           market: {
             type: "string",
-            description: "Perp market id or devnet symbol (e.g. '0' or 'ETH'; known symbols: ETH, BTC, SOL, DOGE)",
+            description: "Market id or symbol: '0','1','2','3' or ETH, BTC, SOL, DOGE",
           },
           side: {
             type: "string",
-            description: "'buy' (long / bid) or 'sell' (short / ask)",
+            description: "'buy' or 'sell'",
           },
           size: {
             type: "string",
-            description: "Size in base-asset units (e.g. '0.15'), exact to the market's sizeDecimals tick",
+            description: "Size in ETH/BTC units, e.g. '0.5'",
           },
           price: {
             type: "string",
-            description: "Limit price in quote units (e.g. '67234.5'), required for a limit order",
+            description: "Limit price, e.g. '82000'",
           },
           postOnly: {
             type: "boolean",
-            description: "true for a post-only (maker) order — tif 'postOnly' instead of 'gtt'",
+            description: "true = maker-only (rests or is rejected)",
           },
           expiry: {
             type: "number",
-            description: "Optional GTT expiry in ms since epoch; clamped to 5 minutes … 30 days from now (default: 24h)",
+            description: "Expiry, ms since epoch (default 24h, max 30d)",
           },
           reduceOnly: {
             type: "boolean",
-            description: "true to only reduce/close an existing position (never opens a new one)",
+            description: "true = reduce/close a position only",
           },
         },
         required: ["market", "side", "size", "price"],
@@ -738,19 +738,19 @@ export const TOOL_DEFINITIONS = [
         properties: {
           market: {
             type: "string",
-            description: "Perp market id or devnet symbol (e.g. '0' or 'ETH'; known symbols: ETH, BTC, SOL, DOGE)",
+            description: "Market id or symbol: '0','1','2','3' or ETH, BTC, SOL, DOGE",
           },
           side: {
             type: "string",
-            description: "'buy' (long / bid) or 'sell' (short / ask)",
+            description: "'buy' or 'sell'",
           },
           size: {
             type: "string",
-            description: "Size in base-asset units (e.g. '0.15'), exact to the market's sizeDecimals tick",
+            description: "Size in ETH/BTC units, e.g. '0.5'",
           },
           reduceOnly: {
             type: "boolean",
-            description: "true to only reduce/close an existing position (never opens a new one)",
+            description: "true = reduce/close a position only",
           },
         },
         required: ["market", "side", "size"],
@@ -770,7 +770,7 @@ export const TOOL_DEFINITIONS = [
         properties: {
           orderIndex: {
             type: "string",
-            description: "Order index or clientOrderIndex (decimal or 0x hex) of the order to cancel",
+            description: "Client order index from the order confirmation",
           },
         },
         required: ["orderIndex"],
@@ -806,7 +806,7 @@ export const TOOL_DEFINITIONS = [
         properties: {
           marketId: {
             type: "string",
-            description: "Perp market id or devnet symbol (e.g. '0' or 'ETH'; known symbols: ETH, BTC, SOL, DOGE)",
+            description: "Market id or symbol: '0','1','2','3' or ETH, BTC, SOL, DOGE",
           },
         },
         required: ["marketId"],
@@ -826,7 +826,7 @@ export const TOOL_DEFINITIONS = [
         properties: {
           marketId: {
             type: "string",
-            description: "Perp market id or devnet symbol to untrack (e.g. '0' or 'ETH')",
+            description: "Market id or symbol, e.g. '1' or BTC",
           },
         },
         required: ["marketId"],
@@ -847,7 +847,7 @@ export const TOOL_DEFINITIONS = [
         properties: {
           reqId: {
             type: "string",
-            description: "Core request id (decimal or 0x hex) from the transaction result/logs",
+            description: "Request id from the OrderSent event",
           },
         },
         required: ["reqId"],

@@ -61,6 +61,9 @@ const MARKET_OUT = [
   { type: "uint64" }, { type: "uint32" }, { type: "uint64" }, { type: "uint64" },
 ] as const;
 
+// Devnet layout (verified live 2026-10-20): the two count fields are served in
+// REVERSE docs order — word3 = totalPositionTiedOrderCount (SL/TP tied to a
+// position), word4 = totalOrderCount (currently open orders).
 const POSITION_OUT = [
   { type: "int64" }, { type: "uint56" }, { type: "uint16" },
   { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
@@ -84,7 +87,7 @@ function encodePosition(fields: {
 }): Hex {
   return encodeAbiParameters([...POSITION_OUT], [
     fields.position, fields.entryQuote, 100,
-    fields.totalOrderCount ?? 3n, fields.totalPositionTiedOrderCount ?? 1n,
+    fields.totalPositionTiedOrderCount ?? 1n, fields.totalOrderCount ?? 3n,
     fields.marginMode ?? 0, fields.allocatedMargin ?? 0n,
   ]);
 }
@@ -173,6 +176,8 @@ describe("READ_CORE client", () => {
     expect(pos!.position).toBe(-2000n);
     expect(pos!.entryQuote).toBe(4_600_000_000n);
     expect(pos!.marginMode).toBe(0);
+    // Devnet serves the count fields in reverse docs order: word3 = tied (SL/TP), word4 = open.
+    expect(pos!.totalPositionTiedOrderCount).toBe(1n);
     expect(pos!.totalOrderCount).toBe(3n);
     const data = mockState.call.mock.calls[0][0] as { data: Hex };
     expect(data.data).toBe(`0x0007${VAULT.slice(2).toLowerCase()}000002`);
@@ -629,7 +634,8 @@ describe("chain gating", () => {
     const result = await handle_lighter_get_orders(
       { KV: createMockKV() } as unknown as Env, makeCtx(CHAIN), {}, "lighter_get_orders",
     );
-    expect(result.message).toMatch(/ETH \(market 0\): 2 open order\(s\), 1 tied to a position/);
+    expect(result.message).toMatch(/ETH \(market 0\): 2 open order\(s\)/);
+    expect(result.message).toMatch(/1 SL\/TP order\(s\) tied to a position/);
     expect(result.message).toMatch(/COUNTS only/);
     expect(result.message).toMatch(/IOC/);
     expect(result.suggestions).toContain("Cancel a Lighter order");
@@ -654,6 +660,32 @@ describe("chain gating", () => {
       { KV: createMockKV() } as unknown as Env, makeCtx(CHAIN), {}, "lighter_get_orders",
     );
     expect(result.message).toMatch(/No open orders on the tracked markets/);
+  });
+
+  it("limit order drafts show notional vs Core collateral (margin context)", async () => {
+    const trackedView = encodeAbiParameters([...LIGHTER_VIEW_DATA_OUT], [
+      {
+        marketIds: [0], sizeDecimals: [4], priceDecimals: [2],
+        inFlightAmount: 0n, lastActionTimestamp: 0n, lastReqId: 0n,
+      },
+    ]);
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      if (args.data.slice(0, 10) === "0x5239dd83") return { data: trackedView };
+      if (args.data.slice(0, 6) === "0x0001") return { data: encodeAccount(15_000_000n) };
+      if (args.data.slice(0, 6) === "0x0005") return { data: encodeMarket(246000n) };
+      throw new Error(`unexpected eth_call data: ${args.data.slice(0, 10)}`);
+    });
+    const { handle_lighter_limit_order } = await import("../src/llm/handlers/lighter.js");
+    const result = await handle_lighter_limit_order(
+      { KV: createMockKV() } as unknown as Env, makeCtx(CHAIN),
+      { market: "ETH", side: "buy", size: "10", price: "2460" },
+      "lighter_limit_order",
+    );
+    expect(result.transaction).toBeDefined();
+    expect(result.message).toMatch(/Notional ≈ \$24,600\.00/);
+    expect(result.message).toMatch(/Core collateral: \$15\.00/);
+    expect(result.message).toMatch(/Estimated initial margin \(≈20% of notional ≈ \$4,920\.00\)/);
+    expect(result.message).toMatch(/cancel it at matching without a fill/);
   });
 
   it("deposit drafts are capped to the vault USDC balance and carry the async note", async () => {

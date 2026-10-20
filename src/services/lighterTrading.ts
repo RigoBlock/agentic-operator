@@ -14,8 +14,8 @@
  *   - order amount : base-asset units scaled by the market's sizeDecimals (uint48)
  *   - order price  : quote units scaled by the market's priceDecimals (uint32)
  *
- * Market decimals are NOT readable on-chain — they are recorded when the pool
- * owner runs lighter_track_market (sourced from the Lighter team / Core API).
+ * Market decimals come from the pool's on-chain tracked-markets view
+ * (getLighterTrackedMarkets) — never from user input.
  */
 
 import {
@@ -206,6 +206,14 @@ export interface BuiltLighterOrder {
  *    fetched from READ_CORE 0x0005).
  *  - Limit order: GTT (tif 1) by default with expiry now+24h clamped to
  *    5min…30d; postOnly (tif 2) keeps the expiry. reduceOnly allowed on both.
+ *
+ * Every order reads the market's on-chain configuration (READ_CORE 0x0005) and
+ * is HARD-REJECTED below Core's minimum order size (minBaseAmount) or minimum
+ * notional (minQuoteAmount, 6-dec USDC) — both are exact sequencer values, so
+ * undersized orders fail here instead of being accepted by Core and cancelled
+ * at matching. Margin adequacy is NOT checked here: the market-default initial
+ * margin fraction is not readable on-chain and Core does not margin-reject at
+ * placement anyway — the handler surfaces a conservative collateral warning.
  */
 export async function buildLighterOrderCalldata(p: LighterOrderParams): Promise<BuiltLighterOrder> {
   const tracked = assertMarketTracked(p.marketId, p.trackedMarkets);
@@ -213,6 +221,15 @@ export async function buildLighterOrderCalldata(p: LighterOrderParams): Promise<
   const reduceOnly = p.reduceOnly === true;
   const amount = toLighterAmount(p.sizeHuman, tracked.sizeDecimals);
   const clientOrderIndex = randomClientOrderIndex();
+
+  // Live market config, required for every order: the mark price bounds market
+  // orders and the on-chain minimums gate all orders.
+  const info = await readLighterMarketInfo(p.chainId, p.marketId);
+  if (!info) {
+    throw new Error(
+      `No live market data for Lighter market ${p.marketId} — the Core read failed or the market does not exist. Try again shortly.`,
+    );
+  }
 
   let orderType: number;
   let tifCode: number;
@@ -223,12 +240,6 @@ export async function buildLighterOrderCalldata(p: LighterOrderParams): Promise<
   if (p.isMarket) {
     orderType = LIGHTER_ORDER_TYPES.market;
     tifCode = LIGHTER_TIF.ioc;
-    const info = await readLighterMarketInfo(p.chainId, p.marketId);
-    if (!info) {
-      throw new Error(
-        `No live mark price available for Lighter market ${p.marketId} — provide an explicit limit price instead.`,
-      );
-    }
     // ±1% bound on the Core mark price, rounded to an integer price tick,
     // conservative in both directions: a BUY bound rounds DOWN (stays at/under
     // the cap), a SELL bound rounds UP (stays at/over it).
@@ -261,6 +272,24 @@ export async function buildLighterOrderCalldata(p: LighterOrderParams): Promise<
     }
     price = toLighterPrice(p.priceHuman, tracked.priceDecimals);
     priceHuman = formatPriceHuman(price, tracked.priceDecimals);
+  }
+
+  // Core's on-chain minimums (exact sequencer values) — hard stops. Below them
+  // Core would accept the order and cancel it at matching, which surfaces as a
+  // confirmed EVM transaction that never fills.
+  if (amount < info.minBaseAmount) {
+    const minHuman = formatPriceHuman(info.minBaseAmount, tracked.sizeDecimals);
+    throw new Error(
+      `Order size ${p.sizeHuman} is below Lighter market ${p.marketId}'s minimum order size (${minHuman} base units).`,
+    );
+  }
+  const notionalMicroUsd = (amount * price * 1_000_000n) / 10n ** BigInt(tracked.sizeDecimals + tracked.priceDecimals);
+  if (notionalMicroUsd < info.minQuoteAmount) {
+    const notionalUsd = (Number(notionalMicroUsd) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 2 });
+    const minUsd = (Number(info.minQuoteAmount) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 2 });
+    throw new Error(
+      `Order notional (≈ $${notionalUsd}) is below Lighter market ${p.marketId}'s minimum of $${minUsd}.`,
+    );
   }
 
   const calldata = encodeFunctionData({

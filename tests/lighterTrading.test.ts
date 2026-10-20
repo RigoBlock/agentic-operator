@@ -1,7 +1,8 @@
 /**
  * Lighter calldata builder tests — unit conversions, vault adapter calldata,
  * order building (scaling, market bound, GTT expiry clamp, tracked-market
- * enforcement, overflow checks). The market-order mark price read is mocked.
+ * enforcement, on-chain minimum sizes, overflow checks). The READ_CORE
+ * market-info read is mocked.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { decodeAbiParameters, decodeFunctionData, toFunctionSelector, type Address } from "viem";
@@ -117,6 +118,11 @@ describe("deposit / withdraw calldata", () => {
 describe("createOrder calldata", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default market config: ETH-like minimums (0.005 base units, $10 notional).
+    mockMarketInfo.mockResolvedValue({
+      marketType: 0, baseAssetId: 0, quoteAssetId: 0, takerFee: 0, makerFee: 0,
+      minBaseAmount: 5n, minQuoteAmount: 10_000_000n, liquidationFee: 0, indexPrice: 245000n, markPrice: 245000n,
+    });
   });
 
   it("builds a GTT limit order with a 24h default expiry and a clientOrderIndex", async () => {
@@ -224,14 +230,47 @@ describe("createOrder calldata", () => {
     expect(sell.isAsk).toBe(true);
   });
 
-  it("rejects a market order when no mark price is available", async () => {
+  it("rejects a market order when no live market data is available", async () => {
     mockMarketInfo.mockResolvedValue(null);
     await expect(
       buildLighterOrderCalldata({
         chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "2", isMarket: true,
         trackedMarkets: [ETH_PERP],
       }),
-    ).rejects.toThrow(/No live mark price/);
+    ).rejects.toThrow(/No live market data/);
+  });
+
+  it("rejects orders below the market's on-chain minimum order size", async () => {
+    // minBaseAmount 5 on sizeDecimals 3 → 0.005 minimum; 0.004 is below it.
+    await expect(
+      buildLighterOrderCalldata({
+        chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "0.004", priceHuman: "2350",
+        isMarket: false, trackedMarkets: [ETH_PERP],
+      }),
+    ).rejects.toThrow(/minimum order size \(0\.005 base units\)/);
+  });
+
+  it("rejects orders below the market's on-chain minimum notional", async () => {
+    // 2 ETH @ $1 = $2 notional, below the $10 minimum.
+    await expect(
+      buildLighterOrderCalldata({
+        chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "2", priceHuman: "1",
+        isMarket: false, trackedMarkets: [ETH_PERP],
+      }),
+    ).rejects.toThrow(/minimum of \$10/);
+  });
+
+  it("market orders are also gated by the on-chain minimums", async () => {
+    mockMarketInfo.mockResolvedValue({
+      marketType: 0, baseAssetId: 0, quoteAssetId: 0, takerFee: 0, makerFee: 0,
+      minBaseAmount: 5n, minQuoteAmount: 10_000_000n, liquidationFee: 0, indexPrice: 100000n, markPrice: 100000n,
+    });
+    await expect(
+      buildLighterOrderCalldata({
+        chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "0.001", isMarket: true,
+        trackedMarkets: [ETH_PERP],
+      }),
+    ).rejects.toThrow(/minimum order size/);
   });
 
   it("rejects an untracked market with a pointer to lighter_track_market", async () => {

@@ -118,10 +118,16 @@ const MARKET_INFO_OUT = [
 ] as const;
 
 // Documented position layout (Lighter "Reading Core from EVM", verified live
-// on the devnet 2026-10-20: a 224-byte / 7-word payload). An earlier docs
-// revision carried a leading int64 lastFundingRatePrefixSum; the current
-// devnet does NOT serve it — 8-field decoders silently fail on the short
-// payload and read no positions at all.
+// on the devnet 2026-10-20: a 224-byte / 7-word payload). Two deviations from
+// the published docs, both verified against live devnet state:
+//  - the leading int64 lastFundingRatePrefixSum the docs now show is NOT
+//    served by this build;
+//  - the two order-count fields are served in REVERSE docs order: word3 is
+//    totalPositionTiedOrderCount (SL/TP conditional orders tied to a position's
+//    lifecycle — always 0 without a position) and word4 is totalOrderCount
+//    (currently open/resting orders). Evidence: with 2 plain resting limit
+//    orders and no position the tuple reads […, 0, 2, …], matching the REST
+//    model's open_order_count / position_tied_order_count semantics.
 const POSITION_OUT = [
   { type: "int64" }, { type: "uint56" }, { type: "uint16" },
   { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
@@ -200,7 +206,7 @@ export async function readLighterPosition(
       chainId,
       packQuery(LIGHTER_QUERIES.position, hexAddress(vaultAddress), hexBool(false), hexUint16(marketId)),
     );
-    const [position, entryQuote, initialMarginFraction, totalOrderCount, totalPositionTiedOrderCount, marginMode, allocatedMargin] =
+    const [position, entryQuote, initialMarginFraction, totalPositionTiedOrderCount, totalOrderCount, marginMode, allocatedMargin] =
       decodeAbiParameters([...POSITION_OUT], raw) as unknown as readonly [bigint, number, number, bigint, bigint, number, bigint];
     return {
       position,
@@ -497,9 +503,9 @@ export async function getLighterPortfolio(
 
 export interface LighterOpenOrderCounts {
   marketId: number;
-  /** All open orders of the account on this market. */
+  /** Currently open (resting) orders of the account on this market. */
   totalOrderCount: bigint;
-  /** Open orders tied to the market's position. */
+  /** SL/TP conditional orders tied to a position's lifecycle (0 without a position). */
   totalPositionTiedOrderCount: bigint;
 }
 

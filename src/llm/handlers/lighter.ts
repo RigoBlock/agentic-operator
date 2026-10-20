@@ -292,9 +292,11 @@ export async function handle_lighter_get_orders(
   let anyOpen = false;
   for (const c of counts) {
     anyOpen = anyOpen || c.totalOrderCount > 0n;
-    lines.push(
-      `- ${marketLabel(c.marketId)}: ${c.totalOrderCount} open order(s), ${c.totalPositionTiedOrderCount} tied to a position`,
-    );
+    const tied =
+      c.totalPositionTiedOrderCount > 0n
+        ? `, plus ${c.totalPositionTiedOrderCount} SL/TP order(s) tied to a position`
+        : "";
+    lines.push(`- ${marketLabel(c.marketId)}: ${c.totalOrderCount} open order(s)${tied}`);
   }
   if (counts.length < tracked.length) {
     lines.push(
@@ -306,9 +308,10 @@ export async function handle_lighter_get_orders(
   }
   lines.push(
     "",
-    "Lighter's on-chain reads expose order COUNTS only — individual order prices and sizes are not readable on-chain (no READ_CORE query returns them).",
+    "Lighter's on-chain reads expose order COUNTS only: READ_CORE has no order-listing query, so individual order prices and sizes are not readable on-chain.",
+    "A full order list exists only on Lighter's Core API — but its account/order endpoints require an API key registered on the Core account (Schnorr auth), which the pool cannot register through the adapter.",
+    "A limit order stays open until it fills, reaches its expiry, or is cancelled — quote its client order index (shown when the order was placed) with lighter_cancel_order.",
     "Market orders are IOC: they never rest on the book, so an unfilled market order leaves no open order.",
-    "To cancel a resting limit order, quote its client order index (shown when the order was placed) with lighter_cancel_order.",
   );
 
   return {
@@ -493,6 +496,28 @@ async function draftOrder(
     `[Lighter] ${verb}: ${parsed.side.toUpperCase()} ${parsed.size} ${marketLabel(parsed.market)} @ ${built.priceHuman}`,
   );
 
+  // Factual margin context: order notional vs Core collateral. Core does not
+  // margin-reject at request time (it accepts and cancels at matching), so
+  // surfacing both numbers is the honest protection — no guessed leverage caps.
+  const account = await readLighterAccount(LIGHTER_CHAIN_ID, vault).catch(() => null);
+  const notionalUsd = trackedMarket
+    ? Number((built.amount * built.price * 1_000_000n) / 10n ** BigInt(trackedMarket.sizeDecimals + trackedMarket.priceDecimals)) / 1e6
+    : null;
+  const collateralUsd = account ? Number(account.collateralBaseAmount) / 1e6 : null;
+  const money = (v: number) => v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const marginContextLine =
+    notionalUsd != null && collateralUsd != null
+      ? `Notional ≈ $${money(notionalUsd)}   |   Core collateral: $${money(collateralUsd)}`
+      : "";
+  // Conservative margin warning. The market-default initial margin fraction is
+  // NOT readable on-chain, so estimate at 20% (≈5x leverage) — an upper bound
+  // for typical perp markets. Reduce-only orders need no margin.
+  const marginWarning =
+    notionalUsd != null && collateralUsd != null && !parsed.reduceOnly && notionalUsd * 0.2 > collateralUsd
+      ? `⚠️ Estimated initial margin (≈20% of notional ≈ $${money(notionalUsd * 0.2)}) exceeds the Core collateral of $${money(collateralUsd)}. ` +
+        `Core accepts the order but will likely cancel it at matching without a fill — reduce the size or deposit more USDC first.`
+      : "";
+
   // Activation is prompt-only: a known-missing account gets a warning, but the
   // order is still drafted — an accidental stale read must never block trading.
   const activation = await getLighterAccountActivation(LIGHTER_CHAIN_ID, vault);
@@ -509,6 +534,8 @@ async function draftOrder(
       isMarket
         ? `Market price: ${built.priceHuman} (Core mark price ${parsed.side === "buy" ? "+1%" : "−1%"} bound)   |   TIF: IOC${parsed.reduceOnly ? "   |   reduce-only" : ""}`
         : `Limit price: ${built.priceHuman}   |   TIF: ${tif === "postOnly" ? "post-only" : "GTT"}${parsed.reduceOnly ? "   |   reduce-only" : ""}`,
+      marginContextLine,
+      ...(marginWarning ? [marginWarning] : []),
       ...(expiryNote ? [expiryNote] : []),
       `Client order index: ${built.clientOrderIndexHex} — quote it to cancel this order`,
       activationNote,
