@@ -88,8 +88,7 @@ export const RIGOBLOCK_VAULT_ABI = [
     outputs: [{ name: "", type: "uint256" }],
   },
 
-  // NOTE: the ENavView extension is removed in newer protocol releases — never
-  // reference it. Always eth_call updateUnitaryValue() instead — see getNavData()
+  // NOTE: always eth_call updateUnitaryValue() for NAV data — see getNavData()
   // in services/vault.ts and the NAV guard.
 
   // ── Multicall (AMulticall adapter) ──
@@ -418,13 +417,16 @@ export const ALLOWED_VAULT_SELECTORS = {
   // createOrder(uint48,uint16,uint48,uint8,uint8,uint64,uint48,uint32,bool,bool,uint32)
   //                                                 — perp order (market must be tracked, < 2048)
   // cancelOrder(uint48,uint64) / cancelAllOrders(uint48) — order cancels
-  // trackMarket(uint16,uint8,uint8) / untrackMarket(uint16) — pool-owner market tracking
+  // trackMarket(uint16) / untrackMarket(uint16)     — pool-owner market tracking; decimals come
+  //                                                   from the adapter's LighterConstants table,
+  //                                                   never from calldata (ALighter v4.6.0, 0xee814ef0;
+  //                                                   the old 3-arg 0x341a942b was retired)
   lighterSendToCore: "0xeed67f2c" as `0x${string}`,
   lighterSendToEvm: "0x60f502da" as `0x${string}`,
   lighterCreateOrder: "0x8a7da422" as `0x${string}`,
   lighterCancelOrder: "0x736fd6b3" as `0x${string}`,
   lighterCancelAllOrders: "0xa4b6f756" as `0x${string}`,
-  lighterTrackMarket: "0x341a942b" as `0x${string}`,
+  lighterTrackMarket: "0xee814ef0" as `0x${string}`,
   lighterUntrackMarket: "0xe0ad5442" as `0x${string}`,
   // ── AIntents Adapter (cross-chain) ──
   depositV3: "0x770d096f" as `0x${string}`,

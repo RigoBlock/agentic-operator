@@ -76,7 +76,7 @@ RULE: The NAV shield (10% max drop check) runs BEFORE every transaction
   adapter is an event emission), so owner-simulation is state-equivalent to
   agent-execution for every legitimately delegated tx.
 - **Uses `updateUnitaryValue()`** (the actual contract NAV algorithm via `eth_call`) —
-  never the removed ENavView extension, whose view returned stale results in edge cases.
+  the same live computation real execution performs.
 - Three distinct outcomes with separate error codes:
   1. **NAV drops > 10%** → `allowed: false, code: 'BLOCKED'` → `NAV_SHIELD_BLOCKED`
   2. **Transaction itself reverts** → `allowed: false, code: 'TRADE_REVERTS'` → `SIMULATION_FAILED`

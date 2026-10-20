@@ -43,6 +43,7 @@ const MENU_TITLES: Record<string, string> = {
   hyperliquid_usd_class_transfer: "Withdraw ① perp → Core spot",
   hyperliquid_spot_send: "Withdraw ② Core spot → HyperEVM",
   lighter_get_positions: "View Lighter account",
+  lighter_get_orders: "View Lighter open orders",
   lighter_get_markets: "View Lighter markets",
   lighter_get_request_status: "Check Lighter request status",
   lighter_deposit: "Deposit USDC to Lighter",
@@ -78,6 +79,7 @@ const MENU_TITLES: Record<string, string> = {
   verify_bridge_arrival: "Check bridge arrival",
   fund_pool: "Fund pool (mint pool tokens)",
   deploy_smart_pool: "Deploy smart pool",
+  upgrade_pool: "Upgrade pool implementation",
 };
 
 /**
@@ -243,6 +245,7 @@ const CROSSCHAIN_MENU: MenuEntry[] = [
 const POOL_MENU: MenuEntry[] = [
   "fund_pool",
   "deploy_smart_pool",
+  "upgrade_pool",
 ];
 
 /** Categories exposed by the menu. Aliases point at shared lists. */
@@ -262,6 +265,7 @@ const MENU_CATEGORIES: Record<string, MenuEntry[]> = {
   ],
   lighter: [
     "lighter_get_positions",
+    "lighter_get_orders",
     "lighter_get_markets",
     "lighter_get_request_status",
     "lighter_deposit",

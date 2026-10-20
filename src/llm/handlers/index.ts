@@ -37,6 +37,7 @@ import { handle_hyperliquid_usd_class_transfer } from "./hyperliquid.js";
 import { handle_hyperliquid_spot_send } from "./hyperliquid.js";
 import { handle_lighter_get_markets } from "./lighter.js";
 import { handle_lighter_get_positions } from "./lighter.js";
+import { handle_lighter_get_orders } from "./lighter.js";
 import { handle_lighter_deposit } from "./lighter.js";
 import { handle_lighter_withdraw } from "./lighter.js";
 import { handle_lighter_limit_order } from "./lighter.js";
@@ -53,6 +54,7 @@ import { handle_revoke_selectors } from "./delegation.js";
 import { handle_check_pending_tx } from "./delegation.js";
 import { handle_deploy_smart_pool } from "./vault-mgmt.js";
 import { handle_fund_pool } from "./vault-mgmt.js";
+import { handle_upgrade_pool } from "./vault-mgmt.js";
 import { handle_crosschain_transfer } from "./bridge.js";
 import { handle_crosschain_sync } from "./bridge.js";
 import { handle_get_crosschain_quote } from "./bridge.js";
@@ -106,6 +108,7 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "hyperliquid_spot_send": handle_hyperliquid_spot_send,
   "lighter_get_markets": handle_lighter_get_markets,
   "lighter_get_positions": handle_lighter_get_positions,
+  "lighter_get_orders": handle_lighter_get_orders,
   "lighter_deposit": handle_lighter_deposit,
   "lighter_withdraw": handle_lighter_withdraw,
   "lighter_limit_order": handle_lighter_limit_order,
@@ -122,6 +125,7 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "revoke_selectors": handle_revoke_selectors,
   "deploy_smart_pool": handle_deploy_smart_pool,
   "fund_pool": handle_fund_pool,
+  "upgrade_pool": handle_upgrade_pool,
   "crosschain_transfer": handle_crosschain_transfer,
   "crosschain_sync": handle_crosschain_sync,
   "get_crosschain_quote": handle_get_crosschain_quote,

@@ -593,10 +593,10 @@ export const TOOL_DEFINITIONS = [
       name: "lighter_get_markets",
       description:
         "List Lighter Core perp markets readable for the vault: every market in the vault's tracked list " +
-        "plus the known devnet perp ids 0..3 (labeled ETH/BTC/SOL/DOGE per Lighter devnet docs — docs-derived, " +
-        "unverified). Returns market type, fees, minimum sizes and index/mark prices. Tracked markets show " +
-        "human-scaled prices; untracked ones show raw market units (decimals not readable on-chain). " +
-        "Lighter Devnet (19529) only.",
+        "plus the known devnet perp ids 0..3 (labeled ETH/BTC/SOL/DOGE per Lighter devnet docs). Returns " +
+        "market type, fees, minimum sizes and index/mark prices. Tracked markets show human-scaled prices " +
+        "using the decimals from the pool's on-chain tracked-markets view; untracked ones show raw market " +
+        "units. Lighter Devnet (19529) only.",
       parameters: {
         type: "object",
         properties: {},
@@ -613,6 +613,23 @@ export const TOOL_DEFINITIONS = [
         "per tracked-market position (size, entry notional, unrealized PnL at mark, margin mode, allocated " +
         "isolated margin) with totals. Positions are read from the Lighter Core state precompile — resting " +
         "orders are NOT shown (only order counts exist on-chain). Lighter Devnet (19529) only.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_get_orders",
+      description:
+        "Check the vault's open Lighter perp orders per tracked market. Lighter's on-chain reads expose " +
+        "order COUNTS only (the position read's order counters) — individual order prices/sizes are not " +
+        "readable on-chain. Market orders are IOC and never rest on the book; a limit order rests until " +
+        "filled, expired or cancelled (cancel it by the client order index shown when it was placed). " +
+        "Lighter Devnet (19529) only.",
       parameters: {
         type: "object",
         properties: {},
@@ -780,10 +797,10 @@ export const TOOL_DEFINITIONS = [
       name: "lighter_track_market",
       description:
         "Track a Lighter perp market for the pool (pool-owner method): validates on-chain that the market is " +
-        "a perp and records its sizeDecimals/priceDecimals for NAV valuation and order building. Decimals are " +
-        "resolved automatically (verified constants or the Lighter Core API) — never taken from user input, " +
-        "and they are NOT readable on-chain (Lighter docs). Required before any order on the market. The " +
-        "operator ledger is updated when the transaction is drafted.",
+        "a perp and lets the adapter resolve its sizeDecimals/priceDecimals from its own LighterConstants " +
+        "table (never user input). The tracked market — with those decimals — is then readable from the " +
+        "pool's on-chain tracked-markets view and is required before any order on the market. The " +
+        "operator keeps no separate ledger.",
       parameters: {
         type: "object",
         properties: {
@@ -802,7 +819,8 @@ export const TOOL_DEFINITIONS = [
       name: "lighter_untrack_market",
       description:
         "Untrack a Lighter perp market (pool-owner method). Reverts PositionNotClosed while the pool holds " +
-        "a position on the market. The operator ledger is updated when the transaction is drafted.",
+        "a position on the market. The pool's on-chain tracked-markets view reflects the removal once the " +
+        "transaction confirms.",
       parameters: {
         type: "object",
         properties: {
@@ -989,6 +1007,26 @@ export const TOOL_DEFINITIONS = [
           },
         },
         required: ["amount"],
+      },
+    },
+  },
+
+  // ── Pool Implementation Upgrade ─────────────────────────────────────
+
+  {
+    type: "function" as const,
+    function: {
+      name: "upgrade_pool",
+      description:
+        "Upgrade the current Rigoblock smart pool to the canonical implementation served by the " +
+        "factory beacon (EUpgrade.upgradeImplementation, owner-signed). Use after a protocol release: " +
+        "e.g. to pick up the Lighter adapter support, the pool MUST run implementation >= 4.6.0 or " +
+        "adapter calls revert PoolVersionNotSupported. Previews current vs new implementation and " +
+        "errors when already up to date. The pool's storage, NAV, and positions are preserved.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
       },
     },
   },

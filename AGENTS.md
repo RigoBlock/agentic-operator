@@ -223,15 +223,19 @@ owner-signed execution only in v1):
 - `lighter_limit_order` / `lighter_market_order` / `lighter_cancel_order` /
   `lighter_cancel_all_orders` — `createOrder`/cancels. **Trading: the standard NAV shield
   applies, never exempt.**
-- `lighter_track_market` / `lighter_untrack_market` — pool-owner market tracking; market
-  size/price decimals are not readable on-chain and must be supplied at track time.
+- `lighter_track_market` / `lighter_untrack_market` — pool-owner market tracking. The on-chain
+  `trackMarket(uint16)` resolves size/price decimals from the adapter's own LighterConstants table
+  (never calldata, never user input); the pool's `getLighterTrackedMarkets()` view (0x5239dd83)
+  exposes the tracked markets WITH those decimals and is the operator's only source for both.
 
 Lighter Core writes are **asynchronous**: a successful EVM transaction only means Core accepted
 the request — always surface the reqId and point to `lighter_get_request_status`; never claim an
-order filled. All reads go through the READ_CORE precompile via `LIGHTER_RPC_URL` — no external
-Core REST API. The on-chain pool view of tracked markets is broken on the current devnet
-deployment, so the operator keeps a KV ledger per vault. Full details, live-verified encodings
-and protocol-side discrepancies: `docs/lighter-integration.md`.
+order filled (an IOC/market order against an empty book is cancelled — the devnet ships without
+market makers). All Core state reads go through the READ_CORE precompile via `LIGHTER_RPC_URL` —
+no external Core REST API, no operator-side ledger: tracked markets and decimals come from the
+pool's on-chain view. The position read returns a raw 7-word tuple — the documented
+`(position, entryQuote, initialMarginFraction, totalOrderCount, totalPositionTiedOrderCount,
+marginMode, allocatedMargin)` layout WITHOUT a leading funding field.
 
 ---
 

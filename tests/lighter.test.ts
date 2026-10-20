@@ -1,10 +1,11 @@
 /**
  * Lighter integration tests — READ_CORE encoding/decoding, portfolio valuation,
- * activation caching, the KV tracked-markets ledger, NAV guard classification
- * on chain 19529, error decoding, tool registration/catalog/menu shape, chain
- * gating, and the deterministic fast paths. The RPC provider is mocked.
+ * activation caching, the on-chain tracked-markets view, NAV guard
+ * classification on chain 19529, error decoding, tool registration/catalog/
+ * menu shape, chain gating, and the deterministic fast paths. The RPC provider
+ * is mocked.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { encodeAbiParameters, encodeFunctionData, encodeFunctionResult, type Address, type Hex } from "viem";
 
 // ── Hoisted RPC mock (must precede the imports that use getRpcProvider) ──
@@ -29,16 +30,13 @@ import {
   getLighterAccountIndex,
   getLighterAccountActivation,
   getLighterPortfolio,
+  readLighterTrackedMarkets,
   getLighterTrackedMarkets,
-  addLighterTrackedMarket,
-  removeLighterTrackedMarket,
-  fetchLighterMarketDecimals,
-  resolveLighterMarketDecimals,
-  VERIFIED_LIGHTER_MARKET_DECIMALS,
   type TrackedMarket,
 } from "../src/services/lighter.js";
 import { checkNavImpact } from "../src/services/navGuard.js";
 import { decodeRevertData } from "../src/services/errorDecoder.js";
+import { LIGHTER_VIEW_DATA_OUT } from "../src/abi/lighter.js";
 import { resolveLighterMarketId } from "../src/llm/handlers/lighter.js";
 import { TOOL_DEFINITIONS } from "../src/llm/tools.js";
 import { TOOL_HANDLER_REGISTRY } from "../src/llm/handlers/index.js";
@@ -64,7 +62,7 @@ const MARKET_OUT = [
 ] as const;
 
 const POSITION_OUT = [
-  { type: "int64" }, { type: "int64" }, { type: "uint56" }, { type: "uint16" },
+  { type: "int64" }, { type: "uint56" }, { type: "uint16" },
   { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
 ] as const;
 
@@ -81,9 +79,12 @@ function encodePosition(fields: {
   entryQuote: bigint;
   marginMode?: number;
   allocatedMargin?: bigint;
+  totalOrderCount?: bigint;
+  totalPositionTiedOrderCount?: bigint;
 }): Hex {
   return encodeAbiParameters([...POSITION_OUT], [
-    0n, fields.position, fields.entryQuote, 100, 3n, 1n,
+    fields.position, fields.entryQuote, 100,
+    fields.totalOrderCount ?? 3n, fields.totalPositionTiedOrderCount ?? 1n,
     fields.marginMode ?? 0, fields.allocatedMargin ?? 0n,
   ]);
 }
@@ -165,14 +166,14 @@ describe("READ_CORE client", () => {
     expect(await readLighterMarketInfo(CHAIN, 0)).toBeNull();
   });
 
-  it("position: packed input (25 bytes), raw 8-word decode WITH the leading funding field", async () => {
+  it("position: packed input (25 bytes), raw 7-word decode — the documented layout WITHOUT a leading funding field", async () => {
     setupReadCore({ position: () => encodePosition({ position: -2000n, entryQuote: 4_600_000_000n }) });
     const pos = await readLighterPosition(CHAIN, VAULT, 2);
     expect(pos).not.toBeNull();
-    // Rigoblock LighterTypes order: leading lastFundingRatePrefixSum, then position.
     expect(pos!.position).toBe(-2000n);
     expect(pos!.entryQuote).toBe(4_600_000_000n);
     expect(pos!.marginMode).toBe(0);
+    expect(pos!.totalOrderCount).toBe(3n);
     const data = mockState.call.mock.calls[0][0] as { data: Hex };
     expect(data.data).toBe(`0x0007${VAULT.slice(2).toLowerCase()}000002`);
     expect((data.data.length - 2) / 2).toBe(25);
@@ -296,30 +297,64 @@ describe("portfolio valuation", () => {
   });
 });
 
-// ── Tracked-markets KV ledger ─────────────────────────────────────────
+// ── Tracked-markets on-chain view (getLighterTrackedMarkets, 0x5239dd83) ──
 
-describe("tracked-markets KV ledger", () => {
-  it("adds without duplicates, removes, and tolerates corrupt state", async () => {
-    const kv = createMockKV();
-    expect(await getLighterTrackedMarkets(kv, VAULT)).toEqual([]);
-
-    await addLighterTrackedMarket(kv, VAULT, { marketId: 0, sizeDecimals: 3, priceDecimals: 2 });
-    await addLighterTrackedMarket(kv, VAULT, { marketId: 1, sizeDecimals: 2, priceDecimals: 2 });
-    await addLighterTrackedMarket(kv, VAULT, { marketId: 0, sizeDecimals: 3, priceDecimals: 2 });
-    expect(await getLighterTrackedMarkets(kv, VAULT)).toEqual([
-      { marketId: 0, sizeDecimals: 3, priceDecimals: 2 },
-      { marketId: 1, sizeDecimals: 2, priceDecimals: 2 },
+describe("tracked-markets on-chain view", () => {
+  function encodeTrackedView(
+    marketIds: number[],
+    sizeDecimals: number[],
+    priceDecimals: number[],
+  ): Hex {
+    return encodeAbiParameters([...LIGHTER_VIEW_DATA_OUT], [
+      {
+        marketIds,
+        sizeDecimals,
+        priceDecimals,
+        inFlightAmount: 10_000_000n,
+        lastActionTimestamp: 1_792_495_941n,
+        lastReqId: 6067n,
+      },
     ]);
+  }
 
-    await removeLighterTrackedMarket(kv, VAULT, 0);
-    expect(await getLighterTrackedMarkets(kv, VAULT)).toEqual([
-      { marketId: 1, sizeDecimals: 2, priceDecimals: 2 },
+  it("decodes markets with the adapter's decimals plus the NAV meta fields", async () => {
+    mockState.call.mockImplementation(async (args: { to: string; data: Hex }) => {
+      expect(args.data).toBe("0x5239dd83");
+      return { data: encodeTrackedView([0, 1], [4, 5], [2, 1]) };
+    });
+    const view = await readLighterTrackedMarkets(CHAIN, VAULT);
+    expect(view).not.toBeNull();
+    expect(view!.markets).toEqual([
+      { marketId: 0, sizeDecimals: 4, priceDecimals: 2 },
+      { marketId: 1, sizeDecimals: 5, priceDecimals: 1 },
     ]);
-    // Removing an untracked id is a no-op.
-    await removeLighterTrackedMarket(kv, VAULT, 99);
+    expect(view!.inFlightAmount).toBe(10_000_000n);
+    expect(view!.lastReqId).toBe(6067n);
+    const call = mockState.call.mock.calls[0][0] as { to: string; blockTag?: string };
+    expect(call.to.toLowerCase()).toBe(VAULT.toLowerCase());
+    expect(call.blockTag).toBe("latest");
 
-    await kv.put(`lighter:markets:${VAULT.toLowerCase()}`, "not json");
-    expect(await getLighterTrackedMarkets(kv, VAULT)).toEqual([]);
+    expect(await getLighterTrackedMarkets(CHAIN, VAULT)).toEqual(view!.markets);
+  });
+
+  it("read failure, empty payload, or malformed shape → null view, [] markets", async () => {
+    mockState.call.mockResolvedValue({ data: "0x" });
+    expect(await readLighterTrackedMarkets(CHAIN, VAULT)).toBeNull();
+    expect(await getLighterTrackedMarkets(CHAIN, VAULT)).toEqual([]);
+
+    mockState.call.mockRejectedValue(new Error("execution reverted"));
+    expect(await readLighterTrackedMarkets(CHAIN, VAULT)).toBeNull();
+    expect(await getLighterTrackedMarkets(CHAIN, VAULT)).toEqual([]);
+
+    // Dynamic-array lengths disagreeing with the element count must not throw.
+    mockState.call.mockResolvedValue({ data: encodeAbiParameters([{ type: "uint256" }], [1n]) });
+    expect(await readLighterTrackedMarkets(CHAIN, VAULT)).toBeNull();
+  });
+
+  it("chain gating: reads on any chain other than 19529 return null/[] without an RPC call", async () => {
+    expect(await readLighterTrackedMarkets(OTHER_CHAIN, VAULT)).toBeNull();
+    expect(await getLighterTrackedMarkets(OTHER_CHAIN, VAULT)).toEqual([]);
+    expect(mockState.call).not.toHaveBeenCalled();
   });
 });
 
@@ -450,6 +485,7 @@ describe("errorDecoder — ALighter errors", () => {
 const LIGHTER_TOOLS = [
   "lighter_get_markets",
   "lighter_get_positions",
+  "lighter_get_orders",
   "lighter_deposit",
   "lighter_withdraw",
   "lighter_limit_order",
@@ -488,6 +524,10 @@ describe("tool registration and catalog", () => {
     expect(tryFastPathLighter("what are my lighter positions")).toEqual({
       name: "lighter_get_positions", args: {},
     });
+    expect(tryFastPathLighter("show my lighter open orders")).toEqual({
+      name: "lighter_get_orders", args: {},
+    });
+    expect(tryFastPathLighter("lighter orders")).toEqual({ name: "lighter_get_orders", args: {} });
     expect(tryFastPathLighter("lighter markets")).toEqual({ name: "lighter_get_markets", args: {} });
     expect(tryFastPathLighter("deposit 500 usdc to lighter")).toEqual({
       name: "lighter_deposit", args: { amount: "500" },
@@ -571,6 +611,51 @@ describe("chain gating", () => {
     expect(result.suggestions).toContain("Deposit USDC to Lighter");
   });
 
+  it("lighter_get_orders reports on-chain order counts per tracked market", async () => {
+    const trackedView = encodeAbiParameters([...LIGHTER_VIEW_DATA_OUT], [
+      {
+        marketIds: [0], sizeDecimals: [4], priceDecimals: [2],
+        inFlightAmount: 0n, lastActionTimestamp: 0n, lastReqId: 0n,
+      },
+    ]);
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      if (args.data.slice(0, 10) === "0x5239dd83") return { data: trackedView };
+      if (args.data.slice(0, 6) === "0x0007") {
+        return { data: encodePosition({ position: 0n, entryQuote: 0n, totalOrderCount: 2n, totalPositionTiedOrderCount: 1n }) };
+      }
+      throw new Error(`unexpected eth_call data: ${args.data.slice(0, 10)}`);
+    });
+    const { handle_lighter_get_orders } = await import("../src/llm/handlers/lighter.js");
+    const result = await handle_lighter_get_orders(
+      { KV: createMockKV() } as unknown as Env, makeCtx(CHAIN), {}, "lighter_get_orders",
+    );
+    expect(result.message).toMatch(/ETH \(market 0\): 2 open order\(s\), 1 tied to a position/);
+    expect(result.message).toMatch(/COUNTS only/);
+    expect(result.message).toMatch(/IOC/);
+    expect(result.suggestions).toContain("Cancel a Lighter order");
+  });
+
+  it("lighter_get_orders with zero counts says there are no open orders", async () => {
+    const trackedView = encodeAbiParameters([...LIGHTER_VIEW_DATA_OUT], [
+      {
+        marketIds: [1], sizeDecimals: [5], priceDecimals: [1],
+        inFlightAmount: 0n, lastActionTimestamp: 0n, lastReqId: 0n,
+      },
+    ]);
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      if (args.data.slice(0, 10) === "0x5239dd83") return { data: trackedView };
+      if (args.data.slice(0, 6) === "0x0007") {
+        return { data: encodePosition({ position: 0n, entryQuote: 0n, totalOrderCount: 0n, totalPositionTiedOrderCount: 0n }) };
+      }
+      throw new Error(`unexpected eth_call data: ${args.data.slice(0, 10)}`);
+    });
+    const { handle_lighter_get_orders } = await import("../src/llm/handlers/lighter.js");
+    const result = await handle_lighter_get_orders(
+      { KV: createMockKV() } as unknown as Env, makeCtx(CHAIN), {}, "lighter_get_orders",
+    );
+    expect(result.message).toMatch(/No open orders on the tracked markets/);
+  });
+
   it("deposit drafts are capped to the vault USDC balance and carry the async note", async () => {
     const { handle_lighter_deposit } = await import("../src/llm/handlers/lighter.js");
     // getVaultTokenBalance uses client.multicall — serve it via a dedicated mock.
@@ -623,81 +708,5 @@ describe("resolveLighterMarketId (symbol or numeric id)", () => {
       expect(() => resolveLighterMarketId(bad), bad).toThrow(/Invalid Lighter market/);
     }
     expect(() => resolveLighterMarketId("XAU")).toThrow(/ETH, BTC, SOL, DOGE/);
-  });
-});
-
-// ── Market decimals: deterministic resolution (never user input) ──────
-
-describe("market decimals resolution", () => {
-  const API_ENV = { LIGHTER_CORE_API_URL: "https://core-api.example/api" } as Pick<Env, "LIGHTER_CORE_API_URL">;
-
-  function mockFetchOnce(body: unknown, ok = true) {
-    vi.stubGlobal("fetch", vi.fn(async () => ({
-      ok,
-      status: ok ? 200 : 500,
-      json: async () => body,
-    })) as unknown as typeof fetch);
-  }
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("fetchLighterMarketDecimals parses supported_size_decimals / supported_price_decimals", async () => {
-    mockFetchOnce({
-      order_book_details: [
-        { market_id: 0, supported_size_decimals: 3, supported_price_decimals: 2 },
-      ],
-    });
-    expect(await fetchLighterMarketDecimals(API_ENV, 0)).toEqual({ sizeDecimals: 3, priceDecimals: 2 });
-    const url = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(url).toBe("https://core-api.example/api/v1/orderBookDetails?market_id=0");
-  });
-
-  it("fetchLighterMarketDecimals picks the entry matching the requested market_id", async () => {
-    mockFetchOnce({
-      order_book_details: [
-        { market_id: 1, supported_size_decimals: 2, supported_price_decimals: 2 },
-        { market_id: 0, supported_size_decimals: 3, supported_price_decimals: 2 },
-      ],
-    });
-    expect(await fetchLighterMarketDecimals(API_ENV, 0)).toEqual({ sizeDecimals: 3, priceDecimals: 2 });
-  });
-
-  it("fetchLighterMarketDecimals returns null without env, on HTTP error, and on a malformed body", async () => {
-    expect(await fetchLighterMarketDecimals({}, 0)).toBeNull();
-    mockFetchOnce({}, false);
-    expect(await fetchLighterMarketDecimals(API_ENV, 0)).toBeNull();
-    mockFetchOnce({ order_book_details: [{ market_id: 0 }] });
-    expect(await fetchLighterMarketDecimals(API_ENV, 0)).toBeNull();
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => { throw new Error("bad json"); } })) as unknown as typeof fetch);
-    expect(await fetchLighterMarketDecimals(API_ENV, 0)).toBeNull();
-  });
-
-  it("resolveLighterMarketDecimals prefers the verified constants table (no fetch)", async () => {
-    VERIFIED_LIGHTER_MARKET_DECIMALS[0] = { sizeDecimals: 3, priceDecimals: 2 };
-    try {
-      const fetchSpy = vi.fn();
-      vi.stubGlobal("fetch", fetchSpy);
-      expect(await resolveLighterMarketDecimals({}, 0)).toEqual({ sizeDecimals: 3, priceDecimals: 2 });
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      delete VERIFIED_LIGHTER_MARKET_DECIMALS[0];
-    }
-  });
-
-  it("resolveLighterMarketDecimals falls back to the Core API and caches the result", async () => {
-    mockFetchOnce({
-      order_book_details: [{ market_id: 7, supported_size_decimals: 1, supported_price_decimals: 4 }],
-    });
-    expect(await resolveLighterMarketDecimals(API_ENV, 7)).toEqual({ sizeDecimals: 1, priceDecimals: 4 });
-    expect(await resolveLighterMarketDecimals(API_ENV, 7)).toEqual({ sizeDecimals: 1, priceDecimals: 4 });
-    expect((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
-  });
-
-  it("resolveLighterMarketDecimals fails closed with an actionable error when nothing is available", async () => {
-    await expect(resolveLighterMarketDecimals({}, 0)).rejects.toThrow(
-      /not readable on-chain[\s\S]*orderBookDetails/,
-    );
   });
 });

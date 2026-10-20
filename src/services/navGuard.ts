@@ -35,8 +35,7 @@
  * delegation whitelist at all.
  *
  * NAV reads eth_call updateUnitaryValue() — the actual contract NAV algorithm,
- * matching real execution behavior (the ENavView extension is removed in newer
- * protocol releases and is never used).
+ * matching real execution behavior.
  *
  * ## The NAV shield can be temporarily disabled by the operator
  *

@@ -2,8 +2,7 @@
  * getNavData tests.
  *
  * getNavData must eth_call the real updateUnitaryValue() — the same live
- * computation the NAV guard uses — pinned to an explicit block tag. (The old
- * ENavView extension is removed in newer protocol releases and is never used.)
+ * computation the NAV guard uses — pinned to an explicit block tag.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { encodeFunctionResult, type Address } from "viem";

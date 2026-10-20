@@ -3,15 +3,15 @@
  *
  * Every Lighter Core STATE read goes through the READ_CORE precompile
  * (0x6600…0000) via eth_call on LIGHTER_RPC_URL. Inputs are abi.encodePacked(uint16
- * queryId, args) WITHOUT a function selector; the current devnet build returns RAW
- * abi.encode payloads WITHOUT the documented (bool found, bytes) envelope for every
- * query except tx status (0x0000). Live-verified encodings, 2026-10-20 — see
- * docs/lighter-integration.md.
+ * queryId, args) WITHOUT a function selector; the devnet returns RAW abi.encode
+ * payloads WITHOUT the documented (bool found, bytes) envelope for every query
+ * except tx status (0x0000). Encodings verified live against the devnet on
+ * 2026-10-20.
  *
- * The ONE exception is order-book decimals: per the Lighter docs, the READ_CORE
- * market-info read explicitly does NOT return sizeDecimals/priceDecimals — the
- * Core REST API (GET /v1/orderBookDetails) is the only machine-readable source
- * (fetchLighterMarketDecimals below).
+ * Tracked markets and their size/price decimals are read from the pool's own
+ * on-chain view getLighterTrackedMarkets() (0x5239dd83, EApps/EAppsLighter) —
+ * the same LighterConstants table the adapter uses for NAV, so the operator
+ * can never disagree with the contract. Decimals are NEVER user input.
  *
  * Read-failure policy (mirrors services/hyperliquid.ts):
  *  - Position/market/account reads return null on failure — callers report what
@@ -30,9 +30,11 @@ import {
   LIGHTER_QUERIES,
   LIGHTER_TX_STATUS,
   LIGHTER_MARGIN_MODE_ISOLATED,
+  LIGHTER_VIEW_TRACKED_MARKETS,
+  LIGHTER_VIEW_DATA_OUT,
+  LIGHTER_MARKET_SYMBOLS,
 } from "../abi/lighter.js";
 import { getRpcProvider } from "./rpcClient.js";
-import type { Env } from "../types.js";
 
 // ── READ_CORE input encoding (abi.encodePacked: uint16 id + args) ─────
 
@@ -91,7 +93,6 @@ export interface LighterMarketInfo {
 }
 
 export interface LighterPosition {
-  lastFundingRatePrefixSum: bigint;
   /** Signed size on the market's sizeDecimals scale (createOrder amount units). */
   position: bigint;
   /** Unsigned entry NOTIONAL in 6-dec USDC (not a price). */
@@ -116,11 +117,13 @@ const MARKET_INFO_OUT = [
   { type: "uint64" }, { type: "uint32" }, { type: "uint64" }, { type: "uint64" },
 ] as const;
 
-// Rigoblock LighterTypes layout: leading int64 lastFundingRatePrefixSum
-// (matches the 2026-10-19 docs revision; public-docs-first-field-is-position
-// decoders would mis-shift every field).
+// Documented position layout (Lighter "Reading Core from EVM", verified live
+// on the devnet 2026-10-20: a 224-byte / 7-word payload). An earlier docs
+// revision carried a leading int64 lastFundingRatePrefixSum; the current
+// devnet does NOT serve it — 8-field decoders silently fail on the short
+// payload and read no positions at all.
 const POSITION_OUT = [
-  { type: "int64" }, { type: "int64" }, { type: "uint56" }, { type: "uint16" },
+  { type: "int64" }, { type: "uint56" }, { type: "uint16" },
   { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
 ] as const;
 
@@ -197,10 +200,9 @@ export async function readLighterPosition(
       chainId,
       packQuery(LIGHTER_QUERIES.position, hexAddress(vaultAddress), hexBool(false), hexUint16(marketId)),
     );
-    const [lastFundingRatePrefixSum, position, entryQuote, initialMarginFraction, totalOrderCount, totalPositionTiedOrderCount, marginMode, allocatedMargin] =
-      decodeAbiParameters([...POSITION_OUT], raw) as unknown as readonly [bigint, bigint, number, number, bigint, bigint, number, bigint];
+    const [position, entryQuote, initialMarginFraction, totalOrderCount, totalPositionTiedOrderCount, marginMode, allocatedMargin] =
+      decodeAbiParameters([...POSITION_OUT], raw) as unknown as readonly [bigint, number, number, bigint, bigint, number, bigint];
     return {
-      lastFundingRatePrefixSum,
       position,
       entryQuote: BigInt(entryQuote),
       initialMarginFraction,
@@ -260,114 +262,6 @@ export async function getLighterAccountIndex(
   }
 }
 
-// ── Order-book decimals (the ONE value READ_CORE does not return) ─────
-
-export interface LighterMarketDecimals {
-  sizeDecimals: number;
-  priceDecimals: number;
-}
-
-/**
- * Per-market decimals verified out-of-band and pinned in code. THIS TABLE IS
- * THE ONLY DECIMALS SOURCE THAT WORKS WITHOUT THE CORE API. Entries must come
- * with provenance (who confirmed, when, and the orderBookDetails output they
- * were taken from) — a wrong value distorts NAV math by orders of magnitude,
- * so nothing is ever guessed or accepted from user input.
- *
- * Lighter docs: "READ_CORE does not return the decimals; read them from
- * GET /api/v1/orderBookDetails", and ecosystem docs warn decimals are
- * per-market AND can change — never assume one market's scale fits another.
- */
-export const VERIFIED_LIGHTER_MARKET_DECIMALS: Record<number, LighterMarketDecimals> = {
-  // Devnet perps 0..3 (ETH/BTC/SOL/DOGE): on-chain mark prices are observed at
-  // 1e2 scale (raw ~238800 → $2,388.00), consistent with priceDecimals = 2 —
-  // but sizeDecimals is NOT derivable on-chain and remains UNVERIFIED until
-  // confirmed from GET /api/v1/orderBookDetails?market_id=N (Lighter team).
-  // Intentionally empty until then: resolveLighterMarketDecimals fails closed.
-};
-
-/**
- * sizeDecimals/priceDecimals for a market from the Lighter Core REST API
- * (GET {LIGHTER_CORE_API_URL}/v1/orderBookDetails?market_id=<id>).
- *
- * Lighter's docs state explicitly that the READ_CORE market-info read does NOT
- * return decimals — the Core API is the only machine-readable source. Returns
- * null when the API URL is not configured, the request fails, or the response
- * does not match the documented order_book_details shape; callers then fall
- * back to the verified constants table or fail closed.
- */
-export async function fetchLighterMarketDecimals(
-  env: Pick<Env, "LIGHTER_CORE_API_URL">,
-  marketId: number,
-): Promise<LighterMarketDecimals | null> {
-  const base = env.LIGHTER_CORE_API_URL?.trim().replace(/\/+$/, "");
-  if (!base) return null;
-  try {
-    const res = await fetch(`${base}/v1/orderBookDetails?market_id=${marketId}`, {
-      headers: { accept: "application/json" },
-    });
-    if (!res.ok) return null;
-    const json = (await res.json()) as {
-      order_book_details?: {
-        market_id?: unknown;
-        supported_size_decimals?: unknown;
-        supported_price_decimals?: unknown;
-      }[];
-    } | null;
-    const entry = json?.order_book_details?.find((b) => Number(b?.market_id) === marketId)
-      ?? json?.order_book_details?.[0];
-    const { supported_size_decimals: size, supported_price_decimals: price } = entry ?? {};
-    if (
-      Number.isInteger(size) && (size as number) >= 0 && (size as number) <= 18 &&
-      Number.isInteger(price) && (price as number) >= 0 && (price as number) <= 16
-    ) {
-      return { sizeDecimals: size as number, priceDecimals: price as number };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-const decimalsApiCache = new Map<number, { at: number; value: LighterMarketDecimals }>();
-const DECIMALS_CACHE_TTL_MS = 5 * 60 * 1000;
-
-/**
- * Deterministic decimals for a market — NEVER user input (rogue decimals
- * distort the pool's on-chain NAV by orders of magnitude, hitting every pool
- * token holder). Sources, in trust order:
- *   1. VERIFIED_LIGHTER_MARKET_DECIMALS (pinned, provenance-documented),
- *   2. the Lighter Core API orderBookDetails (Lighter's canonical source —
- *      the same data the protocol team uses to build the constants table),
- * Then fails closed with an actionable error. There is deliberately no
- * free-input path.
- */
-export async function resolveLighterMarketDecimals(
-  env: Pick<Env, "LIGHTER_CORE_API_URL">,
-  marketId: number,
-): Promise<LighterMarketDecimals> {
-  const verified = VERIFIED_LIGHTER_MARKET_DECIMALS[marketId];
-  if (verified) return verified;
-
-  const hit = decimalsApiCache.get(marketId);
-  if (hit && Date.now() - hit.at < DECIMALS_CACHE_TTL_MS) return hit.value;
-
-  const fromApi = await fetchLighterMarketDecimals(env, marketId);
-  if (fromApi) {
-    decimalsApiCache.set(marketId, { at: Date.now(), value: fromApi });
-    return fromApi;
-  }
-
-  throw new Error(
-    `Lighter market ${marketId}: size/price decimals are not readable on-chain — Lighter's READ_CORE ` +
-    `market-info read explicitly does not return them (see the Lighter docs). No verified value is pinned ` +
-    `in code and LIGHTER_CORE_API_URL is not configured or did not answer, so tracking this market is blocked. ` +
-    `Get the values from GET {core-api}/api/v1/orderBookDetails?market_id=${marketId} (fields ` +
-    `supported_size_decimals / supported_price_decimals, from the Lighter team) and either pin them in ` +
-    `VERIFIED_LIGHTER_MARKET_DECIMALS in src/services/lighter.ts or configure LIGHTER_CORE_API_URL.`,
-  );
-}
-
 // ── Core account activation (prompt-only gating) ──────────────────────
 
 const ACTIVATION_TTL_MS = 5 * 60 * 1000;
@@ -425,13 +319,7 @@ export function markLighterAccountActivated(vaultAddress: Address): void {
   activationCache.set(vaultAddress.toLowerCase(), { at: Date.now(), activated: true });
 }
 
-// ── Tracked-markets store (KV ledger) ─────────────────────────────────
-//
-// The on-chain pool view getLighterTrackedMarkets (0x5239dd83) is BROKEN on the
-// current devnet deployment (the pool impl's READ_CORE queries don't match the
-// devnet build — verified 2026-10-20), so the operator keeps its own ledger in
-// KV, keyed by vault. track/untrack tools update it after a successful on-chain
-// write; the order builder enforces market-tracked against this ledger.
+// ── Tracked markets (on-chain view — the single source) ───────────────
 
 export interface TrackedMarket {
   marketId: number;
@@ -439,60 +327,75 @@ export interface TrackedMarket {
   priceDecimals: number;
 }
 
-const TRACKED_MARKETS_PREFIX = "lighter:markets:";
-
-function trackedMarketsKey(vaultAddress: Address): string {
-  return `${TRACKED_MARKETS_PREFIX}${vaultAddress.toLowerCase()}`;
+export interface LighterTrackedMarketsView {
+  markets: TrackedMarket[];
+  /** NAV-relevant in-flight amount (6-dec USDC), as tracked by the contract. */
+  inFlightAmount: bigint;
+  lastActionTimestamp: bigint;
+  lastReqId: bigint;
 }
 
-/** The vault's tracked markets from the KV ledger. Missing/corrupt entries read as []. */
-export async function getLighterTrackedMarkets(
-  kv: KVNamespace,
+/**
+ * The pool's getLighterTrackedMarkets() view (0x5239dd83, EApps/EAppsLighter):
+ * the markets the pool tracks, WITH the size/price decimals the adapter's
+ * LighterConstants table resolved at track time. This is the operator's only
+ * source for both — no KV ledger, no Core API, no user input — so the
+ * operator can never disagree with the contract that prices the pool's NAV.
+ * Null when the read fails or the pool runs an implementation without the
+ * view (never throws).
+ */
+export async function readLighterTrackedMarkets(
+  chainId: number,
   vaultAddress: Address,
-): Promise<TrackedMarket[]> {
-  const raw = await kv.get(trackedMarketsKey(vaultAddress));
-  if (!raw) return [];
+): Promise<LighterTrackedMarketsView | null> {
+  if (chainId !== LIGHTER_CHAIN_ID) return null;
   try {
-    const parsed = JSON.parse(raw) as TrackedMarket[];
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (m) =>
-        Number.isInteger(m.marketId) &&
-        m.marketId >= 0 &&
-        m.marketId < 65536 &&
-        Number.isInteger(m.sizeDecimals) &&
-        Number.isInteger(m.priceDecimals),
-    );
+    const client = getRpcProvider(chainId);
+    const { data: raw } = await client.call({
+      to: vaultAddress,
+      data: LIGHTER_VIEW_TRACKED_MARKETS,
+      blockTag: "latest",
+    });
+    if (!raw || raw === "0x") return null;
+    const [view] = decodeAbiParameters(
+      [...LIGHTER_VIEW_DATA_OUT],
+      raw as Hex,
+    ) as unknown as readonly [{
+      marketIds: number[];
+      sizeDecimals: number[];
+      priceDecimals: number[];
+      inFlightAmount: bigint;
+      lastActionTimestamp: bigint;
+      lastReqId: bigint;
+    }];
+    if (!Array.isArray(view.marketIds) || !Array.isArray(view.sizeDecimals) || !Array.isArray(view.priceDecimals)) {
+      return null;
+    }
+    const markets: TrackedMarket[] = view.marketIds
+      .filter((id) => Number.isInteger(id) && id >= 0 && id < 65536)
+      .map((id, i) => ({
+        marketId: id,
+        sizeDecimals: view.sizeDecimals[i] ?? 0,
+        priceDecimals: view.priceDecimals[i] ?? 0,
+      }));
+    return {
+      markets,
+      inFlightAmount: BigInt(view.inFlightAmount),
+      lastActionTimestamp: BigInt(view.lastActionTimestamp),
+      lastReqId: BigInt(view.lastReqId),
+    };
   } catch {
-    return [];
+    return null;
   }
 }
 
-/** Add a market to the vault's ledger (no-op when already tracked). */
-export async function addLighterTrackedMarket(
-  kv: KVNamespace,
+/** The vault's tracked markets from the on-chain view ([] when unreadable). */
+export async function getLighterTrackedMarkets(
+  chainId: number,
   vaultAddress: Address,
-  market: TrackedMarket,
 ): Promise<TrackedMarket[]> {
-  const list = await getLighterTrackedMarkets(kv, vaultAddress);
-  if (list.some((m) => m.marketId === market.marketId)) return list;
-  const next = [...list, market];
-  await kv.put(trackedMarketsKey(vaultAddress), JSON.stringify(next));
-  return next;
-}
-
-/** Remove a market from the vault's ledger. */
-export async function removeLighterTrackedMarket(
-  kv: KVNamespace,
-  vaultAddress: Address,
-  marketId: number,
-): Promise<TrackedMarket[]> {
-  const list = await getLighterTrackedMarkets(kv, vaultAddress);
-  const next = list.filter((m) => m.marketId !== marketId);
-  if (next.length !== list.length) {
-    await kv.put(trackedMarketsKey(vaultAddress), JSON.stringify(next));
-  }
-  return next;
+  const view = await readLighterTrackedMarkets(chainId, vaultAddress);
+  return view?.markets ?? [];
 }
 
 // ── Portfolio valuation (mirrors LighterLib._positionValueUsdc exactly) ──
@@ -592,6 +495,40 @@ export async function getLighterPortfolio(
   return portfolio;
 }
 
+export interface LighterOpenOrderCounts {
+  marketId: number;
+  /** All open orders of the account on this market. */
+  totalOrderCount: bigint;
+  /** Open orders tied to the market's position. */
+  totalPositionTiedOrderCount: bigint;
+}
+
+/**
+ * Per tracked market, the open-order counts Core exposes on-chain (the
+ * position read's totalOrderCount / totalPositionTiedOrderCount). READ_CORE
+ * has NO order-listing query — individual order prices/sizes exist only on
+ * the Core REST API, which the operator deliberately does not use — so this
+ * is the deterministic on-chain answer to "are my orders still open?".
+ * Markets whose read fails are skipped, never thrown.
+ */
+export async function getLighterOpenOrderCounts(
+  chainId: number,
+  vaultAddress: Address,
+  trackedMarkets: TrackedMarket[],
+): Promise<LighterOpenOrderCounts[]> {
+  const out: LighterOpenOrderCounts[] = [];
+  for (const market of trackedMarkets) {
+    const position = await readLighterPosition(chainId, vaultAddress, market.marketId).catch(() => null);
+    if (!position) continue;
+    out.push({
+      marketId: market.marketId,
+      totalOrderCount: position.totalOrderCount,
+      totalPositionTiedOrderCount: position.totalPositionTiedOrderCount,
+    });
+  }
+  return out;
+}
+
 function formatHuman(value: bigint, decimals: number): string {
   const negative = value < 0n;
   const abs = negative ? -value : value;
@@ -629,8 +566,9 @@ function formatLighterReport(p: LighterPortfolio, trackedMarkets: TrackedMarket[
     lines.push(`|--------|------|------|--------------------------|--------|`);
     for (const pos of p.positions) {
       const decimals = trackedMarkets.find((m) => m.marketId === pos.marketId)?.sizeDecimals ?? 6;
+      const symbol = LIGHTER_MARKET_SYMBOLS[pos.marketId];
       lines.push(
-        `| ${pos.marketId} | ${pos.size > 0n ? "LONG" : "SHORT"} | ${formatHuman(pos.size, decimals)} | ${fmtSignedUsdUnits(pos.value)} | ${pos.marginMode === LIGHTER_MARGIN_MODE_ISOLATED ? `isolated (${fmtUsdUnits(pos.allocatedMargin / 1_000_000n)})` : "cross"} |`,
+        `| ${symbol ? `${symbol} (${pos.marketId})` : pos.marketId} | ${pos.size > 0n ? "LONG" : "SHORT"} | ${formatHuman(pos.size, decimals)} | ${fmtSignedUsdUnits(pos.value)} | ${pos.marginMode === LIGHTER_MARGIN_MODE_ISOLATED ? `isolated (${fmtUsdUnits(pos.allocatedMargin / 1_000_000n)})` : "cross"} |`,
       );
     }
     lines.push("");

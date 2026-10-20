@@ -46,10 +46,6 @@ function num(b: bigint, what: string): number {
   return Number(b);
 }
 
-/** Max sizeDecimals/priceDecimals accepted by trackMarket (adapter bounds: 0..18 / 0..16). */
-export const LIGHTER_MAX_SIZE_DECIMALS = 18;
-export const LIGHTER_MAX_PRICE_DECIMALS = 16;
-
 /** GTT expiry window enforced by Lighter Core: 5 minutes … 30 days from now. */
 export const LIGHTER_MIN_EXPIRY_MS = 5 * 60 * 1000;
 export const LIGHTER_MAX_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
@@ -132,15 +128,6 @@ function assertMarketTracked(marketId: number, trackedMarkets: TrackedMarket[]):
   return tracked;
 }
 
-function assertTrackDecimals(sizeDecimals: number, priceDecimals: number): void {
-  if (!Number.isInteger(sizeDecimals) || sizeDecimals < 0 || sizeDecimals > LIGHTER_MAX_SIZE_DECIMALS) {
-    throw new Error(`Invalid sizeDecimals: ${sizeDecimals} (must be an integer 0…${LIGHTER_MAX_SIZE_DECIMALS}).`);
-  }
-  if (!Number.isInteger(priceDecimals) || priceDecimals < 0 || priceDecimals > LIGHTER_MAX_PRICE_DECIMALS) {
-    throw new Error(`Invalid priceDecimals: ${priceDecimals} (must be an integer 0…${LIGHTER_MAX_PRICE_DECIMALS}).`);
-  }
-}
-
 /** Clamp a GTT expiry into Lighter's 5 min … 30 d window. */
 export function clampLighterExpiry(expiryMs: number, nowMs: number): number {
   return Math.min(Math.max(expiryMs, nowMs + LIGHTER_MIN_EXPIRY_MS), nowMs + LIGHTER_MAX_EXPIRY_MS);
@@ -209,7 +196,8 @@ export interface BuiltLighterOrder {
 
 /**
  * createOrder — the single entry for perp orders. Deterministic validation:
- * market must be tracked (KV ledger) and < 2048; amount must be an exact
+ * market must be tracked by the pool (on-chain tracked-markets view) and
+ * < 2048; amount must be an exact
  * integer on the market's sizeDecimals scale and fit uint48; price must fit
  * uint32.
  *
@@ -338,20 +326,20 @@ export function buildLighterCancelAllOrdersCalldata(): Hex {
   });
 }
 
-/** trackMarket(marketId, sizeDecimals, priceDecimals) — pool-owner method. */
-export function buildLighterTrackMarketCalldata(
-  marketId: number,
-  sizeDecimals: number,
-  priceDecimals: number,
-): Hex {
+/** trackMarket(marketId) — pool-owner method (ALighter v4.6.0).
+ *  The on-chain call takes ONLY the market id: the adapter resolves decimals
+ *  from its own LighterConstants release-time table (never calldata), and the
+ *  pool's getLighterTrackedMarkets() view then exposes exactly those values —
+ *  the operator reads its decimals from that same view (see
+ *  readLighterTrackedMarkets in services/lighter.ts). */
+export function buildLighterTrackMarketCalldata(marketId: number): Hex {
   if (!Number.isInteger(marketId) || marketId < 0 || marketId >= LIGHTER_FIRST_SPOT_MARKET_ID) {
     throw new Error(`Invalid Lighter perp market id: ${marketId} (perp markets are 0 … ${LIGHTER_FIRST_SPOT_MARKET_ID - 1}).`);
   }
-  assertTrackDecimals(sizeDecimals, priceDecimals);
   return encodeFunctionData({
     abi: RIGOBLOCK_LIGHTER_ABI,
     functionName: "trackMarket",
-    args: [marketId, sizeDecimals, priceDecimals],
+    args: [marketId],
   });
 }
 

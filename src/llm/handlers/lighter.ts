@@ -10,17 +10,19 @@
  * - Withdrawals are a single sendToEvm step (USDC Core tickSize is 1, so base
  *   units are already 6-dec USDC) and revert AccountNotActivated with no account.
  * - Orders require the market tracked by the pool (lighter_track_market) and
- *   marketId < 2048; the on-chain pool view of tracked markets is broken on the
- *   current devnet deployment, so the operator keeps a KV ledger per vault.
- *   Market decimals are never user input: the current ALighter adapter takes
- *   them as trackMarket args (protocol change pending), so the operator only
- *   forwards resolver-verified values (constants table / Core API).
+ *   marketId < 2048. Tracked markets and their decimals are read from the
+ *   pool's own on-chain view (EApps.getLighterTrackedMarkets, 0x5239dd83) —
+ *   the same LighterConstants table the adapter prices NAV with, so the
+ *   operator can never disagree with the contract. No KV ledger, no Core API,
+ *   and market decimals are never user input.
  *
  * ASYNC SEMANTICS: every Lighter Core write is asynchronous. A successful EVM
  * transaction only means Core ACCEPTED the request — the tx emits
  * OrderSent(reqId) (or returns a reqId for transfers). The final outcome is
- * read with lighter_get_request_status (READ_CORE 0x0000). User-facing text
- * must NEVER claim an order filled or a transfer completed.
+ * read with lighter_get_request_status (READ_CORE 0x0000). An accepted
+ * createOrder can still leave NO position: an IOC/market order against an
+ * empty book is cancelled, and the devnet ships with no market makers. User-
+ * facing text must NEVER claim an order filled.
  *
  * All tools are gated to chain 19529 — calling them on any other chain rejects
  * with a clear message (unlike Hyperliquid there is no auto-switch: Lighter
@@ -35,6 +37,7 @@ import {
   LIGHTER_USDC,
   LIGHTER_TX_STATUS,
   LIGHTER_MARGIN_MODE_ISOLATED,
+  LIGHTER_MARKET_SYMBOLS,
 } from "../../abi/lighter.js";
 import {
   readLighterMarketInfo,
@@ -43,10 +46,7 @@ import {
   getLighterAccountActivation,
   getLighterPortfolio,
   getLighterTrackedMarkets,
-  addLighterTrackedMarket,
-  removeLighterTrackedMarket,
-  resolveLighterMarketDecimals,
-  VERIFIED_LIGHTER_MARKET_DECIMALS,
+  getLighterOpenOrderCounts,
   type TrackedMarket,
 } from "../../services/lighter.js";
 import {
@@ -63,14 +63,23 @@ import { getVaultTokenBalance } from "../../services/vault.js";
 import { txActionLine } from "../client.js";
 
 /**
- * Devnet perp ids 0..3 labeled per Lighter devnet docs — docs-derived, unverified.
- * Users pass either the symbol ("ETH") or the numeric id (0); both resolve here.
+ * Devnet perp ids 0..3 labeled per Lighter devnet docs — shared with the
+ * portfolio report (LIGHTER_MARKET_SYMBOLS in abi/lighter.ts). Users pass
+ * either the symbol ("ETH") or the numeric id (0); both resolve here.
  */
-const DEVNET_PERP_LABELS: Record<number, string> = { 0: "ETH", 1: "BTC", 2: "SOL", 3: "DOGE" };
+const DEVNET_PERP_LABELS: Record<number, string> = Object.fromEntries(
+  Object.entries(LIGHTER_MARKET_SYMBOLS).filter(([id]) => Number(id) < 2048),
+);
 const DEVNET_PERP_IDS: Record<string, number> = Object.fromEntries(
   Object.entries(DEVNET_PERP_LABELS).map(([id, sym]) => [sym, Number(id)]),
 );
 const KNOWN_DEVNET_PERP_IDS = Object.keys(DEVNET_PERP_LABELS).map(Number);
+
+/** Display label for a market id: "BTC (market 1)" when the symbol is known. */
+function marketLabel(marketId: number): string {
+  const symbol = LIGHTER_MARKET_SYMBOLS[marketId];
+  return symbol ? `${symbol} (market ${marketId})` : `market ${marketId}`;
+}
 
 /** Resolve a Lighter perp market given as a numeric id (0) or symbol ("ETH"). */
 export function resolveLighterMarketId(arg: unknown): number {
@@ -158,7 +167,7 @@ export async function handle_lighter_get_markets(
 ): Promise<ToolResult> {
   assertLighterChain(ctx);
   const vault = requireVault(ctx);
-  const tracked = await getLighterTrackedMarkets(env.KV, vault);
+  const tracked = await getLighterTrackedMarkets(LIGHTER_CHAIN_ID, vault);
 
   const ids = [...new Set([...tracked.map((m) => m.marketId), ...KNOWN_DEVNET_PERP_IDS])].sort((a, b) => a - b);
 
@@ -190,11 +199,11 @@ export async function handle_lighter_get_markets(
   }
   lines.push("");
   lines.push(
-    "Prices/sizes for tracked markets use the decimals recorded at track time; untracked markets show raw market units " +
-    "(decimals are not readable on-chain). Symbols for ids 0..3 are docs-derived and unverified.",
+    "Prices/sizes for tracked markets use the decimals from the pool's on-chain tracked-markets view; " +
+    "untracked markets show raw market units (no decimals are available for them). Symbols for ids 0..3 are per the Lighter devnet docs.",
   );
   if (tracked.length > 0) {
-    lines.push(`Tracked by this pool: ${tracked.map((m) => m.marketId).join(", ")}.`);
+    lines.push(`Tracked by this pool: ${tracked.map((m) => marketLabel(m.marketId)).join(", ")}.`);
   }
 
   return {
@@ -213,7 +222,7 @@ export async function handle_lighter_get_positions(
 ): Promise<ToolResult> {
   assertLighterChain(ctx);
   const vault = requireVault(ctx);
-  const tracked = await getLighterTrackedMarkets(env.KV, vault);
+  const tracked = await getLighterTrackedMarkets(LIGHTER_CHAIN_ID, vault);
   const [portfolio, activation] = await Promise.all([
     getLighterPortfolio(LIGHTER_CHAIN_ID, vault, tracked),
     getLighterAccountActivation(LIGHTER_CHAIN_ID, vault),
@@ -252,6 +261,59 @@ export async function handle_lighter_get_positions(
         totalValueUsd: (Number(portfolio.totalValue) / 1e6).toString(),
       },
     },
+  };
+}
+
+// ── Open orders ─────────────────────────────────────────────────────────
+
+export async function handle_lighter_get_orders(
+  _env: Env,
+  ctx: RequestContext,
+  _args: Record<string, unknown>,
+  _toolName: string,
+): Promise<ToolResult> {
+  assertLighterChain(ctx);
+  const vault = requireVault(ctx);
+  const tracked = await getLighterTrackedMarkets(LIGHTER_CHAIN_ID, vault);
+
+  if (tracked.length === 0) {
+    return {
+      message: [
+        "📋 Lighter Open Orders (Lighter Devnet)",
+        "",
+        "This pool tracks no markets yet — track one with lighter_track_market first.",
+      ].join("\n"),
+      suggestions: ["Show Lighter markets"],
+    };
+  }
+
+  const counts = await getLighterOpenOrderCounts(LIGHTER_CHAIN_ID, vault, tracked);
+  const lines: string[] = ["📋 Lighter Open Orders (Lighter Devnet)", ""];
+  let anyOpen = false;
+  for (const c of counts) {
+    anyOpen = anyOpen || c.totalOrderCount > 0n;
+    lines.push(
+      `- ${marketLabel(c.marketId)}: ${c.totalOrderCount} open order(s), ${c.totalPositionTiedOrderCount} tied to a position`,
+    );
+  }
+  if (counts.length < tracked.length) {
+    lines.push(
+      `- Order state for ${tracked.length - counts.length} tracked market(s) could not be read from Core — try again in a moment.`,
+    );
+  }
+  if (counts.length > 0 && !anyOpen) {
+    lines.push("", "No open orders on the tracked markets.");
+  }
+  lines.push(
+    "",
+    "Lighter's on-chain reads expose order COUNTS only — individual order prices and sizes are not readable on-chain (no READ_CORE query returns them).",
+    "Market orders are IOC: they never rest on the book, so an unfilled market order leaves no open order.",
+    "To cancel a resting limit order, quote its client order index (shown when the order was placed) with lighter_cancel_order.",
+  );
+
+  return {
+    message: lines.join("\n"),
+    suggestions: anyOpen ? ["Cancel a Lighter order", "Show my Lighter positions"] : ["Show Lighter markets"],
   };
 }
 
@@ -396,7 +458,7 @@ async function draftOrder(
   assertLighterChain(ctx);
   const vault = requireVault(ctx);
   const parsed = parseOrderArgs(args, isMarket);
-  const tracked = await getLighterTrackedMarkets(env.KV, vault);
+  const tracked = await getLighterTrackedMarkets(LIGHTER_CHAIN_ID, vault);
 
   const expiryArg = args.expiry != null ? Number(args.expiry) : undefined;
   if (expiryArg != null && !Number.isFinite(expiryArg)) {
@@ -428,7 +490,7 @@ async function draftOrder(
   const transaction = draft(
     ctx,
     built.calldata,
-    `[Lighter] ${verb}: ${parsed.side.toUpperCase()} ${parsed.size} market ${parsed.market} @ ${built.priceHuman}`,
+    `[Lighter] ${verb}: ${parsed.side.toUpperCase()} ${parsed.size} ${marketLabel(parsed.market)} @ ${built.priceHuman}`,
   );
 
   // Activation is prompt-only: a known-missing account gets a warning, but the
@@ -443,7 +505,7 @@ async function draftOrder(
   return {
     message: [
       `✅ Lighter ${isMarket ? "market" : "limit"} order ready`,
-      `${verb}: ${parsed.side.toUpperCase()} ${parsed.size} on market ${parsed.market}${trackedMarket ? ` (sizeDecimals ${trackedMarket.sizeDecimals}, priceDecimals ${trackedMarket.priceDecimals})` : ""}`,
+      `${verb}: ${parsed.side.toUpperCase()} ${parsed.size} on ${marketLabel(parsed.market)}${trackedMarket ? ` (sizeDecimals ${trackedMarket.sizeDecimals}, priceDecimals ${trackedMarket.priceDecimals})` : ""}`,
       isMarket
         ? `Market price: ${built.priceHuman} (Core mark price ${parsed.side === "buy" ? "+1%" : "−1%"} bound)   |   TIF: IOC${parsed.reduceOnly ? "   |   reduce-only" : ""}`
         : `Limit price: ${built.priceHuman}   |   TIF: ${tif === "postOnly" ? "post-only" : "GTT"}${parsed.reduceOnly ? "   |   reduce-only" : ""}`,
@@ -541,7 +603,7 @@ export async function handle_lighter_cancel_all_orders(
 // ── Track / untrack markets ────────────────────────────────────────────
 
 export async function handle_lighter_track_market(
-  env: Env,
+  _env: Env,
   ctx: RequestContext,
   args: Record<string, unknown>,
   _toolName: string,
@@ -551,12 +613,10 @@ export async function handle_lighter_track_market(
   const vault = requireVault(ctx);
 
   const marketId = parseMarketId(args.marketId);
-  // Decimals are NEVER user input: rogue values would distort the pool's
-  // on-chain NAV by orders of magnitude. They are not readable via READ_CORE
-  // (Lighter docs), so they resolve deterministically: verified constants
-  // table → Lighter Core API orderBookDetails → fail closed.
-  const { sizeDecimals, priceDecimals } = await resolveLighterMarketDecimals(env, marketId);
-  const decimalsSource = VERIFIED_LIGHTER_MARKET_DECIMALS[marketId] ? "verified constants" : "Lighter Core API";
+  // Decimals are resolved on-chain: trackMarket(uint16) reads the adapter's
+  // LighterConstants table at track time, and the pool's
+  // getLighterTrackedMarkets view exposes exactly those values afterwards —
+  // never user input (rogue decimals would distort the pool's NAV).
 
   // Validate against the live market read before drafting: a nonexistent market
   // or a non-perp reverts on-chain anyway, but failing here saves a signature.
@@ -565,25 +625,18 @@ export async function handle_lighter_track_market(
     throw new Error(`Lighter market ${marketId} is not a perp market (marketType ${info.marketType}) — only perps can be tracked.`);
   }
 
-  const calldata = buildLighterTrackMarketCalldata(marketId, sizeDecimals, priceDecimals);
-  const transaction = draft(ctx, calldata, `[Lighter] Track market ${marketId} (sizeDecimals ${sizeDecimals}, priceDecimals ${priceDecimals})`);
-
-  // Update the operator ledger when the transaction is drafted: manual mode has
-  // no success signal in-handler, so the ledger reflects the operator's intent;
-  // if the transaction is never signed, lighter_untrack_market removes the entry.
-  // The on-chain MarketNotTracked / MarketAlreadyTracked reverts remain the
-  // ground truth for order building.
-  await addLighterTrackedMarket(env.KV, vault, { marketId, sizeDecimals, priceDecimals });
+  const calldata = buildLighterTrackMarketCalldata(marketId);
+  const transaction = draft(ctx, calldata, `[Lighter] Track ${marketLabel(marketId)}`);
 
   const actionLine = txActionLine(ctx);
   return {
     message: [
       `✅ Lighter track-market ready`,
-      `Market: ${marketId}   |   sizeDecimals: ${sizeDecimals}   |   priceDecimals: ${priceDecimals}   |   decimals source: ${decimalsSource} (never user input)`,
+      `Market: ${marketLabel(marketId)}   |   on-chain trackMarket(uint16) takes no decimals (adapter's LighterConstants table)`,
       info
         ? "On-chain validation: market exists on Core and is a perp."
         : "Market info could not be read from Core — the transaction itself validates the market (it reverts if the market does not exist or is not a perp).",
-      "The operator ledger was updated; it is used for NAV valuation and order building. If you don't sign the transaction, run lighter_untrack_market to remove the entry.",
+      "After the transaction confirms, the market (with its adapter-resolved decimals) appears in the pool's on-chain tracked-markets view and can be traded.",
       ASYNC_NOTE,
       ...(actionLine ? [actionLine] : []),
     ].join("\n"),
@@ -592,7 +645,7 @@ export async function handle_lighter_track_market(
 }
 
 export async function handle_lighter_untrack_market(
-  env: Env,
+  _env: Env,
   ctx: RequestContext,
   args: Record<string, unknown>,
   _toolName: string,
@@ -603,17 +656,14 @@ export async function handle_lighter_untrack_market(
 
   const marketId = parseMarketId(args.marketId);
   const calldata = buildLighterUntrackMarketCalldata(marketId);
-  const transaction = draft(ctx, calldata, `[Lighter] Untrack market ${marketId}`);
-
-  await removeLighterTrackedMarket(env.KV, vault, marketId);
+  const transaction = draft(ctx, calldata, `[Lighter] Untrack ${marketLabel(marketId)}`);
 
   const actionLine = txActionLine(ctx);
   return {
     message: [
       `✅ Lighter untrack-market ready`,
-      `Market: ${marketId}`,
+      `Market: ${marketLabel(marketId)}`,
       `Reverts on-chain while the pool holds a position on this market (PositionNotClosed).`,
-      `The operator ledger entry was removed.`,
       ASYNC_NOTE,
       ...(actionLine ? [actionLine] : []),
     ].join("\n"),

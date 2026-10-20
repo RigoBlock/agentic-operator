@@ -39,6 +39,7 @@ const REQUIRED_TOOLS = [
   // Lighter perpetuals (Lighter EVM devnet)
   "lighter_get_markets",
   "lighter_get_positions",
+  "lighter_get_orders",
   "lighter_deposit",
   "lighter_withdraw",
   "lighter_limit_order",
@@ -73,6 +74,7 @@ const REQUIRED_TOOLS = [
   "get_token_balance",
   "deploy_smart_pool",
   "fund_pool",
+  "upgrade_pool",
   // Utility
   "switch_chain",
   // Trading settings
@@ -201,7 +203,7 @@ describe("get_tool_menu handler", () => {
       {} as never, {} as never, { category: "pool" }, "get_tool_menu",
     );
     const cards = (result.metadata as { toolCards: { toolName: string; title: string; fields: { name: string; required: boolean }[] }[] }).toolCards;
-    expect(cards.map((c) => c.toolName)).toEqual(["fund_pool", "deploy_smart_pool"]);
+    expect(cards.map((c) => c.toolName)).toEqual(["fund_pool", "deploy_smart_pool", "upgrade_pool"]);
     const fund = cards.find((c) => c.toolName === "fund_pool")!;
     expect(fund.fields.filter((f) => f.required).map((f) => f.name)).toEqual(["amount"]);
     const deploy = cards.find((c) => c.toolName === "deploy_smart_pool")!;

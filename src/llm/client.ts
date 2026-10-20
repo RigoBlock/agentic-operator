@@ -2739,6 +2739,13 @@ export function tryFastPathLighter(msg: string): FastPathResult | null {
     return { name: "lighter_get_positions", args: {} };
   }
 
+  // "show my lighter open orders" / "lighter orders"
+  if (/^(?:show|list|get|check|what\s+are)(?:\s+my)?\s+lighter\s+(?:open\s+)?orders[\s?.!]*$/i.test(m) ||
+      /^my\s+lighter\s+(?:open\s+)?orders[\s?.!]*$/i.test(m) ||
+      /^lighter\s+(?:open\s+)?orders[\s?.!]*$/i.test(m)) {
+    return { name: "lighter_get_orders", args: {} };
+  }
+
   // "lighter markets" / "show lighter markets"
   if (/^(?:show|list|get)?\s*lighter\s+markets?[\s?.!]*$/i.test(m)) {
     return { name: "lighter_get_markets", args: {} };

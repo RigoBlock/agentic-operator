@@ -20,7 +20,3 @@ APP_ENV=development
 # X402_RELAXED=1                            # serve paid endpoints if payment can't be verified
 LIGHTER_RPC_URL="lighter-rpc-url"
 LIGHTER_DEVNET_BROWSER_URL="lighter-browser-url"
-# Lighter Core REST API base (the ONLY source of order-book decimals — NOT the
-# Blockscout explorer /api, which only proxies eth-rpc). Ends in /api, e.g.
-# https://host/api. Get the devnet URL from the Lighter team (private docs).
-# LIGHTER_CORE_API_URL="https://core-api-host/api"

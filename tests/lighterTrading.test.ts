@@ -274,13 +274,12 @@ describe("cancel / track / untrack calldata", () => {
     expect(decodeVaultCall(calldata).args).toEqual([0]);
   });
 
-  it("trackMarket validates decimals bounds and the perp id range", () => {
-    const ok = buildLighterTrackMarketCalldata(0, 3, 2);
-    expect(ok.slice(0, 10)).toBe(toFunctionSelector("trackMarket(uint16,uint8,uint8)"));
-    expect(decodeVaultCall(ok).args).toEqual([0, 3, 2]);
-    expect(() => buildLighterTrackMarketCalldata(0, 19, 2)).toThrow(/sizeDecimals/);
-    expect(() => buildLighterTrackMarketCalldata(0, 3, 17)).toThrow(/priceDecimals/);
-    expect(() => buildLighterTrackMarketCalldata(2048, 3, 2)).toThrow(/0 … 2047/);
+  it("trackMarket is 1-arg (decimals come from the adapter's LighterConstants table)", () => {
+    const ok = buildLighterTrackMarketCalldata(0);
+    expect(ok.slice(0, 10)).toBe(toFunctionSelector("trackMarket(uint16)"));
+    expect(ok).toHaveLength(10 + 64);
+    expect(decodeVaultCall(ok).args).toEqual([0]);
+    expect(() => buildLighterTrackMarketCalldata(2048)).toThrow(/0 … 2047/);
     expect(() => buildLighterUntrackMarketCalldata(2048)).toThrow(/0 … 2047/);
   });
 });

@@ -371,3 +371,90 @@ export async function handle_fund_pool(
 
 }
 
+
+// ── Pool implementation upgrade ───────────────────────────────────────
+
+/** EIP-1967 implementation slot (keccak("eip1967.proxy.implementation") − 1),
+ * matching the slot EUpgrade.upgradeImplementation writes. */
+const EIP1967_IMPLEMENTATION_SLOT =
+  "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+/** upgradeImplementation() — EUpgrade extension, delegatecalled through the pool. */
+const UPGRADE_IMPLEMENTATION_SELECTOR = "0x466f3dc3";
+
+function slotAddress(raw: `0x${string}` | undefined): Address | null {
+  if (!raw || raw === "0x" || raw.length < 42) return null;
+  const addr = `0x${raw.slice(-40)}`;
+  return BigInt(addr) === 0n ? null : (addr as Address);
+}
+
+/**
+ * Preview what upgradeImplementation() would do: the pool's current EIP-1967
+ * implementation and the implementation the factory beacon currently serves
+ * (the factory is deterministically deployed at the same address on every
+ * chain). Best-effort — nulls when a read fails; the on-chain call itself is
+ * the ground truth.
+ */
+async function previewUpgrade(
+  chainId: number,
+  vault: Address,
+): Promise<{ current: Address | null; target: Address | null }> {
+  const client = getRpcProvider(chainId);
+  const current = await client
+    .getStorageAt({ address: vault, slot: EIP1967_IMPLEMENTATION_SLOT })
+    .then(slotAddress)
+    .catch(() => null);
+  const target = await client
+    .call({ to: POOL_FACTORY_ADDRESS, data: "0x5c60da1b", blockTag: "latest" }) // implementation()
+    .then((r) => slotAddress(r.data as `0x${string}`))
+    .catch(() => null);
+  return { current, target };
+}
+
+export async function handle_upgrade_pool(
+  _env: Env,
+  ctx: RequestContext,
+  _args: Record<string, unknown>,
+  _toolName: string,
+): Promise<ToolResult> {
+  if (!ctx.operatorAddress) {
+    throw new Error("Wallet not connected. Connect your wallet first.");
+  }
+  if (!ctx.vaultAddress) {
+    throw new Error("Set a vault address first.");
+  }
+  const vault = ctx.vaultAddress as Address;
+  const preview = await previewUpgrade(ctx.chainId, vault);
+
+  if (preview.current && preview.target) {
+    if (preview.current.toLowerCase() === preview.target.toLowerCase()) {
+      throw new Error(
+        `Pool ${vault} is already on the current implementation (${preview.current}). Nothing to upgrade.`,
+      );
+    }
+  } else if (!preview.current) {
+    throw new Error(
+      `Pool ${vault} has no EIP-1967 implementation set — this does not look like a Rigoblock pool proxy.`,
+    );
+  }
+
+  const transaction: TransactionDraft = {
+    to: vault,
+    data: UPGRADE_IMPLEMENTATION_SELECTOR,
+    value: "0x0",
+    chainId: ctx.chainId,
+    description: "Upgrade pool to the current Rigoblock implementation",
+    operatorOnly: true,
+  };
+
+  const message = [
+    `✅ Pool upgrade ready`,
+    `Pool: ${vault}`,
+    `Current implementation: ${preview.current ?? "unreadable"}`,
+    `New implementation: ${preview.target ?? "unreadable"}`,
+    "",
+    "Sign this transaction to pull the current implementation from the factory beacon into your pool. " +
+    "The pool's storage, NAV, and positions are preserved — only the code changes.",
+  ].join("\n");
+
+  return { message, transaction };
+}
