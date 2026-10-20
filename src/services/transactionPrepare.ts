@@ -95,6 +95,7 @@ async function resolveDelegatedExecutorFromChain(
           address: vaultAddress as Address,
           abi: RIGOBLOCK_VAULT_ABI,
           functionName: "getPool",
+          blockTag: "latest",
         }) as { owner: Address }).owner;
       const healed: DelegationConfig = {
         enabled: true,

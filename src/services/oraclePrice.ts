@@ -192,6 +192,7 @@ export async function getOracleSpotTick(
     abi: BACKGEO_ORACLE_ABI,
     functionName: "observe",
     args: [poolKey, SECONDS_AGOS],
+    blockTag: "latest",
   })) as unknown as [bigint[], bigint[]];
 
   const tick = observeResultToTick(result, SECONDS_AGOS);
@@ -235,6 +236,7 @@ export async function hasOraclePriceFeed(
       abi: BACKGEO_ORACLE_ABI,
       functionName: "getState",
       args: [poolKey],
+      blockTag: "latest",
     })) as { index: number; cardinality: number; cardinalityNext: number };
 
     return state.cardinality > 0;

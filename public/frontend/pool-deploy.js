@@ -1,10 +1,15 @@
 import {
-  connectedAddress, vaultInput, escapeHtml,
+  connectedAddress,
   currentChainId, activeProvider, CHAIN_NAMES,
-  MAINNET_CHAINS_LIST, TESTNET_CHAINS_LIST, getExplorerUrl,
+  MAINNET_CHAINS_LIST, TESTNET_CHAINS_LIST,
+  authSignature,
 } from './state.js';
 
-import { ensureWalletChain } from './wallet.js';
+import { ensureWalletChain, closeModal, signAuthMessage } from './wallet.js';
+
+import { callTool } from './api.js';
+
+import { showTransactionModal } from './tx-modal.js';
 
 function openDeployPoolModal() {
   if (!connectedAddress) {
@@ -50,7 +55,7 @@ const USDC_ADDRESSES = {
   137:   '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
   56:    '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',
   130:   '0x078D888E40faAe0f32594342c85940AF3949E666',
-  999:   '0xb88339CB7199b77E23DB6E890353E22632Ba630f',
+  999:   '0xb88339CB7199b77e23DB6E890353E22632Ba630f',
   19529: '0xf2A5728d366c6d0f764Af612cD47F3608E2B4d5B',
 };
 
@@ -72,40 +77,16 @@ function applyBaseTokenRestriction(chainId) {
 }
 
 /**
- * Minimal ABI encoder for createPool(string, string, address).
- * Returns the hex arguments (without selector prefix).
+ * Deploy via the backend deploy_smart_pool tool — the SAME path as chatting
+ * "deploy a pool": registry name/symbol validation, per-chain USDC-only
+ * enforcement, base-token code preflight, revert simulation, and a real
+ * server-side gas estimate all run before the tx reaches the wallet. The
+ * prepared transaction is signed in the standard tx modal; on confirmation
+ * the modal extracts the new pool address from the receipt and auto-fills it.
  */
-function encodeCreatePoolArgs(name, symbol, baseToken) {
-  // Pad to 32 bytes (64 hex chars)
-  function pad32(hex) { return hex.padStart(64, '0'); }
-  // Encode string: offset → length → utf8 bytes padded to 32
-  function encodeString(str) {
-    const bytes = new TextEncoder().encode(str);
-    const len = pad32(bytes.length.toString(16));
-    const hexBytes = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-    const padded = hexBytes.padEnd(Math.ceil(hexBytes.length / 64) * 64, '0');
-    return len + padded;
-  }
-  // Head: 3 slots (offsets for name, symbol, then address)
-  // name offset = 0x60 (3 * 32 = 96), symbol offset = dynamic, baseToken = value
-  const nameEncoded = encodeString(name);
-  const symbolEncoded = encodeString(symbol);
-  // Offsets: name at 96 (0x60), symbol at 96 + nameEncoded/2 bytes
-  const nameOffset = 96; // 3 * 32
-  const symbolOffset = nameOffset + nameEncoded.length / 2;
-  const addrClean = baseToken.toLowerCase().replace('0x', '');
-  return (
-    pad32(nameOffset.toString(16)) +
-    pad32(symbolOffset.toString(16)) +
-    pad32(addrClean) +
-    nameEncoded +
-    symbolEncoded
-  );
-}
-
 async function deploySmartPool() {
   const name = document.getElementById('deploy-pool-name').value.trim();
-  const symbol = document.getElementById('deploy-pool-symbol').value.trim().toUpperCase();
+  const symbol = document.getElementById('deploy-pool-symbol').value.trim();
   const baseTokenSelect = document.getElementById('deploy-pool-base-token').value;
   const statusEl = document.getElementById('deploy-pool-status');
   const deployChainId = parseInt(document.getElementById('deploy-pool-chain').value, 10);
@@ -113,7 +94,7 @@ async function deploySmartPool() {
   if (!name) { statusEl.textContent = 'Pool name is required.'; return; }
   if (!symbol || symbol.length < 2) { statusEl.textContent = 'Valid symbol required (2-5 chars).'; return; }
 
-  let baseToken = '0x0000000000000000000000000000000000000000'; // ETH
+  let baseToken = 'ETH';
   if (baseTokenSelect === 'USDC') {
     const usdc = USDC_ADDRESSES[deployChainId];
     if (!usdc) {
@@ -128,108 +109,44 @@ async function deploySmartPool() {
     }
   }
 
-  statusEl.textContent = 'Preparing deployment…';
   statusEl.style.color = 'var(--text)';
 
   try {
-    // Ensure wallet is on the selected deploy chain
+    // The tools route proves operator identity from the session auth headers;
+    // the deploy flow has no vault yet, so make sure the auth signature exists.
+    if (!authSignature) {
+      statusEl.textContent = 'Signing authentication…';
+      await signAuthMessage();
+      if (!authSignature) {
+        statusEl.style.color = 'var(--muted)';
+        statusEl.textContent = 'Sign cancelled. Please try again.';
+        return;
+      }
+    }
+
     statusEl.textContent = `Switching to ${CHAIN_NAMES[deployChainId] || 'chain ' + deployChainId}…`;
     await ensureWalletChain(activeProvider, deployChainId);
 
-    // Encode createPool(string, string, address) — selector 0x1d7d13cc
-    const factoryAddress = '0x8DE8895ddD702d9a216E640966A98e08c9228f24';
+    statusEl.textContent = 'Preparing deployment…';
+    const { ok, data } = await callTool('deploy_smart_pool', {
+      arguments: { name, symbol, baseToken },
+      chainId: deployChainId,
+      operatorAddress: connectedAddress,
+    });
 
-    // Minimal ABI encoding for createPool(string name, string symbol, address baseToken)
-    const selector = '0x1d7d13cc';
-    const data = selector + encodeCreatePoolArgs(name, symbol, baseToken);
-
-    // Simulate the deployment first: a reverting createPool (bad base token,
-    // invalid name/symbol) is rejected here with its reason instead of
-    // burning a failed on-chain transaction.
-    statusEl.textContent = 'Simulating deployment…';
-    try {
-      await activeProvider.request({
-        method: 'eth_call',
-        params: [{ from: connectedAddress, to: factoryAddress, data: data, value: '0x0' }, 'latest'],
-      });
-    } catch (simErr) {
-      const reason = (simErr && (simErr.data?.message || simErr.data?.data || simErr.reason || simErr.message)) || 'unknown revert';
+    if (!ok || !data || data.error) {
       statusEl.style.color = 'var(--error)';
-      statusEl.textContent = 'Deployment would fail: ' + String(reason).slice(0, 160) +
-        (baseToken !== '0x0000000000000000000000000000000000000000' && /initialization/i.test(String(reason))
-          ? ' — check the base token address for this chain.'
-          : '');
+      statusEl.textContent = `Deployment blocked: ${(data && (data.error || data.message)) || 'unknown error'}`;
       return;
     }
 
-    statusEl.textContent = 'Please confirm in your wallet…';
-    const txHash = await activeProvider.request({
-      method: 'eth_sendTransaction',
-      params: [{
-        from: connectedAddress,
-        to: factoryAddress,
-        data: data,
-        value: '0x0',
-      }],
-    });
-
-    statusEl.style.color = 'var(--success)';
-    statusEl.textContent = `Transaction sent: ${txHash.slice(0, 10)}… Waiting for confirmation…`;
-
-    // Poll for receipt
-    let confirmed = false;
-    for (let i = 0; i < 60; i++) {
-      await new Promise(r => setTimeout(r, 3000));
-      try {
-        const receipt = await activeProvider.request({
-          method: 'eth_getTransactionReceipt',
-          params: [txHash],
-        });
-        if (receipt && receipt.status === '0x1') {
-          confirmed = true;
-          // Try to extract new pool address from logs
-          // The factory emits PoolCreated(address indexed pool, ...) or the return value
-          // Look for the new pool address in the logs (first topic of PoolCreated event)
-          let newPoolAddress = null;
-          if (receipt.logs && receipt.logs.length > 0) {
-            // PoolCreated event or similar — look for address in first topic or data
-            for (const log of receipt.logs) {
-              // Pool created events typically have the address as topic[1]
-              if (log.topics && log.topics.length >= 2) {
-                const addr = '0x' + log.topics[1].slice(26);
-                if (addr.length === 42 && addr !== '0x0000000000000000000000000000000000000000') {
-                  newPoolAddress = addr;
-                  break;
-                }
-              }
-            }
-          }
-
-          if (newPoolAddress) {
-            // Switch the app to the deploy chain
-            currentChainId = deployChainId;
-            window.updateChainDisplay();
-            vaultInput.value = newPoolAddress;
-            window.updateOnboardingVisibility();
-            statusEl.innerHTML = `✅ Pool deployed at <strong>${newPoolAddress.slice(0,6)}…${newPoolAddress.slice(-4)}</strong>. Address auto-filled!`;
-            window.validateVault();
-            window.appendMessage('system', `🏊 New pool "${name}" (${symbol}) deployed at ${newPoolAddress} on ${CHAIN_NAMES[deployChainId] || 'chain ' + deployChainId}`);
-          } else {
-            statusEl.innerHTML = `✅ Pool deployed! Check the <a href="${getExplorerUrl(deployChainId, txHash)}" target="_blank">transaction</a> for the new address and paste it above.`;
-            window.appendMessage('system', `🏊 Pool "${name}" (${symbol}) deployed on ${CHAIN_NAMES[deployChainId] || 'chain ' + deployChainId}. Tx: ${txHash.slice(0,10)}…`);
-          }
-          break;
-        } else if (receipt && receipt.status === '0x0') {
-          throw new Error('Deployment transaction reverted');
-        }
-      } catch (e) {
-        if (e.message?.includes('reverted')) throw e;
-      }
+    closeModal('deploy-pool-modal');
+    if (data.message) {
+      window.appendMessage('assistant', data.message);
     }
-    if (!confirmed) {
-      statusEl.textContent = `Transaction pending: ${txHash.slice(0,10)}… (check explorer)`;
+    if (data.transaction) {
+      showTransactionModal(data.transaction);
     }
-
   } catch (err) {
     if (err.code === 4001 || err.message?.includes('rejected')) {
       statusEl.textContent = 'Deployment cancelled.';
@@ -241,4 +158,4 @@ async function deploySmartPool() {
   }
 }
 
-export { openDeployPoolModal, encodeCreatePoolArgs, deploySmartPool };
+export { openDeployPoolModal, deploySmartPool };

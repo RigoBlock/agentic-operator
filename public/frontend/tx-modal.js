@@ -4,7 +4,7 @@
 
 import {
   pendingTx, setPendingTx,
-  activeProvider, connectedAddress, currentChainId,
+  activeProvider, connectedAddress, currentChainId, vaultInput,
   CHAIN_NAMES, escapeHtml, getExplorerUrl,
 } from "./state.js";
 
@@ -13,6 +13,8 @@ import { appendMessage } from "./chat-ui.js";
 import { formatTxMetrics } from "./tx-receipt.js";
 
 import { closeModal, ensureWalletChain } from "./wallet.js";
+
+import { callTool } from "./api.js";
 
 function showTransactionModal(tx) {
   if (!tx || !tx.to || !tx.data) {
@@ -64,6 +66,10 @@ function showTransactionModal(tx) {
     : desc.includes('gmx') || desc.includes('close') || desc.includes('decrease') ? 'Confirm'
     : 'Confirm';
   confirmBtn.style.display = '';
+  // Restore the cancel button — it is hidden while a tx is pending and must be
+  // back whenever the modal is reused (e.g. a deterministic step 2 reopens it).
+  const cancelBtn = document.querySelector('#tx-modal .btn-cancel');
+  if (cancelBtn) cancelBtn.style.display = '';
   document.getElementById('tx-modal').classList.add('visible');
 }
 
@@ -158,27 +164,46 @@ async function pollTransactionReceipt(txHash, tx, statusEl) {
             ? `✅ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}${meta.price ? ' (' + meta.price + ')' : ''} — [${shortHash}](${explorerUrl})`
             : `✅ ${tx.description || 'Transaction'} confirmed — [${shortHash}](${explorerUrl})`;
           appendMessage('assistant', chatMsg);
+          // Pool deployments: extract the new pool address from the receipt and
+          // switch the app to it (same auto-fill the dedicated deploy form did).
+          if (/deploy new rigoblock pool/i.test(tx.description || '')) {
+            const newPool = extractPoolAddressFromReceipt(receipt);
+            if (newPool) {
+              vaultInput.value = newPool;
+              appendMessage('system', `🏊 New pool deployed at ${newPool} — address auto-filled above.`);
+              if (window.validateVault) window.validateVault();
+              if (window.updateOnboardingVisibility) window.updateOnboardingVisibility();
+            }
+          }
           // Refresh delegation status (handles chat-based delegation setup)
           window.refreshDelegationStatus();
-          // Auto-progress to next strategy step if agent is leading a multi-step flow
-          // Note: we do NOT repeat the buy/sell amounts here (those came from the swap
-          // result — already in conversation history). Including them as a new user
-          // message causes the LLM to echo them as "new balance", which is wrong.
-          setTimeout(() => window.autoProgressAfterTx(null), 4500);
+          // Progression after a confirmed tx:
+          //  - tx.nextStep: deterministic multi-step (e.g. fund_pool approve →
+          //    mint) — re-invoke the tool directly, no LLM roundtrip.
+          //  - otherwise: auto-progress to next strategy step if agent is
+          //    leading a multi-step flow.
+          if (tx.nextStep) {
+            setTimeout(() => runToolNextStep(tx), 1200);
+          } else {
+            setTimeout(() => window.autoProgressAfterTx(null), 4500);
+          }
         } else {
           statusEl.style.color = 'var(--error)';
           statusEl.innerHTML = `✗ Transaction reverted — <a href="${explorerUrl}" target="_blank" rel="noopener">${shortHash} ↗</a>`;
           appendMessage('assistant', `❌ Transaction reverted — [${shortHash}](${explorerUrl})`);
         }
-        // Keep modal open for 4 seconds so user sees the result
-        setTimeout(() => {
-          closeModal('tx-modal');
-          // Restore button visibility for next tx
-          const cancelBtn = document.querySelector('#tx-modal .btn-cancel');
-          const confirmBtn = document.getElementById('tx-confirm-btn');
-          if (cancelBtn) cancelBtn.style.display = '';
-          if (confirmBtn) { confirmBtn.style.display = ''; confirmBtn.textContent = 'Confirm'; confirmBtn.disabled = false; }
-        }, 4000);
+        // Keep modal open for 4 seconds so user sees the result — unless a
+        // deterministic next step is about to reopen the modal with step 2.
+        if (!tx.nextStep) {
+          setTimeout(() => {
+            closeModal('tx-modal');
+            // Restore button visibility for next tx
+            const cancelBtn = document.querySelector('#tx-modal .btn-cancel');
+            const confirmBtn = document.getElementById('tx-confirm-btn');
+            if (cancelBtn) cancelBtn.style.display = '';
+            if (confirmBtn) { confirmBtn.style.display = ''; confirmBtn.textContent = 'Confirm'; confirmBtn.disabled = false; }
+          }, 4000);
+        }
         return;
       }
     } catch (e) {
@@ -198,6 +223,59 @@ async function pollTransactionReceipt(txHash, tx, statusEl) {
   }, 5000);
 }
 
+/**
+ * Deterministic follow-up for multi-step operator transactions (tx.nextStep):
+ * re-invoke the tool directly after step 1 confirmed — no LLM roundtrip, so a
+ * replayed stale draft can never re-open an already-completed approval.
+ */
+async function runToolNextStep(confirmedTx) {
+  const step = confirmedTx.nextStep;
+  if (!step) return;
+  // Step 1's outcome is already posted to the chat (with the explorer link) —
+  // close the modal before preparing step 2.
+  closeModal('tx-modal');
+  appendMessage('system', '⏭️ Step 1 confirmed — preparing the next step…');
+  try {
+    const { ok, data } = await callTool(step.toolName, {
+      arguments: step.arguments,
+      chainId: confirmedTx.chainId,
+      vaultAddress: vaultInput.value.trim(),
+      operatorAddress: connectedAddress,
+    });
+    if (!ok || !data || data.error) {
+      appendMessage(
+        'assistant',
+        `❌ Could not prepare the next step: ${(data && (data.error || data.message)) || `HTTP error`}`,
+        { toolError: true },
+      );
+      return;
+    }
+    if (data.message) appendMessage('assistant', data.message);
+    if (data.transaction) {
+      showTransactionModal({
+        ...data.transaction,
+        description: `Step 2/2 — ${data.transaction.description || 'next step'}`,
+      });
+    }
+  } catch (err) {
+    appendMessage('system', `Next step failed: ${err.message}`);
+  }
+}
+
+/** First contract address found in a deploy receipt's log topics (PoolCreated). */
+function extractPoolAddressFromReceipt(receipt) {
+  if (!receipt.logs) return null;
+  for (const log of receipt.logs) {
+    if (log.topics && log.topics.length >= 2) {
+      const addr = '0x' + log.topics[1].slice(26);
+      if (addr.length === 42 && addr !== '0x0000000000000000000000000000000000000000') {
+        return addr;
+      }
+    }
+  }
+  return null;
+}
+
 /** Show an in-chat card for a manual-mode transaction (user signs with wallet) */
 
-export { showTransactionModal, confirmTransaction };
+export { showTransactionModal, confirmTransaction, runToolNextStep };

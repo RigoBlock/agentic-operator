@@ -128,6 +128,9 @@ const LIGHTER_NAV_NEUTRAL_SELECTORS: string[] = [
   ALLOWED_VAULT_SELECTORS.lighterSendToEvm.toLowerCase(),
 ];
 
+/** mint(address,uint256,uint256) — see the exemption site in checkNavImpact. */
+const MINT_SELECTOR = "0x156e29f6";
+
 /**
  * Decode a sendRawAction(bytes) vault calldata payload and report whether it
  * carries a SPOT_SEND_ACTION (CoreWriter action id 6) — the only sendRawAction
@@ -571,6 +574,7 @@ export async function checkNavImpact(
         address: vaultAddress,
         abi: RIGOBLOCK_VAULT_ABI,
         functionName: "owner",
+        blockTag: "latest",
       }))) as Address;
 
     const updateNavCalldata = encodeFunctionData({
@@ -600,7 +604,14 @@ export async function checkNavImpact(
     // orders/cancels never touch the settlement lock and keep the full shield.
     const isNavNeutralLighterTx =
       chainId === 19529 && LIGHTER_NAV_NEUTRAL_SELECTORS.includes(txSelector);
-    if (isNavNeutralHyperCoreTx || isNavNeutralLighterTx) {
+    // mint(address,uint256,uint256) — pool funding, ALL chains. The operator
+    // deposits base token 1:1 at the current unitary value: it cannot distort
+    // NAV, and it must stay possible on a vault that already breached its NAV
+    // threshold (rescue deposit). The agent is never delegated mint (it is not
+    // in ALLOWED_VAULT_SELECTORS), so the trading kill-switch is unaffected:
+    // the raw transaction is still simulated and reverts still block.
+    const isNavNeutralMintTx = txSelector === MINT_SELECTOR;
+    if (isNavNeutralHyperCoreTx || isNavNeutralLighterTx || isNavNeutralMintTx) {
       const [preSettled, txSettled] = await Promise.allSettled([
         publicClient.call({
           account: vaultOwner,

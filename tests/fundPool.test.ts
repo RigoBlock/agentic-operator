@@ -78,6 +78,24 @@ describe("fund_pool with an ERC-20 base token", () => {
     // approve(address,uint256) selector
     expect(result.transaction?.data.startsWith("0x095ea7b3")).toBe(true);
     expect(result.message).toContain("2 transactions");
+    // Deterministic follow-up: the frontend re-invokes fund_pool after the
+    // approval confirms (no LLM roundtrip) and the mint is returned.
+    expect(result.transaction?.nextStep).toEqual({
+      toolName: "fund_pool",
+      arguments: { amount: "35" },
+    });
+  });
+
+  it("carries the recipient into the follow-up when one was given", async () => {
+    mockReadContract.mockResolvedValue(0n);
+    const result = await handle_fund_pool(env, makeCtx(), { amount: "35", recipient: OPERATOR }, "fund_pool");
+    expect(result.transaction?.nextStep?.arguments).toEqual({ amount: "35", recipient: OPERATOR });
+  });
+
+  it("mint transactions carry no follow-up", async () => {
+    mockReadContract.mockResolvedValue(100n * 10n ** 6n);
+    const result = await handle_fund_pool(env, makeCtx(), { amount: "35" }, "fund_pool");
+    expect(result.transaction?.nextStep).toBeUndefined();
   });
 
   it("returns the approve transaction when allowance is insufficient", async () => {

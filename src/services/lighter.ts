@@ -93,6 +93,8 @@ export interface LighterMarketInfo {
 }
 
 export interface LighterPosition {
+  /** Funding accumulator prefix sum (perp units × 1e6 — Lighter-internal). */
+  lastFundingRatePrefixSum: bigint;
   /** Signed size on the market's sizeDecimals scale (createOrder amount units). */
   position: bigint;
   /** Unsigned entry NOTIONAL in 6-dec USDC (not a price). */
@@ -117,19 +119,22 @@ const MARKET_INFO_OUT = [
   { type: "uint64" }, { type: "uint32" }, { type: "uint64" }, { type: "uint64" },
 ] as const;
 
-// Documented position layout (Lighter "Reading Core from EVM", verified live
-// on the devnet 2026-10-20: a 224-byte / 7-word payload). Two deviations from
-// the published docs, both verified against live devnet state:
-//  - the leading int64 lastFundingRatePrefixSum the docs now show is NOT
-//    served by this build;
-//  - the two order-count fields are served in REVERSE docs order: word3 is
-//    totalPositionTiedOrderCount (SL/TP conditional orders tied to a position's
-//    lifecycle — always 0 without a position) and word4 is totalOrderCount
-//    (currently open/resting orders). Evidence: with 2 plain resting limit
-//    orders and no position the tuple reads […, 0, 2, …], matching the REST
-//    model's open_order_count / position_tied_order_count semantics.
+// Documented position layout (Lighter "Reading Core from EVM"), verified live
+// on the devnet 2026-10-20 AFTER the pool implementation upgrade: a 256-byte /
+// 8-word payload WITH the leading int64 lastFundingRatePrefixSum the docs show.
+// (The pre-upgrade build served 7 words without it — decoding that build with
+// this table misaligns every field: the funding word reads as a huge position,
+// the 2^256-80 position word as entryQuote, and the 5% initialMarginFraction
+// (raw 500) as an order count.)
+//
+// The two order-count fields are served in DOCS order here: word4 is
+// totalOrderCount (currently open/resting orders), word5 is
+// totalPositionTiedOrderCount (SL/TP conditional orders tied to a position's
+// lifecycle). Verified against live state with 1 resting limit order and no
+// SL/TP orders: word4 = 1, word5 = 0. The tuple is always 8 words, even for an
+// empty position (all zeros).
 const POSITION_OUT = [
-  { type: "int64" }, { type: "uint56" }, { type: "uint16" },
+  { type: "int64" }, { type: "int64" }, { type: "uint56" }, { type: "uint16" },
   { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
 ] as const;
 
@@ -206,9 +211,10 @@ export async function readLighterPosition(
       chainId,
       packQuery(LIGHTER_QUERIES.position, hexAddress(vaultAddress), hexBool(false), hexUint16(marketId)),
     );
-    const [position, entryQuote, initialMarginFraction, totalPositionTiedOrderCount, totalOrderCount, marginMode, allocatedMargin] =
-      decodeAbiParameters([...POSITION_OUT], raw) as unknown as readonly [bigint, number, number, bigint, bigint, number, bigint];
+    const [lastFundingRatePrefixSum, position, entryQuote, initialMarginFraction, totalOrderCount, totalPositionTiedOrderCount, marginMode, allocatedMargin] =
+      decodeAbiParameters([...POSITION_OUT], raw) as unknown as readonly [bigint, bigint, number, number, bigint, bigint, number, bigint];
     return {
+      lastFundingRatePrefixSum,
       position,
       entryQuote: BigInt(entryQuote),
       initialMarginFraction,

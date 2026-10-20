@@ -71,7 +71,7 @@ Every delegated transaction passes:
 1. **Operator auth** — signature + on-chain ownership.
 2. **Delegation check** — active on-chain delegation for the exact selector.
 3. **7-point validation** — config enabled, target == vault, selector whitelisted, agent wallet matches, `eth_call` simulation succeeds, gas balance sufficient, gas within per-chain caps.
-4. **NAV shield** — `eth_call` of `multicall([tx, updateUnitaryValue])` from the vault owner (the simulation is caller-independent: selector delegation is enforced by validation, and the owner always passes the fallback write-mode gate, so no multicall delegation exists); blocks if post-swap unit value drops > configured threshold (default 10%, temporarily configurable 1%–100% for 10 minutes). The shield is also the **kill-switch for trading**: once the vault has breached its allowed NAV drop, trading actions are rejected while NAV-neutral operations keep working so the operator can rebalance or exit. Trading paths — swaps and Hyperliquid `sendRawAction` orders alike — must NEVER be exempted. EXCEPTION (NAV-neutral only): `deposit` / `depositFor` / `sendRawAction` spot sends on chain 999 lock pool NAV for a few seconds while HyperCore settles (they touch `lastActionTimestamp`, so a trailing `updateUnitaryValue` in the same multicall always reverts `NavLocked()`), yet cannot impact NAV — deposits move USDC 1:1 into the Core perp account the NAV already counts, and a spot send is a Core → HyperEVM withdrawal. For those the shield simulates the raw transaction instead (reverts still block; a clean simulation is allowed without a threshold comparison, code `NAV_NEUTRAL`).
+4. **NAV shield** — `eth_call` of `multicall([tx, updateUnitaryValue])` from the vault owner (the simulation is caller-independent: selector delegation is enforced by validation, and the owner always passes the fallback write-mode gate, so no multicall delegation exists); blocks if post-swap unit value drops > configured threshold (default 10%, temporarily configurable 1%–100% for 10 minutes). The shield is also the **kill-switch for trading**: once the vault has breached its allowed NAV drop, trading actions are rejected while NAV-neutral operations keep working so the operator can rebalance or exit. Trading paths — swaps and Hyperliquid `sendRawAction` orders alike — must NEVER be exempted. EXCEPTION (NAV-neutral only): `deposit` / `depositFor` / `sendRawAction` spot sends on chain 999 lock pool NAV for a few seconds while HyperCore settles (they touch `lastActionTimestamp`, so a trailing `updateUnitaryValue` in the same multicall always reverts `NavLocked()`), yet cannot impact NAV — deposits move USDC 1:1 into the Core perp account the NAV already counts, and a spot send is a Core → HyperEVM withdrawal. For those the shield simulates the raw transaction instead (reverts still block; a clean simulation is allowed without a threshold comparison, code `NAV_NEUTRAL`). `mint` (pool funding, ALL chains) is in the same NAV-neutral class: operator-only capital movement (the agent is never delegated mint), it cannot distort NAV and must stay possible on a vault that already breached its threshold — raw-tx simulation, reverts still block.
 5. **Slippage protection** — default 1% (100 bps), clamped to 0.1%–5%.
 6. **Swap shield** — compares DEX quote vs BackgeoOracle 5-minute TWAP; blocks if divergence exceeds 5% (or operator's temporary tolerance).
 
@@ -237,9 +237,12 @@ the request — always surface the reqId and point to `lighter_get_request_statu
 order filled (an IOC/market order against an empty book is cancelled — the devnet ships without
 market makers). All Core state reads go through the READ_CORE precompile via `LIGHTER_RPC_URL` —
 no external Core REST API, no operator-side ledger: tracked markets and decimals come from the
-pool's on-chain view. The position read returns a raw 7-word tuple WITHOUT the leading funding
-field the current docs show, and the two order-count fields are served in REVERSE docs order:
-word3 = position-tied (SL/TP) order count, word4 = currently open order count. Lighter has no
+pool's on-chain view. The position read is a raw 8-word tuple WITH the leading
+int64 `lastFundingRatePrefixSum` the docs show (post-upgrade build; the
+pre-upgrade build served 7 words without it — decoding that build with the
+8-word table misaligns every field, and vice versa). The two order-count
+fields are in docs order: word4 = currently open order count, word5 =
+position-tied (SL/TP) order count. Lighter has no
 GTC — a resting limit order is `timeInForce = GTT` with a 5min…30d expiry; margin is always
 cross (the EVM entrypoint has no margin-mode field) at the market-default initial margin
 fraction, which is not readable on-chain. Resting maker orders are NOT margin-rejected at
@@ -248,6 +251,18 @@ can sit on the book. A full open-order LIST is impossible on-chain (READ_CORE ha
 order-listing query); Lighter's Core REST API serves one, but its account/order endpoints
 require a Schnorr API key registered on the Core account, which the pool cannot register
 through the adapter — do not add an unauthenticated order-listing dependency.
+- **The devnet RPC has hang phases (observed 2026-10-20):** it intermittently accepts
+  connections and never responds (no HTTP status, no reset — same time-dependent failure
+  family as HyperEVM's unattached-state phases, but a full hang instead of a revert). viem's
+  10s transport timeout fires and rejects the caller, but the abandoned fetch stays dangling;
+  when it eventually errors it surfaced as an unhandled rejection that KILLED the production
+  isolate — every subsequent request on it returned Cloudflare error 1101 ("Worker hung")
+  while fresh isolates served 200, i.e. an intermittent 1101 cascade. Hardening in
+  `services/rpcClient.ts`: `instrumentedFetch` attaches a no-op `.catch` to every RPC fetch
+  (a late rejection from an abandoned fetch can never kill an isolate again) and non-Alchemy
+  transports (Lighter) use `retryCount: 0` so a hang phase fails in one bounded 10s attempt
+  instead of stacking retries. Poisoned isolates do not self-heal promptly — recovery is a
+  fresh deployment (new isolate pool) or forcing new isolates via concurrent load.
 
 ---
 

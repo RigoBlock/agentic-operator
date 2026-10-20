@@ -94,7 +94,7 @@ import {
 } from './telegram.js';
 
 import {
-  openDeployPoolModal, encodeCreatePoolArgs, deploySmartPool,
+  openDeployPoolModal, deploySmartPool,
 } from './pool-deploy.js';
 
 // ── Attach cross-module functions to window for backward compat ───────

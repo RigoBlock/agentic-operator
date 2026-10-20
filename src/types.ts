@@ -224,6 +224,14 @@ export interface TransactionDraft {
   };
   /** Per-transaction metrics (NAV impact, swap-shield divergence) for frontend display. */
   metrics?: Record<string, unknown>;
+  /** Deterministic follow-up for multi-step operator flows: after this tx is
+   *  confirmed, the frontend re-invokes the named tool with these arguments
+   *  directly (no LLM roundtrip) and presents the returned transaction.
+   *  Used by fund_pool's approve-then-mint step. */
+  nextStep?: {
+    toolName: string;
+    arguments: Record<string, unknown>;
+  };
 }
 
 /** An unsigned transaction returned to the frontend for operator signing.

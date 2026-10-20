@@ -55,6 +55,7 @@ export async function getTokenDecimals(
       address: tokenAddress as Address,
       abi: ERC20_ABI,
       functionName: "decimals",
+      blockTag: "latest",
     })) as number;
 
     const result = Number(decimals);
@@ -276,6 +277,7 @@ async function getVaultOwner(
       address: vaultAddress,
       abi: RIGOBLOCK_VAULT_ABI,
       functionName: "owner",
+      blockTag: "latest",
     })) as Address;
   } catch (err) {
     // Provide clearer error if the RPC endpoint returned non-JSON (e.g. invalid API key)

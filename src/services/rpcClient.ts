@@ -39,7 +39,14 @@ export function getRpcProvider(chainId: number): PublicClient {
     const headers = isAlchemy
       ? { ...init?.headers, Origin: ALCHEMY_ORIGIN }
       : init?.headers;
-    return metricsFetch(input, { ...init, headers });
+    const request = metricsFetch(input, { ...init, headers });
+    // viem abandons this promise when its transport timeout fires while the
+    // origin keeps the connection open; if that dangling fetch later rejects,
+    // it would surface as an unhandled rejection and kill the isolate (the
+    // production 1101 cascade on Lighter Devnet's intermittent hang phases).
+    // Swallow the late rejection — viem has already rejected its own timeout.
+    request.catch(() => {});
+    return request;
   };
 
   const client = createPublicClient({
@@ -56,6 +63,10 @@ export function getRpcProvider(chainId: number): PublicClient {
       // Batch independent JSON-RPC requests into a single HTTP call.
       // This is separate from the contract-layer multicall batching above.
       batch: true,
+      // Non-Alchemy origins (Lighter Devnet) intermittently accept connections
+      // and never respond. Retries would stack sequential 10s timeouts during
+      // those phases; one bounded attempt fails fast instead.
+      ...(isAlchemy ? {} : { retryCount: 0 }),
     }),
   });
   clientCache.set(cacheKey, client);

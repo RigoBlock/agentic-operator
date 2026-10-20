@@ -309,6 +309,10 @@ export async function handle_fund_pool(
     abi: ERC20_ABI,
     functionName: "allowance",
     args: [ctx.operatorAddress as Address, ctx.vaultAddress as Address],
+    // Explicit block tag: a bare eth_call intermittently executes against
+    // unattached state on Lighter Devnet and false-positives "execution
+    // reverted" (same failure class as the pinned eth_estimateGas).
+    blockTag: "latest",
   });
 
   if (allowance >= amountInWei) {
@@ -336,7 +340,8 @@ export async function handle_fund_pool(
   }
 
   // Insufficient allowance — return the approve transaction first; once it is
-  // mined, asking again returns the mint (allowance is re-read on-chain).
+  // mined, the deterministic follow-up re-runs this tool (nextStep) and the
+  // allowance re-read returns the mint directly.
   const approveData = encodeFunctionData({
     abi: ERC20_ABI,
     functionName: "approve",
@@ -350,6 +355,13 @@ export async function handle_fund_pool(
     chainId: ctx.chainId,
     description: `Approve ${amountStr} ${baseSymbol} for pool ${poolData.name}`,
     operatorOnly: true,
+    nextStep: {
+      toolName: "fund_pool",
+      arguments: {
+        amount: amountStr,
+        ...(args.recipient ? { recipient: args.recipient } : {}),
+      },
+    },
   };
 
   const message = [
@@ -363,8 +375,8 @@ export async function handle_fund_pool(
     `Recipient: ${recipient}`,
     "",
     `**Step 1/2:** Sign the approval transaction to allow the pool to transfer your ${baseSymbol}.`,
-    "**Step 2/2:** After the approval transaction is confirmed, ask again (e.g. \"mint " +
-    `${amountStr} ${baseSymbol}\") — the approval is detected on-chain and only the mint transaction is returned.`,
+    "**Step 2/2:** The approval is detected on-chain automatically — the app prepares the mint transaction " +
+    "as soon as the approval confirms, without another request.",
   ].join("\n");
 
   return { message, transaction };

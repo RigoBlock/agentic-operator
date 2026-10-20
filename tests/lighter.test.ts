@@ -61,11 +61,12 @@ const MARKET_OUT = [
   { type: "uint64" }, { type: "uint32" }, { type: "uint64" }, { type: "uint64" },
 ] as const;
 
-// Devnet layout (verified live 2026-10-20): the two count fields are served in
-// REVERSE docs order — word3 = totalPositionTiedOrderCount (SL/TP tied to a
-// position), word4 = totalOrderCount (currently open orders).
+// Live layout (verified against the upgraded devnet 2026-10-20): 8 words WITH
+// the leading int64 lastFundingRatePrefixSum the docs show; the two count
+// fields are in DOCS order — word4 = totalOrderCount (currently open orders),
+// word5 = totalPositionTiedOrderCount (SL/TP tied to a position).
 const POSITION_OUT = [
-  { type: "int64" }, { type: "uint56" }, { type: "uint16" },
+  { type: "int64" }, { type: "int64" }, { type: "uint56" }, { type: "uint16" },
   { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
 ] as const;
 
@@ -82,12 +83,13 @@ function encodePosition(fields: {
   entryQuote: bigint;
   marginMode?: number;
   allocatedMargin?: bigint;
+  lastFundingRatePrefixSum?: bigint;
   totalOrderCount?: bigint;
   totalPositionTiedOrderCount?: bigint;
 }): Hex {
   return encodeAbiParameters([...POSITION_OUT], [
-    fields.position, fields.entryQuote, 100,
-    fields.totalPositionTiedOrderCount ?? 1n, fields.totalOrderCount ?? 3n,
+    fields.lastFundingRatePrefixSum ?? 0n, fields.position, fields.entryQuote, 100,
+    fields.totalOrderCount ?? 3n, fields.totalPositionTiedOrderCount ?? 1n,
     fields.marginMode ?? 0, fields.allocatedMargin ?? 0n,
   ]);
 }
@@ -169,19 +171,38 @@ describe("READ_CORE client", () => {
     expect(await readLighterMarketInfo(CHAIN, 0)).toBeNull();
   });
 
-  it("position: packed input (25 bytes), raw 7-word decode — the documented layout WITHOUT a leading funding field", async () => {
+  it("position: packed input (25 bytes), raw 8-word decode WITH the leading funding field", async () => {
     setupReadCore({ position: () => encodePosition({ position: -2000n, entryQuote: 4_600_000_000n }) });
     const pos = await readLighterPosition(CHAIN, VAULT, 2);
     expect(pos).not.toBeNull();
     expect(pos!.position).toBe(-2000n);
     expect(pos!.entryQuote).toBe(4_600_000_000n);
     expect(pos!.marginMode).toBe(0);
-    // Devnet serves the count fields in reverse docs order: word3 = tied (SL/TP), word4 = open.
-    expect(pos!.totalPositionTiedOrderCount).toBe(1n);
+    // Count fields in docs order: word4 = open, word5 = tied (SL/TP).
     expect(pos!.totalOrderCount).toBe(3n);
+    expect(pos!.totalPositionTiedOrderCount).toBe(1n);
     const data = mockState.call.mock.calls[0][0] as { data: Hex };
     expect(data.data).toBe(`0x0007${VAULT.slice(2).toLowerCase()}000002`);
     expect((data.data.length - 2) / 2).toBe(25);
+  });
+
+  it("position: a nonzero funding word must not leak into position/entryQuote (live regression — the 787299804 funding word read as a LONG 78729.9804 position)", async () => {
+    setupReadCore({
+      position: () => encodePosition({
+        lastFundingRatePrefixSum: 787_299_804n,
+        position: -80n,
+        entryQuote: 20_000_000n,
+        totalOrderCount: 1n,
+        totalPositionTiedOrderCount: 0n,
+      }),
+    });
+    const pos = await readLighterPosition(CHAIN, VAULT, 0);
+    expect(pos).not.toBeNull();
+    expect(pos!.lastFundingRatePrefixSum).toBe(787_299_804n);
+    expect(pos!.position).toBe(-80n);
+    expect(pos!.entryQuote).toBe(20_000_000n);
+    expect(pos!.totalOrderCount).toBe(1n);
+    expect(pos!.totalPositionTiedOrderCount).toBe(0n);
   });
 
   it("tx status: the ONE query with the (uint8, bytes) envelope, failed carries the error code", async () => {

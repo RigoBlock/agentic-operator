@@ -470,7 +470,7 @@ function formatDirectToolLabel(toolName, args) {
   if (toolName === 'collect_lp_fees') return `Collect fees from position ${args.tokenId}`;
   if (toolName === 'burn_position') return `Burn position ${args.tokenId}`;
   if (toolName === 'deploy_smart_pool') return `Deploy pool: ${args.name}`;
-  if (toolName === 'fund_pool') return `Fund pool with ${args.amount} ${args.token}`;
+  if (toolName === 'fund_pool') return `Fund pool with ${args.amount}`;
   if (toolName === 'setup_delegation') return 'Set up delegation';
   if (toolName === 'revoke_delegation') return 'Revoke delegation';
   if (toolName === 'add_liquidity') return `Add liquidity: ${args.tokenA}/${args.tokenB}`;

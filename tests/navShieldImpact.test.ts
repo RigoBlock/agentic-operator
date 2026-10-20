@@ -456,3 +456,72 @@ describe("NAV Shield — HyperEVM → HyperCore interactions (NAV-neutral select
     expect(result.verified).toBe(true);
   });
 });
+
+// ── mint (pool funding) — NAV-neutral on ALL chains ───────────────────
+//
+// mint is operator-only capital movement (the agent is never delegated
+// mint): it cannot distort NAV and must stay possible on a vault that
+// already breached its NAV threshold (rescue deposit). Like the HyperCore
+// and Lighter exemptions it skips the post-tx NAV comparison — the raw
+// transaction is still simulated and reverts still block.
+
+describe("NAV Shield — mint (pool funding) is NAV-neutral on all chains", () => {
+  const MINT_SELECTOR = encodeFunctionData({
+    abi: RIGOBLOCK_VAULT_ABI,
+    functionName: "mint",
+    args: [OWNER, 1000n, 950n],
+  }).slice(0, 10);
+
+  const MINT_DATA = encodeFunctionData({
+    abi: RIGOBLOCK_VAULT_ABI,
+    functionName: "mint",
+    args: [OWNER, 1000n, 950n],
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockState.readContract.mockReset();
+    mockState.readContract.mockImplementation(async (args: { functionName: string }) =>
+      args.functionName === "owner" ? OWNER : 1n,
+    );
+    mockState.call.mockReset();
+  });
+
+  it("mint on a regular chain skips the multicall NAV comparison (raw-tx simulation only)", async () => {
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      const selector = args.data.slice(0, 10);
+      if (selector === UPDATE_SELECTOR) return { data: encodeNavReturn(10000n) };
+      if (selector === MINT_SELECTOR) return { data: "0x" };
+      throw new Error(`unexpected eth_call data: ${selector}`);
+    });
+
+    const result = await checkNavImpact(VAULT, MINT_DATA, 0n, CHAIN_ID, OWNER, createMockKV());
+
+    expect(result.allowed).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.code).toBe("NAV_NEUTRAL");
+    const calledSelectors = mockState.call.mock.calls.map(
+      (c) => (c[0] as { data: Hex }).data.slice(0, 10),
+    );
+    expect(calledSelectors).not.toContain(MULTICALL_SELECTOR);
+    expect(calledSelectors).toContain(MINT_SELECTOR);
+  });
+
+  it("a reverting mint is still blocked (NAV-neutral ≠ unvalidated)", async () => {
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      const selector = args.data.slice(0, 10);
+      if (selector === UPDATE_SELECTOR) return { data: encodeNavReturn(10000n) };
+      if (selector === MINT_SELECTOR) throw new Error("execution reverted");
+      throw new Error(`unexpected eth_call data: ${selector}`);
+    });
+
+    const result = await checkNavImpact(VAULT, MINT_DATA, 0n, CHAIN_ID, OWNER, createMockKV());
+
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe("TRADE_REVERTS");
+    const calledSelectors = mockState.call.mock.calls.map(
+      (c) => (c[0] as { data: Hex }).data.slice(0, 10),
+    );
+    expect(calledSelectors).not.toContain(MULTICALL_SELECTOR);
+  });
+});

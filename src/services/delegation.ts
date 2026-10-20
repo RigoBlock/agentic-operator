@@ -115,6 +115,7 @@ export async function getAgentDelegatedSelectors(
       abi: VAULT_DELEGATION_ABI,
       functionName: "getDelegatedSelectors",
       args: [agentAddress],
+      blockTag: "latest",
     });
     return (result as readonly string[]).map((s) => s.toLowerCase() as Hex);
   } catch {
