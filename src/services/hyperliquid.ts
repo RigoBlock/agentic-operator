@@ -141,7 +141,9 @@ async function callReadPrecompile(
 ): Promise<readonly unknown[]> {
   const client = getRpcProvider(HYPEREVM_CHAIN_ID);
   const data = encodeAbiParameters([...params.in], [...args] as never);
-  const { data: returnData } = await client.call({ to, data });
+  // Pinned block tag: a bare eth_call intermittently hits unattached precompile
+  // state on HyperEVM (same failure class as the pinned eth_estimateGas).
+  const { data: returnData } = await client.call({ to, data, blockTag: "latest" });
   return decodeAbiParameters([...params.out], returnData ?? "0x");
 }
 

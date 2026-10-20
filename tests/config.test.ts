@@ -7,6 +7,8 @@ import {
   getChain,
   resolveChainId,
   getRpcUrl,
+  getExplorerTxUrl,
+  LIGHTER_DEVNET_CHAIN_ID,
   TOKEN_MAP,
   STAKING_PROXY,
   SUPPORTED_CHAINS,
@@ -111,6 +113,55 @@ describe("getRpcUrl", () => {
 
   it("returns Alchemy URL for HyperEVM", () => {
     expect(getRpcUrl(999)).toContain("hyperliquid-mainnet");
+  });
+
+  it("Lighter Devnet uses LIGHTER_RPC_URL from env, not Alchemy", () => {
+    const saved = process.env.LIGHTER_RPC_URL;
+    try {
+      process.env.LIGHTER_RPC_URL = "https://lighter-devnet.example/rpc";
+      expect(getRpcUrl(LIGHTER_DEVNET_CHAIN_ID)).toBe("https://lighter-devnet.example/rpc");
+    } finally {
+      if (saved === undefined) delete process.env.LIGHTER_RPC_URL;
+      else process.env.LIGHTER_RPC_URL = saved;
+    }
+  });
+
+  it("throws a clear error for Lighter Devnet when LIGHTER_RPC_URL is unset", () => {
+    const saved = process.env.LIGHTER_RPC_URL;
+    try {
+      delete process.env.LIGHTER_RPC_URL;
+      expect(() => getRpcUrl(LIGHTER_DEVNET_CHAIN_ID)).toThrow(/LIGHTER_RPC_URL is not configured/);
+    } finally {
+      if (saved !== undefined) process.env.LIGHTER_RPC_URL = saved;
+    }
+  });
+});
+
+describe("getExplorerTxUrl", () => {
+  it("returns the static explorer base for known chains", () => {
+    expect(getExplorerTxUrl(8453)).toBe("https://basescan.org/tx/");
+    expect(getExplorerTxUrl(11155111)).toBe("https://sepolia.etherscan.io/tx/");
+  });
+
+  it("Lighter Devnet resolves from LIGHTER_DEVNET_BROWSER_URL (trailing slash stripped)", () => {
+    const saved = process.env.LIGHTER_DEVNET_BROWSER_URL;
+    try {
+      process.env.LIGHTER_DEVNET_BROWSER_URL = "https://explorer.example/";
+      expect(getExplorerTxUrl(LIGHTER_DEVNET_CHAIN_ID)).toBe("https://explorer.example/tx/");
+    } finally {
+      if (saved === undefined) delete process.env.LIGHTER_DEVNET_BROWSER_URL;
+      else process.env.LIGHTER_DEVNET_BROWSER_URL = saved;
+    }
+  });
+
+  it("returns undefined for Lighter Devnet when the env var is unset", () => {
+    const saved = process.env.LIGHTER_DEVNET_BROWSER_URL;
+    try {
+      delete process.env.LIGHTER_DEVNET_BROWSER_URL;
+      expect(getExplorerTxUrl(LIGHTER_DEVNET_CHAIN_ID)).toBeUndefined();
+    } finally {
+      if (saved !== undefined) process.env.LIGHTER_DEVNET_BROWSER_URL = saved;
+    }
   });
 });
 
@@ -312,8 +363,15 @@ describe("per-chain config completeness", () => {
       expect(MIN_BALANCE[chain.id], `${chain.name} (${chain.id}) missing MIN_BALANCE`).toBeDefined();
       expect(MIN_BALANCE[chain.id], `${chain.name}: MIN_BALANCE must be > 0`).toBeGreaterThan(0n);
 
-      expect(ALCHEMY_NETWORK[chain.id], `${chain.name} (${chain.id}) missing ALCHEMY_NETWORK`).toMatch(/^[a-z0-9-]+$/);
-      expect(EXPLORER_TX_URL[chain.id], `${chain.name} (${chain.id}) missing EXPLORER_TX_URL`).toMatch(/^https:\/\//);
+      if (chain.id === LIGHTER_DEVNET_CHAIN_ID) {
+        // No Alchemy on Lighter Devnet — the private RPC URL comes from
+        // LIGHTER_RPC_URL env (asserted in the getRpcUrl tests above), and the
+        // explorer from LIGHTER_DEVNET_BROWSER_URL via getExplorerTxUrl.
+        expect(ALCHEMY_NETWORK[chain.id]).toBeUndefined();
+      } else {
+        expect(ALCHEMY_NETWORK[chain.id], `${chain.name} (${chain.id}) missing ALCHEMY_NETWORK`).toMatch(/^[a-z0-9-]+$/);
+        expect(EXPLORER_TX_URL[chain.id], `${chain.name} (${chain.id}) missing EXPLORER_TX_URL`).toMatch(/^https:\/\//);
+      }
 
       expect(() => getChain(chain.id), `${chain.name} (${chain.id}) missing viem chain definition`).not.toThrow();
     }

@@ -233,6 +233,12 @@ export async function prepareTransaction(
     ctx.vaultAddress.toLowerCase() !== ZERO_ADDRESS.toLowerCase() &&
     tx.to.toLowerCase() === ctx.vaultAddress.toLowerCase();
 
+  // Set when the NAV multicall simulation reports the tx itself would revert
+  // (TRADE_REVERTS). The tx is still returned for manual signing (with this
+  // warning), but it MUST fall through to gas estimation — the wallet can
+  // never be handed gas "0x0".
+  let navRevertWarning: string | undefined;
+
   if (isVaultTarget) {
     const storedNavThreshold = env.KV && ctx.operatorAddress
       ? await getNavShieldThreshold(env.KV, ctx.operatorAddress)
@@ -254,15 +260,14 @@ export async function prepareTransaction(
 
     if (!navResult.allowed) {
       if (navResult.code === "TRADE_REVERTS") {
-        const warning = `⚠️ Simulation warning: ${navResult.reason || "the transaction would revert on-chain"}`;
-        tx.revertWarning = warning;
-        tx.navShieldChecked = true;
-        return { tx, warning };
+        navRevertWarning = `⚠️ Simulation warning: ${navResult.reason || "the transaction would revert on-chain"}`;
+        tx.revertWarning = navRevertWarning;
+      } else {
+        throw new ExecutionError(
+          navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
+          "NAV_SHIELD_BLOCKED",
+        );
       }
-      throw new ExecutionError(
-        navResult.reason || "Trade blocked by NAV protection — would reduce unit price too much",
-        "NAV_SHIELD_BLOCKED",
-      );
     }
 
     tx.navShieldChecked = true;
@@ -300,6 +305,17 @@ export async function prepareTransaction(
       });
       if (reason) msg = `${msg} — revert reason: ${reason}`;
     }
+    // No revert data AND no recovered reason means the transaction was never
+    // executed against the chain: the RPC itself failed (node unreachable,
+    // transient degradation). Tell the user exactly that instead of a bare
+    // "fetch failed" — and still block: nothing signable leaves preparation
+    // without a real gas estimate.
+    if (!revertData && !msg.includes("revert reason:")) {
+      msg +=
+        ` — the chain RPC could not simulate the transaction (no revert data was returned, so the node ` +
+        `likely did not execute it). This is usually transient: wait a few seconds and retry. ` +
+        `If it persists, the chain's RPC endpoint is degraded.`;
+    }
     // The AHyperliquid adapter enforces Core account activation on-chain; translate
     // it into the fix. (Deposit is what activates a Core account.)
     if (msg.includes("AccountNotActivated")) {
@@ -331,5 +347,5 @@ export async function prepareTransaction(
     tx.navShieldChecked = true;
   }
 
-  return { tx };
+  return { tx, warning: navRevertWarning };
 }

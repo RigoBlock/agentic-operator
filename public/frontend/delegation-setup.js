@@ -14,7 +14,7 @@ import { fetchDelegationStatus, fetchAgentBalance } from "./api.js";
 
 import { appendMessage } from "./chat-ui.js";
 
-import { closeModal, openWalletPicker } from "./wallet.js";
+import { closeModal, openWalletPicker, ensureWalletChain } from "./wallet.js";
 
 import { fetchAllDelegationStatuses, refreshDelegationStatus } from "./delegation-status.js";
 
@@ -214,17 +214,11 @@ async function startDelegationSetup() {
 
       // ── Step 2: Switch wallet to this chain ──
       rowStatus.textContent = 'Switching chain…';
-      const targetHex = '0x' + chainId.toString(16);
       try {
-        const walletChainHex = await activeProvider.request({ method: 'eth_chainId' });
-        if (walletChainHex !== targetHex) {
-          await activeProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: targetHex }] });
-          await new Promise(function(r) { setTimeout(r, 500); });
-        }
+        await ensureWalletChain(activeProvider, chainId);
+        await new Promise(function(r) { setTimeout(r, 500); });
       } catch (switchErr) {
-        if (switchErr.code === 4001) throw new Error('Chain switch rejected');
-        if (switchErr.code === 4902) throw new Error('Chain not in wallet — add ' + (CHAIN_NAMES[chainId] || chainId) + ' manually');
-        throw new Error('Switch failed: ' + (switchErr.message || switchErr));
+        throw new Error(switchErr.message || 'Switch failed');
       }
 
       // ── Step 2b: Verify vault exists on this chain ──

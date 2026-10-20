@@ -12,7 +12,7 @@ import { appendMessage } from "./chat-ui.js";
 
 import { formatTxMetrics } from "./tx-receipt.js";
 
-import { closeModal } from "./wallet.js";
+import { closeModal, ensureWalletChain } from "./wallet.js";
 
 function showTransactionModal(tx) {
   if (!tx || !tx.to || !tx.data) {
@@ -80,25 +80,23 @@ async function confirmTransaction() {
 
   try {
     // Ensure correct chain
-    const currentChainId = await activeProvider.request({ method: 'eth_chainId' });
-    const targetChainHex = '0x' + pendingTx.chainId.toString(16);
-    if (currentChainId !== targetChainHex) {
-      statusEl.textContent = 'Switching chain…';
-      await activeProvider.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: targetChainHex }],
-      });
-    }
+    statusEl.textContent = 'Switching chain…';
+    await ensureWalletChain(activeProvider, pendingTx.chainId);
 
     statusEl.textContent = 'Confirm in your wallet…';
 
+    // Never forward a zero/unset gas to the wallet: Lighter's sequencer
+    // rejects gas 0 ("pubdata budget below intrinsic") and some wallets
+    // pass it through instead of re-estimating. Omitting the field makes the
+    // wallet estimate itself.
+    const gasParam = pendingTx.gas && pendingTx.gas !== '0x0' ? pendingTx.gas : undefined;
     const txHash = await activeProvider.request({
       method: 'eth_sendTransaction',
       params: [{
         from: connectedAddress,
         to: pendingTx.to,
         data: pendingTx.data,
-        gas: pendingTx.gas,
+        ...(gasParam ? { gas: gasParam } : {}),
         value: pendingTx.value || '0x0',
       }],
     });

@@ -54,6 +54,7 @@ import {
   connectWithProvider, attachProviderListeners,
   restoreCachedAuth, signAuthMessage,
   authKey, disconnectWallet, closeModal,
+  fetchChainDetails,
 } from './wallet.js';
 
 import {
@@ -228,6 +229,10 @@ document.addEventListener('click', (e) => {
 // ── Initialization ────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Fetch per-chain details (private devnet RPC/explorer URLs) — lazy and
+  // best-effort: the app works fine when this fails or returns nothing.
+  fetchChainDetails();
+
   // Restore persisted settings
   loadAiSettings();
   restoreTradeSettings();

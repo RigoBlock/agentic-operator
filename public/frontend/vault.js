@@ -7,6 +7,7 @@ import {
   strategyPollTimer, setStrategyPollTimer,
   setExecutionMode, setDelegationState,
   afterValidateVault,
+  DEFAULT_TESTNET_CHAIN_ID,
 } from './state.js';
 
 import {
@@ -92,7 +93,7 @@ function restoreLastVault() {
   const testnetOn = localStorage.getItem('rigoblock_testnet') === 'true';
   document.getElementById('testnet-toggle').checked = testnetOn;
   applyTestnetState(testnetOn);
-  if (testnetOn) setCurrentChainId(11155111);
+  if (testnetOn) setCurrentChainId(DEFAULT_TESTNET_CHAIN_ID);
 
   const vaults = getSavedVaults();
   if (vaults.length > 0) {

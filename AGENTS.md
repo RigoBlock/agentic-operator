@@ -185,7 +185,7 @@ Semantics you must know:
 - **Gas sponsorship on HyperEVM uses the non-7702 (sma-b) route** (probed 2026-09): Alchemy's HyperEVM Wallet API has **no EIP-7702 mode** — `wallet_prepareCalls` with the owner address fails with "EIP-7702 is not enabled on HyperEVM" even with no paymaster capability, while the identical request on Base passes. The Gas Manager policy gates only the paymaster stage and is never reached in 7702 mode. The **implemented** alternative is non-7702 mode: `wallet_requestAccount({signerAddress, creationHint:{accountType:"sma-b"}})` returns a **stable, deterministic** smart-account address derived from the agent EOA (`getScaAddress` in `src/services/scaAccount.ts`), and `wallet_prepareCalls({from: <sma-b address>})` is accepted on chain 999. The **agent wallet remains the sole signer/owner** of the sma-b account — Alchemy never holds the key — and the **operator wallet only signs the one-time on-chain `updateDelegation` grant**, exactly as on every other chain. On 999, `prepareDelegation` co-delegates the chain's mapped selector set (from `getDelegableSelectors(999)`) to **both** the agent EOA (direct-broadcast fallback) and the sca address (sponsored primary) in a single `updateDelegation` call; `confirmDelegation` persists `scaAddress` in `config.chains["999"]` and writes the `agent-reverse:` KV lookup so the gas-policy webhook recognizes the sca sender. The stored tx `from` decides execution: `from == sca` → sponsored path only (no EOA fallback on failure), `from == agent EOA` → direct broadcast. Sponsored gas ON without a stored `scaAddress` (delegation not updated) falls back to the EOA/direct path. On every OTHER chain, sponsored gas via 7702 works as-is but requires the chain to be included in the Alchemy Gas Manager policy — when the paymaster rejects a sponsored tx, the `SPONSORED_FAILED` error says so. Probes: `scripts/test-hyperliquid-sponsor-policy.ts` (7702 gate), `scripts/test-hyperliquid-smab-flow.ts` (sma-b route).
 - After a deposit or spot-send, NAV-sensitive vault operations are locked for a few seconds while HyperCore settles; the agent is also blocked from trading during that window on-chain.
 - Core account activation is service-side readable ONLY from the `coreUserExists` precompile (raw eth_call to 0x810, never via the vault/simulation): the Core info API returns zeroed success for non-activated accounts (verified 2026-10-13), so it cannot discriminate. `getHyperliquidAccountActivation` (services/hyperliquid.ts) reads it directly, caches per vault 5 minutes, returns null on read failure ("unknown — never prompt/block"), and is prompt-only: the positions report and limit-order drafts warn and suggest `hyperliquid_deposit`, but never gate. Enforcement stays on-chain (`AccountNotActivated`, decoded + translated at estimation).
-- **Gas estimation pins `blockTag: "latest"` on all chains** (observed 2026-10-13): viem's `estimateGas` omits the block parameter unless `blockTag` is set explicitly, and a *bare* `eth_estimateGas` on HyperEVM intermittently executes read precompiles against unattached state — any vault-adapter transaction reverts `PrecompileLib__CoreUserExistsPrecompileFailed` (selector `0xafa95720`, surfacing as "Failed to estimate gas: InvalidTransaction(Revert(RevertError { output: Some(0xafa95720) }))") — while the same call with any explicit block tag, and any `eth_call`, succeeds, and the confirmed tx lands fine (MetaMask shows the same spurious "likely to fail"). The failure is time-dependent (minute-scale phases) and sender-independent; probed 2026-10-13 during a failing phase. Real estimation is kept — it is also the early-revert detector.
+- **Gas estimation pins `blockTag: "latest"` on all chains** (observed 2026-10-13): viem's `estimateGas` omits the block parameter unless `blockTag` is set explicitly, and a *bare* `eth_estimateGas` on HyperEVM intermittently executes read precompiles against unattached state — any vault-adapter transaction reverts `PrecompileLib__CoreUserExistsPrecompileFailed` (selector `0xafa95720`, surfacing as "Failed to estimate gas: InvalidTransaction(Revert(RevertError { output: Some(0xafa95720) }))") — while the same call with any explicit block tag, and any `eth_call`, succeeds, and the confirmed tx lands fine (MetaMask shows the same spurious "likely to fail"). The failure is time-dependent (minute-scale phases) and sender-independent; probed 2026-10-13 during a failing phase. Real estimation is kept — it is also the early-revert detector. The same pinning applies to every `eth_call` in the transaction path (NAV shield simulations, cross-chain NAV sim, HyperEVM/Lighter precompile reads): on Lighter Devnet a bare call intermittently false-positives `TRADE_REVERTS`, which previously leaked a `gas: "0x0"` transaction to the wallet (Lighter's sequencer rejects gas-0 at submission with "gas-limit-derived pubdata budget is below intrinsic pubdata bytes"). Every manually signable transaction must carry a real server-side estimate — never `0x0`.
 
 ## Supported Chains
 
@@ -199,6 +199,39 @@ Semantics you must know:
 | BNB Chain | 56 | `bsc` |
 | Unichain | 130 | `unichain` |
 | HyperEVM | 999 | `hyperevm` |
+
+Testnets (only shown when testnet mode is on):
+
+| Chain | ID | Short name | Notes |
+|-------|----|------------|-------|
+| Sepolia | 11155111 | `sepolia` | |
+| Lighter Devnet | 19529 | `lighter` | Axiom/OpenVM EVM-equivalent rollup, private devnet — RPC and explorer endpoints are private devnet URLs injected via env vars (`LIGHTER_RPC_URL`, `LIGHTER_DEVNET_BROWSER_URL`), never hardcoded. No sponsored gas, oracle, or DEX support. Hosts Lighter Core perp trading through the ALighter vault adapter (USDC-only; see below). |
+
+---
+
+## Lighter (HyperEVM-style) perps on Lighter Devnet
+
+Smart pools trade Lighter Core perps through the `ALighter` vault adapter on chain 19529 —
+USDC-only, mirroring the Hyperliquid integration. Tools (all gated to chain 19529, manual
+owner-signed execution only in v1):
+
+- `lighter_get_positions`, `lighter_get_markets`, `lighter_get_request_status` — reads (positions
+  report never shows resting orders — only order counts exist on-chain).
+- `lighter_deposit` / `lighter_withdraw` — `sendToCore` / `sendToEvm`. **NAV-neutral** for the
+  NAV shield (raw-tx simulation, code `NAV_NEUTRAL`), like Hyperliquid deposits/spot sends.
+  The first deposit auto-creates the vault's Core master account — no activation step.
+- `lighter_limit_order` / `lighter_market_order` / `lighter_cancel_order` /
+  `lighter_cancel_all_orders` — `createOrder`/cancels. **Trading: the standard NAV shield
+  applies, never exempt.**
+- `lighter_track_market` / `lighter_untrack_market` — pool-owner market tracking; market
+  size/price decimals are not readable on-chain and must be supplied at track time.
+
+Lighter Core writes are **asynchronous**: a successful EVM transaction only means Core accepted
+the request — always surface the reqId and point to `lighter_get_request_status`; never claim an
+order filled. All reads go through the READ_CORE precompile via `LIGHTER_RPC_URL` — no external
+Core REST API. The on-chain pool view of tracked markets is broken on the current devnet
+deployment, so the operator keeps a KV ledger per vault. Full details, live-verified encodings
+and protocol-side discrepancies: `docs/lighter-integration.md`.
 
 ---
 
@@ -216,7 +249,7 @@ Rules for every code change to this service:
 
 `/api/chat` is an **atomic operations provider**. Each request handles one operation.
 
-**The chat endpoint handles one per request:** spot swaps, GMX perpetuals, Hyperliquid perpetuals, Uniswap v4 LP, GRG staking, cross-chain bridge/transfer/sync, vault info, delegation setup/revoke/status, TWAP orders, strategies, chain switch.
+**The chat endpoint handles one per request:** spot swaps, GMX perpetuals, Hyperliquid perpetuals, Lighter perpetuals, Uniswap v4 LP, GRG staking, cross-chain bridge/transfer/sync, vault info, delegation setup/revoke/status, TWAP orders, strategies, chain switch.
 
 **It does NOT handle:** multi-step orchestration, historical data, APR/APY estimates, lending protocols, arbitrary on-chain reads, or token approvals (the vault adapter handles approvals internally).
 

@@ -158,6 +158,14 @@ export const VAULT_TX_TOOLS = new Set<string>([
   "hyperliquid_cancel_order",
   "hyperliquid_usd_class_transfer",
   "hyperliquid_spot_send",
+  "lighter_deposit",
+  "lighter_withdraw",
+  "lighter_limit_order",
+  "lighter_market_order",
+  "lighter_cancel_order",
+  "lighter_cancel_all_orders",
+  "lighter_track_market",
+  "lighter_untrack_market",
   "grg_stake",
   "grg_undelegate_stake",
   "grg_unstake",
@@ -211,6 +219,12 @@ const TOOL_LABEL_MAP: Record<string, string> = {
   hyperliquid_get_positions: "Hyperliquid positions",
   hyperliquid_get_markets: "Hyperliquid markets",
   hyperliquid_deposit: "Hyperliquid deposit",
+  lighter_get_positions: "Lighter positions",
+  lighter_get_markets: "Lighter markets",
+  lighter_deposit: "Lighter deposit",
+  lighter_withdraw: "Lighter withdrawal",
+  lighter_limit_order: "Lighter limit order",
+  lighter_market_order: "Lighter market order",
   get_vault_info: "vault info",
   check_delegation_status: "delegation status",
 };
@@ -996,6 +1010,8 @@ ${executionModeNote}${contextDocsBlock}`;
     tryFastPathTwapCreate(effectiveMsg) ||
     tryFastPathGmxIncrease(effectiveMsg) ||
     tryFastPathHyperliquid(effectiveMsg) ||
+    tryFastPathLighter(effectiveMsg) ||
+    tryFastPathFundPool(effectiveMsg) ||
     tryFastPathStrategyQueries(effectiveMsg) ||
     tryFastPathPendingTx(effectiveMsg) ||
     tryFastPathToolMenu(effectiveMsg);
@@ -1186,6 +1202,8 @@ ${executionModeNote}${contextDocsBlock}`;
             detectedDex = "GMX";
           } else if (name.startsWith("hyperliquid_")) {
             detectedDex = "Hyperliquid";
+          } else if (name.startsWith("lighter_")) {
+            detectedDex = "Lighter";
           }
         } catch (err) {
           // Token resolution failures should ask the user for a contract address or
@@ -2662,6 +2680,92 @@ export function tryFastPathHyperliquid(msg: string): FastPathResult | null {
         ...(openMatch[4] ? { price: openMatch[4].replace(/,/g, "") } : {}),
       },
     };
+  }
+
+  return null;
+}
+
+// ── Fast-path: Lighter (Lighter EVM devnet) ───────────────────────────
+
+// ── Fast-path: pool funding (mint) ─────────────────────────────────────
+
+/**
+ * Detect unambiguous pool-funding (mint) requests so they execute
+ * deterministically instead of routing through the LLM:
+ *   "mint 35 USDC worth of earnest smart pool"
+ *   "mint 0.1 ETH"
+ *   "fund the pool with 500 USDC" / "fund 500 USDC into the pool"
+ * Requires an amount; anything ambiguous (recipient, multiple steps) goes to the LLM.
+ */
+export function tryFastPathFundPool(msg: string): FastPathResult | null {
+  const m = msg.trim();
+
+  const mintMatch = m.match(/^mint\s+([\d.,]+)\s*(?:usdc|usd|eth)?\b(?:\s+worth\b.*)?[\s?.!]*$/i);
+  if (mintMatch) {
+    return { name: "fund_pool", args: { amount: mintMatch[1].replace(/,/g, "") } };
+  }
+
+  const fundMatch = m.match(/^(?:fund|top\s*up)\s+(?:the\s+)?(?:smart\s+)?pool\s+with\s+([\d.,]+)\s*(?:usdc|usd|eth)?[\s?.!]*$/i) ||
+    m.match(/^fund\s+([\d.,]+)\s*(?:usdc|usd|eth)?\s+(?:into|to)\s+(?:the\s+)?(?:smart\s+)?pool[\s?.!]*$/i);
+  if (fundMatch) {
+    return { name: "fund_pool", args: { amount: fundMatch[1].replace(/,/g, "") } };
+  }
+
+  // Fund intent WITHOUT an amount — surface the clickable fund_pool card
+  // (inline amount form, direct /api/tools execution, no LLM) instead of
+  // guessing or routing through the model.
+  if (/^(?:fund|mint)\s+(?:my\s+|the\s+)?(?:smart\s+)?pool(?:\s+tokens?)?[\s?.!]*$/i.test(m) ||
+      /^(?:how\s+(?:do|can)\s+i|i\s+want\s+to)\s+(?:fund|mint)\s+(?:my\s+|the\s+)?(?:smart\s+)?pool[\s?.!]*$/i.test(m)) {
+    return { name: "get_tool_menu", args: { category: "pool" } };
+  }
+
+  return null;
+}
+
+/**
+ * Deterministic fast paths for unambiguous Lighter commands. Every pattern
+ * REQUIRES the "lighter" keyword so generic perp phrases keep flowing to GMX.
+ * Lighter markets are numeric ids (symbol mapping is docs-derived and
+ * unverified), so order fast paths take an explicit market id.
+ */
+export function tryFastPathLighter(msg: string): FastPathResult | null {
+  const m = msg.trim();
+  if (!/\blighter\b/i.test(m)) return null;
+
+  // "show my lighter positions" / "lighter account" / "my lighter positions"
+  if (/^(?:show|list|get|check|what\s+are)(?:\s+my)?\s+lighter\s+(?:positions?|account|balance|portfolio)[\s?.!]*$/i.test(m) ||
+      /^my\s+lighter\s+(?:positions?|account|balance|portfolio)[\s?.!]*$/i.test(m) ||
+      /^lighter\s+(?:positions?|account|balance|portfolio)[\s?.!]*$/i.test(m)) {
+    return { name: "lighter_get_positions", args: {} };
+  }
+
+  // "lighter markets" / "show lighter markets"
+  if (/^(?:show|list|get)?\s*lighter\s+markets?[\s?.!]*$/i.test(m)) {
+    return { name: "lighter_get_markets", args: {} };
+  }
+
+  // "deposit 500 usdc to lighter" / "lighter deposit 500"
+  const depositMatch = m.match(/^(?:(?:lighter\s+)?deposit|bridge)\s+([\d.,]+)\s*(?:usdc|usd)?\s*(?:to|into)?\s+lighter[\s?.!]*$/i) ||
+    m.match(/^lighter\s+deposit\s+([\d.,]+)\s*(?:usdc|usd)?[\s?.!]*$/i);
+  if (depositMatch) {
+    return { name: "lighter_deposit", args: { amount: depositMatch[1].replace(/,/g, "") } };
+  }
+
+  // "withdraw 250 usdc from lighter" / "lighter withdraw 250"
+  const withdrawMatch = m.match(/^(?:(?:lighter\s+)?withdraw)\s+([\d.,]+)\s*(?:usdc|usd)?\s*(?:from)?\s*lighter[\s?.!]*$/i) ||
+    m.match(/^lighter\s+withdraw\s+([\d.,]+)\s*(?:usdc|usd)?[\s?.!]*$/i);
+  if (withdrawMatch) {
+    return { name: "lighter_withdraw", args: { amount: withdrawMatch[1].replace(/,/g, "") } };
+  }
+
+  // "buy 0.5 eth on lighter market 0" / "sell $3000 of BTC on lighter" need a verified symbol
+  // mapping, so orders flow through the LLM with an explicit market id instead.
+
+  // "lighter status of 123" / "check lighter request 0x2a"
+  const statusMatch = m.match(/^lighter\s+(?:request\s+)?status\s+(?:of\s+)?(?:request\s+)?(0x[0-9a-f]+|\d+)[\s?.!]*$/i) ||
+    m.match(/^(?:check|what\s+is)\s+lighter\s+(?:request\s+)?(0x[0-9a-f]+|\d+)[\s?.!]*$/i);
+  if (statusMatch) {
+    return { name: "lighter_get_request_status", args: { reqId: statusMatch[1] } };
   }
 
   return null;

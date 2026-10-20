@@ -431,6 +431,119 @@ describe("prepareTransaction NAV-shield sender selection (auth security)", () =>
 });
 
 
+describe("prepareTransaction TRADE_REVERTS still estimates gas (regression)", () => {
+  // Bug: the NAV multicall eth_call failing on Lighter Devnet returned
+  // TRADE_REVERTS, and prepareTransaction returned the tx EARLY — with
+  // gas "0x0". The frontend forwarded that to MetaMask and Lighter's sequencer
+  // rejected the submission: "gas-limit-derived pubdata budget is below
+  // intrinsic pubdata bytes". A manually signable tx must ALWAYS carry a real
+  // gas estimate.
+
+  const UPDATE_SELECTOR = encodeFunctionData({
+    abi: RIGOBLOCK_VAULT_ABI,
+    functionName: "updateUnitaryValue",
+  }).slice(0, 10);
+
+  const draft = {
+    to: VAULT,
+    data: "0x12345678" as Hex,
+    value: "0x0" as Hex,
+    chainId: CHAIN_ID,
+    description: "Mint",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEstimateGas.mockResolvedValue(100_000n);
+    mockEstimateFeesPerGas.mockResolvedValue({
+      maxFeePerGas: 1_000_000_000n,
+      maxPriorityFeePerGas: 100_000_000n,
+    });
+    mockReadContract.mockResolvedValue(0n);
+  });
+
+  function mockTradeRevertingNavShield() {
+    // Pre-NAV read succeeds; the [tx, updateUnitaryValue] multicall reverts.
+    mockGetRpcProvider.mockReturnValue({
+      ...makePublicClient(),
+      call: vi.fn(async (args: { data: Hex }) => {
+        if (args.data.slice(0, 10) === UPDATE_SELECTOR) {
+          return {
+            data: encodeFunctionResult({
+              abi: RIGOBLOCK_VAULT_ABI,
+              functionName: "updateUnitaryValue",
+              result: [10_000n, 10_000_000n, 0n] as any,
+            }),
+          };
+        }
+        throw new Error("execution reverted (mock multicall revert)");
+      }),
+    });
+  }
+
+  it("returns the tx WITH an estimated gas and the warning when estimation succeeds", async () => {
+    mockTradeRevertingNavShield();
+
+    const result = await prepareTransaction(
+      { KV: makeKV(null) } as any,
+      {
+        vaultAddress: VAULT,
+        chainId: CHAIN_ID,
+        operatorAddress: OPERATOR,
+        operatorVerified: true,
+        executionMode: "manual",
+      },
+      draft,
+    );
+
+    expect(mockEstimateGas).toHaveBeenCalled();
+    expect(result.tx.gas).not.toBe("0x0");
+    expect(result.tx.gas).toBe(`0x${(100_000n + 25_000n).toString(16)}`);
+    expect(result.tx.maxFeePerGas).not.toBe("0x0");
+    expect(result.warning).toMatch(/Simulation warning/);
+    expect(result.tx.revertWarning).toMatch(/Simulation warning/);
+  });
+
+  it("throws PREPARATION_FAILED instead of returning gas 0x0 when the tx genuinely reverts", async () => {
+    mockTradeRevertingNavShield();
+    mockEstimateGas.mockRejectedValue(new Error("execution reverted (mint would fail)"));
+
+    await expect(
+      prepareTransaction(
+        { KV: makeKV(null) } as any,
+        {
+          vaultAddress: VAULT,
+          chainId: CHAIN_ID,
+          operatorAddress: OPERATOR,
+          operatorVerified: true,
+          executionMode: "manual",
+        },
+        draft,
+      ),
+    ).rejects.toMatchObject({ code: "PREPARATION_FAILED" });
+  });
+
+  it("advises on RPC transport failure instead of returning a bare fetch error", async () => {
+    mockTradeRevertingNavShield();
+    mockEstimateGas.mockRejectedValue(new TypeError("fetch failed"));
+
+    await expect(
+      prepareTransaction(
+        { KV: makeKV(null) } as any,
+        {
+          vaultAddress: VAULT,
+          chainId: CHAIN_ID,
+          operatorAddress: OPERATOR,
+          operatorVerified: true,
+          executionMode: "manual",
+        },
+        draft,
+      ),
+    ).rejects.toThrow(/could not simulate the transaction.*usually transient/s);
+  });
+});
+
+
 describe("prepareTransaction HyperEVM (999) sma-b executor selection", () => {
   const AGENT = "0x3333333333333333333333333333333333333333" as Address;
   const SCA = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;

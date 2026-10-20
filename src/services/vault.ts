@@ -12,6 +12,7 @@
 import {
   formatUnits,
   encodeFunctionData,
+  decodeFunctionResult,
   type Address,
   type Hex,
 } from "viem";
@@ -385,31 +386,44 @@ export async function getPoolData(
   }
 }
 
-/** NAV data returned by vault.getNavDataView() */
+/** NAV data derived from an updateUnitaryValue() simulation. */
 export interface NavData {
   totalValue: bigint;
   unitaryValue: bigint;
+  /** Not returned by updateUnitaryValue — reported as 0. */
   timestamp: bigint;
 }
 
 /**
  * Read the pool's current NAV data (total value, unitary value, timestamp).
+ *
+ * eth_calls the real updateUnitaryValue() — the same live computation the
+ * contract performs — pinned to an explicit block tag (bare calls
+ * intermittently hit unattached state on HyperEVM / Lighter Devnet).
+ * Timestamp is not part of its return tuple and is reported as 0.
  */
 export async function getNavData(
   chainId: number,
   vaultAddress: Address,
 ): Promise<NavData> {
   const client = getRpcProvider(chainId);
-  const result = await client.readContract({
-    address: vaultAddress,
-    abi: RIGOBLOCK_VAULT_ABI,
-    functionName: "getNavDataView",
+  const { data } = await client.call({
+    to: vaultAddress,
+    data: encodeFunctionData({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "updateUnitaryValue",
+    }),
+    blockTag: "latest",
   });
-  const navData = result as { totalValue: bigint; unitaryValue: bigint; timestamp: bigint };
+  const navResult = decodeFunctionResult({
+    abi: RIGOBLOCK_VAULT_ABI,
+    functionName: "updateUnitaryValue",
+    data: data ?? "0x",
+  }) as { unitaryValue: bigint; netTotalValue: bigint };
   return {
-    totalValue: navData.totalValue,
-    unitaryValue: navData.unitaryValue,
-    timestamp: navData.timestamp,
+    totalValue: navResult.netTotalValue,
+    unitaryValue: navResult.unitaryValue,
+    timestamp: 0n,
   };
 }
 

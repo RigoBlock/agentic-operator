@@ -75,10 +75,8 @@ RULE: The NAV shield (10% max drop check) runs BEFORE every transaction
   whitelisted adapter branches on `msg.sender` (the only `msg.sender` use in any
   adapter is an event emission), so owner-simulation is state-equivalent to
   agent-execution for every legitimately delegated tx.
-- **Uses `updateUnitaryValue()`** (the actual contract NAV algorithm via `eth_call`),
-  NOT `getNavDataView()`. The view function (ENavView) has an edge case bug where it
-  returns `unitaryValue=0` when `effectiveSupply > 0` AND `totalValue <= 0`, while
-  the actual contract (`_updateNav` in MixinPoolValue) preserves the stored value.
+- **Uses `updateUnitaryValue()`** (the actual contract NAV algorithm via `eth_call`) —
+  never the removed ENavView extension, whose view returned stale results in edge cases.
 - Three distinct outcomes with separate error codes:
   1. **NAV drops > 10%** → `allowed: false, code: 'BLOCKED'` → `NAV_SHIELD_BLOCKED`
   2. **Transaction itself reverts** → `allowed: false, code: 'TRADE_REVERTS'` → `SIMULATION_FAILED`

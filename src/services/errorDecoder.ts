@@ -80,6 +80,15 @@ const COMMON_ERRORS = [
   // Rigoblock AHyperliquid (HyperEVM)
   { name: "AccountNotActivated", type: "error", inputs: [] },
   { name: "PrecompileLib__CoreUserExistsPrecompileFailed", type: "error", inputs: [] },
+
+  // Rigoblock ALighter (Lighter EVM devnet)
+  { name: "InvalidMarketDecimals", type: "error", inputs: [] },
+  { name: "MarketAlreadyTracked", type: "error", inputs: [] },
+  { name: "MarketNotTracked", type: "error", inputs: [] },
+  { name: "MaxTrackedMarketsReached", type: "error", inputs: [] },
+  { name: "InvalidMarket", type: "error", inputs: [] },
+  { name: "LighterReadFailed", type: "error", inputs: [] },
+  { name: "PositionNotClosed", type: "error", inputs: [] },
 ];
 
 /** Names for 0x Settler action selectors that A0xRouter may report via ActionNotAllowed. */
@@ -170,6 +179,38 @@ function formatDecodedError(name: string, args: unknown): string {
   if (name === "NavLocked") {
     return "NavLocked — the vault is in the HyperCore settlement window (~2 minutes after a deposit or spot send). " +
       "Operations that touch pool NAV are blocked on-chain during this window; retry shortly.";
+  }
+
+  // Rigoblock ALighter (Lighter Devnet)
+  if (name === "MarketNotTracked") {
+    return "MarketNotTracked — this Lighter market is not tracked by the pool. " +
+      "Track it first with lighter_track_market (you need the market's size and price decimals).";
+  }
+  if (name === "MarketAlreadyTracked") {
+    return "MarketAlreadyTracked — this Lighter market is already tracked by the pool.";
+  }
+  if (name === "MaxTrackedMarketsReached") {
+    return "MaxTrackedMarketsReached — the pool tracks the maximum number of Lighter markets (32). " +
+      "Untrack an unused market with lighter_untrack_market first.";
+  }
+  if (name === "InvalidMarket") {
+    return "InvalidMarket — the Lighter market id is not a perp market (perp ids are 0…2047).";
+  }
+  if (name === "InvalidMarketDecimals") {
+    return "InvalidMarketDecimals — the size/price decimals given to lighter_track_market are out of range " +
+      "(size 0…18, price 0…16). Check the market's orderBookDetails.";
+  }
+  if (name === "PositionNotClosed") {
+    return "PositionNotClosed — the pool still holds a position on this Lighter market. " +
+      "Close it (reduce-only order) before untracking the market.";
+  }
+  if (name === "LighterReadFailed") {
+    return "LighterReadFailed — a Lighter Core state read failed on-chain. " +
+      "Retry shortly; if it persists the devnet build may have changed (see docs/lighter-integration.md).";
+  }
+  if (name === "AccountNotActivated") {
+    return "AccountNotActivated — the vault has no Lighter Core account yet. " +
+      "Run lighter_deposit to bridge USDC; the first deposit creates the account automatically.";
   }
 
   const argEntries = Object.entries(record).map(([k, v]) => `${k}=${String(v)}`);

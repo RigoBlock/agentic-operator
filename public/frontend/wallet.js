@@ -7,6 +7,7 @@ import {
   vaultInput,
   CHAIN_NAMES, TESTNET_CHAINS_LIST,
   setPendingTx, setCurrentChainId,
+  setChainDetails, getChainDetails,
 } from './state.js';
 
 import { appendMessage } from './chat-ui.js';
@@ -263,6 +264,58 @@ function disconnectWallet() {
 function closeModal(id) {
   document.getElementById(id).classList.remove('visible');
   if (id === 'tx-modal') setPendingTx(null);
+}
+
+/** Fetch /api/chains?testnet=true and populate chainDetails. Cached — the
+ *  second call is a no-op. Never throws: failure leaves details empty. */
+let chainDetailsFetched = false;
+export async function fetchChainDetails() {
+  if (chainDetailsFetched) return getChainDetails();
+  try {
+    const res = await fetch('/api/chains?testnet=true');
+    if (res.ok) {
+      const data = await res.json();
+      setChainDetails(data.details || {});
+    }
+  } catch { /* offline or error — app works without details */ }
+  chainDetailsFetched = true;
+  return getChainDetails();
+}
+
+/** Ensure the wallet is on the target chain: eth_chainId → wallet_switchEthereumChain,
+ *  and if the chain is unknown to the wallet (4902) add it from the env-provided
+ *  details when available. Throws a user-friendly error on rejection. */
+export async function ensureWalletChain(provider, chainId) {
+  const targetHex = '0x' + chainId.toString(16);
+  const walletChainHex = await provider.request({ method: 'eth_chainId' });
+  if (walletChainHex === targetHex) return;
+
+  try {
+    await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: targetHex }] });
+  } catch (err) {
+    if (err && err.code === 4001) throw new Error('Chain switch rejected');
+    if (!err || err.code !== 4902) {
+      throw new Error('Switch failed: ' + (err?.message || err));
+    }
+    // Chain unknown to the wallet — try to add it from env-provided details.
+    const details = await fetchChainDetails();
+    const detail = details[chainId];
+    if (!detail || !detail.rpcUrl) {
+      throw new Error('Chain not in wallet — add ' + (CHAIN_NAMES[chainId] || chainId) + ' manually');
+    }
+    await provider.request({
+      method: 'wallet_addEthereumChain',
+      params: [{
+        chainId: targetHex,
+        chainName: CHAIN_NAMES[chainId] || detail.chainName || ('Chain ' + chainId),
+        rpcUrls: [detail.rpcUrl],
+        nativeCurrency: detail.nativeCurrency || { name: 'Ether', symbol: 'ETH', decimals: 18 },
+        ...(detail.blockExplorerUrl ? { blockExplorerUrls: [detail.blockExplorerUrl] } : {}),
+      }],
+    });
+    const recheckHex = await provider.request({ method: 'eth_chainId' });
+    if (recheckHex !== targetHex) throw new Error('Switch failed: wallet did not switch to ' + (CHAIN_NAMES[chainId] || chainId));
+  }
 }
 
 // Legacy fallback after a brief delay + auto-reconnect

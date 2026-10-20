@@ -21,7 +21,7 @@ import {
 } from "viem";
 import type { LocalAccount } from "viem/accounts";
 import type { Env, UnsignedTransaction, TransactionDraft, ExecutionResult } from "../types.js";
-import { getChain, getRpcUrl, sanitizeError, MIN_BALANCE, EXPLORER_TX_URL } from "../config.js";
+import { getChain, getRpcUrl, sanitizeError, MIN_BALANCE, getExplorerTxUrl } from "../config.js";
 import { loadAgentWalletAccount } from "./agentWallet.js";
 import { getDelegationConfig, getChainDelegation } from "./delegation.js";
 import { recordGasSpend } from "../routes/gasPolicy.js";
@@ -48,8 +48,8 @@ const MAX_RESUBMIT_ATTEMPTS = 2;
 /** Timeout for waiting for a tx receipt (ms) */
 const TX_CONFIRM_TIMEOUT_MS = 60_000;
 
-/** Fast-confirming chains (L2s, BSC, HyperEVM) with sub-second block times */
-const FAST_CHAIN_IDS = new Set([10, 42161, 8453, 130, 56, 999, 84532]);
+/** Fast-confirming chains (L2s, BSC, HyperEVM, Lighter Devnet) with ~1s block times */
+const FAST_CHAIN_IDS = new Set([10, 42161, 8453, 130, 56, 999, 84532, 19529]);
 
 /**
  * Execute a pre-prepared transaction via the agent wallet.
@@ -319,7 +319,7 @@ async function broadcastAgentTransaction(
     }
   }
 
-  const explorerBase = EXPLORER_TX_URL[chainId];
+  const explorerBase = getExplorerTxUrl(chainId);
   const explorerUrl = explorerBase ? `${explorerBase}${txHash}` : undefined;
 
   // ── Build result with gas receipt details ──
@@ -480,7 +480,7 @@ async function sponsoredAgentTransaction(
   }
 
   // ── Map result to ExecutionResult ──
-  const explorerBase = EXPLORER_TX_URL[chainId];
+  const explorerBase = getExplorerTxUrl(chainId);
 
   if (result.status === "success" && receipt) {
     const gasUsed = receipt.gasUsed.toString();
@@ -741,7 +741,7 @@ export async function checkPendingTxStatus(
   const storedCallId = stored?.callId?.toLowerCase();
 
   const buildResult = async (receipt: TransactionReceipt, txHash: Hex): Promise<ExecutionResult> => {
-    const explorerBase = EXPLORER_TX_URL[chainId];
+    const explorerBase = getExplorerTxUrl(chainId);
     const cost = receipt.gasUsed * receipt.effectiveGasPrice;
 
     const result: ExecutionResult = {

@@ -18,3 +18,9 @@ APP_ENV=development
 # --- Local-dev escape hatches (active ONLY with APP_ENV=development) ---
 # TELEGRAM_ALLOW_UNAUTHENTICATED_WEBHOOK=1  # skip Telegram webhook secret check
 # X402_RELAXED=1                            # serve paid endpoints if payment can't be verified
+LIGHTER_RPC_URL="lighter-rpc-url"
+LIGHTER_DEVNET_BROWSER_URL="lighter-browser-url"
+# Lighter Core REST API base (the ONLY source of order-book decimals — NOT the
+# Blockscout explorer /api, which only proxies eth-rpc). Ends in /api, e.g.
+# https://host/api. Get the devnet URL from the Lighter team (private docs).
+# LIGHTER_CORE_API_URL="https://core-api-host/api"

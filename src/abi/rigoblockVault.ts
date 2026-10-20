@@ -88,26 +88,9 @@ export const RIGOBLOCK_VAULT_ABI = [
     outputs: [{ name: "", type: "uint256" }],
   },
 
-  // ── NAV view (ENavView extension) ──
-
-  // getNavDataView() → (uint256 totalValue, uint256 unitaryValue, uint256 timestamp)
-  {
-    name: "getNavDataView",
-    type: "function",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [
-      {
-        name: "navData",
-        type: "tuple",
-        components: [
-          { name: "totalValue", type: "uint256" },
-          { name: "unitaryValue", type: "uint256" },
-          { name: "timestamp", type: "uint256" },
-        ],
-      },
-    ],
-  },
+  // NOTE: the ENavView extension is removed in newer protocol releases — never
+  // reference it. Always eth_call updateUnitaryValue() instead — see getNavData()
+  // in services/vault.ts and the NAV guard.
 
   // ── Multicall (AMulticall adapter) ──
 
@@ -428,6 +411,21 @@ export const ALLOWED_VAULT_SELECTORS = {
   hlDeposit: "0x2b2dfd2c" as `0x${string}`,
   hlDepositFor: "0xc23c545a" as `0x${string}`,
   hlSendRawAction: "0x17938e13" as `0x${string}`,
+  // ── ALighter Adapter (Lighter Core perps on Lighter EVM devnet, USDC-only) ──
+  // sendToCore(uint32,address,bool,uint256,uint8)   — deposit pool USDC into Core perps margin
+  //                                                   (auto-creates the Core account on first deposit)
+  // sendToEvm(uint48,uint32,address,uint8,uint64)   — withdraw Core perps USDC back to the pool
+  // createOrder(uint48,uint16,uint48,uint8,uint8,uint64,uint48,uint32,bool,bool,uint32)
+  //                                                 — perp order (market must be tracked, < 2048)
+  // cancelOrder(uint48,uint64) / cancelAllOrders(uint48) — order cancels
+  // trackMarket(uint16,uint8,uint8) / untrackMarket(uint16) — pool-owner market tracking
+  lighterSendToCore: "0xeed67f2c" as `0x${string}`,
+  lighterSendToEvm: "0x60f502da" as `0x${string}`,
+  lighterCreateOrder: "0x8a7da422" as `0x${string}`,
+  lighterCancelOrder: "0x736fd6b3" as `0x${string}`,
+  lighterCancelAllOrders: "0xa4b6f756" as `0x${string}`,
+  lighterTrackMarket: "0x341a942b" as `0x${string}`,
+  lighterUntrackMarket: "0xe0ad5442" as `0x${string}`,
   // ── AIntents Adapter (cross-chain) ──
   depositV3: "0x770d096f" as `0x${string}`,
   // ── AUniswap Adapter (wrap/unwrap native ↔ wrapped-native) ──

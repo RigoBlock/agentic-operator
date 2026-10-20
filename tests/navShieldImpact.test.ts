@@ -182,6 +182,33 @@ describe("NAV Shield impact logic", () => {
     expect(result.reason).toContain("Cannot simulate vault NAV impact");
   });
 
+  it("on Lighter Devnet, a pre-NAV read failure names the deployed-contract issue", async () => {
+    // Regression (prod, second lighter_deposit 2026-10-20): after the pool's first
+    // Core deposit the vault's updateUnitaryValue reverts with no data on-chain —
+    // the deployed pool implementation's READ_CORE queries mismatch the devnet
+    // build (docs/lighter-integration.md discrepancies #1/#2). The shield fails
+    // closed and must say so, not just "execution reverted". Verified on-chain:
+    // raw ALighter sendToCore from the vault owner reverts identically.
+    mockState.call.mockRejectedValue(new Error("execution reverted"));
+    const result = await checkNavImpact(
+      VAULT, SWAP_DATA, 0n, 19529, undefined, createMockKV(),
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("Cannot simulate vault NAV impact");
+    expect(result.reason).toContain("known deployed-contract issue");
+    expect(result.reason).toContain("redeploys");
+    expect(result.reason).toContain("will not help");
+  });
+
+  it("other chains do not get the Lighter-specific explanation", async () => {
+    mockState.call.mockRejectedValue(new Error("execution reverted"));
+    const result = await checkNavImpact(
+      VAULT, SWAP_DATA, 0n, CHAIN_ID, undefined, createMockKV(),
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.reason).not.toContain("known deployed-contract issue");
+  });
+
   it("reports TRADE_REVERTS when the multicall eth_call reverts", async () => {
     setupClient(10000n, 10000n);
     mockState.call.mockImplementation(async (args: { data: Hex }) => {

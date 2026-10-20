@@ -42,6 +42,17 @@ const MENU_TITLES: Record<string, string> = {
   hyperliquid_cancel_order: "Cancel Hyperliquid order",
   hyperliquid_usd_class_transfer: "Withdraw ① perp → Core spot",
   hyperliquid_spot_send: "Withdraw ② Core spot → HyperEVM",
+  lighter_get_positions: "View Lighter account",
+  lighter_get_markets: "View Lighter markets",
+  lighter_get_request_status: "Check Lighter request status",
+  lighter_deposit: "Deposit USDC to Lighter",
+  lighter_withdraw: "Withdraw USDC from Lighter",
+  lighter_limit_order: "Lighter limit order",
+  lighter_market_order: "Lighter market order",
+  lighter_cancel_order: "Cancel Lighter order",
+  lighter_cancel_all_orders: "Cancel all Lighter orders",
+  lighter_track_market: "Track Lighter market",
+  lighter_untrack_market: "Untrack Lighter market",
   gmx_get_positions: "View GMX positions",
   gmx_get_markets: "View GMX markets",
   gmx_increase_position: "Open / increase GMX position",
@@ -65,6 +76,8 @@ const MENU_TITLES: Record<string, string> = {
   get_aggregated_nav: "Aggregated multi-chain NAV",
   get_rebalance_plan: "Rebalance plan (analysis only, no transactions)",
   verify_bridge_arrival: "Check bridge arrival",
+  fund_pool: "Fund pool (mint pool tokens)",
+  deploy_smart_pool: "Deploy smart pool",
 };
 
 /**
@@ -73,6 +86,14 @@ const MENU_TITLES: Record<string, string> = {
  * needs side and size).
  */
 const MENU_FIELD_OVERRIDES: Record<string, ToolCardField[]> = {
+  fund_pool: [
+    { name: "amount", label: "Amount (base token)", required: true, placeholder: "35 — USDC on USDC-only chains (Lighter Devnet, HyperEVM), ETH elsewhere" },
+  ],
+  deploy_smart_pool: [
+    { name: "name", label: "Pool name", required: true, placeholder: "4-31 chars, case-sensitive as typed" },
+    { name: "symbol", label: "Pool symbol", required: true, placeholder: "3-5 chars, uppercased automatically" },
+    { name: "baseToken", label: "Base token", required: false, placeholder: "default: USDC on USDC-only chains, ETH elsewhere" },
+  ],
   hyperliquid_limit_order: [
     { name: "coin", label: "Market", required: true, placeholder: "BTC" },
     { name: "side", label: "Side", required: true, options: [
@@ -219,8 +240,16 @@ const CROSSCHAIN_MENU: MenuEntry[] = [
   "verify_bridge_arrival",
 ];
 
+const POOL_MENU: MenuEntry[] = [
+  "fund_pool",
+  "deploy_smart_pool",
+];
+
 /** Categories exposed by the menu. Aliases point at shared lists. */
 const MENU_CATEGORIES: Record<string, MenuEntry[]> = {
+  pool: POOL_MENU,
+  vault: POOL_MENU,
+  fund: ["fund_pool"],
   hyperliquid: [
     "hyperliquid_get_positions",
     "hyperliquid_get_markets",
@@ -230,6 +259,19 @@ const MENU_CATEGORIES: Record<string, MenuEntry[]> = {
     "hyperliquid_cancel_order",
     "hyperliquid_usd_class_transfer",
     "hyperliquid_spot_send",
+  ],
+  lighter: [
+    "lighter_get_positions",
+    "lighter_get_markets",
+    "lighter_get_request_status",
+    "lighter_deposit",
+    "lighter_withdraw",
+    "lighter_limit_order",
+    "lighter_market_order",
+    "lighter_cancel_order",
+    "lighter_cancel_all_orders",
+    "lighter_track_market",
+    "lighter_untrack_market",
   ],
   gmx: GMX_MENU,
   swap: SWAP_MENU,
@@ -324,6 +366,18 @@ export async function handle_get_tool_menu(
       `\nHyperEVM is USDC-only — any other token on a route to or from it is rejected with an error naming USDC as the alternative.` +
       `\nNative ETH can bridge as WETH — set "Use native ETH" to true on WETH transfers and the vault wraps ETH automatically.` +
       `\n"Sync NAV between two chains" computes the exact equalizing amount itself — leave Amount empty.`;
+  }
+  if (toolNames === MENU_CATEGORIES.lighter) {
+    message =
+      `Lighter tools operate on Lighter Devnet (chain 19529) only — switch_chain chain="Lighter Devnet" first.` +
+      `\nUSDC only. The first deposit creates the vault's Core account automatically.` +
+      `\nA market must be tracked (lighter_track_market) before any order on it.` +
+      `\nCore writes are asynchronous: a successful transaction only means Core accepted the request — check the outcome with lighter_get_request_status.`;
+  }
+  if (toolNames === POOL_MENU) {
+    message =
+      `Click a card, fill in the fields, and it executes directly — no LLM in the loop. ` +
+      `Fund pool reads the pool's base token and your approval on-chain: if your approval is already mined it returns the mint directly, otherwise the approve first.`;
   }
 
   return {

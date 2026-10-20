@@ -25,7 +25,7 @@ import { telegram } from "./routes/telegram.js";
 import { settings } from "./routes/settings.js";
 import { tools as toolsRoute } from "./routes/tools.js";
 import { oracle } from "./routes/oracle.js";
-import { SUPPORTED_CHAINS, TESTNET_CHAINS } from "./config.js";
+import { SUPPORTED_CHAINS, TESTNET_CHAINS, LIGHTER_DEVNET_CHAIN_ID, sanitizeError } from "./config.js";
 import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
 import { mapWithConcurrencySettled } from "./services/concurrency.js";
@@ -41,6 +41,15 @@ import { validateEnvironmentConfig } from "./services/devMode.js";
 import type { Address } from "viem";
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
+
+// Global error handler: any exception that escapes a route's own try/catch
+// (middleware failures, unhandled service errors) becomes a clean JSON 500
+// instead of a Cloudflare Error 1101 "Worker threw exception" HTML page that
+// tells the user nothing.
+app.onError((err, c) => {
+  console.error(`[unhandled] ${c.req.method} ${c.req.url}:`, err);
+  return c.json({ error: sanitizeError(err instanceof Error ? err.message : "Internal error") }, 500);
+});
 
 // ── Middleware ─────────────────────────────────────────────────────────
 app.use("*", cors());
@@ -151,7 +160,26 @@ app.get("/api/chains", (c) => {
   const chains = includeTestnet
     ? [...SUPPORTED_CHAINS, ...TESTNET_CHAINS]
     : SUPPORTED_CHAINS;
-  return c.json({ chains });
+
+  // Per-chain details that must never be part of the static lists: private
+  // devnet endpoints injected via env vars. Keyed by chain id string; only
+  // present when the env vars are set. Never include Alchemy-keyed URLs.
+  const lighterRpcUrl = c.env.LIGHTER_RPC_URL;
+  const lighterExplorerUrl = c.env.LIGHTER_DEVNET_BROWSER_URL;
+  const details: Record<string, {
+    rpcUrl?: string;
+    blockExplorerUrl?: string;
+    nativeCurrency?: { name: string; symbol: string; decimals: number };
+  }> = {};
+  if (lighterRpcUrl || lighterExplorerUrl) {
+    details[String(LIGHTER_DEVNET_CHAIN_ID)] = {
+      ...(lighterRpcUrl ? { rpcUrl: lighterRpcUrl } : {}),
+      ...(lighterExplorerUrl ? { blockExplorerUrl: lighterExplorerUrl } : {}),
+      nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    };
+  }
+
+  return c.json({ chains, details });
 });
 
 // ── Strategy events (polling endpoint for web chat notifications) ──

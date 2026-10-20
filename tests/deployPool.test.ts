@@ -5,17 +5,30 @@
  * other base token could never trade there. The deploy handler must therefore
  * default to USDC on chain 999 and reject every other base token.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Address } from "viem";
 import { handle_deploy_smart_pool } from "../src/llm/handlers/vault-mgmt.js";
 import type { RequestContext, Env } from "../src/types.js";
 
 // The execution module is mocked so runTransactionFlow never performs real
 // agent-side effects in the flow-contract test below.
-const { mockExecuteTxList } = vi.hoisted(() => ({ mockExecuteTxList: vi.fn() }));
+const { mockExecuteTxList, mockGetCode, mockCall } = vi.hoisted(() => ({
+  mockExecuteTxList: vi.fn(),
+  mockGetCode: vi.fn(),
+  mockCall: vi.fn(),
+}));
 vi.mock("../src/services/execution.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/services/execution.js")>();
   return { ...actual, executeTxList: mockExecuteTxList };
+});
+// The deploy preflight (base-token code check + createPool eth_call simulation)
+// must never reach the network in unit tests — deterministic canned responses.
+vi.mock("../src/services/rpcClient.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/services/rpcClient.js")>();
+  return {
+    ...actual,
+    getRpcProvider: () => ({ getCode: mockGetCode, call: mockCall }),
+  };
 });
 
 const HYPER_USDC = "0xb88339CB7199b77E23DB6E890353E22632Ba630f";
@@ -31,6 +44,13 @@ function makeCtx(chainId: number): RequestContext {
 }
 
 const env = {} as Env;
+
+beforeEach(() => {
+  // Default: base token has code, simulation succeeds. Individual tests
+  // override either to exercise the blocking paths.
+  mockGetCode.mockResolvedValue("0x01");
+  mockCall.mockResolvedValue("0x");
+});
 
 async function deploy(chainId: number, args: Record<string, unknown>) {
   return handle_deploy_smart_pool(env, makeCtx(chainId), args, "deploy_smart_pool");
@@ -191,5 +211,35 @@ describe("deploy_smart_pool execution-flow contract (regression guard)", () => {
     expect(flow.transactions![0].description).toContain("alcyoneus (ALC)");
     expect(mockExecuteTxList).not.toHaveBeenCalled();
     expect((await kv.list({ prefix: "pending-sim:" })).keys).toHaveLength(0);
+  });
+});
+
+describe("deploy_smart_pool preflight (base-token code check + createPool simulation)", () => {
+  it("blocks a base token with no contract code with an actionable error", async () => {
+    mockGetCode.mockResolvedValue("0x");
+    await expect(
+      deploy(999, { name: "Hyper Pool", symbol: "HYP", baseToken: HYPER_USDC }),
+    ).rejects.toThrow(/has no contract code on .* would fail with POOL_INITIALIZATION_FAILED/s);
+  });
+
+  it("still simulates createPool after the code check passes", async () => {
+    await deploy(999, { name: "Hyper Pool", symbol: "HYP" });
+    expect(mockGetCode).toHaveBeenCalledWith({ address: HYPER_USDC });
+    expect(mockCall).toHaveBeenCalled();
+  });
+
+  it("blocks when the createPool simulation reverts", async () => {
+    mockCall.mockRejectedValue(new Error("execution reverted (registry: name already taken)"));
+    await expect(deploy(999, { name: "Hyper Pool", symbol: "HYP" }))
+      .rejects.toThrow(/simulation failed on .*would revert/s);
+  });
+
+  it("does not block when the simulation RPC itself is unreadable", async () => {
+    // Transport failure (node down, bad key) — MetaMask would still price and
+    // confirm the tx, so the handler must not stand in the way.
+    mockCall.mockRejectedValue(new Error("fetch failed"));
+    mockGetCode.mockRejectedValue(new Error("fetch failed"));
+    const result = await deploy(999, { name: "Hyper Pool", symbol: "HYP" });
+    expect(result.transaction).toBeDefined();
   });
 });

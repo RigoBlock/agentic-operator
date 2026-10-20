@@ -36,6 +36,18 @@ const REQUIRED_TOOLS = [
   "hyperliquid_cancel_order",
   "hyperliquid_usd_class_transfer",
   "hyperliquid_spot_send",
+  // Lighter perpetuals (Lighter EVM devnet)
+  "lighter_get_markets",
+  "lighter_get_positions",
+  "lighter_deposit",
+  "lighter_withdraw",
+  "lighter_limit_order",
+  "lighter_market_order",
+  "lighter_cancel_order",
+  "lighter_cancel_all_orders",
+  "lighter_track_market",
+  "lighter_untrack_market",
+  "lighter_get_request_status",
   // Uniswap LP
   "get_pool_info",
   "initialize_pool",
@@ -181,6 +193,26 @@ describe("get_tool_menu handler", () => {
     );
     // The menu message carries the per-chain bridgeable token list
     expect(result.message).toContain("Bridgeable tokens by chain");
+  });
+
+  it("returns pool cards — fund_pool with an amount field for direct execution", async () => {
+    const { handle_get_tool_menu } = await import("../src/llm/handlers/menu.js");
+    const result = await handle_get_tool_menu(
+      {} as never, {} as never, { category: "pool" }, "get_tool_menu",
+    );
+    const cards = (result.metadata as { toolCards: { toolName: string; title: string; fields: { name: string; required: boolean }[] }[] }).toolCards;
+    expect(cards.map((c) => c.toolName)).toEqual(["fund_pool", "deploy_smart_pool"]);
+    const fund = cards.find((c) => c.toolName === "fund_pool")!;
+    expect(fund.fields.filter((f) => f.required).map((f) => f.name)).toEqual(["amount"]);
+    const deploy = cards.find((c) => c.toolName === "deploy_smart_pool")!;
+    expect(deploy.fields.filter((f) => f.required).map((f) => f.name)).toEqual(
+      expect.arrayContaining(["name", "symbol"]),
+    );
+    expect(result.message).toContain("no LLM");
+    // Aliases resolve to the same menu
+    const vault = await handle_get_tool_menu({} as never, {} as never, { category: "vault" }, "get_tool_menu");
+    expect((vault.metadata as { toolCards: { toolName: string }[] }).toolCards.map((c) => c.toolName))
+      .toContain("fund_pool");
   });
 
   it("lists available categories for unknown or missing category", async () => {

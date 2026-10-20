@@ -12,7 +12,7 @@
  * ## NAV Shield
  * The existing NAV shield in execution.ts (`checkNavImpact`) runs on ALL
  * delegated transactions regardless of function selector. It simulates
- * `multicall([txData, getNavDataView])` via eth_call and rejects if
+ * `multicall([txData, updateUnitaryValue])` via eth_call and rejects if
  * the unitary value drops >10%. This automatically covers `depositV3`
  * and any future vault methods — no per-method extension needed.
  *
@@ -1598,6 +1598,7 @@ export async function projectSyncNavImpact(params: {
         abi: RIGOBLOCK_VAULT_ABI,
         functionName: "updateUnitaryValue",
       }),
+      blockTag: "latest",
     });
     if (!preCall.data) return undefined;
     const preResult = decodeFunctionResult({
@@ -1635,6 +1636,7 @@ export async function projectSyncNavImpact(params: {
       to: params.vaultAddress,
       data: multicallData,
       value: 0n,
+      blockTag: "latest",
     });
     if (!postCall.data) return undefined;
     const postResults = decodeFunctionResult({

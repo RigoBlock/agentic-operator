@@ -11,6 +11,8 @@ import { appendMessage } from "./chat-ui.js";
 
 import { fetchAgentBalance } from "./api.js";
 
+import { ensureWalletChain } from "./wallet.js";
+
 /** Format a numeric percentage string for display, trimming trailing zeros. */
 function formatPct(value, fallback = '0') {
   const num = Number(value);
@@ -93,24 +95,22 @@ async function signManualTxCard(btn) {
   btn.textContent = 'Signing…';
 
   try {
-    const currentChainHex = await activeProvider.request({ method: 'eth_chainId' });
-    const targetChainHex = '0x' + tx.chainId.toString(16);
-    if (currentChainHex !== targetChainHex) {
+    if (tx.chainId) {
       statusEl.textContent = 'Switching chain…';
-      await activeProvider.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: targetChainHex }],
-      });
+      await ensureWalletChain(activeProvider, tx.chainId);
     }
 
     statusEl.textContent = 'Confirm in your wallet…';
+    // Never forward a zero/unset gas to the wallet (Lighter rejects gas 0 at
+    // submission: pubdata budget below intrinsic) — omit it so the wallet estimates.
+    const gasParam = tx.gas && tx.gas !== '0x0' ? tx.gas : undefined;
     const txHash = await activeProvider.request({
       method: 'eth_sendTransaction',
       params: [{
         from: connectedAddress,
         to: tx.to,
         data: tx.data,
-        gas: tx.gas,
+        ...(gasParam ? { gas: gasParam } : {}),
         value: tx.value || '0x0',
       }],
     });
@@ -215,7 +215,7 @@ async function pollPendingTx(r, swapMeta, statusEl) {
   if (!hash || hash === '0x') return;
 
   // L2s and BSC have sub-second blocks — poll faster
-  const fastChains = new Set([10, 42161, 8453, 130, 56, 999, 84532]);
+  const fastChains = new Set([10, 42161, 8453, 130, 56, 999, 84532, 19529]);
   const intervalMs = fastChains.has(r.chainId) ? 1000 : 3000;
   const maxAttempts = fastChains.has(r.chainId) ? 15 : 20;
   let attempts = 0;

@@ -4,6 +4,8 @@ import {
   MAINNET_CHAINS_LIST, TESTNET_CHAINS_LIST, getExplorerUrl,
 } from './state.js';
 
+import { ensureWalletChain } from './wallet.js';
+
 function openDeployPoolModal() {
   if (!connectedAddress) {
     window.openWalletPicker();
@@ -16,6 +18,7 @@ function openDeployPoolModal() {
   chainSelect.innerHTML = chains.map(c =>
     `<option value="${c.id}" ${c.id === currentChainId ? 'selected' : ''}>${c.name}</option>`
   ).join('');
+  applyBaseTokenRestriction(parseInt(chainSelect.value, 10));
   document.getElementById('deploy-pool-name').value = '';
   document.getElementById('deploy-pool-symbol').value = '';
   document.getElementById('deploy-pool-base-token').value = 'ETH';
@@ -30,7 +33,15 @@ document.getElementById('deploy-pool-base-token').addEventListener('change', (e)
     e.target.value === 'custom' ? '' : 'none';
 });
 
-// Well-known USDC addresses per chain
+// Re-apply the base-token restriction when the deploy chain changes
+document.getElementById('deploy-pool-chain').addEventListener('change', (e) => {
+  applyBaseTokenRestriction(parseInt(e.target.value, 10));
+});
+
+// Well-known USDC addresses per chain. There is intentionally NO default
+// fallback: an unconfigured chain must error, not silently use mainnet USDC
+// (that exact fallback deployed pools against an address with no code on
+// Lighter Devnet — POOL_INITIALIZATION_FAILED).
 const USDC_ADDRESSES = {
   1:     '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
   8453:  '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
@@ -39,7 +50,26 @@ const USDC_ADDRESSES = {
   137:   '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
   56:    '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',
   130:   '0x078D888E40faAe0f32594342c85940AF3949E666',
+  999:   '0xb88339CB7199b77E23DB6E890353E22632Ba630f',
+  19529: '0xf2A5728d366c6d0f764Af612cD47F3608E2B4d5B',
 };
+
+// Lighter Devnet smart pools are USDC-only: the ALighter adapter settles Core
+// margin in USDC, so an ETH-based pool could never trade there.
+const USDC_ONLY_CHAINS = new Set([19529]);
+
+/** Restrict the base-token select for USDC-only chains (Lighter Devnet). */
+function applyBaseTokenRestriction(chainId) {
+  const select = document.getElementById('deploy-pool-base-token');
+  const isUsdcOnly = USDC_ONLY_CHAINS.has(chainId);
+  for (const opt of select.options) {
+    if (opt.value === 'ETH') opt.disabled = isUsdcOnly;
+  }
+  if (isUsdcOnly && select.value === 'ETH') {
+    select.value = 'USDC';
+    document.getElementById('deploy-custom-token-field').style.display = 'none';
+  }
+}
 
 /**
  * Minimal ABI encoder for createPool(string, string, address).
@@ -85,7 +115,12 @@ async function deploySmartPool() {
 
   let baseToken = '0x0000000000000000000000000000000000000000'; // ETH
   if (baseTokenSelect === 'USDC') {
-    baseToken = USDC_ADDRESSES[deployChainId] || USDC_ADDRESSES[1];
+    const usdc = USDC_ADDRESSES[deployChainId];
+    if (!usdc) {
+      statusEl.textContent = `USDC is not configured for chain ${deployChainId} — paste the token address via "Custom token address…".`;
+      return;
+    }
+    baseToken = usdc;
   } else if (baseTokenSelect === 'custom') {
     baseToken = document.getElementById('deploy-custom-token').value.trim();
     if (!baseToken || baseToken.length !== 42 || !baseToken.startsWith('0x')) {
@@ -98,15 +133,8 @@ async function deploySmartPool() {
 
   try {
     // Ensure wallet is on the selected deploy chain
-    const walletChainHex = await activeProvider.request({ method: 'eth_chainId' });
-    const walletChain = parseInt(walletChainHex, 16);
-    if (walletChain !== deployChainId) {
-      statusEl.textContent = `Switching to ${CHAIN_NAMES[deployChainId] || 'chain ' + deployChainId}…`;
-      await activeProvider.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: '0x' + deployChainId.toString(16) }],
-      });
-    }
+    statusEl.textContent = `Switching to ${CHAIN_NAMES[deployChainId] || 'chain ' + deployChainId}…`;
+    await ensureWalletChain(activeProvider, deployChainId);
 
     // Encode createPool(string, string, address) — selector 0x1d7d13cc
     const factoryAddress = '0x8DE8895ddD702d9a216E640966A98e08c9228f24';
@@ -114,6 +142,25 @@ async function deploySmartPool() {
     // Minimal ABI encoding for createPool(string name, string symbol, address baseToken)
     const selector = '0x1d7d13cc';
     const data = selector + encodeCreatePoolArgs(name, symbol, baseToken);
+
+    // Simulate the deployment first: a reverting createPool (bad base token,
+    // invalid name/symbol) is rejected here with its reason instead of
+    // burning a failed on-chain transaction.
+    statusEl.textContent = 'Simulating deployment…';
+    try {
+      await activeProvider.request({
+        method: 'eth_call',
+        params: [{ from: connectedAddress, to: factoryAddress, data: data, value: '0x0' }, 'latest'],
+      });
+    } catch (simErr) {
+      const reason = (simErr && (simErr.data?.message || simErr.data?.data || simErr.reason || simErr.message)) || 'unknown revert';
+      statusEl.style.color = 'var(--error)';
+      statusEl.textContent = 'Deployment would fail: ' + String(reason).slice(0, 160) +
+        (baseToken !== '0x0000000000000000000000000000000000000000' && /initialization/i.test(String(reason))
+          ? ' — check the base token address for this chain.'
+          : '');
+      return;
+    }
 
     statusEl.textContent = 'Please confirm in your wallet…';
     const txHash = await activeProvider.request({

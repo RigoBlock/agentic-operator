@@ -139,7 +139,7 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "get_tool_menu",
       description:
-        "Return the menu of directly-invokable tools for a category (e.g. 'hyperliquid', 'gmx', 'swap', " +
+        "Return the menu of directly-invokable tools for a category (e.g. 'hyperliquid', 'lighter', 'gmx', 'swap', " +
         "'lp'/'uniswap', 'crosschain') as structured cards " +
         "listing only the required input fields. Use when the user asks what tools/operations are available " +
         "or wants to run a tool directly by filling a form instead of describing it in prose.",
@@ -148,7 +148,7 @@ export const TOOL_DEFINITIONS = [
         properties: {
           category: {
             type: "string",
-            description: "Menu category, e.g. 'hyperliquid'. Omit for the full list.",
+            description: "Menu category, e.g. 'hyperliquid' or 'lighter'. Omit for the full list.",
           },
         },
         required: [],
@@ -191,7 +191,7 @@ export const TOOL_DEFINITIONS = [
         properties: {
           chain: {
             type: "string",
-            description: "Chain name or ID (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB Chain, Unichain, HyperEVM, Sepolia)",
+            description: "Chain name or ID (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB Chain, Unichain, HyperEVM, Sepolia, Lighter Devnet)",
           },
         },
         required: ["chain"],
@@ -581,6 +581,258 @@ export const TOOL_DEFINITIONS = [
           },
         },
         required: ["amount"],
+      },
+    },
+  },
+
+  // ── Lighter Perpetuals Tools (Lighter EVM devnet, 19529, only) ─────
+
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_get_markets",
+      description:
+        "List Lighter Core perp markets readable for the vault: every market in the vault's tracked list " +
+        "plus the known devnet perp ids 0..3 (labeled ETH/BTC/SOL/DOGE per Lighter devnet docs — docs-derived, " +
+        "unverified). Returns market type, fees, minimum sizes and index/mark prices. Tracked markets show " +
+        "human-scaled prices; untracked ones show raw market units (decimals not readable on-chain). " +
+        "Lighter Devnet (19529) only.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_get_positions",
+      description:
+        "Get the vault's Lighter Core account portfolio: Core account status, shared USDC collateral, and " +
+        "per tracked-market position (size, entry notional, unrealized PnL at mark, margin mode, allocated " +
+        "isolated margin) with totals. Positions are read from the Lighter Core state precompile — resting " +
+        "orders are NOT shown (only order counts exist on-chain). Lighter Devnet (19529) only.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_deposit",
+      description:
+        "Deposit (bridge) USDC from the vault on Lighter Devnet into its Lighter Core perps margin. " +
+        "The first deposit auto-creates the vault's Core master account (no separate activation). " +
+        "Amount is capped to the vault's USDC balance. The executed transaction only means Core ACCEPTED " +
+        "the request — check the outcome via lighter_get_request_status.",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: {
+            type: "string",
+            description: "USDC amount in human units (e.g. '500')",
+          },
+        },
+        required: ["amount"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_withdraw",
+      description:
+        "Withdraw USDC from the vault's Lighter Core perps margin back to the pool on Lighter Devnet. " +
+        "Reverts when the vault has no Core account (deposit first). The executed transaction only means " +
+        "Core ACCEPTED the request — delivery lands in a later transaction; check via lighter_get_request_status.",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: {
+            type: "string",
+            description: "USDC amount in human units (e.g. '250')",
+          },
+        },
+        required: ["amount"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_limit_order",
+      description:
+        "Place a resting Lighter perp limit order (GTT by default, expiry 24h, postOnly optional) to open, " +
+        "increase, decrease (reduceOnly) or close a position. The market must be tracked by the pool first " +
+        "(lighter_track_market). Amounts/prices are validated against the tracked market decimals. " +
+        "The executed transaction only means Core ACCEPTED the request — an accepted order is NOT a fill; " +
+        "track the reqId with lighter_get_request_status.",
+      parameters: {
+        type: "object",
+        properties: {
+          market: {
+            type: "string",
+            description: "Perp market id or devnet symbol (e.g. '0' or 'ETH'; known symbols: ETH, BTC, SOL, DOGE)",
+          },
+          side: {
+            type: "string",
+            description: "'buy' (long / bid) or 'sell' (short / ask)",
+          },
+          size: {
+            type: "string",
+            description: "Size in base-asset units (e.g. '0.15'), exact to the market's sizeDecimals tick",
+          },
+          price: {
+            type: "string",
+            description: "Limit price in quote units (e.g. '67234.5'), required for a limit order",
+          },
+          postOnly: {
+            type: "boolean",
+            description: "true for a post-only (maker) order — tif 'postOnly' instead of 'gtt'",
+          },
+          expiry: {
+            type: "number",
+            description: "Optional GTT expiry in ms since epoch; clamped to 5 minutes … 30 days from now (default: 24h)",
+          },
+          reduceOnly: {
+            type: "boolean",
+            description: "true to only reduce/close an existing position (never opens a new one)",
+          },
+        },
+        required: ["market", "side", "size", "price"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_market_order",
+      description:
+        "Place a Lighter perp market order: priced at the Core mark price ±1% bound, forced IOC " +
+        "(fills immediately up to the bound or the order is cancelled). The market must be tracked by the " +
+        "pool first (lighter_track_market). The executed transaction only means Core ACCEPTED the request — " +
+        "an accepted order is NOT a fill; track the reqId with lighter_get_request_status.",
+      parameters: {
+        type: "object",
+        properties: {
+          market: {
+            type: "string",
+            description: "Perp market id or devnet symbol (e.g. '0' or 'ETH'; known symbols: ETH, BTC, SOL, DOGE)",
+          },
+          side: {
+            type: "string",
+            description: "'buy' (long / bid) or 'sell' (short / ask)",
+          },
+          size: {
+            type: "string",
+            description: "Size in base-asset units (e.g. '0.15'), exact to the market's sizeDecimals tick",
+          },
+          reduceOnly: {
+            type: "boolean",
+            description: "true to only reduce/close an existing position (never opens a new one)",
+          },
+        },
+        required: ["market", "side", "size"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_cancel_order",
+      description:
+        "Cancel an open Lighter perp order by its order index (values below 2^48 are treated as a " +
+        "clientOrderIndex — the clientOrderIndexHex shown when the order was placed). The executed " +
+        "transaction only means Core ACCEPTED the request; check via lighter_get_request_status.",
+      parameters: {
+        type: "object",
+        properties: {
+          orderIndex: {
+            type: "string",
+            description: "Order index or clientOrderIndex (decimal or 0x hex) of the order to cancel",
+          },
+        },
+        required: ["orderIndex"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_cancel_all_orders",
+      description:
+        "Cancel ALL open Lighter perp orders of the vault's Core account. The executed transaction only " +
+        "means Core ACCEPTED the request; check via lighter_get_request_status.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_track_market",
+      description:
+        "Track a Lighter perp market for the pool (pool-owner method): validates on-chain that the market is " +
+        "a perp and records its sizeDecimals/priceDecimals for NAV valuation and order building. Decimals are " +
+        "resolved automatically (verified constants or the Lighter Core API) — never taken from user input, " +
+        "and they are NOT readable on-chain (Lighter docs). Required before any order on the market. The " +
+        "operator ledger is updated when the transaction is drafted.",
+      parameters: {
+        type: "object",
+        properties: {
+          marketId: {
+            type: "string",
+            description: "Perp market id or devnet symbol (e.g. '0' or 'ETH'; known symbols: ETH, BTC, SOL, DOGE)",
+          },
+        },
+        required: ["marketId"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_untrack_market",
+      description:
+        "Untrack a Lighter perp market (pool-owner method). Reverts PositionNotClosed while the pool holds " +
+        "a position on the market. The operator ledger is updated when the transaction is drafted.",
+      parameters: {
+        type: "object",
+        properties: {
+          marketId: {
+            type: "string",
+            description: "Perp market id or devnet symbol to untrack (e.g. '0' or 'ETH')",
+          },
+        },
+        required: ["marketId"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "lighter_get_request_status",
+      description:
+        "Check the status of a Lighter Core request by its reqId (emitted as OrderSent(reqId) / returned by " +
+        "deposit/withdraw/order transactions): pending / success / failed (+ Core error code). Use it after any " +
+        "executed Lighter transaction — a successful EVM transaction only means Core accepted the request. " +
+        "Lighter Devnet (19529) only.",
+      parameters: {
+        type: "object",
+        properties: {
+          reqId: {
+            type: "string",
+            description: "Core request id (decimal or 0x hex) from the transaction result/logs",
+          },
+        },
+        required: ["reqId"],
       },
     },
   },

@@ -34,14 +34,9 @@
  * core admin methods are onlyOwner), so the multicall selectors are not in the
  * delegation whitelist at all.
  *
- * ## Why updateUnitaryValue() instead of getNavDataView()
- *
- * getNavDataView() is a view-only extension (ENavView) that has an edge case
- * bug: when effectiveSupply > 0 AND totalValue <= 0, it returns unitaryValue=0.
- * The actual contract algorithm (_updateNav in MixinPoolValue) returns the
- * STORED unitaryValue in this case, preserving the last known good price.
- * Since eth_call can simulate non-view functions, we use updateUnitaryValue()
- * to get the correct result matching actual contract behavior.
+ * NAV reads eth_call updateUnitaryValue() — the actual contract NAV algorithm,
+ * matching real execution behavior (the ENavView extension is removed in newer
+ * protocol releases and is never used).
  *
  * ## The NAV shield can be temporarily disabled by the operator
  *
@@ -80,6 +75,7 @@ import {
 } from "viem";
 import { RIGOBLOCK_VAULT_ABI, ALLOWED_VAULT_SELECTORS } from "../abi/rigoblockVault.js";
 import { RIGOBLOCK_HYPERLIQUID_ABI, HL_ACTIONS } from "../abi/hyperliquid.js";
+import { LIGHTER_DEVNET_CHAIN_ID } from "../config.js";
 import { getRpcProvider } from "./rpcClient.js";
 import { decodeRevertData, getRevertDataFromError } from "./errorDecoder.js";
 import type { Env } from "../types.js";
@@ -111,6 +107,26 @@ import type { Env } from "../types.js";
 const HYPERCORE_NAV_NEUTRAL_SELECTORS: string[] = [
   ALLOWED_VAULT_SELECTORS.hlDeposit.toLowerCase(),
   ALLOWED_VAULT_SELECTORS.hlDepositFor.toLowerCase(),
+];
+
+/**
+ * Lighter Devnet → Lighter Core NAV-neutral selectors (ALighter) — chain 19529 only.
+ *
+ * Same treatment as the HyperCore selectors above: `sendToCore` moves USDC 1:1
+ * into the Core perps margin the NAV already counts via getLighterBalances, and
+ * `sendToEvm` is the matching withdrawal. Both engage Lighter's 16s settlement
+ * lock (they touch the pool's lastActionTimestamp via LighterLib.recordAction),
+ * so a trailing updateUnitaryValue in the same multicall always reverts
+ * NavLocked — the raw transaction is simulated instead (reverts still block).
+ *
+ * On Lighter, orders/cancels do NOT touch the settlement lock (verified
+ * 2026-10-20), so — unlike HyperEVM's sendRawAction — no payload-based
+ * exemption is needed: createOrder/cancelOrder/cancelAllOrders are trading and
+ * go through the standard multicall shield below, NEVER exempt.
+ */
+const LIGHTER_NAV_NEUTRAL_SELECTORS: string[] = [
+  ALLOWED_VAULT_SELECTORS.lighterSendToCore.toLowerCase(),
+  ALLOWED_VAULT_SELECTORS.lighterSendToEvm.toLowerCase(),
 ];
 
 /**
@@ -258,13 +274,15 @@ export interface NavShieldResult {
   /** Distinguishes WHY the result is what it is:
    *  - 'BLOCKED'       — NAV would drop more than the threshold
    *  - 'TRADE_REVERTS' — the transaction itself reverts on-chain (not a NAV issue)
-   *  - 'NAV_NEUTRAL'   — HyperEVM → HyperCore interaction that locks NAV but
-   *                      cannot impact it (deposit/depositFor/spotSend): tx
-   *                      simulates cleanly; the [tx, updateUnitaryValue]
-   *                      composition would always revert NavLocked, so the raw
-   *                      tx was simulated and the threshold comparison skipped.
-   *                      Trading actions (sendRawAction orders) are NEVER this
-   *                      code — they keep the full shield as the kill-switch.
+   *  - 'NAV_NEUTRAL'   — HyperEVM → HyperCore / Lighter Devnet → Lighter Core
+   *                      interaction that locks NAV but cannot impact it
+   *                      (HyperCore deposit/depositFor/spotSend; Lighter
+   *                      sendToCore/sendToEvm): tx simulates cleanly; the
+   *                      [tx, updateUnitaryValue] composition would always
+   *                      revert NavLocked, so the raw tx was simulated and the
+   *                      threshold comparison skipped. Trading actions are
+   *                      NEVER this code — they keep the full shield as the
+   *                      kill-switch.
    *  - 'DISABLED'      — operator intentionally disabled the NAV shield temporarily
    *  - undefined       — allowed, NAV verified OK
    */
@@ -579,18 +597,27 @@ export async function checkNavImpact(
       (HYPERCORE_NAV_NEUTRAL_SELECTORS.includes(txSelector) ||
         (txSelector === ALLOWED_VAULT_SELECTORS.hlSendRawAction.toLowerCase() &&
           isSpotSendAction(txData)));
-    if (isNavNeutralHyperCoreTx) {
+    // Lighter Devnet (19529): only the two USDC transfer selectors are exempt;
+    // orders/cancels never touch the settlement lock and keep the full shield.
+    const isNavNeutralLighterTx =
+      chainId === 19529 && LIGHTER_NAV_NEUTRAL_SELECTORS.includes(txSelector);
+    if (isNavNeutralHyperCoreTx || isNavNeutralLighterTx) {
       const [preSettled, txSettled] = await Promise.allSettled([
         publicClient.call({
           account: vaultOwner,
           to: vaultAddress,
           data: updateNavCalldata,
+          // Explicit block tag: a bare eth_call intermittently executes against
+          // unattached state on these chains (same failure class as the pinned
+          // eth_estimateGas below) and would false-positive TRADE_REVERTS.
+          blockTag: "latest",
         }),
         publicClient.call({
           account: vaultOwner,
           to: vaultAddress,
           data: txData,
           value: txValue,
+          blockTag: "latest",
         }),
       ]);
 
@@ -613,7 +640,7 @@ export async function checkNavImpact(
         postNavUnitaryValue: "0",
         dropPct: "0",
         impactPct: "0",
-        reason: "Transaction simulates cleanly. This HyperCore interaction locks NAV for a few seconds at the end of execution but cannot impact NAV: deposits move USDC 1:1 into the Core perp account the NAV already counts, and spot sends are withdrawals from Core back to HyperEVM. The NAV threshold comparison is skipped for it by design; reverts still block. Trading actions (orders) keep the full NAV shield.",
+        reason: "Transaction simulates cleanly. This Core interaction locks NAV for a few seconds at the end of execution but cannot impact NAV: deposits move USDC 1:1 into the Core perp account the NAV already counts, and withdrawals move it back out 1:1. The NAV threshold comparison is skipped for it by design; reverts still block. Trading actions (orders) keep the full NAV shield.",
       };
     }
 
@@ -625,18 +652,22 @@ export async function checkNavImpact(
 
     // Run both eth_calls concurrently from the vault owner. viem's HTTP
     // transport batches independent JSON-RPC requests into a single HTTP call,
-    // so this is still one round-trip.
+    // so this is still one round-trip. Block tags are pinned explicit: a bare
+    // eth_call intermittently executes against unattached state on HyperEVM /
+    // Lighter Devnet and would false-positive TRADE_REVERTS.
     const [preSettled, multiSettled] = await Promise.allSettled([
       publicClient.call({
         account: vaultOwner,
         to: vaultAddress,
         data: updateNavCalldata,
+        blockTag: "latest",
       }),
       publicClient.call({
         account: vaultOwner,
         to: vaultAddress,
         data: multicallData,
         value: txValue,
+        blockTag: "latest",
       }),
     ]);
 
@@ -669,6 +700,18 @@ export async function checkNavImpact(
     // means we cannot verify NAV impact. We MUST block the transaction.
     const reason = formatSimulationError(err, "Could not simulate NAV impact");
     console.error(`[NavShield] BLOCKED: ${reason}`);
+    let detail = `Cannot simulate vault NAV impact on chain ${chainId}: ${reason}`;
+    if (chainId === LIGHTER_DEVNET_CHAIN_ID) {
+      // Known protocol-side issue on Lighter Devnet (see docs/lighter-integration.md,
+      // discrepancies #1/#2): the deployed pool implementation's READ_CORE queries
+      // mismatch the devnet build, so once a pool has Lighter Core activity its
+      // on-chain NAV computation (updateUnitaryValue, ALighter balance reads)
+      // reverts with no revert data. Verified empirically: the raw ALighter
+      // sendToCore reverts the same way from the vault owner, so this is not a
+      // shield artifact — no setting in the operator can unblock the vault.
+      detail +=
+        " On Lighter Devnet this specific failure signature (the vault's NAV read reverting with no reason, after the pool's first Core deposit) is a known deployed-contract issue: the pool implementation on this devnet cannot compute NAV once it has Core activity. Deposits, orders, and mints on this pool are blocked on-chain until the protocol team redeploys the Lighter adapter/pool implementation. Disabling the NAV shield will not help — the raw transaction reverts identically outside this service.";
+    }
     return {
       allowed: false,
       verified: false,
@@ -676,7 +719,7 @@ export async function checkNavImpact(
       postNavUnitaryValue: "0",
       dropPct: "0",
       impactPct: "0",
-      reason: `Cannot simulate vault NAV impact on chain ${chainId}: ${reason}`,
+      reason: detail,
     };
   }
 }

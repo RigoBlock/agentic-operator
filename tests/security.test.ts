@@ -193,6 +193,13 @@ describe("execution validation invariants", () => {
       "0x2b2dfd2c": "deposit(uint256,uint32)",                 // AHyperliquid — bridge USDC to Core
       "0xc23c545a": "depositFor(address,uint256,uint32)",      // AHyperliquid — explicit recipient
       "0x17938e13": "sendRawAction(bytes)",                    // AHyperliquid — CoreWriter actions
+      "0xeed67f2c": "sendToCore(uint32,address,bool,uint256,uint8)", // ALighter — deposit USDC to Core perps
+      "0x60f502da": "sendToEvm(uint48,uint32,address,uint8,uint64)", // ALighter — withdraw USDC from Core perps
+      "0x8a7da422": "createOrder(uint48,uint16,uint48,uint8,uint8,uint64,uint48,uint32,bool,bool,uint32)", // ALighter — perp order
+      "0x736fd6b3": "cancelOrder(uint48,uint64)",              // ALighter
+      "0xa4b6f756": "cancelAllOrders(uint48)",                 // ALighter
+      "0x341a942b": "trackMarket(uint16,uint8,uint8)",         // ALighter — pool-owner market tracking
+      "0xe0ad5442": "untrackMarket(uint16)",                   // ALighter
       "0x1c58db4f": "wrapETH()",                                // AUniswap wrap native
       "0x49616997": "unwrapWETH9(uint256)",                     // AUniswap unwrap native
       "0xa694fc3a": "stake(uint256)",                          // GRG staking

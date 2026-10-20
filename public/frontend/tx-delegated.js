@@ -86,7 +86,7 @@ async function confirmDelegatedExecution(btn) {
 
   // Pre-check: if sponsored gas is OFF, verify the agent has the chain's native
   // gas token before calling execute
-  const NATIVE_GAS_SYMBOL = { 999: 'HYPE', 56: 'BNB', 137: 'POL' };
+  const NATIVE_GAS_SYMBOL = { 999: 'HYPE', 56: 'BNB', 137: 'POL', 19529: 'ETH' };
   const gasSymbol = NATIVE_GAS_SYMBOL[tx.chainId] || 'ETH';
   if (!txSponsored) {
     statusEl.style.color = 'var(--muted)';

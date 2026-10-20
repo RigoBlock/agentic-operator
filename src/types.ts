@@ -73,6 +73,17 @@ export interface Env {
   CDP_API_KEY_SECRET: string;  // Coinbase Developer Platform API key secret
   CDP_WALLET_SECRET: string;   // Coinbase Developer Platform wallet secret (agent wallet signing)
 
+  // Lighter EVM devnet (chain 19529) — private devnet endpoints, never hardcode in source.
+  // No Alchemy support: the RPC URL is used directly (no sponsored gas / 7702 / sca).
+  LIGHTER_RPC_URL?: string;             // Private RPC endpoint for Lighter Devnet
+  LIGHTER_DEVNET_BROWSER_URL?: string;  // Block explorer base URL (private for now)
+  // Lighter Core REST API base URL (private). The ONLY source of order-book
+  // sizeDecimals/priceDecimals — the READ_CORE precompile does not return them.
+  // Expected to end in /api (e.g. https://host/api); orderBookDetails is called
+  // as GET {base}/v1/orderBookDetails?market_id=<id>. NOT the Blockscout-style
+  // explorer /api (that one only proxies eth-rpc and returns module/action errors).
+  LIGHTER_CORE_API_URL?: string;
+
   /**
    * Optional request-scoped cache for pre-swap NAV reads.
    * Routes create a fresh Map per request and pass it through processChat /

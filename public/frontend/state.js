@@ -61,6 +61,7 @@ export function setDelegationState(v) { delegationState = v; }
 export const CHAIN_NAMES = {
   1: 'Ethereum', 8453: 'Base', 42161: 'Arbitrum', 10: 'Optimism',
   137: 'Polygon', 56: 'BNB Chain', 130: 'Unichain', 999: 'HyperEVM', 11155111: 'Sepolia',
+  19529: 'Lighter Devnet',
 };
 
 export const MAINNET_CHAINS_LIST = [
@@ -75,8 +76,18 @@ export const MAINNET_CHAINS_LIST = [
 ];
 
 export const TESTNET_CHAINS_LIST = [
+  { id: 19529, name: 'Lighter Devnet' },
   { id: 11155111, name: 'Sepolia' },
 ];
+
+/** Chain selected when the user flips testnet mode on. */
+export const DEFAULT_TESTNET_CHAIN_ID = 19529;
+
+/** Per-chain details fetched from /api/chains (private devnet RPC/explorer URLs).
+ *  Populated once at startup via setChainDetails; empty on fetch failure. */
+let chainDetails = {};
+export function setChainDetails(d) { chainDetails = d || {}; }
+export function getChainDetails() { return chainDetails; }
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -231,5 +242,8 @@ export function getExplorerUrl(chainId, txHash) {
     999: 'https://hyperevmscan.io/tx/',
     11155111: 'https://sepolia.etherscan.io/tx/',
   };
+  // Env-provided explorer (e.g. Lighter Devnet) takes precedence over the static map.
+  const detailBase = chainDetails[chainId]?.blockExplorerUrl;
+  if (detailBase) return `${String(detailBase).replace(/\/+$/, '')}/tx/${txHash}`;
   return (explorers[chainId] || 'https://etherscan.io/tx/') + txHash;
 }

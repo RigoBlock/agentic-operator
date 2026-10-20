@@ -11,6 +11,7 @@ import type { ToolResult } from "../client.js";
 import {
   getPoolData, getNavData, getTokenDecimals, getVaultTokenBalance, encodeMint,
 } from "../../services/vault.js";
+import { getRpcProvider } from "../../services/rpcClient.js";
 import { resolveTokenAddress } from "../../config.js";
 import { encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../../abi/poolFactory.js";
@@ -79,23 +80,28 @@ export async function handle_deploy_smart_pool(
   let baseTokenAddress: Address = "0x0000000000000000000000000000000000000000";
   let baseTokenArg = (args.baseToken as string) || "ETH";
 
-  // HyperEVM (Hyperliquid) pools are USDC-only: the AHyperliquid adapter settles
-  // margin in USDC, so a pool with any other base token could never trade there.
-  // Default to USDC and reject any other base token with actionable guidance.
-  if (ctx.chainId === 999) {
-    const HYPER_USDC = "0xb88339CB7199b77E23DB6E890353E22632Ba630f";
+  // HyperEVM (Hyperliquid) and Lighter Devnet pools are USDC-only: the
+  // AHyperliquid / ALighter adapters settle margin in USDC, so a pool with any
+  // other base token could never trade there. Default to USDC and reject any
+  // other base token with actionable guidance.
+  const USDC_ONLY: Record<number, string> = {
+    999: "0xb88339CB7199b77E23DB6E890353E22632Ba630f",
+    19529: "0xf2A5728d366c6d0f764Af612cD47F3608E2B4d5B",
+  };
+  const chainUsdc = USDC_ONLY[ctx.chainId];
+  if (chainUsdc) {
     const requested = (args.baseToken as string) || "USDC";
     const isUsdc =
       requested.toUpperCase() === "USDC" ||
-      (requested.startsWith("0x") && requested.toLowerCase() === HYPER_USDC.toLowerCase());
+      (requested.startsWith("0x") && requested.toLowerCase() === chainUsdc.toLowerCase());
     if (!isUsdc) {
       throw new Error(
-        `HyperEVM smart pools must use USDC as the base token — the Hyperliquid adapter settles ` +
+        `${chainName} smart pools must use USDC as the base token — the perp adapter settles ` +
         `margin in USDC, so a pool with a different base token could never trade there. ` +
         `Requested: "${requested}". Deploy with USDC, or switch to another chain for an ETH-based pool.`,
       );
     }
-    baseTokenAddress = HYPER_USDC as Address;
+    baseTokenAddress = chainUsdc as Address;
     baseTokenArg = "USDC";
   } else if (baseTokenArg.startsWith("0x") && baseTokenArg.length === 42) {
     baseTokenAddress = baseTokenArg as Address;
@@ -103,11 +109,56 @@ export async function handle_deploy_smart_pool(
     baseTokenAddress = await resolveTokenAddress(ctx.chainId, baseTokenArg) as Address;
   }
 
+  // Preflight: a non-native base token must be a contract on this chain.
+  // Otherwise initialization fails at `assert(baseToken.code.length > 0)` and
+  // the factory only surfaces the opaque POOL_INITIALIZATION_FAILED_ERROR —
+  // catch it here with an actionable message instead.
+  if (baseTokenAddress !== "0x0000000000000000000000000000000000000000") {
+    try {
+      const code = await getRpcProvider(ctx.chainId).getCode({ address: baseTokenAddress });
+      if (code === "0x") {
+        throw new Error(
+          `Base token ${baseTokenAddress} has no contract code on ${chainName} — deploying with it would ` +
+          `fail with POOL_INITIALIZATION_FAILED. A token address from the wrong chain (mainnet USDC used on ` +
+          `another chain is the usual cause). Verify the token address for ${chainName}.`,
+        );
+      }
+    } catch (codeErr) {
+      // Only block on a confirmed empty result; an unreadable RPC must not
+      // prevent a deploy that MetaMask would price and confirm itself (same
+      // policy as the createPool simulation below).
+      if (codeErr instanceof Error && /has no contract code on/.test(codeErr.message)) throw codeErr;
+    }
+  }
+
   const data = encodeFunctionData({
     abi: POOL_FACTORY_ABI,
     functionName: "createPool",
     args: [poolName, poolSymbol, baseTokenAddress],
   });
+
+  // Simulate the deployment before it reaches the wallet, so a reverting
+  // createPool is rejected here with its reason instead of a failed on-chain tx.
+  try {
+    await getRpcProvider(ctx.chainId).call({
+      account: (ctx.operatorAddress ?? undefined) as Address | undefined,
+      to: POOL_FACTORY_ADDRESS as Address,
+      data,
+      blockTag: "latest",
+    });
+  } catch (simErr) {
+    const simMsg = simErr instanceof Error ? simErr.message : String(simErr);
+    // Only block on an actual execution revert; an unreadable RPC must not
+    // prevent a deploy that MetaMask would price and confirm itself.
+    // ("failed" is deliberately excluded — transport errors like "fetch
+    // failed" must not be mistaken for a revert.)
+    if (/revert|denied|invalid/i.test(simMsg)) {
+      throw new Error(
+        `Deployment simulation failed on ${chainName}: ${simMsg}. ` +
+        `The transaction would revert — fix the parameters before signing.`,
+      );
+    }
+  }
 
   const transaction: TransactionDraft = {
     to: POOL_FACTORY_ADDRESS as Address,
@@ -190,8 +241,15 @@ export async function handle_fund_pool(
   //    expectedPoolTokens = amountIn * 10^18 / unitaryValue
   //    amountOutMin = expectedPoolTokens * 0.95
   const unitaryValue = navData.unitaryValue;
+  // An UNPRICED pool must be detected by its zero total value, not just a zero
+  // unitary value: updateUnitaryValue() — the live contract NAV computation —
+  // returns the pool's initial unitary value (10^decimals) even when the pool
+  // is empty. Pricing against that initial value would demand ~10^12x more
+  // pool tokens than a first mint actually produces and the mint reverts
+  // on-chain.
+  const isUnpricedPool = unitaryValue === 0n || navData.totalValue === 0n;
   let amountOutMin: bigint;
-  if (unitaryValue === 0n) {
+  if (isUnpricedPool) {
     // First mint (empty pool) — no NAV yet, accept any amount
     amountOutMin = 0n;
   } else {
@@ -200,12 +258,12 @@ export async function handle_fund_pool(
   }
 
   // Format for display
-  const unitaryValueFormatted = unitaryValue > 0n
-    ? formatUnits(unitaryValue, 18)
-    : "N/A (first mint)";
-  const expectedTokensFormatted = unitaryValue > 0n
-    ? formatUnits((amountInWei * (10n ** 18n)) / unitaryValue, 18)
-    : amountStr;
+  const unitaryValueFormatted = isUnpricedPool
+    ? "N/A (first mint)"
+    : formatUnits(unitaryValue, 18);
+  const expectedTokensFormatted = isUnpricedPool
+    ? amountStr
+    : formatUnits((amountInWei * (10n ** 18n)) / unitaryValue, 18);
   const minTokensFormatted = formatUnits(amountOutMin, 18);
 
   // 5. Build the mint transaction
@@ -242,15 +300,49 @@ export async function handle_fund_pool(
     return { message, transaction };
   }
 
-  // ERC-20 base token — need approve first, then mint
-  // Build approve(vaultAddress, amountIn) on the base token
+  // ERC-20 base token — mint needs an approve only when the operator's
+  // current allowance to the pool is insufficient. Read it on-chain so a
+  // repeat request after a mined approval returns the mint directly instead
+  // of the same approve again.
+  const allowance: bigint = await getRpcProvider(ctx.chainId).readContract({
+    address: baseToken as Address,
+    abi: ERC20_ABI,
+    functionName: "allowance",
+    args: [ctx.operatorAddress as Address, ctx.vaultAddress as Address],
+  });
+
+  if (allowance >= amountInWei) {
+    const transaction: TransactionDraft = {
+      to: ctx.vaultAddress as Address,
+      data: mintData,
+      value: "0x0",
+      chainId: ctx.chainId,
+      description: `Fund pool: deposit ${amountStr} ${baseSymbol} into ${poolData.name}`,
+      operatorOnly: true,
+    };
+    const message = [
+      `✅ Pool funding ready — approval already on-chain`,
+      `Pool: ${poolData.name} (${poolData.symbol})`,
+      `Deposit: ${amountStr} ${baseSymbol}`,
+      `NAV per token: ${unitaryValueFormatted} ${baseSymbol}`,
+      `Expected pool tokens: ~${parseFloat(expectedTokensFormatted).toFixed(6)} ${poolData.symbol}`,
+      `Min pool tokens (5% slippage): ${parseFloat(minTokensFormatted).toFixed(6)} ${poolData.symbol}`,
+      `Chain: ${chainName}`,
+      `Recipient: ${recipient}`,
+      "",
+      "Your existing token approval covers this deposit — sign the mint transaction only.",
+    ].join("\n");
+    return { message, transaction };
+  }
+
+  // Insufficient allowance — return the approve transaction first; once it is
+  // mined, asking again returns the mint (allowance is re-read on-chain).
   const approveData = encodeFunctionData({
     abi: ERC20_ABI,
     functionName: "approve",
     args: [ctx.vaultAddress as Address, amountInWei],
   });
 
-  // Return the approve transaction first — the mint follows after approval
   const transaction: TransactionDraft = {
     to: baseToken as Address,
     data: approveData,
@@ -271,7 +363,8 @@ export async function handle_fund_pool(
     `Recipient: ${recipient}`,
     "",
     `**Step 1/2:** Sign the approval transaction to allow the pool to transfer your ${baseSymbol}.`,
-    "**Step 2/2:** After approval, you'll be prompted to sign the mint transaction.",
+    "**Step 2/2:** After the approval transaction is confirmed, ask again (e.g. \"mint " +
+    `${amountStr} ${baseSymbol}\") — the approval is detected on-chain and only the mint transaction is returned.`,
   ].join("\n");
 
   return { message, transaction };

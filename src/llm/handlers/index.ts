@@ -35,6 +35,17 @@ import { handle_hyperliquid_limit_order } from "./hyperliquid.js";
 import { handle_hyperliquid_cancel_order } from "./hyperliquid.js";
 import { handle_hyperliquid_usd_class_transfer } from "./hyperliquid.js";
 import { handle_hyperliquid_spot_send } from "./hyperliquid.js";
+import { handle_lighter_get_markets } from "./lighter.js";
+import { handle_lighter_get_positions } from "./lighter.js";
+import { handle_lighter_deposit } from "./lighter.js";
+import { handle_lighter_withdraw } from "./lighter.js";
+import { handle_lighter_limit_order } from "./lighter.js";
+import { handle_lighter_market_order } from "./lighter.js";
+import { handle_lighter_cancel_order } from "./lighter.js";
+import { handle_lighter_cancel_all_orders } from "./lighter.js";
+import { handle_lighter_track_market } from "./lighter.js";
+import { handle_lighter_untrack_market } from "./lighter.js";
+import { handle_lighter_get_request_status } from "./lighter.js";
 import { handle_setup_delegation } from "./delegation.js";
 import { handle_revoke_delegation } from "./delegation.js";
 import { handle_check_delegation_status } from "./delegation.js";
@@ -93,6 +104,17 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "hyperliquid_cancel_order": handle_hyperliquid_cancel_order,
   "hyperliquid_usd_class_transfer": handle_hyperliquid_usd_class_transfer,
   "hyperliquid_spot_send": handle_hyperliquid_spot_send,
+  "lighter_get_markets": handle_lighter_get_markets,
+  "lighter_get_positions": handle_lighter_get_positions,
+  "lighter_deposit": handle_lighter_deposit,
+  "lighter_withdraw": handle_lighter_withdraw,
+  "lighter_limit_order": handle_lighter_limit_order,
+  "lighter_market_order": handle_lighter_market_order,
+  "lighter_cancel_order": handle_lighter_cancel_order,
+  "lighter_cancel_all_orders": handle_lighter_cancel_all_orders,
+  "lighter_track_market": handle_lighter_track_market,
+  "lighter_untrack_market": handle_lighter_untrack_market,
+  "lighter_get_request_status": handle_lighter_get_request_status,
   "check_pending_tx": handle_check_pending_tx,
   "setup_delegation": handle_setup_delegation,
   "revoke_delegation": handle_revoke_delegation,

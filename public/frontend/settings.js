@@ -5,6 +5,7 @@ import {
   CHAIN_NAMES,
   authSignature, authTimestamp,
   apiHeaders,
+  DEFAULT_TESTNET_CHAIN_ID,
 } from './state.js';
 
 import { appendMessage } from './chat-ui.js';
@@ -589,7 +590,7 @@ function restoreTradeSettings() {
 function toggleTestnet() {
   const on = document.getElementById('testnet-toggle').checked;
   localStorage.setItem('rigoblock_testnet', on);
-  setCurrentChainId(on ? 11155111 : 1);
+  setCurrentChainId(on ? DEFAULT_TESTNET_CHAIN_ID : 1);
   window.updateChainDisplay();
   window.applyTestnetState(on);
   window.refreshDelegationStatus();

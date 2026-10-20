@@ -5,6 +5,7 @@
  * not from environment variables.
  */
 
+import { defineChain } from "viem";
 import {
   type Chain,
   base,
@@ -20,6 +21,28 @@ import {
 } from "viem/chains";
 import { getEnv } from "./services/envContext.js";
 
+/** Lighter EVM devnet (Axiom/OpenVM rollup) — private devnet, env-provided RPC. */
+export const LIGHTER_DEVNET_CHAIN_ID = 19529;
+
+/** Custom viem chain — not in viem/chains. The rpcUrls entry is a placeholder:
+ *  the real transport URL always comes from getRpcUrl (LIGHTER_RPC_URL env).
+ *  Multicall3 is deployed at the canonical address (verified on devnet) — viem's
+ *  client.multicall (used by getVaultInfo and others) requires this declaration. */
+const lighterDevnet = defineChain({
+  id: LIGHTER_DEVNET_CHAIN_ID,
+  name: "Lighter Devnet",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: {
+    default: { http: ["https://rpc.lighter-devnet.invalid"] },
+  },
+  contracts: {
+    multicall3: {
+      address: "0xcA11bde05977b3631167028862bE2a173976CA11",
+      blockCreated: 0,
+    },
+  },
+});
+
 const chainMap: Record<number, Chain> = {
   1: mainnet,
   10: optimism,
@@ -29,6 +52,7 @@ const chainMap: Record<number, Chain> = {
   999: hyperliquid,
   8453: base,
   42161: arbitrum,
+  19529: lighterDevnet,
   11155111: sepolia,
   84532: baseSepolia,
 };
@@ -45,8 +69,9 @@ export const SUPPORTED_CHAINS = [
   { id: 999, name: "HyperEVM", shortName: "hyperevm" },
 ];
 
-/** Testnet chains (only shown when testnet mode is on) */
+/** Testnet chains (only shown when testnet mode is on). Lighter Devnet is the default testnet. */
 export const TESTNET_CHAINS = [
+  { id: LIGHTER_DEVNET_CHAIN_ID, name: "Lighter Devnet", shortName: "lighter" },
   { id: 11155111, name: "Sepolia", shortName: "sepolia" },
 ];
 
@@ -110,6 +135,17 @@ const PUBLIC_RPC_URLS: Record<number, string> = {};
 
 /** Get the alchemy RPC URL for a chain */
 export function getRpcUrl(chainId: number): string {
+  if (chainId === LIGHTER_DEVNET_CHAIN_ID) {
+    // Private devnet RPC — no Alchemy support, URL comes straight from env.
+    const url = getEnv()?.LIGHTER_RPC_URL ?? process.env.LIGHTER_RPC_URL;
+    if (!url) {
+      throw new Error(
+        "LIGHTER_RPC_URL is not configured. Lighter Devnet on-chain operations require the private devnet RPC URL.",
+      );
+    }
+    return url;
+  }
+
   const publicUrl = PUBLIC_RPC_URLS[chainId];
   if (publicUrl) return publicUrl;
 
@@ -147,6 +183,7 @@ export const MIN_BALANCE: Record<number, bigint> = {
   // Testnets
   11155111: 500_000_000_000_000n,    // 0.0005 ETH  — Sepolia
   84532:    1_000_000_000_000n,      // 0.000001 ETH — Base Sepolia
+  19529:    1_000_000_000_000n,      // 0.000001 ETH — Lighter Devnet (gas ~0.01 gwei)
 };
 
 /** Block explorer transaction URLs per chain. */
@@ -163,10 +200,22 @@ export const EXPLORER_TX_URL: Record<number, string> = {
   84532: "https://sepolia.basescan.org/tx/",
 };
 
+/** Resolve the block explorer transaction-URL base for a chain.
+ *  Most chains have a static entry; Lighter Devnet's explorer is a private
+ *  devnet URL injected via env — returns undefined when it is not configured. */
+export function getExplorerTxUrl(chainId: number): string | undefined {
+  if (chainId === LIGHTER_DEVNET_CHAIN_ID) {
+    const base = getEnv()?.LIGHTER_DEVNET_BROWSER_URL ?? process.env.LIGHTER_DEVNET_BROWSER_URL;
+    return base ? `${base.replace(/\/+$/, "")}/tx/` : undefined;
+  }
+  return EXPLORER_TX_URL[chainId];
+}
+
 /** Native token symbol per chain. Used to derive wrapped-native mappings dynamically. */
 export const NATIVE_TOKEN: Record<number, string> = {
   1: "ETH", 10: "ETH", 130: "ETH", 8453: "ETH", 42161: "ETH",
   56: "BNB", 137: "POL", 999: "HYPE",
+  19529: "ETH", // Lighter Devnet
 };
 
 /** Get the native token symbol for a chain (e.g., "ETH", "BNB", "POL"). */
@@ -276,6 +325,12 @@ export const TOKEN_MAP: Record<number, Record<string, `0x${string}`>> = {
     // Base Sepolia
     ETH: "0x0000000000000000000000000000000000000000",
     WETH: "0x4200000000000000000000000000000000000006",
+  },
+  19529: {
+    // Lighter Devnet — Rigoblock protocol deployed, no DEX/oracle tokens.
+    // USDC is the pool base token for the ALighter integration (assetIndex 3).
+    ETH: "0x0000000000000000000000000000000000000000",
+    USDC: "0xf2A5728d366c6d0f764Af612cD47F3608E2B4d5B",
   },
 };
 
