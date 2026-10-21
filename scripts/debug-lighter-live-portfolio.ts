@@ -12,7 +12,8 @@ console.log("tracked markets:", tracked);
 for (const m of tracked?.markets ?? []) {
   const pos = await readLighterPosition(19529, VAULT, m.marketId);
   const info = await readLighterMarketInfo(19529, m.marketId);
-  console.log(`market ${m.marketId} (${m.symbol}):`, {
+  console.log(`market ${m.marketId}:`,
+    {
     position: pos?.position.toString(),
     entryQuote: pos?.entryQuote.toString(),
     funding: pos?.lastFundingRatePrefixSum.toString(),

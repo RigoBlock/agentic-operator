@@ -15,6 +15,7 @@ import { getRpcProvider } from "../../services/rpcClient.js";
 import { resolveTokenAddress } from "../../config.js";
 import { encodeFunctionData, parseUnits, formatUnits, type Address, type Hex } from "viem";
 import { POOL_FACTORY_ADDRESS, POOL_FACTORY_ABI } from "../../abi/poolFactory.js";
+import { RIGOBLOCK_VAULT_ABI } from "../../abi/rigoblockVault.js";
 import { ERC20_ABI } from "../../abi/erc20.js";
 import { resolveChainArg, resolveChainName } from "../client.js";
 
@@ -466,6 +467,63 @@ export async function handle_upgrade_pool(
     "",
     "Sign this transaction to pull the current implementation from the factory beacon into your pool. " +
     "The pool's storage, NAV, and positions are preserved — only the code changes.",
+  ].join("\n");
+
+  return { message, transaction };
+}
+
+
+export async function handle_update_nav(
+  _env: Env,
+  ctx: RequestContext,
+  _args: Record<string, unknown>,
+  _toolName: string,
+): Promise<ToolResult> {
+  if (!ctx.operatorAddress) {
+    throw new Error("Wallet not connected. Connect your wallet first.");
+  }
+  if (!ctx.vaultAddress) {
+    throw new Error("Set a vault address first.");
+  }
+  const vault = ctx.vaultAddress as Address;
+  const chainName = resolveChainName(ctx.chainId);
+
+  // Simulate the update first: this is the exact computation the transaction
+  // will perform, so the values shown here are what the on-chain log will
+  // record (modulo balance movements before the tx mines). A revert here
+  // (e.g. NavLocked during a Lighter/HyperCore settlement window) surfaces
+  // before the tx reaches the wallet. netTotalValue is on the pool-token
+  // decimals scale (same convention as the chat's get_vault_info display).
+  const [nav, poolData] = await Promise.all([
+    getNavData(ctx.chainId, vault),
+    getPoolData(ctx.chainId, vault),
+  ]);
+  const poolDecimals = poolData.decimals ?? 18;
+  const unitaryValueFormatted = nav.unitaryValue === 0n
+    ? "N/A (pool not priced yet)"
+    : formatUnits(nav.unitaryValue, 18);
+
+  const transaction: TransactionDraft = {
+    to: vault,
+    data: encodeFunctionData({
+      abi: RIGOBLOCK_VAULT_ABI,
+      functionName: "updateUnitaryValue",
+    }),
+    value: "0x0",
+    chainId: ctx.chainId,
+    description: "Update pool NAV (unitary value)",
+    operatorOnly: true,
+  };
+
+  const message = [
+    `✅ NAV update ready`,
+    `Pool: ${poolData.name} (${poolData.symbol})`,
+    `Chain: ${chainName}`,
+    `Unitary value (to be written): ${unitaryValueFormatted}`,
+    `Net total value: ${formatUnits(nav.totalValue, poolDecimals)}`,
+    "",
+    "Sign this transaction to recompute and store the pool's unitary value on-chain. " +
+    "The new NAV is recorded in the transaction logs — use it to reconcile against the value shown in chat.",
   ].join("\n");
 
   return { message, transaction };

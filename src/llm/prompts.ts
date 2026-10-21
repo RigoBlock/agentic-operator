@@ -174,7 +174,7 @@ export const DOMAIN_TOOLS: Record<DomainKey, string[]> = {
   ],
   vault: [
     "get_vault_info", "get_token_balance", "switch_chain",
-    "deploy_smart_pool", "fund_pool",
+    "deploy_smart_pool", "fund_pool", "upgrade_pool", "update_nav",
   ],
   strategy: [
     "list_strategies",
@@ -302,7 +302,8 @@ The agent wallet is a Coinbase Developer Platform server wallet — one determin
   vault: `VAULT:
 - get_vault_info / get_token_balance: read vault state. switch_chain: only when the user wants to change chain with no other action.
 - deploy_smart_pool: only on explicit request — pass the name EXACTLY as typed (registry is case-sensitive); symbol is uppercased server-side. On HyperEVM the base token is always USDC.
-- fund_pool: "buy X USDT of [pool]" — mints pool tokens (5% slippage; approve transaction included for ERC-20 base tokens).`,
+- fund_pool: "buy X USDT of [pool]" — mints pool tokens (5% slippage; approve transaction included for ERC-20 base tokens).
+- update_nav: "update NAV / refresh unitary value" — owner-signed updateUnitaryValue(); the preview shows the exact value the on-chain log will record, for reconciling against the chat display.`,
 
   strategy: `TWAP ORDERS (deterministic only — no free-form strategies):
 Any "in parts / over time / DCA / TWAP / every N minutes" trade request → create_twap_order: side, sellToken, buyToken, totalAmount, sliceAmount, intervalMinutes (min 5), dex ("uniswap"/"0x", default "0x").

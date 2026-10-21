@@ -75,6 +75,7 @@ const REQUIRED_TOOLS = [
   "deploy_smart_pool",
   "fund_pool",
   "upgrade_pool",
+  "update_nav",
   // Utility
   "switch_chain",
   // Trading settings
@@ -203,7 +204,7 @@ describe("get_tool_menu handler", () => {
       {} as never, {} as never, { category: "pool" }, "get_tool_menu",
     );
     const cards = (result.metadata as { toolCards: { toolName: string; title: string; fields: { name: string; required: boolean }[] }[] }).toolCards;
-    expect(cards.map((c) => c.toolName)).toEqual(["fund_pool", "deploy_smart_pool", "upgrade_pool"]);
+    expect(cards.map((c) => c.toolName)).toEqual(["fund_pool", "deploy_smart_pool", "upgrade_pool", "update_nav"]);
     const fund = cards.find((c) => c.toolName === "fund_pool")!;
     expect(fund.fields.filter((f) => f.required).map((f) => f.name)).toEqual(["amount"]);
     const deploy = cards.find((c) => c.toolName === "deploy_smart_pool")!;

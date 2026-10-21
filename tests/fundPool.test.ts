@@ -9,7 +9,9 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Address } from "viem";
-import { handle_fund_pool } from "../src/llm/handlers/vault-mgmt.js";
+import { handle_fund_pool, handle_update_nav } from "../src/llm/handlers/vault-mgmt.js";
+import { encodeFunctionData } from "viem";
+import { RIGOBLOCK_VAULT_ABI } from "../src/abi/rigoblockVault.js";
 import type { RequestContext, Env } from "../src/types.js";
 
 const { mockReadContract, mockGetPoolData, mockGetNavData, mockGetTokenDecimals, mockGetVaultTokenBalance } =
@@ -178,5 +180,35 @@ describe("fund_pool input validation", () => {
     const ctx = { ...makeCtx(), operatorAddress: undefined } as unknown as RequestContext;
     await expect(handle_fund_pool(env, ctx, { amount: "35" }, "fund_pool"))
       .rejects.toThrow(/Wallet not connected/);
+  });
+});
+
+describe("update_nav", () => {
+  it("drafts updateUnitaryValue targeting the vault with a NAV preview", async () => {
+    mockGetNavData.mockResolvedValue({ unitaryValue: 1_000_000_000_000n, totalValue: 40_000_000n, timestamp: 0n });
+    mockGetPoolData.mockResolvedValue({ name: "earnest", symbol: "EARN", baseToken: USDC, decimals: 6 });
+    const result = await handle_update_nav(env, makeCtx(), {}, "update_nav");
+
+    expect(result.transaction?.to.toLowerCase()).toBe(VAULT);
+    expect(result.transaction?.data).toBe(
+      encodeFunctionData({ abi: RIGOBLOCK_VAULT_ABI, functionName: "updateUnitaryValue" }),
+    );
+    expect(result.transaction?.operatorOnly).toBe(true);
+    // Preview shows what the on-chain log will record (18-dec unitary value,
+    // net total value on pool-token decimals)
+    expect(result.message).toContain("earnest (EARN)");
+    expect(result.message).toContain("Unitary value (to be written): 0.000001");
+    expect(result.message).toContain("Net total value: 40");
+  });
+
+  it("reports N/A for a not-yet-priced pool", async () => {
+    mockGetNavData.mockResolvedValue({ unitaryValue: 0n, totalValue: 0n, timestamp: 0n });
+    const result = await handle_update_nav(env, makeCtx(), {}, "update_nav");
+    expect(result.message).toContain("N/A (pool not priced yet)");
+  });
+
+  it("requires a connected wallet", async () => {
+    const ctx = { ...makeCtx(), operatorAddress: undefined } as unknown as RequestContext;
+    await expect(handle_update_nav(env, ctx, {}, "update_nav")).rejects.toThrow(/Wallet not connected/);
   });
 });

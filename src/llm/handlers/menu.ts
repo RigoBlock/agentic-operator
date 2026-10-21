@@ -80,6 +80,7 @@ const MENU_TITLES: Record<string, string> = {
   fund_pool: "Fund pool (mint pool tokens)",
   deploy_smart_pool: "Deploy smart pool",
   upgrade_pool: "Upgrade pool implementation",
+  update_nav: "Update NAV (unitary value)",
 };
 
 /**
@@ -246,6 +247,7 @@ const POOL_MENU: MenuEntry[] = [
   "fund_pool",
   "deploy_smart_pool",
   "upgrade_pool",
+  "update_nav",
 ];
 
 /** Categories exposed by the menu. Aliases point at shared lists. */

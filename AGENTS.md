@@ -248,9 +248,25 @@ cross (the EVM entrypoint has no margin-mode field) at the market-default initia
 fraction, which is not readable on-chain. Resting maker orders are NOT margin-rejected at
 placement (Core accepts and may cancel them at matching time instead), so unfillable orders
 can sit on the book. A full open-order LIST is impossible on-chain (READ_CORE has no
-order-listing query); Lighter's Core REST API serves one, but its account/order endpoints
-require a Schnorr API key registered on the Core account, which the pool cannot register
-through the adapter — do not add an unauthenticated order-listing dependency.
+order-listing query; Lighter confirmed 2026-10-21 that EVM-readable order state is a future
+release). The Core REST API (`LIGHTER_DEVNET_API_URL`, devnet
+`core-api.devnet.lighterevm.axiom.xyz`) was probed 2026-10-21:
+- `GET /api/v1/account?by=index&value=<accountIndex>` is **unauthenticated** and rich —
+  collateral, available balance, `positions[]` (avg entry, position value, unrealized PnL,
+  liquidation price, margin mode, allocated margin), `assets[]`, total asset value. Resolve
+  the index on-chain via READ_CORE 0x0009 (EVM address → master account index) — `by=evm_address`
+  is rejected, `by=l1_address` works. On-chain NAV-relevant reads stay on READ_CORE; this
+  endpoint may supplement them (note: its collateral includes funding accrual, on-chain
+  `collateralBaseAmount` does not — e.g. 30.003768 vs 30.000000).
+- `GET /api/v1/accountOrders?account_index=…` requires an auth token signed by a **per-account**
+  registered Schnorr API key (indices 4–254 per account; 0–3 reserved, 255 = all). There is
+  **no generic key** that reads any account, and keys can only be registered through
+  `EvmToCoreEntrypoint.changePubKey(accountIndex, apiKeyIndex, pubKey)` — which routes via
+  `writeToCore(msg.sender, …)`, so only the account's controlling address (for a pool: the
+  vault, via a whitelisted adapter method) can register one. Do not add a server-held key
+  dependency; order-list UI stays on order counts + client order indexes until the protocol
+  exposes key registration (ALighter `changePubKey` + Schnorr signing in the worker) or Lighter
+  ships EVM-readable order state.
 - **The devnet RPC has hang phases (observed 2026-10-20):** it intermittently accepts
   connections and never responds (no HTTP status, no reset — same time-dependent failure
   family as HyperEVM's unattached-state phases, but a full hang instead of a revert). viem's
@@ -280,8 +296,14 @@ Rules for every code change to this service:
 
 `/api/chat` is an **atomic operations provider**. Each request handles one operation.
 
-**The chat endpoint handles one per request:** spot swaps, GMX perpetuals, Hyperliquid perpetuals, Lighter perpetuals, Uniswap v4 LP, GRG staking, cross-chain bridge/transfer/sync, vault info, delegation setup/revoke/status, TWAP orders, strategies, chain switch.
+**The chat endpoint handles one per request:** spot swaps, GMX perpetuals, Hyperliquid perpetuals, Lighter perpetuals, Uniswap v4 LP, GRG staking, cross-chain bridge/transfer/sync, vault info, pool creation/funding/NAV update, delegation setup/revoke/status, TWAP orders, strategies, chain switch.
 
 **It does NOT handle:** multi-step orchestration, historical data, APR/APY estimates, lending protocols, arbitrary on-chain reads, or token approvals (the vault adapter handles approvals internally).
 
 Orchestrator agents should plan externally, query our API for reads, execute one step per call, and iterate.
+
+---
+
+## Vault Management Tools
+
+`deploy_smart_pool`, `fund_pool` (allowance-aware two-step approve→mint; mint is NAV-neutral), `upgrade_pool`, and `update_nav` — an owner-signed `updateUnitaryValue()` that recomputes and stores the pool's unitary value on-chain (the chat's `get_vault_info` NAV display reads the same `eth_call`, so the two reconcile). The `update_nav` preview shows the exact value the on-chain log will record (unitary value, 18 decimals; net total value on pool-token decimals). It is the kill-switch counterpart for operators: run it after rebalances to persist a fresh reference NAV before trading.

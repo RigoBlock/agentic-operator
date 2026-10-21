@@ -1031,6 +1031,26 @@ export const TOOL_DEFINITIONS = [
     },
   },
 
+  // ── NAV Update (reconcile on-chain NAV) ───────────────────────────────
+
+  {
+    type: "function" as const,
+    function: {
+      name: "update_nav",
+      description:
+        "Update the current Rigoblock smart pool's on-chain NAV: calls updateUnitaryValue() " +
+        "(owner-signed) to recompute and store the unitary value from current holdings. " +
+        "Previews the exact unitary value the transaction will write, so the on-chain log can be " +
+        "reconciled against the value shown in chat. Use when the user asks to refresh/update NAV, " +
+        "update the unitary value, or reconcile the displayed NAV with the on-chain one.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+
   // ── Cross-chain (AIntents + Across Protocol) ────────────────────────
 
   {

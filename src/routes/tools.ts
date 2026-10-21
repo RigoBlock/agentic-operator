@@ -64,7 +64,7 @@ function getToolCategory(name: string): string {
   if (name.startsWith("get_pool_info") || name.startsWith("add_liquidity") || name.startsWith("remove_liquidity") || name.startsWith("collect_lp_fees") || name.startsWith("burn_position") || name.startsWith("get_lp_positions") || name.startsWith("initialize_pool")) return "Uniswap v4 LP";
   if (name.startsWith("crosschain_") || name.startsWith("get_aggregated_nav") || name.startsWith("get_rebalance_plan") || name.startsWith("verify_bridge_arrival")) return "Cross-Chain";
   if (name.startsWith("grg_")) return "GRG Staking";
-  if (name === "deploy_smart_pool" || name === "fund_pool") return "Vault Management";
+  if (name === "deploy_smart_pool" || name === "fund_pool" || name === "upgrade_pool" || name === "update_nav") return "Vault Management";
   if (name.startsWith("setup_delegation") || name.startsWith("revoke_delegation") || name.startsWith("check_delegation_status") || name === "check_pending_tx" || name.startsWith("revoke_selectors")) return "Delegation";
   if (name.startsWith("create_twap_") || name.startsWith("cancel_twap_") || name.startsWith("list_twap_")) return "TWAP Orders";
   if (name.startsWith("create_nav_sync") || name.startsWith("list_nav_syncs") || name.startsWith("cancel_nav_sync")) return "NAV Sync";

@@ -55,6 +55,7 @@ import { handle_check_pending_tx } from "./delegation.js";
 import { handle_deploy_smart_pool } from "./vault-mgmt.js";
 import { handle_fund_pool } from "./vault-mgmt.js";
 import { handle_upgrade_pool } from "./vault-mgmt.js";
+import { handle_update_nav } from "./vault-mgmt.js";
 import { handle_crosschain_transfer } from "./bridge.js";
 import { handle_crosschain_sync } from "./bridge.js";
 import { handle_get_crosschain_quote } from "./bridge.js";
@@ -126,6 +127,7 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "deploy_smart_pool": handle_deploy_smart_pool,
   "fund_pool": handle_fund_pool,
   "upgrade_pool": handle_upgrade_pool,
+  "update_nav": handle_update_nav,
   "crosschain_transfer": handle_crosschain_transfer,
   "crosschain_sync": handle_crosschain_sync,
   "get_crosschain_quote": handle_get_crosschain_quote,
