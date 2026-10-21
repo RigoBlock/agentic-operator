@@ -48,7 +48,7 @@ Requirements:
 1. `operatorAddress` must be the vault owner on at least one supported chain.
 2. `authSignature` is a valid EIP-191 signature of the message above, including the timestamp line.
 3. The vault has active on-chain delegation to the agent wallet for the required function selector.
-4. The signature is valid for 24 hours from `authTimestamp`.
+4. The signature is valid for 24 hours from `authTimestamp`, and it is **redeemed once for a session token** (see Authentication below): after redemption, subsequent requests authenticate with the session token, not the signature.
 
 Set `executionMode: "delegated"` and `confirmExecution: true` to auto-execute. Delegated mode without `confirmExecution` returns unsigned calldata.
 
@@ -242,15 +242,32 @@ int64 `lastFundingRatePrefixSum` the docs show (post-upgrade build; the
 pre-upgrade build served 7 words without it — decoding that build with the
 8-word table misaligns every field, and vice versa). The two order-count
 fields are in docs order: word4 = currently open order count, word5 =
-position-tied (SL/TP) order count. Lighter has no
+position-tied (SL/TP) order count. The positions report shows per-position
+Entry and Mark price columns — Entry is derived by inverting `entryQuote`
+(`entryPrice = entryQuote × 10^(sizeDecimals+priceDecimals) / (|size| × 1e6)`),
+Mark comes from the market-info read; liquidation price is NOT available
+on-chain (not part of the READ_CORE position tuple).
+**Funding is NOT part of on-chain NAV.** `LighterLib.getLighterBalances`
+(v3-contracts `feat/lighter-evm`) computes NAV as `collateralBaseAmount` +
+Σ `_positionValueUsdc` (mark value − entry notional, + isolated margin) +
+the in-flight transfer adjustment — the position tuple's
+`lastFundingRatePrefixSum` is never consumed. Core itself accrues funding into
+collateral continuously, so the Core REST API's collateral (e.g. 30.003768) and
+the on-chain NAV read (30.000000) legitimately diverge by the funding amount;
+the positions report's "Value (PnL + iso margin)" column is mark-vs-entry PnL
+only and matches the on-chain figure. Adding funding to NAV is protocol work:
+the prefix sum AT ENTRY is not stored anywhere readable, so it cannot be
+reconstructed from READ_CORE alone — ALighter/LighterLib would have to snapshot
+it at position open. Lighter has no
 GTC — a resting limit order is `timeInForce = GTT` with a 5min…30d expiry; margin is always
 cross (the EVM entrypoint has no margin-mode field) at the market-default initial margin
 fraction, which is not readable on-chain. Resting maker orders are NOT margin-rejected at
 placement (Core accepts and may cancel them at matching time instead), so unfillable orders
 can sit on the book. A full open-order LIST is impossible on-chain (READ_CORE has no
 order-listing query; Lighter confirmed 2026-10-21 that EVM-readable order state is a future
-release). The Core REST API (`LIGHTER_DEVNET_API_URL`, devnet
-`core-api.devnet.lighterevm.axiom.xyz`) was probed 2026-10-21:
+release). The Core REST API (private devnet URL — injected via the
+`LIGHTER_CORE_API_URL` env var, never hardcoded, never written down in docs
+or the repo) was probed 2026-10-21:
 - `GET /api/v1/account?by=index&value=<accountIndex>` is **unauthenticated** and rich —
   collateral, available balance, `positions[]` (avg entry, position value, unrealized PnL,
   liquidation price, margin mode, allocated margin), `assets[]`, total asset value. Resolve
@@ -279,6 +296,56 @@ release). The Core REST API (`LIGHTER_DEVNET_API_URL`, devnet
   transports (Lighter) use `retryCount: 0` so a hang phase fails in one bounded 10s attempt
   instead of stacking retries. Poisoned isolates do not self-heal promptly — recovery is a
   fresh deployment (new isolate pool) or forcing new isolates via concurrent load.
+
+---
+
+## Authentication & Sessions
+
+**Why:** a captured `(address, signature, timestamp)` triple used to be a replayable
+bearer token — anyone holding it could skip x402 payment on every protected route for
+24h from any IP. Signatures are now **single-use redemptions** (KV-gated; without KV the
+legacy behavior remains, dev/test only):
+
+1. First presentation of a valid signature → the middleware redeems it (KV record
+   `sess-redeem:<sha256(sig)>`, TTL = the signature's remaining validity) and mints an
+   opaque 256-bit **session token** (KV `sess:<sha256(token)>`, 24h TTL), returned as the
+   `X-Session-Token` response header. Only the session token skips payment afterwards; a
+   redeemed signature is worthless to an eavesdropper.
+2. Sessions are **bound to a salted hash of (IP, User-Agent)** (`computeNetworkHash` —
+   only the hash is stored, never raw IPs/UA). A token presented from a different network
+   gets 401; the client re-signs (one wallet prompt when roaming) and receives a fresh
+   session bound to the new network.
+3. Redemption is **idempotent per network**: re-presenting the same signature from the
+   same network re-issues the SAME session (concurrent page-load requests share one
+   signature). The same signature from a different network is rejected (401) — this is
+   the remaining bounded exposure: a signature captured AND redeemed before the victim's
+   own redemption, from the victim's exact IP+UA, yields a working session until TTL.
+4. Routes consume the session via `c.get("operatorAuth")` with `viaSession: true` and
+   must call `verifyOperatorOwnership` (ownership only, no signature) instead of
+   `verifyOperatorAuth`. Body-signature auth remains as a fallback for legacy clients but
+   is ignored when a session auth is present.
+5. Rate limiting is unchanged: 100 requests / 4h per operator address on non-paid
+   requests. Expired/invalid credentials return 401 (never 402) so clients re-sign
+   instead of paying.
+
+**Frontend contract:** `apiHeaders()` sends `X-Session-Token` when one is cached
+(localStorage `rigoblock_session_<address>`) and omits the signature headers; any
+response carrying `X-Session-Token` is captured (`captureSessionToken`), and a 401
+clears the session + cached signature and runs the existing re-sign flow.
+
+**Why not longer-lived signatures or device trust:** browsers expose no trustworthy
+device signal (fingerprints are spoofable/unstable). The 24h signature stays the root
+proof; UX continuity comes from the session token, not from "trusting" a device.
+
+**Telegram pairing hardening** (`services/telegramPairing.ts`): the 6-char (30-bit)
+code is single-use with a 5-minute TTL, and verification is now throttled per Telegram
+user ID — 5 failed attempts lock pairing for that user for 15 minutes (KV
+`tg-pairatt:<userId>`), so online brute force needs ~10⁷ requests per code with each
+guess costing a real Telegram message. Telegram routes (`/api/telegram/*`) are excluded
+from x402 and authenticate via the webhook secret + Telegram's `from.id`; paired users
+keep working across this upgrade with no re-pair (no storage format changed). The
+execution confirm buttons in Telegram remain the last line of defence for delegated
+execution; the webhook secret is the security boundary — rotate it if it may have leaked.
 
 ---
 

@@ -20,3 +20,4 @@ APP_ENV=development
 # X402_RELAXED=1                            # serve paid endpoints if payment can't be verified
 LIGHTER_RPC_URL="lighter-rpc-url"
 LIGHTER_DEVNET_BROWSER_URL="lighter-browser-url"
+LIGHTER_CORE_API_URL="lighter-core-api-url"

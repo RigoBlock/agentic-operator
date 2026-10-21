@@ -21,7 +21,7 @@ import { prepareTransaction } from "../services/transactionPrepare.js";
 import { runTransactionFlow } from "../services/transactionFlow.js";
 import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS } from "../llm/tools.js";
 import { getSkillTools } from "../skills/index.js";
-import { verifyOperatorAuth, AuthError } from "../services/auth.js";
+import { verifyOperatorAuth, verifyOperatorOwnership, AuthError } from "../services/auth.js";
 import { sanitizeError } from "../config.js";
 import type { Address } from "viem";
 
@@ -41,6 +41,7 @@ const READONLY_TOOLS = new Set<string>([
   "hyperliquid_get_fills",
   "lighter_get_markets",
   "lighter_get_positions",
+  "lighter_get_orders",
   "lighter_get_request_status",
   "check_delegation_status",
   "check_pending_tx",
@@ -162,6 +163,16 @@ tools.post("/", async (c) => {
       });
       operatorVerified = true;
       verifiedOperatorAddress = body.operatorAddress;
+    } else if (headerAuth?.viaSession) {
+      // Session-token auth (middleware-gated): no signature to re-verify —
+      // prove ownership of the request vault for the session's address.
+      await verifyOperatorOwnership({
+        operatorAddress: headerAuth.address,
+        vaultAddress: body.vaultAddress || "",
+        preferredChainId: body.chainId,
+      });
+      operatorVerified = true;
+      verifiedOperatorAddress = headerAuth.address;
     } else if (headerAuth && body.vaultAddress) {
       await verifyOperatorAuth({
         operatorAddress: headerAuth.address,

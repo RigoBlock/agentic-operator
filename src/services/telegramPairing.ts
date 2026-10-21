@@ -49,6 +49,24 @@ const PAIR_CODE_TTL = 5 * 60;          // 5 minutes
 const CONV_TTL = 24 * 60 * 60;         // 24 hours
 const MAX_CONV_MESSAGES = 20;           // Keep last N messages per conversation
 
+// Pairing-code guessing is throttled per Telegram user: 5 failures lock the
+// user out of pairing for 15 minutes. The code is 30 bits, single-use, and
+// 5-minute TTL — with this throttle an attacker needs ~10^7 requests per code,
+// and each guess costs a real Telegram message, so online brute force stays
+// infeasible. The counter is keyed by Telegram user ID (the only trustworthy
+// caller identity on the webhook) and only ever counts FAILED attempts.
+const PAIR_MAX_ATTEMPTS = 5;
+const PAIR_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
+
+function pairAttemptsKey(telegramUserId: number): string {
+  return `tg-pairatt:${telegramUserId}`;
+}
+
+interface PairAttempts {
+  count: number;
+  lockedUntil?: number;
+}
+
 // ── Pairing code generation ───────────────────────────────────────────
 
 /** Generate a short alphanumeric pairing code (6 chars, uppercase). */
@@ -97,9 +115,26 @@ export async function verifyPairingCode(
   telegramUserId: number,
   telegramUsername?: string,
 ): Promise<PairResult> {
+  // Throttle guessing: lock after PAIR_MAX_ATTEMPTS failed attempts.
+  const attKey = pairAttemptsKey(telegramUserId);
+  const attempts = await kv.get<PairAttempts>(attKey, "json");
+  if (attempts?.lockedUntil && attempts.lockedUntil > Date.now()) {
+    const mins = Math.ceil((attempts.lockedUntil - Date.now()) / 60000);
+    return {
+      success: false,
+      message: `Too many failed pairing attempts. Try again in ${mins} minute${mins === 1 ? "" : "s"}.`,
+    };
+  }
+
   const raw = await kv.get(pairCodeKey(code.toUpperCase()));
   if (!raw) {
-    return { success: false, message: "Invalid or expired pairing code. Generate a new one from the web app." };
+    const locked = await recordFailedPairAttempt(kv, attKey, attempts);
+    return {
+      success: false,
+      message: locked
+        ? "Too many failed pairing attempts. Try again in 15 minutes."
+        : "Invalid or expired pairing code. Generate a new one from the web app.",
+    };
   }
 
   const pairData: TelegramPairingCode = JSON.parse(raw);
@@ -147,12 +182,31 @@ export async function verifyPairingCode(
   // Reverse lookup: operator address → telegram user ID
   await kv.put(tgAddrKey(pairData.operatorAddress), String(telegramUserId));
 
+  // Successful pairing clears the failed-attempt counter.
+  await kv.delete(attKey);
+
   const vaultLabel = pairData.vaultName || `${pairData.vaultAddress.slice(0, 6)}…`;
   return {
     success: true,
     message: `✅ Paired! Vault "${vaultLabel}" is now active.\nYou can send trade commands directly here.`,
     user,
   };
+}
+
+async function recordFailedPairAttempt(
+  kv: KVNamespace,
+  attKey: string,
+  attempts: PairAttempts | null,
+): Promise<boolean> {
+  const count = (attempts?.count ?? 0) + 1;
+  const locked = count >= PAIR_MAX_ATTEMPTS;
+  const state: PairAttempts = locked
+    ? { count: 0, lockedUntil: Date.now() + PAIR_LOCKOUT_MS }
+    : { count };
+  await kv.put(attKey, JSON.stringify(state), {
+    expirationTtl: Math.ceil(PAIR_LOCKOUT_MS / 1000) + 60,
+  });
+  return locked;
 }
 
 // ── TelegramUser CRUD ─────────────────────────────────────────────────

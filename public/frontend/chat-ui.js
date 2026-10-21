@@ -7,6 +7,7 @@ import {
   conversationHistory, setConversationHistory,
   currentChainId, connectedAddress, authSignature, authTimestamp,
   escapeHtml, copyToClipboard, apiHeaders,
+  captureSessionToken, clearSessionToken, getSessionToken,
   setLastGmxPositions, executionMode, delegationState, autoExecuteMode,
   setAuthSignature, setAuthTimestamp,
 } from "./state.js";
@@ -610,16 +611,18 @@ async function invokeDirectTool(toolInfo) {
       body: JSON.stringify(body),
     });
     clearTimeout(timeoutId);
+    captureSessionToken(res);
     const data = await res.json();
     if (!res.ok) {
-      // Auth expired — clear cached signature and prompt user to re-sign
-      if (res.status === 401 && authSignature) {
+      // Auth expired — clear session + cached signature and prompt user to re-sign
+      if (res.status === 401 && (authSignature || getSessionToken())) {
+        clearSessionToken();
         setAuthSignature(null);
         setAuthTimestamp(null);
         localStorage.removeItem(authKey(connectedAddress));
         appendMessage('system', '🔐 Session expired. Please sign the authentication message to continue.');
         await signAuthMessage();
-        if (authSignature) {
+        if (authSignature || getSessionToken()) {
           // Retry the same tool call with fresh auth
           return invokeDirectTool(toolInfo);
         }

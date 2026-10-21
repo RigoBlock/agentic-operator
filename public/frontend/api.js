@@ -4,7 +4,7 @@
 
 import {
   apiHeaders, connectedAddress, authSignature, authTimestamp,
-  lastEventTimestamp, setLastEventTimestamp,
+  lastEventTimestamp, setLastEventTimestamp, captureSessionToken, clearSessionToken,
 } from './state.js';
 
 /**
@@ -19,8 +19,13 @@ export async function sendChatMessage(body, onStreamEvent, signal) {
     body: JSON.stringify(body),
   });
 
+  captureSessionToken(res);
+
   if (!res.ok) {
     const errData = await res.json().catch(() => null);
+    if (res.status === 401) {
+      clearSessionToken();
+    }
     throw new Error(errData?.error || `HTTP ${res.status}`);
   }
 
@@ -76,6 +81,10 @@ export async function callTool(toolName, body, signal) {
     signal,
     body: JSON.stringify(body),
   });
+  captureSessionToken(res);
+  if (res.status === 401) {
+    clearSessionToken();
+  }
   const data = await res.json().catch(() => ({}));
   return { ok: res.ok, status: res.status, data };
 }
@@ -86,6 +95,7 @@ export async function callTool(toolName, body, signal) {
 export async function fetchDelegationStatus(vault, allChains = false) {
   const url = `/api/delegation/status?vaultAddress=${vault}${allChains ? '&allChains=true' : ''}`;
   const res = await fetch(url, { headers: apiHeaders() });
+  captureSessionToken(res);
   if (!res.ok) return null;
   return res.json();
 }
@@ -95,6 +105,7 @@ export async function fetchDelegationStatus(vault, allChains = false) {
  */
 export async function fetchAgentBalance(vault) {
   const res = await fetch(`/api/delegation/balance?vaultAddress=${vault}`, { headers: apiHeaders() });
+  captureSessionToken(res);
   if (!res.ok) return null;
   return res.json();
 }

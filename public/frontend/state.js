@@ -188,11 +188,51 @@ export function restoreChat() {
 export function apiHeaders(extra) {
   const headers = { 'Content-Type': 'application/json' };
   if (connectedAddress) headers['X-Operator-Address'] = connectedAddress;
-  if (authSignature) {
+  // Prefer the server-minted session token; the raw signature is only sent
+  // when no session exists (it is single-use — redeemed for a session).
+  const session = getSessionToken();
+  if (session) {
+    headers['X-Session-Token'] = session;
+  } else if (authSignature) {
     headers['X-Auth-Signature'] = authSignature;
     headers['X-Auth-Timestamp'] = String(authTimestamp);
   }
   return Object.assign(headers, extra);
+}
+
+// ── Session tokens ────────────────────────────────────────────────────
+// Opaque token minted by the backend when a fresh signature is redeemed.
+// Bound server-side to a hash of this device's IP + browser; when it stops
+// matching (expiry, network change), the API returns 401 and the normal
+// re-sign flow runs.
+
+const SESSION_STORAGE_PREFIX = 'rigoblock_session_';
+
+function sessionKey(addr) { return SESSION_STORAGE_PREFIX + (addr || '').toLowerCase(); }
+
+export function getSessionToken() {
+  try {
+    return localStorage.getItem(sessionKey(connectedAddress)) || '';
+  } catch { return ''; }
+}
+
+export function saveSessionToken(token) {
+  try {
+    if (token) localStorage.setItem(sessionKey(connectedAddress), token);
+  } catch { /* storage full/blocked — next request just re-redeems the signature */ }
+}
+
+/** Capture the session token from any API response that carries one. */
+export function captureSessionToken(res) {
+  const token = res.headers.get('X-Session-Token');
+  if (token) saveSessionToken(token);
+}
+
+/** Drop the session token (401 / logout) — the next request re-authenticates. */
+export function clearSessionToken() {
+  try {
+    localStorage.removeItem(sessionKey(connectedAddress));
+  } catch { /* ignore */ }
 }
 
 export function escapeHtml(value) {

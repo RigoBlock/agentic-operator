@@ -44,7 +44,7 @@ import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler, Context } from "hono";
 import type { Env, AppVariables } from "../types.js";
-import { verifyOperatorSignatureOnly } from "../services/auth.js";
+import { verifyOperatorSignatureOnly, computeNetworkHash, verifySessionToken, redeemSignatureForSession, mintSessionToken } from "../services/auth.js";
 import { isDevEscapeHatchEnabled } from "../services/devMode.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
@@ -823,6 +823,22 @@ function setRateLimitHeaders(
 }
 
 /**
+ * Network context for session binding: salted hash of the caller's IP and
+ * User-Agent. Only a hash is ever stored (no raw IPs/UA in KV). Workers
+ * populate cf-connecting-ip; behind other proxies x-forwarded-for applies.
+ */
+function requestNetworkHash(
+  c: Context<{ Bindings: Env; Variables: AppVariables }>,
+): string {
+  const ip =
+    c.req.header("cf-connecting-ip") ||
+    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "";
+  const ua = c.req.header("user-agent") || "";
+  return computeNetworkHash(ip, ua);
+}
+
+/**
  * Fail-closed helper for payment-verification outages.
  *
  * Paid endpoints must never be served for free just because payment cannot be
@@ -859,9 +875,55 @@ function blockIfPaymentUnverifiable(
 
 export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
   return async (c, next) => {
-    // Fast path: authenticated operators skip x402 payment.
+    const reqPath0 = new URL(c.req.url).pathname;
+    const reqMethod0 = c.req.method;
+
+    // Fast path 0: opaque session token minted by a previous signature
+    // redemption (KV-gated production only). Bound to a salted hash of the
+    // caller's IP + User-Agent; a token presented from a different network is
+    // rejected with 401 so the client re-signs.
+    if (c.env.KV) {
+      const sessionToken = c.req.header("x-session-token");
+      if (sessionToken && isProtectedRoute(reqMethod0, reqPath0)) {
+        const netHash = requestNetworkHash(c);
+        const sess = await verifySessionToken(c.env.KV, sessionToken, netHash);
+        if (!sess) {
+          return c.json(
+            {
+              error: "Session expired",
+              detail: "Your session is invalid, expired, or was created on a different network. Please sign again to authenticate.",
+            },
+            401,
+          );
+        }
+        const rateLimit = await checkRateLimit(c.env.KV, sess.address);
+        if (!rateLimit.allowed) {
+          setRateLimitHeaders(c, 0, rateLimit.resetAt);
+          const retryAfterSec = Math.ceil((rateLimit.resetAt - Date.now()) / 1000);
+          c.header("Retry-After", String(retryAfterSec));
+          return c.json(
+            {
+              error: "Rate limit exceeded",
+              detail: `Authenticated operators are limited to ${RATE_LIMIT_MAX} requests per 4-hour window.`,
+              retryAfter: retryAfterSec,
+            },
+            429,
+          );
+        }
+        c.set("operatorAuthVerified", true);
+        c.set("operatorAuth", { address: sess.address, signature: "", timestamp: 0, viaSession: true });
+        setRateLimitHeaders(c, rateLimit.remaining, rateLimit.resetAt);
+        return next();
+      }
+    }
+
+    // Fast path 1: authenticated operators skip x402 payment.
     // The frontend sends the operator's EIP-191 signature in headers only.
-    // If valid (timestamp within 24h + signature verifies), skip x402 entirely.
+    // If valid (timestamp within 24h + signature verifies), the signature is
+    // REDEEMED once for a session token (returned as X-Session-Token). The
+    // raw signature alone does not skip payment again — a captured signature
+    // is worthless once redeemed. Without KV (dev/test), the legacy
+    // replayable behavior remains and no session is minted.
     const operatorAddress = c.req.header("x-operator-address");
     const authSignature = c.req.header("x-auth-signature");
     const authTimestamp = c.req.header("x-auth-timestamp");
@@ -897,6 +959,36 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
                 },
                 429,
               );
+            }
+
+            if (c.env.KV) {
+              const netHash = requestNetworkHash(c);
+              const redemption = await redeemSignatureForSession(
+                c.env.KV,
+                authSignature,
+                ts,
+                netHash,
+                () => mintSessionToken(c.env.KV!, operatorAddress, netHash),
+              );
+              if (redemption.status === "network-mismatch") {
+                return c.json(
+                  {
+                    error: "Signature already used",
+                    detail: "This signature was already redeemed from a different network. Please sign again to authenticate this device.",
+                  },
+                  401,
+                );
+              }
+              c.set("operatorAuthVerified", true);
+              c.set("operatorAuth", {
+                address: operatorAddress,
+                signature: authSignature,
+                timestamp: ts,
+              });
+              setRateLimitHeaders(c, rateLimit.remaining, rateLimit.resetAt);
+              await next();
+              c.header("X-Session-Token", redemption.token);
+              return;
             }
 
             c.set("operatorAuthVerified", true);

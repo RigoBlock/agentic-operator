@@ -314,6 +314,19 @@ describe("portfolio valuation", () => {
     expect(p.totalValue).toBe(1_600_000_000n);
   });
 
+  it("report shows Entry and Mark price columns derived from Core state", async () => {
+    setupReadCore({
+      account: () => encodeAccount(1_000_000_000n),
+      market: () => encodeMarket(235000n),
+      position: () => encodePosition({ position: 2000n, entryQuote: 4_600_000_000n }),
+    });
+    const p = await getLighterPortfolio(CHAIN, VAULT, tracked);
+    // sizeDecimals 3, priceDecimals 2: size 2000 = 2.0, mark 235000 = $2350,
+    // entry notional $4600 on 2.0 → entry price $2300.
+    expect(p.formattedReport).toContain("| Entry | Mark |");
+    expect(p.formattedReport).toContain("| 2300 | 2350 |");
+  });
+
   it("degrades gracefully: no account → zero collateral, failed reads are skipped", async () => {
     mockState.call.mockRejectedValue(new Error("READ_CORE query failed"));
     const p = await getLighterPortfolio(CHAIN, VAULT, tracked);

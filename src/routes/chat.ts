@@ -14,7 +14,7 @@
 import { Hono, type Context } from "hono";
 import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode, StreamEvent, ChatMessage } from "../types.js";
 import { processChat } from "../llm/client.js";
-import { verifyOperatorAuth, AuthError } from "../services/auth.js";
+import { verifyOperatorAuth, verifyOperatorOwnership, AuthError } from "../services/auth.js";
 import { SETTLEMENT_OVERRIDES_HEADER } from "@x402/core/server";
 
 import { sanitizeError } from "../config.js";
@@ -115,6 +115,20 @@ async function authenticateChatOperator(
     body.vaultAddress && body.vaultAddress.toLowerCase() !== ZERO_VAULT
       ? body.vaultAddress
       : undefined;
+
+  if (headerAuth?.viaSession) {
+    // Middleware authenticated this request via a session token (no signature
+    // to re-verify — the middleware is the credential gate). Prove ownership
+    // of the request vault for the session's address, if a vault was given.
+    if (effectiveVault) {
+      await verifyOperatorOwnership({
+        operatorAddress: headerAuth.address,
+        vaultAddress: effectiveVault,
+        preferredChainId: body.chainId,
+      });
+    }
+    return { operatorVerified: true, operatorAddress: headerAuth.address };
+  }
 
   if (hasBodyAuth) {
     await verifyOperatorAuth({

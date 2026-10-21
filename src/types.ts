@@ -15,6 +15,13 @@ export type VerifiedOperatorAuth = {
   address: string;
   signature: string;
   timestamp: number;
+  /**
+   * True when the middleware authenticated this request via a session token
+   * instead of a fresh signature. Routes must then use
+   * verifyOperatorOwnership (no signature available) rather than
+   * verifyOperatorAuth.
+   */
+  viaSession?: boolean;
 };
 
 export type AppVariables = {
@@ -79,6 +86,8 @@ export interface Env {
   // tracked markets + decimals come from the pool's on-chain getLighterTrackedMarkets() view.
   LIGHTER_RPC_URL?: string;             // Private RPC endpoint for Lighter Devnet
   LIGHTER_DEVNET_BROWSER_URL?: string;  // Block explorer base URL (private for now)
+  // Lighter Core REST API (private devnet URL — never hardcode, never document the value).
+  LIGHTER_CORE_API_URL?: string;
 
   /**
    * Optional request-scoped cache for pre-swap NAV reads.

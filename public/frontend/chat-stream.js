@@ -13,6 +13,7 @@ import {
   autoExecuteMode, setAutoExecuteMode,
   multiStepActive, setMultiStepActive,
   apiHeaders, escapeHtml, getExplorerUrl,
+  captureSessionToken, clearSessionToken,
   CHAIN_NAMES, TESTNET_CHAINS_LIST,
   enterStoppingMode, exitStoppingMode, persistChat, restoreChat,
   commandHistory,
@@ -172,6 +173,8 @@ async function sendMessage() {
       body: JSON.stringify(chatBody),
     });
 
+    captureSessionToken(res);
+
     if (!res.ok) {
       // SSE stream won't start on error — try parsing JSON error
       const errData = await res.json().catch(() => null);
@@ -180,6 +183,7 @@ async function sendMessage() {
       if (res.status === 401 || res.status === 403) {
         if (!isOwner || !authSignature) { appendMessage('system', errMsg); return; }
         appendMessage('system', 'Session expired, re-authenticating…');
+        clearSessionToken();
         setAuthSignature(null);
         setAuthTimestamp(null);
         localStorage.removeItem(authKey(connectedAddress));
@@ -196,6 +200,7 @@ async function sendMessage() {
             signal: controller.signal,
             body: JSON.stringify(retryBody),
           });
+          captureSessionToken(retryRes);
           if (retryRes.ok) {
             const retryType = retryRes.headers.get('content-type') || '';
             let retryData = null;

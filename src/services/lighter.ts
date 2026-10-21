@@ -570,17 +570,25 @@ function formatLighterReport(p: LighterPortfolio, trackedMarkets: TrackedMarket[
     `Core account: ${p.accountExists ? "active" : "not created"}   |   Collateral: ${fmtUsdUnits(p.collateralBase)}   |   Total value: ${fmtUsdUnits(p.totalValue)}`,
   );
   lines.push("");
-  lines.push("Prices are mark prices read from Lighter Core state; sizes use each market's tracked decimals.");
+  lines.push("Prices are mark prices read from Lighter Core state; sizes use each market's tracked decimals. Entry is derived from the entry notional recorded by Core.");
   lines.push("");
 
   if (p.positions.length > 0) {
-    lines.push(`| Market | Side | Size | Value (PnL + iso margin) | Margin |`);
-    lines.push(`|--------|------|------|--------------------------|--------|`);
+    lines.push(`| Market | Side | Size | Entry | Mark | Value (PnL + iso margin) | Margin |`);
+    lines.push(`|--------|------|------|-------|------|--------------------------|--------|`);
     for (const pos of p.positions) {
-      const decimals = trackedMarkets.find((m) => m.marketId === pos.marketId)?.sizeDecimals ?? 6;
+      const market = trackedMarkets.find((m) => m.marketId === pos.marketId);
+      const sizeDecimals = market?.sizeDecimals ?? 6;
+      const priceDecimals = market?.priceDecimals ?? 2;
       const symbol = LIGHTER_MARKET_SYMBOLS[pos.marketId];
+      // entryQuote = |size| × entryPrice × 1e6 / 10^(sizeDecimals + priceDecimals)
+      // (LighterLib._positionValueUsdc), inverted to a price on priceDecimals.
+      const absSize = pos.size < 0n ? -pos.size : pos.size;
+      const entryPrice = absSize > 0n
+        ? (pos.entryQuote * pow10(sizeDecimals + priceDecimals)) / (absSize * 1_000_000n)
+        : 0n;
       lines.push(
-        `| ${symbol ? `${symbol} (${pos.marketId})` : pos.marketId} | ${pos.size > 0n ? "LONG" : "SHORT"} | ${formatHuman(pos.size, decimals)} | ${fmtSignedUsdUnits(pos.value)} | ${pos.marginMode === LIGHTER_MARGIN_MODE_ISOLATED ? `isolated (${fmtUsdUnits(pos.allocatedMargin / 1_000_000n)})` : "cross"} |`,
+        `| ${symbol ? `${symbol} (${pos.marketId})` : pos.marketId} | ${pos.size > 0n ? "LONG" : "SHORT"} | ${formatHuman(pos.size, sizeDecimals)} | ${formatHuman(entryPrice, priceDecimals)} | ${formatHuman(pos.markPrice, priceDecimals)} | ${fmtSignedUsdUnits(pos.value)} | ${pos.marginMode === LIGHTER_MARGIN_MODE_ISOLATED ? `isolated (${fmtUsdUnits(pos.allocatedMargin / 1_000_000n)})` : "cross"} |`,
       );
     }
     lines.push("");

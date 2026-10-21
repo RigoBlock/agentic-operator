@@ -5,9 +5,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 
 const { mockVerifySig } = vi.hoisted(() => ({ mockVerifySig: vi.fn() }));
-vi.mock("../src/services/auth.js", () => ({
-  verifyOperatorSignatureOnly: mockVerifySig,
-}));
+vi.mock("../src/services/auth.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/services/auth.js")>();
+  return {
+    ...actual,
+    verifyOperatorSignatureOnly: mockVerifySig,
+  };
+});
 
 import { createX402Middleware } from "../src/middleware/x402.js";
 
@@ -352,5 +356,122 @@ describe("rate limiting", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("X-RateLimit-Remaining")).toBe("99");
+  });
+});
+
+describe("session tokens (single-use signature redemption)", () => {
+  const ADDR = "0xA0F9C380ad1E1be09046319fd907335B2B452B37";
+
+  beforeEach(() => {
+    mockVerifySig.mockReset();
+    mockVerifySig.mockResolvedValue(true);
+  });
+
+  async function redeem(app: ReturnType<typeof createApp>["app"], env: { KV: KVNamespace }, ua = "test-agent/1.0") {
+    return app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-operator-address": ADDR,
+          "x-auth-signature": "0xdeadbeef",
+          "x-auth-timestamp": String(Date.now()),
+          "user-agent": ua,
+        },
+      },
+      env,
+    );
+  }
+
+  it("redeems a valid signature for an X-Session-Token and skips payment", async () => {
+    const { app, env } = createApp();
+    const res = await redeem(app, env);
+    expect(res.status).toBe(200);
+    const token = res.headers.get("X-Session-Token");
+    expect(token).toMatch(/^0x[0-9a-f]{64}$/);
+    const json = (await res.json()) as any;
+    expect(json.auth).toBe(true);
+  });
+
+  it("session token alone skips payment and marks viaSession", async () => {
+    const { app, env } = createApp();
+    const first = await redeem(app, env);
+    const token = first.headers.get("X-Session-Token")!;
+
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: { "x-session-token": token, "user-agent": "test-agent/1.0" },
+      },
+      env,
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.auth).toBe(true);
+    expect(json.opAuth.viaSession).toBe(true);
+    expect(json.opAuth.address).toBe(ADDR.toLowerCase());
+  });
+
+  it("same signature re-presented from the same network re-issues the same session (concurrent page loads)", async () => {
+    const { app, env } = createApp();
+    const t1 = (await redeem(app, env)).headers.get("X-Session-Token");
+    const t2 = (await redeem(app, env)).headers.get("X-Session-Token");
+    expect(t2).toBe(t1);
+  });
+
+  it("redeemed signature from a DIFFERENT network is rejected with 401", async () => {
+    const { app, env } = createApp();
+    await redeem(app, env, "test-agent/1.0");
+    const res = await redeem(app, env, "evil-agent/2.0");
+    expect(res.status).toBe(401);
+  });
+
+  it("session token from a different network is rejected with 401", async () => {
+    const { app, env } = createApp();
+    const token = (await redeem(app, env, "test-agent/1.0")).headers.get("X-Session-Token")!;
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: { "x-session-token": token, "user-agent": "evil-agent/2.0" },
+      },
+      env,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("unknown session token is rejected with 401 on protected routes", async () => {
+    const { app, env } = createApp();
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: { "x-session-token": "0x" + "ab".repeat(32) },
+      },
+      env,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("without KV no session is minted and the legacy behavior remains", async () => {
+    const app = new Hono<{ Bindings: { KV?: KVNamespace }; Variables: Record<string, unknown> }>();
+    app.use("*", createX402Middleware());
+    app.post("/api/chat", (c) => c.json({ auth: c.get("operatorAuthVerified") ?? false }));
+    const env = {}; // no KV binding
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-operator-address": ADDR,
+          "x-auth-signature": "0xdeadbeef",
+          "x-auth-timestamp": String(Date.now()),
+        },
+      },
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Session-Token")).toBeNull();
   });
 });

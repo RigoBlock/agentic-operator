@@ -73,6 +73,45 @@ describe("Telegram pairing flow", () => {
     expect(result.message).toMatch(/Invalid or expired/);
   });
 
+  it("locks pairing after 5 failed attempts and clears the counter on success", async () => {
+    const tgUser = 999888;
+    // 4 failures: still allowed to try
+    for (let i = 0; i < 4; i++) {
+      const r = await verifyPairingCode(kv, "NOPE11", tgUser);
+      expect(r.success).toBe(false);
+      expect(r.message).toMatch(/Invalid or expired/);
+    }
+    // 5th failure triggers the lockout
+    const fifth = await verifyPairingCode(kv, "NOPE11", tgUser);
+    expect(fifth.success).toBe(false);
+    expect(fifth.message).toMatch(/Too many failed pairing attempts/);
+
+    // Even a VALID code is refused while locked out
+    const code = await createPairingCode(kv, OP, VAULT, "MyPool", CHAIN_ID);
+    const locked = await verifyPairingCode(kv, code, tgUser);
+    expect(locked.success).toBe(false);
+    expect(locked.message).toMatch(/Too many failed pairing attempts/);
+
+    // A different user is unaffected (throttle is per Telegram user)
+    const other = await verifyPairingCode(kv, code, 777666);
+    expect(other.success).toBe(true);
+  });
+
+  it("successful pairing clears the failed-attempt counter", async () => {
+    const tgUser = 555444;
+    await verifyPairingCode(kv, "BAD001", tgUser);
+    await verifyPairingCode(kv, "BAD001", tgUser);
+
+    const code = await createPairingCode(kv, OP, VAULT, "MyPool", CHAIN_ID);
+    const ok = await verifyPairingCode(kv, code, tgUser);
+    expect(ok.success).toBe(true);
+
+    // Counter was reset: two more failures should NOT lock (only 2 < 5)
+    await verifyPairingCode(kv, "BAD001", tgUser);
+    const r = await verifyPairingCode(kv, "BAD001", tgUser);
+    expect(r.message).toMatch(/Invalid or expired/);
+  });
+
   it("verifyPairingCode creates TelegramUser and reverse lookup", async () => {
     const code = await createPairingCode(kv, OP, VAULT, "MyPool", CHAIN_ID);
     const result = await verifyPairingCode(kv, code, 123456, "testuser");
