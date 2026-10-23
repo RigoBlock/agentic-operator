@@ -52,8 +52,6 @@ const MENU_TITLES: Record<string, string> = {
   lighter_market_order: "Lighter market order",
   lighter_cancel_order: "Cancel Lighter order",
   lighter_cancel_all_orders: "Cancel all Lighter orders",
-  lighter_track_market: "Track Lighter market",
-  lighter_untrack_market: "Untrack Lighter market",
   gmx_get_positions: "View GMX positions",
   gmx_get_markets: "View GMX markets",
   gmx_increase_position: "Open / increase GMX position",
@@ -276,8 +274,6 @@ const MENU_CATEGORIES: Record<string, MenuEntry[]> = {
     "lighter_market_order",
     "lighter_cancel_order",
     "lighter_cancel_all_orders",
-    "lighter_track_market",
-    "lighter_untrack_market",
   ],
   gmx: GMX_MENU,
   swap: SWAP_MENU,
@@ -377,7 +373,7 @@ export async function handle_get_tool_menu(
     message =
       `Lighter tools operate on Lighter Devnet (chain 19529) only — switch_chain chain="Lighter Devnet" first.` +
       `\nUSDC only. The first deposit creates the vault's Core account automatically.` +
-      `\nA market must be tracked (lighter_track_market) before any order on it.` +
+      `\nMarkets are tracked automatically: the first order on a market tracks it, and idle markets untrack themselves. Just place the order.` +
       `\nCore writes are asynchronous: a successful transaction only means Core accepted the request — check the outcome with lighter_get_request_status.`;
   }
   if (toolNames === POOL_MENU) {

@@ -14,8 +14,9 @@
  *   - order amount : base-asset units scaled by the market's sizeDecimals (uint48)
  *   - order price  : quote units scaled by the market's priceDecimals (uint32)
  *
- * Market decimals come from the pool's on-chain tracked-markets view
- * (getLighterTrackedMarkets) — never from user input.
+ * Market decimals come from LIGHTER_MARKET_DECIMALS — the adapter's own
+ * LighterConstants table (ALighter v4.6.3), mirrored here. The first order on
+ * a market auto-tracks it on-chain; there is no manual tracking step.
  */
 
 import {
@@ -31,9 +32,10 @@ import {
   LIGHTER_FIRST_SPOT_MARKET_ID,
   LIGHTER_ORDER_TYPES,
   LIGHTER_TIF,
+  LIGHTER_MARKET_DECIMALS,
+  LIGHTER_MARKET_SYMBOLS,
 } from "../abi/lighter.js";
 import { readLighterMarketInfo } from "./lighter.js";
-import type { TrackedMarket } from "./lighter.js";
 
 const U48_MAX = (1n << 48n) - 1n;
 const U32_MAX = (1n << 32n) - 1n;
@@ -112,20 +114,28 @@ export function randomClientOrderIndex(): bigint {
   return BigInt(`0x${Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("")}`) & ((1n << 48n) - 1n);
 }
 
-function assertMarketTracked(marketId: number, trackedMarkets: TrackedMarket[]): TrackedMarket {
+/**
+ * Resolve a perp market's decimals from the adapter's LighterConstants table
+ * (mirrored in LIGHTER_MARKET_DECIMALS). Only markets in the table are
+ * tradeable — any other id reverts UnknownMarket on-chain; fail here instead.
+ */
+export function getLighterMarketDecimals(marketId: number): { sizeDecimals: number; priceDecimals: number } {
   if (!Number.isInteger(marketId) || marketId < 0 || marketId >= LIGHTER_FIRST_SPOT_MARKET_ID) {
     throw new Error(
       `Invalid Lighter perp market id: ${marketId} (perp markets are 0 … ${LIGHTER_FIRST_SPOT_MARKET_ID - 1}).`,
     );
   }
-  const tracked = trackedMarkets.find((m) => m.marketId === marketId);
-  if (!tracked) {
+  const decimals = LIGHTER_MARKET_DECIMALS[marketId];
+  if (!decimals) {
+    const tradeable = Object.entries(LIGHTER_MARKET_DECIMALS)
+      .map(([id, _]) => `${id} ${LIGHTER_MARKET_SYMBOLS[Number(id)] ?? ""}`.trim())
+      .join(", ");
     throw new Error(
-      `Lighter market ${marketId} is not tracked by this pool — track it first with lighter_track_market ` +
-      `(you need the market's size and price decimals from the Lighter team / Core API).`,
+      `Unknown Lighter market ${marketId} — tradeable markets: ${tradeable}. ` +
+      "New markets require a protocol release.",
     );
   }
-  return tracked;
+  return decimals;
 }
 
 /** Clamp a GTT expiry into Lighter's 5 min … 30 d window. */
@@ -175,7 +185,6 @@ export interface LighterOrderParams {
   /** Explicit GTT expiry (ms since epoch); clamped to now+5min … now+30d. */
   expiryMs?: number;
   reduceOnly?: boolean;
-  trackedMarkets: TrackedMarket[];
 }
 
 export interface BuiltLighterOrder {
@@ -196,10 +205,9 @@ export interface BuiltLighterOrder {
 
 /**
  * createOrder — the single entry for perp orders. Deterministic validation:
- * market must be tracked by the pool (on-chain tracked-markets view) and
- * < 2048; amount must be an exact
- * integer on the market's sizeDecimals scale and fit uint48; price must fit
- * uint32.
+ * market must be a tradeable perp (LighterConstants table) and < 2048; amount
+ * must be an exact integer on the market's sizeDecimals scale and fit uint48;
+ * price must fit uint32. The first order on a market auto-tracks it on-chain.
  *
  *  - Market order (isMarket): forced IOC (tif 0), no expiry, price = mark ±1%
  *    (buy = mark × 1.01, sell = mark × 0.99, rounded to an integer price tick,
@@ -216,7 +224,7 @@ export interface BuiltLighterOrder {
  * placement anyway — the handler surfaces a conservative collateral warning.
  */
 export async function buildLighterOrderCalldata(p: LighterOrderParams): Promise<BuiltLighterOrder> {
-  const tracked = assertMarketTracked(p.marketId, p.trackedMarkets);
+  const tracked = getLighterMarketDecimals(p.marketId);
   const isAsk = p.side === "sell";
   const reduceOnly = p.reduceOnly === true;
   const amount = toLighterAmount(p.sizeHuman, tracked.sizeDecimals);
@@ -352,34 +360,5 @@ export function buildLighterCancelAllOrdersCalldata(): Hex {
     abi: RIGOBLOCK_LIGHTER_ABI,
     functionName: "cancelAllOrders",
     args: [0],
-  });
-}
-
-/** trackMarket(marketId) — pool-owner method (ALighter v4.6.0).
- *  The on-chain call takes ONLY the market id: the adapter resolves decimals
- *  from its own LighterConstants release-time table (never calldata), and the
- *  pool's getLighterTrackedMarkets() view then exposes exactly those values —
- *  the operator reads its decimals from that same view (see
- *  readLighterTrackedMarkets in services/lighter.ts). */
-export function buildLighterTrackMarketCalldata(marketId: number): Hex {
-  if (!Number.isInteger(marketId) || marketId < 0 || marketId >= LIGHTER_FIRST_SPOT_MARKET_ID) {
-    throw new Error(`Invalid Lighter perp market id: ${marketId} (perp markets are 0 … ${LIGHTER_FIRST_SPOT_MARKET_ID - 1}).`);
-  }
-  return encodeFunctionData({
-    abi: RIGOBLOCK_LIGHTER_ABI,
-    functionName: "trackMarket",
-    args: [marketId],
-  });
-}
-
-/** untrackMarket(marketId) — pool-owner method; reverts PositionNotClosed with an open position. */
-export function buildLighterUntrackMarketCalldata(marketId: number): Hex {
-  if (!Number.isInteger(marketId) || marketId < 0 || marketId >= LIGHTER_FIRST_SPOT_MARKET_ID) {
-    throw new Error(`Invalid Lighter perp market id: ${marketId} (perp markets are 0 … ${LIGHTER_FIRST_SPOT_MARKET_ID - 1}).`);
-  }
-  return encodeFunctionData({
-    abi: RIGOBLOCK_LIGHTER_ABI,
-    functionName: "untrackMarket",
-    args: [marketId],
   });
 }

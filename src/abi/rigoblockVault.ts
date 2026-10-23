@@ -417,17 +417,14 @@ export const ALLOWED_VAULT_SELECTORS = {
   // createOrder(uint48,uint16,uint48,uint8,uint8,uint64,uint48,uint32,bool,bool,uint32)
   //                                                 — perp order (market must be tracked, < 2048)
   // cancelOrder(uint48,uint64) / cancelAllOrders(uint48) — order cancels
-  // trackMarket(uint16) / untrackMarket(uint16)     — pool-owner market tracking; decimals come
-  //                                                   from the adapter's LighterConstants table,
-  //                                                   never from calldata (ALighter v4.6.0, 0xee814ef0;
-  //                                                   the old 3-arg 0x341a942b was retired)
+  // Market tracking is AUTOMATIC since ALighter v4.6.3 (first order tracks;
+  // NAV loop untracks idle markets) — trackMarket/untrackMarket are removed
+  // from the adapter and are NOT delegable.
   lighterSendToCore: "0xeed67f2c" as `0x${string}`,
   lighterSendToEvm: "0x60f502da" as `0x${string}`,
   lighterCreateOrder: "0x8a7da422" as `0x${string}`,
   lighterCancelOrder: "0x736fd6b3" as `0x${string}`,
   lighterCancelAllOrders: "0xa4b6f756" as `0x${string}`,
-  lighterTrackMarket: "0xee814ef0" as `0x${string}`,
-  lighterUntrackMarket: "0xe0ad5442" as `0x${string}`,
   // ── AIntents Adapter (cross-chain) ──
   depositV3: "0x770d096f" as `0x${string}`,
   // ── AUniswap Adapter (wrap/unwrap native ↔ wrapped-native) ──

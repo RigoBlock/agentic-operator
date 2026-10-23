@@ -285,6 +285,7 @@ describe("portfolio valuation", () => {
     expect(p.collateralBase).toBe(1_000_000_000n);
     // markValue = 2000 × 235000 × 1e6 / 10^5 = 4_700_000_000; pnl = 4.7e9 − 4.6e9 = +$100
     expect(p.positions[0].value).toBe(100_000_000n);
+    expect(p.positions[0].pnl).toBe(100_000_000n);
     expect(p.totalValue).toBe(1_100_000_000n);
   });
 
@@ -297,6 +298,7 @@ describe("portfolio valuation", () => {
     const p = await getLighterPortfolio(CHAIN, VAULT, tracked);
     // markValue = −4_700_000_000; entry = −4.6e9; value = −4.7e9 − (−4.6e9) = −$100
     expect(p.positions[0].value).toBe(-100_000_000n);
+    expect(p.positions[0].pnl).toBe(-100_000_000n);
     expect(p.totalValue).toBe(900_000_000n);
   });
 
@@ -310,7 +312,8 @@ describe("portfolio valuation", () => {
       }),
     });
     const p = await getLighterPortfolio(CHAIN, VAULT, tracked);
-    expect(p.positions[0].value).toBe(100_000_000n + 500_000_000n);
+    expect(p.positions[0].pnl).toBe(100_000_000n); // uPnL column shows the raw PnL…
+    expect(p.positions[0].value).toBe(100_000_000n + 500_000_000n); // …NAV adds iso margin back
     expect(p.totalValue).toBe(1_600_000_000n);
   });
 
@@ -324,7 +327,8 @@ describe("portfolio valuation", () => {
     // sizeDecimals 3, priceDecimals 2: size 2000 = 2.0, mark 235000 = $2350,
     // entry notional $4600 on 2.0 → entry price $2300.
     expect(p.formattedReport).toContain("| Entry | Mark |");
-    expect(p.formattedReport).toContain("| 2300 | 2350 |");
+    // uPnL is the mark-vs-entry PnL; Margin is a dash for cross margin.
+    expect(p.formattedReport).toContain("| 2300 | 2350 | +$100.00 | — |");
   });
 
   it("degrades gracefully: no account → zero collateral, failed reads are skipped", async () => {
@@ -504,7 +508,7 @@ describe("errorDecoder — ALighter errors", () => {
       "0x207719d0": /settlement window/,
       "0x0db95510": /size\/price decimals/i,
       "0x6a409768": /already tracked/i,
-      "0xfacd8cec": /lighter_track_market/,
+      "0xfacd8cec": /not tracked/i,
       "0xb741d9ce": /32/i,
       "0x9db8d5b1": /perp/i,
       "0x73861efb": /state read failed/i,
@@ -531,8 +535,6 @@ const LIGHTER_TOOLS = [
   "lighter_market_order",
   "lighter_cancel_order",
   "lighter_cancel_all_orders",
-  "lighter_track_market",
-  "lighter_untrack_market",
   "lighter_get_request_status",
 ];
 
@@ -556,7 +558,7 @@ describe("tool registration and catalog", () => {
     expect(cards.map((c) => c.toolName).sort()).toEqual([...LIGHTER_TOOLS].sort());
     expect(result.message).toMatch(/19529/);
     expect(result.message).toMatch(/asynchronous/i);
-    expect(result.message).toMatch(/lighter_track_market/);
+    expect(result.message).toMatch(/tracked automatically/i);
   });
 
   it("fast paths route unambiguous lighter phrases without the LLM", () => {

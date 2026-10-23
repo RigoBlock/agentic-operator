@@ -62,7 +62,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   // USDC-based pool, unpriced (fresh — updateUnitaryValue returns the initial
   // unitary value with zero total value)
-  mockGetPoolData.mockResolvedValue({ name: "earnest", symbol: "EARN", baseToken: USDC });
+  mockGetPoolData.mockResolvedValue({ name: "earnest", symbol: "EARN", baseToken: USDC, decimals: 6 });
   mockGetNavData.mockResolvedValue({ unitaryValue: 1_000_000n, totalValue: 0n, timestamp: 0n });
   mockGetTokenDecimals.mockResolvedValue(6);
   mockGetVaultTokenBalance.mockResolvedValue({ symbol: "USDC", balance: 0n });
@@ -145,7 +145,8 @@ describe("fund_pool with an ERC-20 base token", () => {
   });
 
   it("prices amountOutMin from NAV when the pool is funded", async () => {
-    mockGetNavData.mockResolvedValue({ unitaryValue: 1_000_000_000_000_000_000n, totalValue: 100n * 10n ** 6n, timestamp: 0n });
+    // unitaryValue is on the POOL TOKEN decimals scale (6 here): NAV 1.0 → 1e6.
+    mockGetNavData.mockResolvedValue({ unitaryValue: 1_000_000n, totalValue: 100n * 10n ** 6n, timestamp: 0n });
     mockReadContract.mockResolvedValue(100n * 10n ** 6n);
     const result = await handle_fund_pool(env, makeCtx(), { amount: "35" }, "fund_pool");
 
@@ -161,7 +162,7 @@ describe("fund_pool with an ERC-20 base token", () => {
 
 describe("fund_pool with a native base token", () => {
   it("returns a single payable mint — no approve, no allowance read", async () => {
-    mockGetPoolData.mockResolvedValue({ name: "Ether Pool", symbol: "ETHP", baseToken: ZERO });
+    mockGetPoolData.mockResolvedValue({ name: "Ether Pool", symbol: "ETHP", baseToken: ZERO, decimals: 18 });
     const result = await handle_fund_pool(env, makeCtx(), { amount: "1.5" }, "fund_pool");
 
     expect(mockReadContract).not.toHaveBeenCalled();
@@ -185,7 +186,10 @@ describe("fund_pool input validation", () => {
 
 describe("update_nav", () => {
   it("drafts updateUnitaryValue targeting the vault with a NAV preview", async () => {
-    mockGetNavData.mockResolvedValue({ unitaryValue: 1_000_000_000_000n, totalValue: 40_000_000n, timestamp: 0n });
+    // unitaryValue is on the pool-token decimals scale: raw 1017985 at 6
+    // decimals = 1.017985 base units per pool token (the value the on-chain
+    // log will record — modulo balance movements before the tx mines).
+    mockGetNavData.mockResolvedValue({ unitaryValue: 1_017_985n, totalValue: 40_678_720n, timestamp: 0n });
     mockGetPoolData.mockResolvedValue({ name: "earnest", symbol: "EARN", baseToken: USDC, decimals: 6 });
     const result = await handle_update_nav(env, makeCtx(), {}, "update_nav");
 
@@ -194,11 +198,9 @@ describe("update_nav", () => {
       encodeFunctionData({ abi: RIGOBLOCK_VAULT_ABI, functionName: "updateUnitaryValue" }),
     );
     expect(result.transaction?.operatorOnly).toBe(true);
-    // Preview shows what the on-chain log will record (18-dec unitary value,
-    // net total value on pool-token decimals)
     expect(result.message).toContain("earnest (EARN)");
-    expect(result.message).toContain("Unitary value (to be written): 0.000001");
-    expect(result.message).toContain("Net total value: 40");
+    expect(result.message).toContain("Unitary value (to be written): 1.017985");
+    expect(result.message).toContain("Net total value: 40.67872");
   });
 
   it("reports N/A for a not-yet-priced pool", async () => {

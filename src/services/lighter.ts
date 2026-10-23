@@ -9,9 +9,14 @@
  * 2026-10-20.
  *
  * Tracked markets and their size/price decimals are read from the pool's own
- * on-chain view getLighterTrackedMarkets() (0x5239dd83, EApps/EAppsLighter) —
- * the same LighterConstants table the adapter uses for NAV, so the operator
- * can never disagree with the contract. Decimals are NEVER user input.
+ * on-chain view getLighterTrackedMarkets() (0x5239dd83, EApps) — since
+ * ALighter v4.6.3 tracking is automatic (first order on a market tracks it;
+ * the NAV loop untracks markets with no position and no open orders), so the
+ * view reflects the pool's actual activity. This read feeds REPORTS ONLY;
+ * order building resolves decimals from the LighterConstants table mirrored
+ * in LIGHTER_MARKET_DECIMALS (abi/lighter.ts) — the same table the adapter
+ * prices NAV with, so the operator can never disagree with the contract.
+ * Decimals are NEVER user input.
  *
  * Read-failure policy (mirrors services/hyperliquid.ts):
  *  - Position/market/account reads return null on failure — callers report what
@@ -420,10 +425,14 @@ export interface LighterPortfolioPosition {
   /** Entry notional in 6-dec USDC. */
   entryQuote: bigint;
   markPrice: bigint;
-  /** Unrealized PnL + (isolated) margin add-back, 6-dec USDC (signed). */
-  value: bigint;
+  /** Unrealized PnL (mark value − entry notional), 6-dec USDC (signed). */
+  pnl: bigint;
+  /** Margin mode: 1 = isolated. */
   marginMode: number;
+  /** Isolated margin allocated outside shared collateral, 12-dec USDC. */
   allocatedMargin: bigint;
+  /** NAV contribution: pnl + isolated-margin add-back, 6-dec USDC (signed). */
+  value: bigint;
 }
 
 export interface LighterPortfolio {
@@ -476,7 +485,8 @@ export async function getLighterPortfolio(
     const scale = pow10(market.sizeDecimals + market.priceDecimals);
     const markValue = (position.position * marketInfo.markPrice * 1_000_000n) / scale;
     const entryValue = position.position > 0n ? position.entryQuote : -position.entryQuote;
-    let value = markValue - entryValue;
+    const pnl = markValue - entryValue;
+    let value = pnl;
     if (position.marginMode === LIGHTER_MARGIN_MODE_ISOLATED) {
       // 12-dec isolated margin → 6-dec USDC.
       value += position.allocatedMargin / 1_000_000n;
@@ -488,9 +498,10 @@ export async function getLighterPortfolio(
       sizeHuman: formatHuman(position.position, market.sizeDecimals),
       entryQuote: position.entryQuote,
       markPrice: marketInfo.markPrice,
-      value,
+      pnl,
       marginMode: position.marginMode,
       allocatedMargin: position.allocatedMargin,
+      value,
     });
     totalValue += value;
   }
@@ -574,8 +585,8 @@ function formatLighterReport(p: LighterPortfolio, trackedMarkets: TrackedMarket[
   lines.push("");
 
   if (p.positions.length > 0) {
-    lines.push(`| Market | Side | Size | Entry | Mark | Value (PnL + iso margin) | Margin |`);
-    lines.push(`|--------|------|------|-------|------|--------------------------|--------|`);
+    lines.push(`| Market | Side | Size | Entry | Mark | uPnL | Margin |`);
+    lines.push(`|--------|------|------|-------|------|------|--------|`);
     for (const pos of p.positions) {
       const market = trackedMarkets.find((m) => m.marketId === pos.marketId);
       const sizeDecimals = market?.sizeDecimals ?? 6;
@@ -587,8 +598,13 @@ function formatLighterReport(p: LighterPortfolio, trackedMarkets: TrackedMarket[
       const entryPrice = absSize > 0n
         ? (pos.entryQuote * pow10(sizeDecimals + priceDecimals)) / (absSize * 1_000_000n)
         : 0n;
+      // Cross margin is funded from the shared collateral line above — the
+      // position carries no separate margin, so the column shows a dash.
+      const margin = pos.marginMode === LIGHTER_MARGIN_MODE_ISOLATED
+        ? `isolated (${fmtUsdUnits(pos.allocatedMargin / 1_000_000n)})`
+        : "—";
       lines.push(
-        `| ${symbol ? `${symbol} (${pos.marketId})` : pos.marketId} | ${pos.size > 0n ? "LONG" : "SHORT"} | ${formatHuman(pos.size, sizeDecimals)} | ${formatHuman(entryPrice, priceDecimals)} | ${formatHuman(pos.markPrice, priceDecimals)} | ${fmtSignedUsdUnits(pos.value)} | ${pos.marginMode === LIGHTER_MARGIN_MODE_ISOLATED ? `isolated (${fmtUsdUnits(pos.allocatedMargin / 1_000_000n)})` : "cross"} |`,
+        `| ${symbol ? `${symbol} (${pos.marketId})` : pos.marketId} | ${pos.size > 0n ? "LONG" : "SHORT"} | ${formatHuman(pos.size, sizeDecimals)} | ${formatHuman(entryPrice, priceDecimals)} | ${formatHuman(pos.markPrice, priceDecimals)} | ${fmtSignedUsdUnits(pos.pnl)} | ${margin} |`,
       );
     }
     lines.push("");

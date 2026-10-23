@@ -44,8 +44,6 @@ import { handle_lighter_limit_order } from "./lighter.js";
 import { handle_lighter_market_order } from "./lighter.js";
 import { handle_lighter_cancel_order } from "./lighter.js";
 import { handle_lighter_cancel_all_orders } from "./lighter.js";
-import { handle_lighter_track_market } from "./lighter.js";
-import { handle_lighter_untrack_market } from "./lighter.js";
 import { handle_lighter_get_request_status } from "./lighter.js";
 import { handle_setup_delegation } from "./delegation.js";
 import { handle_revoke_delegation } from "./delegation.js";
@@ -116,8 +114,6 @@ export const TOOL_HANDLER_REGISTRY: Record<string, (env: Env, ctx: RequestContex
   "lighter_market_order": handle_lighter_market_order,
   "lighter_cancel_order": handle_lighter_cancel_order,
   "lighter_cancel_all_orders": handle_lighter_cancel_all_orders,
-  "lighter_track_market": handle_lighter_track_market,
-  "lighter_untrack_market": handle_lighter_untrack_market,
   "lighter_get_request_status": handle_lighter_get_request_status,
   "check_pending_tx": handle_check_pending_tx,
   "setup_delegation": handle_setup_delegation,

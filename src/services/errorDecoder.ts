@@ -183,26 +183,28 @@ function formatDecodedError(name: string, args: unknown): string {
 
   // Rigoblock ALighter (Lighter Devnet)
   if (name === "MarketNotTracked") {
-    return "MarketNotTracked — this Lighter market is not tracked by the pool. " +
-      "Track it first with lighter_track_market (you need the market's size and price decimals).";
+    return "MarketNotTracked — this Lighter market is not tracked by the pool yet. " +
+      "Tracking is automatic: place the first order on the market (it self-tracks), or retry shortly — " +
+      "the NAV loop prunes markets that have no position and no open orders.";
   }
   if (name === "MarketAlreadyTracked") {
     return "MarketAlreadyTracked — this Lighter market is already tracked by the pool.";
   }
   if (name === "MaxTrackedMarketsReached") {
     return "MaxTrackedMarketsReached — the pool tracks the maximum number of Lighter markets (32). " +
-      "Untrack an unused market with lighter_untrack_market first.";
+      "Idle markets untrack themselves once they have no position and no open orders; retry later.";
   }
   if (name === "InvalidMarket") {
-    return "InvalidMarket — the Lighter market id is not a perp market (perp ids are 0…2047).";
+    return "InvalidMarket — the Lighter market id is not a perp market (perp ids are 0…2047). " +
+      "On this devnet only markets 0 ETH, 1 BTC, 2 SOL, 3 DOGE are tradeable.";
   }
   if (name === "InvalidMarketDecimals") {
-    return "InvalidMarketDecimals — the size/price decimals given to lighter_track_market are out of range " +
-      "(size 0…18, price 0…16). Check the market's orderBookDetails.";
+    return "InvalidMarketDecimals — the market's size/price decimals are out of range (size 0…18, price 0…16). " +
+      "This should not happen with the adapter's built-in LighterConstants table; report the market id.";
   }
   if (name === "PositionNotClosed") {
     return "PositionNotClosed — the pool still holds a position on this Lighter market. " +
-      "Close it (reduce-only order) before untracking the market.";
+      "Close it (reduce-only order) first.";
   }
   if (name === "LighterReadFailed") {
     return "LighterReadFailed — a Lighter Core state read failed on-chain. " +

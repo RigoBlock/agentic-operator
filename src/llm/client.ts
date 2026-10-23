@@ -164,8 +164,6 @@ export const VAULT_TX_TOOLS = new Set<string>([
   "lighter_market_order",
   "lighter_cancel_order",
   "lighter_cancel_all_orders",
-  "lighter_track_market",
-  "lighter_untrack_market",
   "grg_stake",
   "grg_undelegate_stake",
   "grg_unstake",

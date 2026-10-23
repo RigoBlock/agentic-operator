@@ -592,11 +592,11 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "lighter_get_markets",
       description:
-        "List Lighter Core perp markets readable for the vault: every market in the vault's tracked list " +
-        "plus the known devnet perp ids 0..3 (labeled ETH/BTC/SOL/DOGE per Lighter devnet docs). Returns " +
-        "market type, fees, minimum sizes and index/mark prices. Tracked markets show human-scaled prices " +
-        "using the decimals from the pool's on-chain tracked-markets view; untracked ones show raw market " +
-        "units. Lighter Devnet (19529) only.",
+        "List Lighter Core perp markets readable for the vault: every market the pool has activity on " +
+        "(tracked automatically — the first order on a market tracks it) plus the known devnet perp ids " +
+        "0..3 (labeled ETH/BTC/SOL/DOGE per Lighter devnet docs). Returns market type, fees, minimum sizes " +
+        "and index/mark prices, scaled with the decimals from the adapter's LighterConstants table. " +
+        "Lighter Devnet (19529) only.",
       parameters: {
         type: "object",
         properties: {},
@@ -610,9 +610,10 @@ export const TOOL_DEFINITIONS = [
       name: "lighter_get_positions",
       description:
         "Get the vault's Lighter Core account portfolio: Core account status, shared USDC collateral, and " +
-        "per tracked-market position (size, entry notional, unrealized PnL at mark, margin mode, allocated " +
-        "isolated margin) with totals. Positions are read from the Lighter Core state precompile — resting " +
-        "orders are NOT shown (only order counts exist on-chain). Lighter Devnet (19529) only.",
+        "per-market position (size, entry notional, unrealized PnL at mark, margin mode, allocated isolated " +
+        "margin) with totals. Markets are tracked automatically — the first order on a market tracks it. " +
+        "Positions are read from the Lighter Core state precompile — resting orders are NOT shown (only " +
+        "order counts exist on-chain). Lighter Devnet (19529) only.",
       parameters: {
         type: "object",
         properties: {},
@@ -625,10 +626,11 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: "lighter_get_orders",
       description:
-        "Check the vault's open Lighter perp orders per tracked market. Lighter's on-chain reads expose " +
-        "order COUNTS only (the position read's order counters) — individual order prices/sizes are not " +
-        "readable on-chain. Market orders are IOC and never rest on the book; a limit order rests until " +
-        "filled, expired or cancelled (cancel it by the client order index shown when it was placed). " +
+        "Check the vault's open Lighter perp orders per market the pool has activity on (markets are tracked " +
+        "automatically — the first order on a market tracks it). Lighter's on-chain reads expose order " +
+        "COUNTS only (the position read's order counters) — individual order prices/sizes are not readable " +
+        "on-chain. Market orders are IOC and never rest on the book; a limit order rests until filled, " +
+        "expired or cancelled (cancel it by the client order index shown when it was placed). " +
         "Lighter Devnet (19529) only.",
       parameters: {
         type: "object",
@@ -684,8 +686,9 @@ export const TOOL_DEFINITIONS = [
       name: "lighter_limit_order",
       description:
         "Place a resting Lighter perp limit order (GTT by default, expiry 24h, postOnly optional) to open, " +
-        "increase, decrease (reduceOnly) or close a position. The market must be tracked by the pool first " +
-        "(lighter_track_market). Amounts/prices are validated against the tracked market decimals. " +
+        "increase, decrease (reduceOnly) or close a position. Markets are tracked automatically — the first " +
+        "order on a market tracks it — and amounts/prices are validated against the adapter's LighterConstants " +
+        "decimals (markets 0 ETH, 1 BTC, 2 SOL, 3 DOGE). " +
         "The executed transaction only means Core ACCEPTED the request — an accepted order is NOT a fill; " +
         "track the reqId with lighter_get_request_status.",
       parameters: {
@@ -730,8 +733,8 @@ export const TOOL_DEFINITIONS = [
       name: "lighter_market_order",
       description:
         "Place a Lighter perp market order: priced at the Core mark price ±1% bound, forced IOC " +
-        "(fills immediately up to the bound or the order is cancelled). The market must be tracked by the " +
-        "pool first (lighter_track_market). The executed transaction only means Core ACCEPTED the request — " +
+        "(fills immediately up to the bound or the order is cancelled). Markets are tracked automatically — " +
+        "the first order on a market tracks it. The executed transaction only means Core ACCEPTED the request — " +
         "an accepted order is NOT a fill; track the reqId with lighter_get_request_status.",
       parameters: {
         type: "object",
@@ -788,48 +791,6 @@ export const TOOL_DEFINITIONS = [
         type: "object",
         properties: {},
         required: [],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "lighter_track_market",
-      description:
-        "Track a Lighter perp market for the pool (pool-owner method): validates on-chain that the market is " +
-        "a perp and lets the adapter resolve its sizeDecimals/priceDecimals from its own LighterConstants " +
-        "table (never user input). The tracked market — with those decimals — is then readable from the " +
-        "pool's on-chain tracked-markets view and is required before any order on the market. The " +
-        "operator keeps no separate ledger.",
-      parameters: {
-        type: "object",
-        properties: {
-          marketId: {
-            type: "string",
-            description: "Market id or symbol: '0','1','2','3' or ETH, BTC, SOL, DOGE",
-          },
-        },
-        required: ["marketId"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "lighter_untrack_market",
-      description:
-        "Untrack a Lighter perp market (pool-owner method). Reverts PositionNotClosed while the pool holds " +
-        "a position on the market. The pool's on-chain tracked-markets view reflects the removal once the " +
-        "transaction confirms.",
-      parameters: {
-        type: "object",
-        properties: {
-          marketId: {
-            type: "string",
-            description: "Market id or symbol, e.g. '1' or BTC",
-          },
-        },
-        required: ["marketId"],
       },
     },
   },

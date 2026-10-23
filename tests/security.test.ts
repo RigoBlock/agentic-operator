@@ -198,8 +198,6 @@ describe("execution validation invariants", () => {
       "0x8a7da422": "createOrder(uint48,uint16,uint48,uint8,uint8,uint64,uint48,uint32,bool,bool,uint32)", // ALighter — perp order
       "0x736fd6b3": "cancelOrder(uint48,uint64)",              // ALighter
       "0xa4b6f756": "cancelAllOrders(uint48)",                 // ALighter
-      "0xee814ef0": "trackMarket(uint16)",                    // ALighter — pool-owner market tracking (decimals from the adapter's constants table)
-      "0xe0ad5442": "untrackMarket(uint16)",                   // ALighter
       "0x1c58db4f": "wrapETH()",                                // AUniswap wrap native
       "0x49616997": "unwrapWETH9(uint256)",                     // AUniswap unwrap native
       "0xa694fc3a": "stake(uint256)",                          // GRG staking

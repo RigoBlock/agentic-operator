@@ -19,21 +19,23 @@
  *                                                                  reverts AccountNotActivated when
  *                                                                  no Core account exists
  *   - createOrder(uint48,uint16,uint48,uint8,uint8,uint64,uint48,uint32,bool,bool,uint32)
- *                                                                → perp order; requires the market
- *                                                                  tracked by the pool, marketIndex < 2048;
- *                                                                  accountIndex arg is ignored (adapter
- *                                                                  substitutes the vault's own)
+ *                                                                → perp order; marketIndex < 2048
+ *                                                                  (perps only); the FIRST order on a
+ *                                                                  market auto-tracks it (ALighter v4.6.3)
+ *                                                                  — no manual tracking step
  *   - cancelOrder(uint48,uint64) / cancelAllOrders(uint48)       → order cancels (accountIndex ignored)
- *   - trackMarket(uint16) / untrackMarket(uint16)                → pool-owner market tracking
- *                                                                  (untrack requires zero position;
- *                                                                  decimals come from the adapter's
- *                                                                  LighterConstants table, ALighter
- *                                                                  v4.6.0; old 3-arg 0x341a942b retired)
+ *
+ * Market tracking is AUTOMATIC since ALighter v4.6.3: createOrder auto-tracks
+ * the market (decimals from the adapter's LighterConstants table), and the NAV
+ * loop auto-untracks any market with no position AND no open orders. The old
+ * trackMarket/untrackMarket adapter methods are removed. The pool's
+ * getLighterTrackedMarkets() view (0x5239dd83) still exposes the tracked set
+ * WITH decimals — it is read-only context for the operator, never a gate.
  *
  * On-chain NAV valuation lives on the pool implementation's EAppsLighter
- * extension (getLighterBalances(), 0x58a5a2a4 — 0-arg since v4.6.0; the old
- * adapter-side getLighterBalances(address) 0x432de12b was removed). The
- * operator never calls it: the portfolio view reads READ_CORE directly.
+ * extension via getAppTokenBalances — the old getLighterBalances views are
+ * gone (ALighter v4.6.2/4.6.3). The operator never calls them: the portfolio
+ * view reads READ_CORE directly.
  *
  * READ_CORE precompile (0x6600…0000) encodings are live-verified against the
  * current devnet build (2026-10-20); see docs/lighter-integration.md. Current
@@ -46,9 +48,10 @@
  *   - allocatedMargin: 12 decimals (divide by 1e6 for USDC)
  *   - order amount: base-asset units scaled by the market's sizeDecimals
  *   - order price: market price units scaled by the market's priceDecimals
- *     (size/price decimals are NOT readable on-chain — Lighter docs; the
- *      operator resolves them deterministically: verified constants → Core
- *      API orderBookDetails → fail closed; NEVER user input)
+ *     (size/price decimals are NOT readable on-chain — they come from the
+ *      adapter's LighterConstants table, mirrored in LIGHTER_MARKET_DECIMALS
+ *      below and copied into pool storage at auto-track time; NEVER user
+ *      input. A new market needs a protocol release AND a table update here.)
  */
 
 export const LIGHTER_CHAIN_ID = 19529;
@@ -118,6 +121,20 @@ export const LIGHTER_MARKET_SYMBOLS: Record<number, string> = {
   2048: "ETH/USDC",
 };
 
+/**
+ * Perp-market size/price decimals, mirroring the adapter's LighterConstants
+ * table (ALighter v4.6.3 — the sole on-chain source, copied into pool storage
+ * at auto-track time). Only these markets are tradeable; any other market id
+ * reverts UnknownMarket at order placement. A new market requires a protocol
+ * release AND an update here.
+ */
+export const LIGHTER_MARKET_DECIMALS: Record<number, { sizeDecimals: number; priceDecimals: number }> = {
+  0: { sizeDecimals: 4, priceDecimals: 2 },   // ETH-PERP
+  1: { sizeDecimals: 5, priceDecimals: 1 },   // BTC-PERP
+  2: { sizeDecimals: 3, priceDecimals: 3 },   // SOL-PERP
+  3: { sizeDecimals: 0, priceDecimals: 6 },   // DOGE-PERP
+};
+
 // ── READ_CORE query ids (uint16 prefix, abi.encodePacked with the args) ──
 
 export const LIGHTER_QUERIES = {
@@ -126,7 +143,7 @@ export const LIGHTER_QUERIES = {
   assetDecimals: 0x0002,   // + uint32 assetId (6 bytes) — raw uint8 word
   evmToken: 0x0004,        // + uint32 assetId (6 bytes) — raw address word
   marketInfo: 0x0005,      // + uint16 marketId (4 bytes) — raw 10-word tuple
-  position: 0x0007,        // + address + bool + uint16 marketId (25 bytes) — raw 7-word tuple
+  position: 0x0007,        // + address + bool + uint16 marketId (25 bytes) — raw 8-word tuple
   evmAccountIndex: 0x0009, // + address (22 bytes) — raw uint48 word; ERRORS when account absent
 } as const;
 
@@ -218,24 +235,10 @@ export const RIGOBLOCK_LIGHTER_ABI = [
     inputs: [{ name: "accountIndex", type: "uint48" }],
     outputs: [],
   },
-  {
-    name: "trackMarket",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [{ name: "marketIndex", type: "uint16" }],
-    outputs: [],
-  },
-  {
-    name: "untrackMarket",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [{ name: "marketIndex", type: "uint16" }],
-    outputs: [],
-  },
   // NOTE: getLighterBalances moved off the adapter in ALighter v4.6.0 — it now
-  // lives on the pool implementation's EAppsLighter extension as the 0-arg view
-  // getLighterBalances() (0x58a5a2a4), which owns on-chain NAV valuation. The
-  // operator never calls it: the portfolio view reads READ_CORE directly.
+  // lives on the pool implementation's EAppsLighter extension, which owns
+  // on-chain NAV valuation. The operator never calls it: the portfolio view
+  // reads READ_CORE directly.
 
   // ── Events (IALighter) ──
   // OrderSent carries the Core request id — the handle for lighter_get_request_status.
@@ -254,16 +257,6 @@ export const RIGOBLOCK_LIGHTER_ABI = [
     type: "event",
     inputs: [{ name: "reqId", type: "uint64", indexed: true }],
   },
-  {
-    name: "MarketTracked",
-    type: "event",
-    inputs: [{ name: "marketId", type: "uint16", indexed: true }],
-  },
-  {
-    name: "MarketUntracked",
-    type: "event",
-    inputs: [{ name: "marketId", type: "uint16", indexed: true }],
-  },
 ] as const;
 
 // ── Vault-facing selectors (must match ALLOWED_VAULT_SELECTORS) ────────
@@ -274,8 +267,6 @@ export const LIGHTER_SELECTORS = {
   createOrder: "0x8a7da422" as `0x${string}`,
   cancelOrder: "0x736fd6b3" as `0x${string}`,
   cancelAllOrders: "0xa4b6f756" as `0x${string}`,
-  trackMarket: "0xee814ef0" as `0x${string}`,
-  untrackMarket: "0xe0ad5442" as `0x${string}`,
 } as const;
 
 /** ALighter custom errors, selector → error name (live-verified 2026-10-20). */

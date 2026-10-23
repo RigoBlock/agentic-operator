@@ -227,17 +227,28 @@ owner-signed execution only in v1):
   below them Core would accept and cancel at matching. Margin adequacy is a handler WARNING
   only (notional × assumed 20% initial margin vs Core collateral): the market-default IMF
   is not readable on-chain and maker orders are not margin-rejected at placement.
-- `lighter_track_market` / `lighter_untrack_market` — pool-owner market tracking. The on-chain
-  `trackMarket(uint16)` resolves size/price decimals from the adapter's own LighterConstants table
-  (never calldata, never user input); the pool's `getLighterTrackedMarkets()` view (0x5239dd83)
-  exposes the tracked markets WITH those decimals and is the operator's only source for both.
+
+**Market tracking is fully automatic (ALighter v4.6.3, PR #972)** — there is no
+track/untrack tool and no operator step. The first `createOrder` on a market tracks it;
+the NAV loop auto-untracks a market only when it has NO position AND NO open orders, so
+resting-order markets stay tracked. Size/price decimals for order building come from the
+adapter's LighterConstants table, mirrored in `LIGHTER_MARKET_DECIMALS`
+(`src/abi/lighter.ts`); on this devnet only markets 0 ETH (4,2), 1 BTC (5,1), 2 SOL (3,3),
+3 DOGE (0,6) are tradeable — any other id reverts `UnknownMarket` on-chain and is rejected
+in the builder. The pool's `getLighterTrackedMarkets()` view (0x5239dd83) still exists and
+feeds the reports (scaled prices/sizes), but it is never a gate.
+
+Any Lighter adapter write (deposit, withdraw, order, cancel) locks pool NAV for **16
+seconds** while Core settles (`lastActionTimestamp`, same on-chain gate as Hyperliquid's
+settlement lock) — a trailing `updateUnitaryValue` reverts `NavLocked()` in that window,
+and the agent is blocked from trading on-chain too.
 
 Lighter Core writes are **asynchronous**: a successful EVM transaction only means Core accepted
 the request — always surface the reqId and point to `lighter_get_request_status`; never claim an
 order filled (an IOC/market order against an empty book is cancelled — the devnet ships without
 market makers). All Core state reads go through the READ_CORE precompile via `LIGHTER_RPC_URL` —
-no external Core REST API, no operator-side ledger: tracked markets and decimals come from the
-pool's on-chain view. The position read is a raw 8-word tuple WITH the leading
+no operator-side ledger: tracked markets and decimals come from
+the pool's on-chain view. The position read is a raw 8-word tuple WITH the leading
 int64 `lastFundingRatePrefixSum` the docs show (post-upgrade build; the
 pre-upgrade build served 7 words without it — decoding that build with the
 8-word table misaligns every field, and vice versa). The two order-count
@@ -246,16 +257,20 @@ position-tied (SL/TP) order count. The positions report shows per-position
 Entry and Mark price columns — Entry is derived by inverting `entryQuote`
 (`entryPrice = entryQuote × 10^(sizeDecimals+priceDecimals) / (|size| × 1e6)`),
 Mark comes from the market-info read; liquidation price is NOT available
-on-chain (not part of the READ_CORE position tuple).
-**Funding is NOT part of on-chain NAV.** `LighterLib.getLighterBalances`
-(v3-contracts `feat/lighter-evm`) computes NAV as `collateralBaseAmount` +
+on-chain (not part of the READ_CORE position tuple). The positions report shows
+`| Market | Side | Size | Entry | Mark | uPnL | Margin |`: uPnL is mark-vs-entry PnL
+(matching `_positionValueUsdc` before the isolated-margin add-back) and Margin shows
+`isolated ($X)` for isolated positions or `—` for cross (cross margin is funded from
+the shared collateral line, so the position carries no separate margin).
+**Funding is NOT part of on-chain NAV.** `LighterLib` (v3-contracts `feat/lighter-evm`)
+computes NAV as `collateralBaseAmount` +
 Σ `_positionValueUsdc` (mark value − entry notional, + isolated margin) +
 the in-flight transfer adjustment — the position tuple's
 `lastFundingRatePrefixSum` is never consumed. Core itself accrues funding into
 collateral continuously, so the Core REST API's collateral (e.g. 30.003768) and
 the on-chain NAV read (30.000000) legitimately diverge by the funding amount;
-the positions report's "Value (PnL + iso margin)" column is mark-vs-entry PnL
-only and matches the on-chain figure. Adding funding to NAV is protocol work:
+the positions report's uPnL column is mark-vs-entry PnL only and matches the
+on-chain figure. Adding funding to NAV is protocol work:
 the prefix sum AT ENTRY is not stored anywhere readable, so it cannot be
 reconstructed from READ_CORE alone — ALighter/LighterLib would have to snapshot
 it at position open. Lighter has no

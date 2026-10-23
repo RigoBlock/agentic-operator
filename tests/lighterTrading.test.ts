@@ -1,8 +1,8 @@
 /**
  * Lighter calldata builder tests — unit conversions, vault adapter calldata,
- * order building (scaling, market bound, GTT expiry clamp, tracked-market
- * enforcement, on-chain minimum sizes, overflow checks). The READ_CORE
- * market-info read is mocked.
+ * order building (scaling, market bound, GTT expiry clamp, market decimals
+ * from the LighterConstants table, on-chain minimum sizes, overflow checks).
+ * The READ_CORE market-info read is mocked.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { decodeAbiParameters, decodeFunctionData, toFunctionSelector, type Address } from "viem";
@@ -16,17 +16,13 @@ import {
   buildLighterOrderCalldata,
   buildLighterCancelOrderCalldata,
   buildLighterCancelAllOrdersCalldata,
-  buildLighterTrackMarketCalldata,
-  buildLighterUntrackMarketCalldata,
   LIGHTER_MIN_EXPIRY_MS,
   LIGHTER_MAX_EXPIRY_MS,
   LIGHTER_DEFAULT_EXPIRY_MS,
 } from "../src/services/lighterTrading.js";
 import { RIGOBLOCK_LIGHTER_ABI, LIGHTER_USDC_ASSET_INDEX, LIGHTER_TIF, LIGHTER_ORDER_TYPES } from "../src/abi/lighter.js";
-import type { TrackedMarket } from "../src/services/lighter.js";
 
 const VAULT = "0x1111111111111111111111111111111111111111" as Address;
-const ETH_PERP: TrackedMarket = { marketId: 0, sizeDecimals: 3, priceDecimals: 2 };
 
 // Mock the mark-price read used by market orders.
 const mockMarketInfo = vi.hoisted(() => vi.fn());
@@ -135,13 +131,12 @@ describe("createOrder calldata", () => {
       sizeHuman: "2",
       priceHuman: "2350",
       isMarket: false,
-      trackedMarkets: [ETH_PERP],
     });
     const after = Date.now();
 
     expect(built.orderType).toBe(LIGHTER_ORDER_TYPES.limit);
     expect(built.tifCode).toBe(LIGHTER_TIF.gtt);
-    expect(built.amount).toBe(2000n);
+    expect(built.amount).toBe(20000n); // ETH sizeDecimals 4
     expect(built.price).toBe(235000n);
     expect(built.isAsk).toBe(false);
     expect(built.reduceOnly).toBe(false);
@@ -159,7 +154,7 @@ describe("createOrder calldata", () => {
     expect(orderType).toBe(0);
     expect(tif).toBe(1); // GTT
     expect(expiry).toBe(built.expiry);
-    expect(amount).toBe(2000);
+    expect(amount).toBe(20000);
     expect(price).toBe(235000);
     expect(isAsk).toBe(false);
     expect(reduceOnly).toBe(false);
@@ -177,7 +172,6 @@ describe("createOrder calldata", () => {
       priceHuman: "2350",
       isMarket: false,
       expiryMs: now + 60_000, // 1 minute — below the 5-minute floor
-      trackedMarkets: [ETH_PERP],
     });
     expect(built.expiry >= BigInt(now + LIGHTER_MIN_EXPIRY_MS)).toBe(true);
     expect(built.expiry <= BigInt(now + LIGHTER_MIN_EXPIRY_MS + 2000)).toBe(true);
@@ -194,7 +188,6 @@ describe("createOrder calldata", () => {
       isMarket: false,
       tif: "postOnly",
       reduceOnly: true,
-      trackedMarkets: [ETH_PERP],
     });
     expect(built.tifCode).toBe(LIGHTER_TIF.postOnly);
     expect(built.isAsk).toBe(true);
@@ -209,7 +202,6 @@ describe("createOrder calldata", () => {
     });
     const buy = await buildLighterOrderCalldata({
       chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "2", isMarket: true,
-      trackedMarkets: [ETH_PERP],
     });
     expect(buy.orderType).toBe(LIGHTER_ORDER_TYPES.market);
     expect(buy.tifCode).toBe(LIGHTER_TIF.ioc);
@@ -223,7 +215,6 @@ describe("createOrder calldata", () => {
     });
     const sell = await buildLighterOrderCalldata({
       chainId: 19529, vault: VAULT, marketId: 0, side: "sell", sizeHuman: "2", isMarket: true,
-      trackedMarkets: [ETH_PERP],
     });
     // 99999 × 0.99 = 98999.01 → rounds up to 99000, never down to 98999
     expect(sell.price).toBe(99000n);
@@ -235,19 +226,18 @@ describe("createOrder calldata", () => {
     await expect(
       buildLighterOrderCalldata({
         chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "2", isMarket: true,
-        trackedMarkets: [ETH_PERP],
       }),
     ).rejects.toThrow(/No live market data/);
   });
 
   it("rejects orders below the market's on-chain minimum order size", async () => {
-    // minBaseAmount 5 on sizeDecimals 3 → 0.005 minimum; 0.004 is below it.
+    // minBaseAmount 5 on ETH's sizeDecimals 4 → 0.0005 minimum; 0.0004 is below it.
     await expect(
       buildLighterOrderCalldata({
-        chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "0.004", priceHuman: "2350",
-        isMarket: false, trackedMarkets: [ETH_PERP],
+        chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "0.0004", priceHuman: "2350",
+        isMarket: false,
       }),
-    ).rejects.toThrow(/minimum order size \(0\.005 base units\)/);
+    ).rejects.toThrow(/minimum order size \(0\.0005 base units\)/);
   });
 
   it("rejects orders below the market's on-chain minimum notional", async () => {
@@ -255,7 +245,7 @@ describe("createOrder calldata", () => {
     await expect(
       buildLighterOrderCalldata({
         chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "2", priceHuman: "1",
-        isMarket: false, trackedMarkets: [ETH_PERP],
+        isMarket: false,
       }),
     ).rejects.toThrow(/minimum of \$10/);
   });
@@ -267,38 +257,37 @@ describe("createOrder calldata", () => {
     });
     await expect(
       buildLighterOrderCalldata({
-        chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "0.001", isMarket: true,
-        trackedMarkets: [ETH_PERP],
+        chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "0.0004", isMarket: true,
       }),
     ).rejects.toThrow(/minimum order size/);
   });
 
-  it("rejects an untracked market with a pointer to lighter_track_market", async () => {
+  it("rejects an unknown (not-yet-tradeable) market id", async () => {
     await expect(
       buildLighterOrderCalldata({
         chainId: 19529, vault: VAULT, marketId: 7, side: "buy", sizeHuman: "2", priceHuman: "2350",
-        isMarket: false, trackedMarkets: [ETH_PERP],
+        isMarket: false,
       }),
-    ).rejects.toThrow(/not tracked by this pool.*lighter_track_market/s);
+    ).rejects.toThrow(/Unknown Lighter market 7 — tradeable markets: 0 ETH, 1 BTC, 2 SOL, 3 DOGE/);
   });
 
   it("rejects spot-range market ids and invalid tif", async () => {
     await expect(
       buildLighterOrderCalldata({
         chainId: 19529, vault: VAULT, marketId: 2048, side: "buy", sizeHuman: "2", priceHuman: "1",
-        isMarket: false, trackedMarkets: [{ marketId: 2048, sizeDecimals: 3, priceDecimals: 2 }],
+        isMarket: false,
       }),
-    ).rejects.toThrow(/not a perp market|0 … 2047/);
+    ).rejects.toThrow(/perp markets are 0 … 2047/);
     await expect(
       buildLighterOrderCalldata({
         chainId: 19529, vault: VAULT, marketId: 0, side: "buy", sizeHuman: "2", priceHuman: "2350",
-        isMarket: false, tif: "gtc" as never, trackedMarkets: [ETH_PERP],
+        isMarket: false, tif: "gtc" as never,
       }),
     ).rejects.toThrow(/time-in-force/);
   });
 });
 
-describe("cancel / track / untrack calldata", () => {
+describe("cancel calldata", () => {
   it("cancelOrder carries the order index and ignores accountIndex", () => {
     const calldata = buildLighterCancelOrderCalldata("12345");
     expect(calldata.slice(0, 10)).toBe(toFunctionSelector("cancelOrder(uint48,uint64)"));
@@ -311,14 +300,5 @@ describe("cancel / track / untrack calldata", () => {
     const calldata = buildLighterCancelAllOrdersCalldata();
     expect(calldata.slice(0, 10)).toBe(toFunctionSelector("cancelAllOrders(uint48)"));
     expect(decodeVaultCall(calldata).args).toEqual([0]);
-  });
-
-  it("trackMarket is 1-arg (decimals come from the adapter's LighterConstants table)", () => {
-    const ok = buildLighterTrackMarketCalldata(0);
-    expect(ok.slice(0, 10)).toBe(toFunctionSelector("trackMarket(uint16)"));
-    expect(ok).toHaveLength(10 + 64);
-    expect(decodeVaultCall(ok).args).toEqual([0]);
-    expect(() => buildLighterTrackMarketCalldata(2048)).toThrow(/0 … 2047/);
-    expect(() => buildLighterUntrackMarketCalldata(2048)).toThrow(/0 … 2047/);
   });
 });

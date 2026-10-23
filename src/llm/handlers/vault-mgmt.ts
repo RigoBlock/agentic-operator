@@ -237,35 +237,37 @@ export async function handle_fund_pool(
   // 3. Parse amount to smallest units
   const amountInWei = parseUnits(amountStr, baseDecimals);
 
-  // 4. Calculate amountOutMin from NAV with 5% slippage
-  //    unitaryValue = price of 1 pool token in base token units (18 decimals)
-  //    expectedPoolTokens = amountIn * 10^18 / unitaryValue
-  //    amountOutMin = expectedPoolTokens * 0.95
+  // 4. Calculate amountOutMin from NAV with 5% slippage.
+  //    unitaryValue = price of 1 pool token in base token units, on the
+  //    POOL TOKEN decimals scale (pool.decimals): the same scale as
+  //    netTotalValue — see getEffectivePoolState in services/vault.ts.
+  //    expectedPoolTokens = amountIn × 10^poolDecimals / unitaryValue
+  //    amountOutMin = expectedPoolTokens × 0.95
   const unitaryValue = navData.unitaryValue;
+  const poolDecimals = poolData.decimals;
   // An UNPRICED pool must be detected by its zero total value, not just a zero
   // unitary value: updateUnitaryValue() — the live contract NAV computation —
-  // returns the pool's initial unitary value (10^decimals) even when the pool
-  // is empty. Pricing against that initial value would demand ~10^12x more
-  // pool tokens than a first mint actually produces and the mint reverts
-  // on-chain.
+  // returns the pool's initial unitary value (10^poolDecimals) even when the
+  // pool is empty, and pricing against that initial value ignores the pool's
+  // supply — the mint would revert on-chain.
   const isUnpricedPool = unitaryValue === 0n || navData.totalValue === 0n;
   let amountOutMin: bigint;
   if (isUnpricedPool) {
     // First mint (empty pool) — no NAV yet, accept any amount
     amountOutMin = 0n;
   } else {
-    const expectedPoolTokens = (amountInWei * (10n ** 18n)) / unitaryValue;
+    const expectedPoolTokens = (amountInWei * (10n ** BigInt(poolDecimals))) / unitaryValue;
     amountOutMin = (expectedPoolTokens * 95n) / 100n; // 5% slippage
   }
 
-  // Format for display
+  // Format for display (pool-token scale, not 18 decimals).
   const unitaryValueFormatted = isUnpricedPool
     ? "N/A (first mint)"
-    : formatUnits(unitaryValue, 18);
+    : formatUnits(unitaryValue, poolDecimals);
   const expectedTokensFormatted = isUnpricedPool
     ? amountStr
-    : formatUnits((amountInWei * (10n ** 18n)) / unitaryValue, 18);
-  const minTokensFormatted = formatUnits(amountOutMin, 18);
+    : formatUnits((amountInWei * (10n ** BigInt(poolDecimals))) / unitaryValue, poolDecimals);
+  const minTokensFormatted = formatUnits(amountOutMin, poolDecimals);
 
   // 5. Build the mint transaction
   const mintData = encodeMint(
@@ -499,9 +501,12 @@ export async function handle_update_nav(
     getPoolData(ctx.chainId, vault),
   ]);
   const poolDecimals = poolData.decimals ?? 18;
+  // unitaryValue is the price of 1 pool token in base token units, on the
+  // pool-token decimals scale — the same scale as netTotalValue below (see
+  // getEffectivePoolState in services/vault.ts). NOT 18 decimals.
   const unitaryValueFormatted = nav.unitaryValue === 0n
     ? "N/A (pool not priced yet)"
-    : formatUnits(nav.unitaryValue, 18);
+    : formatUnits(nav.unitaryValue, poolDecimals);
 
   const transaction: TransactionDraft = {
     to: vault,

@@ -46,8 +46,6 @@ const REQUIRED_TOOLS = [
   "lighter_market_order",
   "lighter_cancel_order",
   "lighter_cancel_all_orders",
-  "lighter_track_market",
-  "lighter_untrack_market",
   "lighter_get_request_status",
   // Uniswap LP
   "get_pool_info",
