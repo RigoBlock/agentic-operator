@@ -301,7 +301,7 @@ export async function getLighterAccountIndex(
   }
 }
 
-// ── Core account activation (prompt-only gating) ──────────────────────
+// ── Core account activation (write-path gating) ───────────────────────
 
 const ACTIVATION_TTL_MS = 5 * 60 * 1000;
 const activationCache = new Map<string, { at: number; activated: boolean }>();

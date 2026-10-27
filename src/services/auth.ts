@@ -39,14 +39,24 @@ const REDEEM_KV_PREFIX = "sess-redeem:";
 
 /**
  * Pepper for the network hash. Not a secret against code access — it only
- * ensures a KV dump exposes hashes, not raw IPs / user-agent strings.
+ * ensures a KV dump exposes hashes, not raw device IDs / user-agent strings.
  */
 const NETWORK_HASH_PEPPER = "rigoblock-network-hash-v1";
 
-/** Salted hash binding a session to the caller's observed network context. */
-export function computeNetworkHash(ip: string, userAgent: string): string {
+/**
+ * Salted hash binding a session to the caller's device context: the
+ * client-generated `x-device-id` (a random per-browser-profile ID the
+ * frontend persists and sends on every request) plus the User-Agent.
+ *
+ * Deliberately NOT bound to the egress IP: `cf-connecting-ip` rotates
+ * between connections on IPv6 privacy extensions and dual-stack v4/v6
+ * clients, so an IP-bound session failed on every other request and looped
+ * the user through continuous re-signs. The device ID is stable across IP
+ * changes while still scoping the token to one browser profile.
+ */
+export function computeNetworkHash(deviceId: string, userAgent: string): string {
   return sha256(
-    (NETWORK_HASH_PEPPER + "|" + ip + "|" + userAgent) as Hex,
+    (NETWORK_HASH_PEPPER + "|" + deviceId + "|" + userAgent) as Hex,
   );
 }
 

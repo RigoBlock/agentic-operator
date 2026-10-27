@@ -441,6 +441,79 @@ describe("session tokens (single-use signature redemption)", () => {
     expect(res.status).toBe(401);
   });
 
+  it("session survives an egress IP rotation — binding is device ID + UA, NOT cf-connecting-ip (IPv6 privacy-extensions regression)", async () => {
+    const { app, env } = createApp();
+    const device = "0x" + "11".repeat(16);
+    const first = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-operator-address": ADDR,
+          "x-auth-signature": "0xdeadbeef",
+          "x-auth-timestamp": String(Date.now()),
+          "user-agent": "test-agent/1.0",
+          "x-device-id": device,
+          "cf-connecting-ip": "2001:db8::1",
+        },
+      },
+      env,
+    );
+    const token = first.headers.get("X-Session-Token")!;
+    expect(token).toBeTruthy();
+
+    // Same device ID + UA from a rotated IPv6 address must still authenticate
+    // (under the old IP-bound implementation this returned 401 and looped
+    // the user through continuous re-signs).
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-session-token": token,
+          "user-agent": "test-agent/1.0",
+          "x-device-id": device,
+          "cf-connecting-ip": "2001:db8::2",
+        },
+      },
+      env,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("session token presented from a DIFFERENT device ID is rejected with 401", async () => {
+    const { app, env } = createApp();
+    const token = (
+      await app.request(
+        "/api/chat",
+        {
+          method: "POST",
+          headers: {
+            "x-operator-address": ADDR,
+            "x-auth-signature": "0xdeadbeef",
+            "x-auth-timestamp": String(Date.now()),
+            "user-agent": "test-agent/1.0",
+            "x-device-id": "0x" + "11".repeat(16),
+          },
+        },
+        env,
+      )
+    ).headers.get("X-Session-Token")!;
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-session-token": token,
+          "user-agent": "test-agent/1.0",
+          "x-device-id": "0x" + "22".repeat(16),
+        },
+      },
+      env,
+    );
+    expect(res.status).toBe(401);
+  });
+
   it("unknown session token is rejected with 401 on protected routes", async () => {
     const { app, env } = createApp();
     const res = await app.request(

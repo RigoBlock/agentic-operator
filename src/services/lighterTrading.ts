@@ -60,22 +60,25 @@ const MARKET_BOUND_BPS = 100;
 // ── Unit conversions ──────────────────────────────────────────────────
 
 /** Human base-asset size → uint48 amount on the market's sizeDecimals scale.
- *  Must be an EXACT integer on that scale — sub-tick sizes are rejected. */
+ *  Must be an EXACT integer on that scale — sub-tick sizes are rejected.
+ *  Parses the decimal string exactly: float multiplication misclassifies exact
+ *  ticks (0.0006 × 10^5 computes to 59.99999999999999, not 60). */
 export function toLighterAmount(size: number | string, sizeDecimals: number): bigint {
-  const n = typeof size === "string" ? parseFloat(size.replace(/[$,]/g, "")) : size;
-  if (!Number.isFinite(n) || n <= 0) {
+  const raw = String(size).replace(/[$,]/g, "").trim();
+  const m = /^(\d*)(?:\.(\d+))?$/.exec(raw);
+  if (!m || (m[1] === "" && m[2] === undefined)) {
     throw new Error(`Invalid Lighter order size: ${size} (must be a positive number).`);
   }
-  const scale = 10 ** sizeDecimals;
-  const scaled = n * scale;
-  if (!Number.isInteger(scaled)) {
+  const whole = m[1] || "0";
+  const frac = m[2] ?? "";
+  if (frac.length > sizeDecimals) {
     throw new Error(
       `Lighter order size ${size} is below this market's size tick (sizeDecimals = ${sizeDecimals}). ` +
       `Use a size with at most ${sizeDecimals} decimal places.`,
     );
   }
-  const amount = BigInt(scaled);
-  if (amount <= 0n) throw new Error(`Lighter order size too small: ${size}`);
+  const amount = BigInt(whole) * (10n ** BigInt(sizeDecimals)) + BigInt(frac.padEnd(sizeDecimals, "0") || "0");
+  if (amount <= 0n) throw new Error(`Invalid Lighter order size: ${size} (must be a positive number).`);
   if (amount > U48_MAX) throw new Error(`Lighter order size too large: ${size}`);
   return amount;
 }

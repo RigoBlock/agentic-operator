@@ -612,6 +612,19 @@ async function invokeDirectTool(toolInfo) {
     });
     clearTimeout(timeoutId);
     captureSessionToken(res);
+    // A non-JSON body means Cloudflare answered for us (worker crash 1101,
+    // gateway 5xx) — our routes always return a JSON envelope. Extract the
+    // diagnostic from the HTML error page instead of dying on res.json().
+    if (!(res.headers.get('content-type') || '').includes('application/json')) {
+      const text = await res.text().catch(() => '');
+      const cfCode = text.match(/cf-error-code[^0-9]{0,40}(\d{3,4})/i)?.[1]
+        || text.match(/\bError\s+(\d{3,4})\b/)?.[1];
+      const ray = text.match(/Ray ID:\s*(?:<[^>]*>\s*)?([0-9a-f]{16})/i)?.[1];
+      appendMessage('system',
+        `⚠️ Service error (HTTP ${res.status}${cfCode ? `, Cloudflare ${cfCode}` : ''}${ray ? `, Ray ID ${ray}` : ''}). ` +
+        'The service crashed or was temporarily unreachable — please retry in a moment. If it keeps happening, report the Ray ID.');
+      return;
+    }
     const data = await res.json();
     if (!res.ok) {
       // Auth expired — clear session + cached signature and prompt user to re-sign

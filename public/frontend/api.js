@@ -22,6 +22,20 @@ export async function sendChatMessage(body, onStreamEvent, signal) {
   captureSessionToken(res);
 
   if (!res.ok) {
+    // A non-JSON body is a Cloudflare-level error page (worker crash 1101,
+    // gateway 5xx) — extract the diagnostic instead of a bare "HTTP 500".
+    if (!(res.headers.get('content-type') || '').includes('application/json')) {
+      const text = await res.text().catch(() => '');
+      const cfCode = text.match(/cf-error-code[^0-9]{0,40}(\d{3,4})/i)?.[1]
+        || text.match(/\bError\s+(\d{3,4})\b/)?.[1];
+      const ray = text.match(/Ray ID:\s*(?:<[^>]*>\s*)?([0-9a-f]{16})/i)?.[1];
+      if (res.status === 401) {
+        clearSessionToken();
+      }
+      throw new Error(
+        `Service error (HTTP ${res.status}${cfCode ? `, Cloudflare ${cfCode}` : ''}${ray ? `, Ray ID ${ray}` : ''}) — please retry in a moment`,
+      );
+    }
     const errData = await res.json().catch(() => null);
     if (res.status === 401) {
       clearSessionToken();
@@ -84,6 +98,21 @@ export async function callTool(toolName, body, signal) {
   captureSessionToken(res);
   if (res.status === 401) {
     clearSessionToken();
+  }
+  // A non-JSON body is a Cloudflare-level error page (worker crash, gateway
+  // 5xx) — surface its code instead of an empty "Unknown error".
+  if (!(res.headers.get('content-type') || '').includes('application/json')) {
+    const text = await res.text().catch(() => '');
+    const cfCode = text.match(/cf-error-code[^0-9]{0,40}(\d{3,4})/i)?.[1]
+      || text.match(/\bError\s+(\d{3,4})\b/)?.[1];
+    const ray = text.match(/Ray ID:\s*(?:<[^>]*>\s*)?([0-9a-f]{16})/i)?.[1];
+    return {
+      ok: false,
+      status: res.status,
+      data: {
+        error: `Service error (HTTP ${res.status}${cfCode ? `, Cloudflare ${cfCode}` : ''}${ray ? `, Ray ID ${ray}` : ''}) — please retry in a moment`,
+      },
+    };
   }
   const data = await res.json().catch(() => ({}));
   return { ok: res.ok, status: res.status, data };

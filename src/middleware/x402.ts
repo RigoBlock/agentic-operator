@@ -823,19 +823,21 @@ function setRateLimitHeaders(
 }
 
 /**
- * Network context for session binding: salted hash of the caller's IP and
- * User-Agent. Only a hash is ever stored (no raw IPs/UA in KV). Workers
- * populate cf-connecting-ip; behind other proxies x-forwarded-for applies.
+ * Session binding context: salted hash of the caller's device ID and
+ * User-Agent. The device ID comes from the client-generated `x-device-id`
+ * header — deliberately not the egress IP, which rotates between requests
+ * on IPv6 privacy extensions / dual-stack clients and made IP-bound
+ * sessions fail every other request (continuous re-sign loop). Clients
+ * without the header (curl, outdated frontends) bind to the UA alone.
+ * Only a hash is ever stored (no raw device IDs/UA in KV).
  */
 function requestNetworkHash(
   c: Context<{ Bindings: Env; Variables: AppVariables }>,
 ): string {
-  const ip =
-    c.req.header("cf-connecting-ip") ||
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-    "";
+  const raw = c.req.header("x-device-id") || "";
+  const deviceId = /^0x[0-9a-fA-F]{32}$/.test(raw) ? raw.toLowerCase() : "";
   const ua = c.req.header("user-agent") || "";
-  return computeNetworkHash(ip, ua);
+  return computeNetworkHash(deviceId, ua);
 }
 
 /**

@@ -249,6 +249,18 @@ seconds** while Core settles (`lastActionTimestamp`, same on-chain gate as Hyper
 settlement lock) — a trailing `updateUnitaryValue` reverts `NavLocked()` in that window,
 and the agent is blocked from trading on-chain too.
 
+**Core account gate (order/withdraw drafts):** this RPC returns NO revert data on failed
+`eth_call`/`eth_estimateGas` (and `debug_traceCall` is Alchemy-only, which Lighter is not),
+so a guaranteed revert would surface as a bare "execution reverted". `lighter_limit_order`,
+`lighter_market_order`, and `lighter_withdraw` therefore check
+`getLighterAccountActivation` first and fail fast with "run lighter_deposit first" when the
+account is DEFINITELY missing (READ_CORE found=false, e.g. after a devnet reset). A read
+failure (null) never blocks. `lighter_deposit` marks the vault activated when drafted (the
+first deposit auto-creates the account) so an immediate follow-up order is not gated on a
+stale cached false. A **devnet reset wipes all Core accounts and collateral** — the
+expected post-reset flow is deposit → trade. `lighter_deposit` itself needs no account (it
+creates one) and is never gated.
+
 Lighter Core writes are **asynchronous**: a successful EVM transaction only means Core accepted
 the request — always surface the reqId and point to `lighter_get_request_status`; never claim an
 order filled (an IOC/market order against an empty book is cancelled — the devnet ships without
@@ -344,15 +356,24 @@ legacy behavior remains, dev/test only):
    opaque 256-bit **session token** (KV `sess:<sha256(token)>`, 24h TTL), returned as the
    `X-Session-Token` response header. Only the session token skips payment afterwards; a
    redeemed signature is worthless to an eavesdropper.
-2. Sessions are **bound to a salted hash of (IP, User-Agent)** (`computeNetworkHash` —
-   only the hash is stored, never raw IPs/UA). A token presented from a different network
-   gets 401; the client re-signs (one wallet prompt when roaming) and receives a fresh
-   session bound to the new network.
-3. Redemption is **idempotent per network**: re-presenting the same signature from the
-   same network re-issues the SAME session (concurrent page-load requests share one
-   signature). The same signature from a different network is rejected (401) — this is
-   the remaining bounded exposure: a signature captured AND redeemed before the victim's
-   own redemption, from the victim's exact IP+UA, yields a working session until TTL.
+2. Sessions are **bound to a salted hash of (device ID, User-Agent)**
+   (`computeNetworkHash` — only the hash is stored, never raw device IDs/UA).
+   The device ID is a random per-browser-profile value the frontend generates
+   once, persists in localStorage, and sends as the `X-Device-Id` header.
+   **Deliberately NOT the egress IP** (`cf-connecting-ip`): it rotates between
+   connections on IPv6 privacy extensions and dual-stack v4/v6 clients, so an
+   IP-bound session failed on every other request and looped the user through
+   continuous re-signs (fixed 2026-10-27). Clients without the header (curl,
+   outdated frontends) bind to the UA alone. A token presented from a
+   different device/UA gets 401; the client re-signs and receives a fresh
+   session bound to the new context.
+3. Redemption is **idempotent per device context**: re-presenting the same
+   signature from the same context re-issues the SAME session (concurrent
+   page-load requests share one signature). The same signature from a
+   different context is rejected (401) — this is the remaining bounded
+   exposure: a signature captured AND redeemed before the victim's own
+   redemption, from the victim's exact device ID+UA, yields a working session
+   until TTL.
 4. Routes consume the session via `c.get("operatorAuth")` with `viaSession: true` and
    must call `verifyOperatorOwnership` (ownership only, no signature) instead of
    `verifyOperatorAuth`. Body-signature auth remains as a fallback for legacy clients but
@@ -361,8 +382,10 @@ legacy behavior remains, dev/test only):
    requests. Expired/invalid credentials return 401 (never 402) so clients re-sign
    instead of paying.
 
-**Frontend contract:** `apiHeaders()` sends `X-Session-Token` when one is cached
-(localStorage `rigoblock_session_<address>`) and omits the signature headers; any
+**Frontend contract:** `apiHeaders()` sends `X-Device-Id` (stable random ID,
+localStorage `rigoblock_device_id`) on every request — sessions bind to it, not to
+the egress IP — and sends `X-Session-Token` when one is cached
+(localStorage `rigoblock_session_<address>`), omitting the signature headers; any
 response carrying `X-Session-Token` is captured (`captureSessionToken`), and a 401
 clears the session + cached signature and runs the existing re-sign flow.
 

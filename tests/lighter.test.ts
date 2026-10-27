@@ -258,7 +258,7 @@ describe("READ_CORE client", () => {
   });
 });
 
-// ── Account activation (prompt-only) ──────────────────────────────────
+// ── Account activation (hard gate for Core writes, prompt-only for reads) ──
 
 describe("Core account activation", () => {
   it("true on a successful read, cached for 5 minutes", async () => {
@@ -719,6 +719,9 @@ describe("chain gating", () => {
   });
 
   it("limit order drafts show notional vs Core collateral (margin context)", async () => {
+    // Fresh vault: the no-account positions test above caches activation=false
+    // for VAULT, and a definite false now hard-fails order drafts.
+    const orderVault = "0x7777777777777777777777777777777777777777" as Address;
     const trackedView = encodeAbiParameters([...LIGHTER_VIEW_DATA_OUT], [
       {
         marketIds: [0], sizeDecimals: [4], priceDecimals: [2],
@@ -733,7 +736,11 @@ describe("chain gating", () => {
     });
     const { handle_lighter_limit_order } = await import("../src/llm/handlers/lighter.js");
     const result = await handle_lighter_limit_order(
-      { KV: createMockKV() } as unknown as Env, makeCtx(CHAIN),
+      { KV: createMockKV() } as unknown as Env,
+      {
+        vaultAddress: orderVault, chainId: CHAIN, operatorAddress: OWNER,
+        operatorVerified: true, executionMode: "manual",
+      } as never,
       { market: "ETH", side: "buy", size: "10", price: "2460" },
       "lighter_limit_order",
     );
@@ -742,6 +749,63 @@ describe("chain gating", () => {
     expect(result.message).toMatch(/Core collateral: \$15\.00/);
     expect(result.message).toMatch(/Estimated initial margin \(≈20% of notional ≈ \$4,920\.00\)/);
     expect(result.message).toMatch(/cancel it at matching without a fill/);
+  });
+
+  it("limit order with a definitely-missing Core account fails fast, pointing at lighter_deposit", async () => {
+    const freshVault = "0x8888888888888888888888888888888888888888" as Address;
+    setupReadCore({
+      account: () => wrapNotFound(),
+      market: () => encodeMarket(246000n),
+    });
+    const { handle_lighter_limit_order } = await import("../src/llm/handlers/lighter.js");
+    await expect(
+      handle_lighter_limit_order(
+        { KV: createMockKV() } as unknown as Env,
+        {
+          vaultAddress: freshVault, chainId: CHAIN, operatorAddress: OWNER,
+          operatorVerified: true, executionMode: "manual",
+        } as never,
+        { market: "ETH", side: "buy", size: "10", price: "2460" },
+        "lighter_limit_order",
+      ),
+    ).rejects.toThrow(/no Lighter Core account[\s\S]*lighter_deposit/);
+  });
+
+  it("limit order still drafts when the activation read itself fails (null never blocks)", async () => {
+    const freshVault = "0x9999999999999999999999999999999999999999" as Address;
+    mockState.call.mockImplementation(async (args: { data: Hex }) => {
+      if (args.data.slice(0, 6) === "0x0001") throw new Error("fetch failed");
+      if (args.data.slice(0, 6) === "0x0005") return { data: encodeMarket(246000n) };
+      throw new Error(`unexpected eth_call data: ${args.data.slice(0, 10)}`);
+    });
+    const { handle_lighter_limit_order } = await import("../src/llm/handlers/lighter.js");
+    const result = await handle_lighter_limit_order(
+      { KV: createMockKV() } as unknown as Env,
+      {
+        vaultAddress: freshVault, chainId: CHAIN, operatorAddress: OWNER,
+        operatorVerified: true, executionMode: "manual",
+      } as never,
+      { market: "ETH", side: "buy", size: "10", price: "2460" },
+      "lighter_limit_order",
+    );
+    expect(result.transaction).toBeDefined();
+  });
+
+  it("withdraw with a definitely-missing Core account fails fast, pointing at lighter_deposit", async () => {
+    const freshVault = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
+    setupReadCore({ account: () => wrapNotFound() });
+    const { handle_lighter_withdraw } = await import("../src/llm/handlers/lighter.js");
+    await expect(
+      handle_lighter_withdraw(
+        { KV: createMockKV() } as unknown as Env,
+        {
+          vaultAddress: freshVault, chainId: CHAIN, operatorAddress: OWNER,
+          operatorVerified: true, executionMode: "manual",
+        } as never,
+        { amount: "25" },
+        "lighter_withdraw",
+      ),
+    ).rejects.toThrow(/no Lighter Core account[\s\S]*lighter_deposit/);
   });
 
   it("deposit drafts are capped to the vault USDC balance and carry the async note", async () => {

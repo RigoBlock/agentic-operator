@@ -44,6 +44,13 @@ describe("unit conversions", () => {
     expect(toLighterAmount("1.234567", 6)).toBe(1234567n);
   });
 
+  it("accepts exact ticks that float multiplication misclassifies (0.0006×10^5 = 59.999…)", () => {
+    expect(toLighterAmount("0.0006", 5)).toBe(60n); // the user's BTC case
+    expect(toLighterAmount("0.007", 3)).toBe(7n);
+    expect(toLighterAmount("1.1", 1)).toBe(11n);
+    expect(toLighterAmount("0.00006", 5)).toBe(6n);
+  });
+
   it("rejects sub-tick sizes, non-positive and overflowing values", () => {
     expect(() => toLighterAmount("0.0001", 3)).toThrow(/size tick/);
     expect(() => toLighterAmount("0", 3)).toThrow();

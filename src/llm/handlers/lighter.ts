@@ -49,6 +49,7 @@ import {
   readLighterAccount,
   readLighterTxStatus,
   getLighterAccountActivation,
+  markLighterAccountActivated,
   getLighterPortfolio,
   getLighterTrackedMarkets,
   getLighterOpenOrderCounts,
@@ -258,7 +259,8 @@ export async function handle_lighter_get_positions(
         unrealizedPnlUsd: (Number(p.pnl) / 1e6).toString(),
         marginMode: p.marginMode === LIGHTER_MARGIN_MODE_ISOLATED ? "isolated" : "cross",
         isolatedMarginUsd: p.marginMode === LIGHTER_MARGIN_MODE_ISOLATED
-          ? (Number(p.allocatedMargin) / 1e12).toString()
+          // Devnet 1.1.0: allocatedMargin is already 6-dec USDC.
+          ? (Number(p.allocatedMargin) / 1e6).toString()
           : null,
       })),
       lighterAccount: {
@@ -359,6 +361,11 @@ export async function handle_lighter_deposit(
 
   const calldata = buildLighterDepositCalldata(vault, finalAmount);
   const transaction = draft(ctx, calldata, `[Lighter] Deposit ${finalAmount} USDC into Core perps margin`);
+  // The deposit creates the Core account on first use — record it so a
+  // follow-up order within the activation-cache window is not gated on a
+  // stale found=false. If the deposit never confirms, the gate simply lets
+  // the order through to its (already guarded) on-chain revert, as before.
+  markLighterAccountActivated(vault);
 
   const actionLine = txActionLine(ctx);
   return {
@@ -387,6 +394,17 @@ export async function handle_lighter_withdraw(
   const vault = requireVault(ctx);
 
   const amount = parseAmount(args.amount, "withdraw from Lighter Core");
+
+  // sendToEvm reverts without a Core account and this RPC returns no revert
+  // data — fail here on a DEFINITE missing account instead of after signing.
+  // null (read failure) never blocks.
+  const activation = await getLighterAccountActivation(LIGHTER_CHAIN_ID, vault);
+  if (activation === false) {
+    throw new Error(
+      "This pool has no Lighter Core account (e.g. after a devnet reset) — there is no Core collateral to withdraw. " +
+      "Run lighter_deposit first; the first deposit creates the Core account automatically.",
+    );
+  }
 
   // Cap to the Core perps collateral when it is readable.
   const account = await readLighterAccount(LIGHTER_CHAIN_ID, vault).catch(() => null);
@@ -469,6 +487,18 @@ async function draftOrder(
   const parsed = parseOrderArgs(args, isMarket);
   const marketDecimals = getLighterMarketDecimals(parsed.market);
 
+  // Core account must exist: createOrder reads it on-chain and reverts without
+  // one, and this RPC returns no revert data — a missing account would surface
+  // as a bare "execution reverted" only after the user signs. Gate on a
+  // DEFINITE false (READ_CORE found=false); null (read failure) never blocks.
+  const activation = await getLighterAccountActivation(LIGHTER_CHAIN_ID, vault);
+  if (activation === false) {
+    throw new Error(
+      "This pool has no Lighter Core account (e.g. after a devnet reset), and Core orders revert without one. " +
+      "Run lighter_deposit first — the first deposit creates the Core account automatically — then place the order.",
+    );
+  }
+
   const expiryArg = args.expiry != null ? Number(args.expiry) : undefined;
   if (expiryArg != null && !Number.isFinite(expiryArg)) {
     throw new Error(`Invalid expiry: ${String(args.expiry)} (ms since epoch).`);
@@ -521,14 +551,6 @@ async function draftOrder(
         `Core accepts the order but will likely cancel it at matching without a fill — reduce the size or deposit more USDC first.`
       : "";
 
-  // Activation is prompt-only: a known-missing account gets a warning, but the
-  // order is still drafted — an accidental stale read must never block trading.
-  const activation = await getLighterAccountActivation(LIGHTER_CHAIN_ID, vault);
-  const activationNote =
-    activation === false
-      ? "⚠️ No Lighter Core account yet — this order will revert until you run lighter_deposit to create the account."
-      : "";
-
   const actionLine = txActionLine(ctx);
   return {
     message: [
@@ -541,7 +563,6 @@ async function draftOrder(
       ...(marginWarning ? [marginWarning] : []),
       ...(expiryNote ? [expiryNote] : []),
       `Client order index: ${built.clientOrderIndexHex} — quote it to cancel this order`,
-      activationNote,
       ASYNC_NOTE,
       ...(actionLine ? [actionLine] : []),
     ].filter(Boolean).join("\n"),

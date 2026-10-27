@@ -188,6 +188,11 @@ export function restoreChat() {
 export function apiHeaders(extra) {
   const headers = { 'Content-Type': 'application/json' };
   if (connectedAddress) headers['X-Operator-Address'] = connectedAddress;
+  // Stable per-browser-profile ID the backend binds sessions to (hashed).
+  // Without it the server would fall back to binding by egress IP, which
+  // rotates between requests on IPv6 / dual-stack clients and loops the
+  // user through continuous re-signs.
+  headers['X-Device-Id'] = getDeviceId();
   // Prefer the server-minted session token; the raw signature is only sent
   // when no session exists (it is single-use — redeemed for a session).
   const session = getSessionToken();
@@ -200,10 +205,32 @@ export function apiHeaders(extra) {
   return Object.assign(headers, extra);
 }
 
+// ── Device ID ─────────────────────────────────────────────────────────
+// Random ID generated once per browser profile and persisted in localStorage.
+// The backend binds session tokens to a salted hash of this ID (+ User-Agent)
+// instead of the egress IP, which is unstable on IPv6 privacy extensions and
+// dual-stack v4/v6 clients (every IP rotation forced a full re-sign).
+
+const DEVICE_ID_KEY = 'rigoblock_device_id';
+
+export function getDeviceId() {
+  try {
+    let id = localStorage.getItem(DEVICE_ID_KEY);
+    if (!id) {
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      id = '0x' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      localStorage.setItem(DEVICE_ID_KEY, id);
+    }
+    return id;
+  } catch { return '0x' + '0'.repeat(32); }
+}
+
 // ── Session tokens ────────────────────────────────────────────────────
 // Opaque token minted by the backend when a fresh signature is redeemed.
-// Bound server-side to a hash of this device's IP + browser; when it stops
-// matching (expiry, network change), the API returns 401 and the normal
+// Bound server-side to a salted hash of this browser's device ID + User-Agent
+// (never the egress IP — that rotates on IPv6/dual-stack clients); when the
+// binding stops matching (expiry), the API returns 401 and the normal
 // re-sign flow runs.
 
 const SESSION_STORAGE_PREFIX = 'rigoblock_session_';
