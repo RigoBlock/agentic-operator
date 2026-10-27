@@ -16,10 +16,10 @@ for (const m of tracked?.markets ?? []) {
     {
     position: pos?.position.toString(),
     entryQuote: pos?.entryQuote.toString(),
-    funding: pos?.lastFundingRatePrefixSum.toString(),
     openOrders: pos?.totalOrderCount.toString(),
     tiedOrders: pos?.totalPositionTiedOrderCount.toString(),
     marginMode: pos?.marginMode,
+    allocatedMargin: pos?.allocatedMargin.toString(),
     markPrice: info?.markPrice.toString(),
   });
   if (pos && info && pos.position !== 0n) {

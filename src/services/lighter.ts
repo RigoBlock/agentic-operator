@@ -3,10 +3,14 @@
  *
  * Every Lighter Core STATE read goes through the READ_CORE precompile
  * (0x6600…0000) via eth_call on LIGHTER_RPC_URL. Inputs are abi.encodePacked(uint16
- * queryId, args) WITHOUT a function selector; the devnet returns RAW abi.encode
- * payloads WITHOUT the documented (bool found, bytes) envelope for every query
- * except tx status (0x0000). Encodings verified live against the devnet on
- * 2026-10-20.
+ * queryId, args) WITHOUT a function selector. Since the Devnet 1.1.0 reset
+ * (2026-10-26) every read except tx status (0x0000) returns the documented
+ * (bool found, bytes data) envelope: found=false means the account/asset/market
+ * does not exist and data is empty. The position read (0x0007) serves a 7-word
+ * tuple WITHOUT the old leading lastFundingRatePrefixSum, and allocatedMargin is
+ * in 6-dec USDC (10^6 per USDC — previously 12-dec). Withdrawal Core write type
+ * is 0x48 (was 0x4c) with 72xx rejection codes (was 76xx); the app only surfaces
+ * the numeric code. Encodings verified live against Devnet 1.1.0 on 2026-10-27.
  *
  * Tracked markets and their size/price decimals are read from the pool's own
  * on-chain view getLighterTrackedMarkets() (0x5239dd83, EApps) — since
@@ -98,8 +102,6 @@ export interface LighterMarketInfo {
 }
 
 export interface LighterPosition {
-  /** Funding accumulator prefix sum (perp units × 1e6 — Lighter-internal). */
-  lastFundingRatePrefixSum: bigint;
   /** Signed size on the market's sizeDecimals scale (createOrder amount units). */
   position: bigint;
   /** Unsigned entry NOTIONAL in 6-dec USDC (not a price). */
@@ -109,7 +111,7 @@ export interface LighterPosition {
   totalPositionTiedOrderCount: bigint;
   /** 0 = cross, 1 = isolated. */
   marginMode: number;
-  /** Isolated margin in 12-dec USDC (divide by 1e6 for 6-dec). */
+  /** Isolated margin in 6-dec USDC (Devnet 1.1.0 — was 12-dec before the reset). */
   allocatedMargin: bigint;
 }
 
@@ -124,24 +126,38 @@ const MARKET_INFO_OUT = [
   { type: "uint64" }, { type: "uint32" }, { type: "uint64" }, { type: "uint64" },
 ] as const;
 
-// Documented position layout (Lighter "Reading Core from EVM"), verified live
-// on the devnet 2026-10-20 AFTER the pool implementation upgrade: a 256-byte /
-// 8-word payload WITH the leading int64 lastFundingRatePrefixSum the docs show.
-// (The pre-upgrade build served 7 words without it — decoding that build with
-// this table misaligns every field: the funding word reads as a huge position,
-// the 2^256-80 position word as entryQuote, and the 5% initialMarginFraction
-// (raw 500) as an order count.)
-//
-// The two order-count fields are served in DOCS order here: word4 is
-// totalOrderCount (currently open/resting orders), word5 is
+// Devnet 1.1.0 position layout (Lighter "Reading Core from EVM"): a 7-word
+// tuple WITHOUT the leading int64 lastFundingRatePrefixSum the 1.0.0 docs
+// showed — the field was dropped in the reset. allocatedMargin is 6-dec USDC
+// (10^6 per USDC; 1.0.0 served 12-dec). The two order-count fields are in
+// docs order: word3 = totalOrderCount (currently open/resting orders), word4 =
 // totalPositionTiedOrderCount (SL/TP conditional orders tied to a position's
-// lifecycle). Verified against live state with 1 resting limit order and no
-// SL/TP orders: word4 = 1, word5 = 0. The tuple is always 8 words, even for an
-// empty position (all zeros).
+// lifecycle). Verified against live state on 2026-10-27.
 const POSITION_OUT = [
-  { type: "int64" }, { type: "int64" }, { type: "uint56" }, { type: "uint16" },
+  { type: "int64" }, { type: "uint56" }, { type: "uint16" },
   { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
 ] as const;
+
+// Envelope served by every READ_CORE query except tx status (0x0000) since
+// Devnet 1.1.0: abi.encode(bool found, bytes data). found=false (data empty)
+// is the "entity does not exist" signal — a SUCCESS, not an error.
+const FOUND_ENVELOPE_OUT = [{ type: "bool" }, { type: "bytes" }] as const;
+
+/** Unwrap the (bool found, bytes data) envelope. Null data when not found. */
+function unwrapFoundData(raw: Hex): Hex | null {
+  const [found, data] = decodeAbiParameters(
+    [...FOUND_ENVELOPE_OUT], raw,
+  ) as unknown as readonly [boolean, Hex];
+  return found ? data : null;
+}
+
+/** Strict word-count guard: a payload of the wrong size means the chain served
+ *  a different read ABI — fail the read instead of silently misaligning every
+ *  field (viem's decodeAbiParameters ignores trailing bytes, so without this
+ *  an old-shape tuple decodes "successfully" into garbage). */
+function hasExactWords(data: Hex, words: number): boolean {
+  return data.length === 2 + 64 * words;
+}
 
 /**
  * Raw eth_call to READ_CORE with blockTag pinned to "latest" (bare
@@ -159,9 +175,8 @@ async function callReadCore(chainId: number, data: Hex): Promise<Hex> {
 }
 
 /**
- * Account info (0x0001, 23 bytes in). The call ERRORS ("READ_CORE query
- * failed") when the account does not exist — treated as "no account" (null),
- * mirroring LighterLib.coreAccountExists.
+ * Account info (0x0001, 23 bytes in). A missing account returns
+ * found=false → null (Devnet 1.1.0 envelope), mirroring LighterLib.coreAccountExists.
  */
 export async function readLighterAccount(
   chainId: number,
@@ -173,8 +188,10 @@ export async function readLighterAccount(
       chainId,
       packQuery(LIGHTER_QUERIES.accountInfo, hexAddress(vaultAddress), hexBool(false)),
     );
+    const data = unwrapFoundData(raw);
+    if (data === null || !hasExactWords(data, 6)) return null;
     const [accountType, accountIndex, masterAccountIndex, l1Address, evmAddress, collateralBaseAmount] =
-      decodeAbiParameters([...ACCOUNT_INFO_OUT], raw) as unknown as readonly [number, number, number, Address, Address, bigint];
+      decodeAbiParameters([...ACCOUNT_INFO_OUT], data) as unknown as readonly [number, number, number, Address, Address, bigint];
     return {
       accountType,
       accountIndex: BigInt(accountIndex),
@@ -196,8 +213,10 @@ export async function readLighterMarketInfo(
   if (chainId !== LIGHTER_CHAIN_ID) return null;
   try {
     const raw = await callReadCore(chainId, packQuery(LIGHTER_QUERIES.marketInfo, hexUint16(marketId)));
+    const data = unwrapFoundData(raw);
+    if (data === null || !hasExactWords(data, 10)) return null;
     const [marketType, baseAssetId, quoteAssetId, takerFee, makerFee, minBaseAmount, minQuoteAmount, liquidationFee, indexPrice, markPrice] =
-      decodeAbiParameters([...MARKET_INFO_OUT], raw) as unknown as readonly [number, number, number, number, number, bigint, bigint, number, bigint, bigint];
+      decodeAbiParameters([...MARKET_INFO_OUT], data) as unknown as readonly [number, number, number, number, number, bigint, bigint, number, bigint, bigint];
     return { marketType, baseAssetId, quoteAssetId, takerFee, makerFee, minBaseAmount, minQuoteAmount, liquidationFee, indexPrice, markPrice };
   } catch {
     return null;
@@ -216,10 +235,11 @@ export async function readLighterPosition(
       chainId,
       packQuery(LIGHTER_QUERIES.position, hexAddress(vaultAddress), hexBool(false), hexUint16(marketId)),
     );
-    const [lastFundingRatePrefixSum, position, entryQuote, initialMarginFraction, totalOrderCount, totalPositionTiedOrderCount, marginMode, allocatedMargin] =
-      decodeAbiParameters([...POSITION_OUT], raw) as unknown as readonly [bigint, bigint, number, number, bigint, bigint, number, bigint];
+    const data = unwrapFoundData(raw);
+    if (data === null || !hasExactWords(data, 7)) return null;
+    const [position, entryQuote, initialMarginFraction, totalOrderCount, totalPositionTiedOrderCount, marginMode, allocatedMargin] =
+      decodeAbiParameters([...POSITION_OUT], data) as unknown as readonly [bigint, number, number, bigint, bigint, number, bigint];
     return {
-      lastFundingRatePrefixSum,
       position,
       entryQuote: BigInt(entryQuote),
       initialMarginFraction,
@@ -272,7 +292,9 @@ export async function getLighterAccountIndex(
   if (chainId !== LIGHTER_CHAIN_ID) return null;
   try {
     const raw = await callReadCore(chainId, packQuery(LIGHTER_QUERIES.evmAccountIndex, hexAddress(vaultAddress)));
-    const [accountIndex] = decodeAbiParameters([{ type: "uint48" }], raw) as unknown as readonly [number];
+    const data = unwrapFoundData(raw);
+    if (data === null || !hasExactWords(data, 1)) return null;
+    const [accountIndex] = decodeAbiParameters([{ type: "uint48" }], data) as unknown as readonly [number];
     return BigInt(accountIndex);
   } catch {
     return null;
@@ -307,22 +329,18 @@ export async function getLighterAccountActivation(
   const hit = activationCache.get(key);
   if (hit && Date.now() - hit.at < ACTIVATION_TTL_MS) return hit.activated;
 
-  const info = await readLighterAccount(chainId, vaultAddress);
-  if (info !== null) {
-    activationCache.set(key, { at: Date.now(), activated: true });
-    return true;
-  }
-
-  // Classify the failure: a READ_CORE application error ("READ_CORE query
-  // failed") is the precompile's "no such account" signal → false; a
-  // transport/RPC failure → null ("unknown", never prompt).
-  let activated: boolean | null = null;
+  // Devnet 1.1.0: a missing account returns found=false with SUCCESS — the
+  // envelope itself discriminates "absent" from "read failure". A thrown
+  // READ_CORE application error is still the precompile's legacy "no such
+  // account" signal → false; a transport/RPC failure → null ("unknown", never
+  // prompt).
+  let activated: boolean | null;
   try {
-    await callReadCore(
+    const raw = await callReadCore(
       chainId,
       packQuery(LIGHTER_QUERIES.accountInfo, hexAddress(vaultAddress), hexBool(false)),
     );
-    activated = true;
+    activated = unwrapFoundData(raw) !== null;
   } catch (err) {
     activated = isReadCoreMissingAccountError(err) ? false : null;
   }
@@ -429,7 +447,7 @@ export interface LighterPortfolioPosition {
   pnl: bigint;
   /** Margin mode: 1 = isolated. */
   marginMode: number;
-  /** Isolated margin allocated outside shared collateral, 12-dec USDC. */
+  /** Isolated margin allocated outside shared collateral, 6-dec USDC (Devnet 1.1.0). */
   allocatedMargin: bigint;
   /** NAV contribution: pnl + isolated-margin add-back, 6-dec USDC (signed). */
   value: bigint;
@@ -458,10 +476,11 @@ function pow10(n: number): bigint {
  *
  *   markValue  = position × markPrice × 1e6 / 10^(sizeDecimals + priceDecimals)   (signed)
  *   entryValue = position > 0 ? entryQuote : −entryQuote
- *   value      = markValue − entryValue  (+ allocatedMargin / 1e6 when isolated)
+ *   value      = markValue − entryValue  (+ allocatedMargin when isolated)
  *
  * (LighterLib._positionValueUsdc, minus the in-flight adjustment — the operator
- * has no on-chain NAV to keep consistent and surfaces reqId status separately.)
+ * has no on-chain NAV to keep consistent and surfaces reqId status separately.
+ * Devnet 1.1.0: allocatedMargin is already 6-dec USDC, no conversion.)
  * Read failures degrade to what is known; they never throw.
  */
 export async function getLighterPortfolio(
@@ -488,8 +507,8 @@ export async function getLighterPortfolio(
     const pnl = markValue - entryValue;
     let value = pnl;
     if (position.marginMode === LIGHTER_MARGIN_MODE_ISOLATED) {
-      // 12-dec isolated margin → 6-dec USDC.
-      value += position.allocatedMargin / 1_000_000n;
+      // Devnet 1.1.0: allocatedMargin is already 6-dec USDC.
+      value += position.allocatedMargin;
     }
 
     positions.push({
@@ -598,10 +617,9 @@ function formatLighterReport(p: LighterPortfolio, trackedMarkets: TrackedMarket[
       const entryPrice = absSize > 0n
         ? (pos.entryQuote * pow10(sizeDecimals + priceDecimals)) / (absSize * 1_000_000n)
         : 0n;
-      // Cross margin is funded from the shared collateral line above — the
-      // position carries no separate margin, so the column shows a dash.
+      // Devnet 1.1.0: allocatedMargin is already 6-dec USDC.
       const margin = pos.marginMode === LIGHTER_MARGIN_MODE_ISOLATED
-        ? `isolated (${fmtUsdUnits(pos.allocatedMargin / 1_000_000n)})`
+        ? `isolated (${fmtUsdUnits(pos.allocatedMargin)})`
         : "—";
       lines.push(
         `| ${symbol ? `${symbol} (${pos.marketId})` : pos.marketId} | ${pos.size > 0n ? "LONG" : "SHORT"} | ${formatHuman(pos.size, sizeDecimals)} | ${formatHuman(entryPrice, priceDecimals)} | ${formatHuman(pos.markPrice, priceDecimals)} | ${fmtSignedUsdUnits(pos.pnl)} | ${margin} |`,

@@ -262,11 +262,15 @@ async function runToolNextStep(confirmedTx) {
   }
 }
 
-/** First contract address found in a deploy receipt's log topics (PoolCreated). */
+/** PoolCreated(address indexed newPoolAddress) topic0 — emitted by the factory AFTER the
+ *  proxy's own init events, so blindly taking the first address-shaped topic returns the
+ *  SmartPool implementation (BeaconUpgraded topic1). Match the event exactly. */
+const POOL_CREATED_TOPIC0 = '0x83a48fbcfc991335314e74d0496aab6a1987e992ddc85dddbcc4d6dd6ef2e9fc';
+
 function extractPoolAddressFromReceipt(receipt) {
   if (!receipt.logs) return null;
   for (const log of receipt.logs) {
-    if (log.topics && log.topics.length >= 2) {
+    if (log.topics && log.topics[0] === POOL_CREATED_TOPIC0 && log.topics.length >= 2) {
       const addr = '0x' + log.topics[1].slice(26);
       if (addr.length === 42 && addr !== '0x0000000000000000000000000000000000000000') {
         return addr;

@@ -52,6 +52,12 @@ Requirements:
 
 Set `executionMode: "delegated"` and `confirmExecution: true` to auto-execute. Delegated mode without `confirmExecution` returns unsigned calldata.
 
+Vault-less requests (zero address as `vaultAddress` — the pool-deployment flow): no ownership
+check is possible or required; a valid operator signature (or session token) alone
+authenticates, so a first-time operator can call `deploy_smart_pool` before owning any pool.
+The zero address is normalized to "no vault" in both `/api/chat` and `/api/tools` — an
+explicit `0x0000…0000` must never be ownership-checked.
+
 Optional LLM overrides for `/api/chat`:
 
 | Field | Description |
@@ -248,12 +254,23 @@ the request — always surface the reqId and point to `lighter_get_request_statu
 order filled (an IOC/market order against an empty book is cancelled — the devnet ships without
 market makers). All Core state reads go through the READ_CORE precompile via `LIGHTER_RPC_URL` —
 no operator-side ledger: tracked markets and decimals come from
-the pool's on-chain view. The position read is a raw 8-word tuple WITH the leading
-int64 `lastFundingRatePrefixSum` the docs show (post-upgrade build; the
-pre-upgrade build served 7 words without it — decoding that build with the
-8-word table misaligns every field, and vice versa). The two order-count
-fields are in docs order: word4 = currently open order count, word5 =
-position-tied (SL/TP) order count. The positions report shows per-position
+the pool's on-chain view. **Devnet 1.1.0 read ABI (chain reset 2026-10-26):** every read
+EXCEPT tx status (0x0000) returns the documented `(bool found, bytes data)` envelope —
+`found=false` (empty data) is the "entity does not exist" signal, a SUCCESS, not an
+error (1.0.0 returned raw tuples). The position read (0x0007) is a 7-word tuple WITHOUT
+the 1.0.0 leading `lastFundingRatePrefixSum` (dropped), and `allocatedMargin` is 6-dec
+USDC (1.0.0 served 12-dec — no conversion anywhere). Decoders enforce the exact word
+count: viem ignores trailing bytes, so an old-shape payload would otherwise decode
+"successfully" into misaligned garbage. The two order-count fields are in docs order:
+word3 = currently open order count, word4 = position-tied (SL/TP) order count.
+**The 1.1.0 reset wiped all chain state** — pool deployments, Core accounts, adapter
+authorizations on the authority, and delegation grants are all gone and must be
+re-established (pool addresses are deterministic create2 on (name, owner), so recreating
+a pool lands at the SAME address). `createOrder` now applies Core's order admission
+checks (collateral, capacity, market restrictions) at request time. Contract
+verification is enabled on the explorer (1.0.0 shipped with it disabled). The
+Core→EVM withdrawal write type is 0x48 (was 0x4c) with 72xx rejection codes (was
+76xx); the app surfaces the numeric code as-is. The positions report shows per-position
 Entry and Mark price columns — Entry is derived by inverting `entryQuote`
 (`entryPrice = entryQuote × 10^(sizeDecimals+priceDecimals) / (|size| × 1e6)`),
 Mark comes from the market-info read; liquidation price is NOT available
@@ -265,8 +282,9 @@ the shared collateral line, so the position carries no separate margin).
 **Funding is NOT part of on-chain NAV.** `LighterLib` (v3-contracts `feat/lighter-evm`)
 computes NAV as `collateralBaseAmount` +
 Σ `_positionValueUsdc` (mark value − entry notional, + isolated margin) +
-the in-flight transfer adjustment — the position tuple's
-`lastFundingRatePrefixSum` is never consumed. Core itself accrues funding into
+the in-flight transfer adjustment — the 1.0.0 position tuple's
+`lastFundingRatePrefixSum` was never consumed and is no longer even served (1.1.0).
+Core itself accrues funding into
 collateral continuously, so the Core REST API's collateral (e.g. 30.003768) and
 the on-chain NAV read (30.000000) legitimately diverge by the funding amount;
 the positions report's uPnL column is mark-vs-entry PnL only and matches the

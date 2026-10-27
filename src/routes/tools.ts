@@ -141,6 +141,13 @@ tools.post("/", async (c) => {
 
     const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
     const resolvedVaultAddress: Address = (body.vaultAddress || ZERO_ADDRESS) as Address;
+    // The zero address signals "no pool yet" (pool deployment flow) — same
+    // normalization as chat.ts: no ownership check can succeed against it, so
+    // treat it as NO vault and rely on signature auth only.
+    const effectiveVaultAddress =
+      body.vaultAddress && body.vaultAddress.toLowerCase() !== ZERO_ADDRESS
+        ? body.vaultAddress
+        : "";
 
     // Auth gate — same model as chat.ts
     // operatorAuthVerified means a valid EIP-191 signature was supplied in headers,
@@ -156,7 +163,7 @@ tools.post("/", async (c) => {
     if (hasBodyAuth) {
       await verifyOperatorAuth({
         operatorAddress: body.operatorAddress || "",
-        vaultAddress: body.vaultAddress || "",
+        vaultAddress: effectiveVaultAddress,
         authSignature: body.authSignature || "",
         authTimestamp: body.authTimestamp || 0,
         preferredChainId: body.chainId,
@@ -168,15 +175,15 @@ tools.post("/", async (c) => {
       // prove ownership of the request vault for the session's address.
       await verifyOperatorOwnership({
         operatorAddress: headerAuth.address,
-        vaultAddress: body.vaultAddress || "",
+        vaultAddress: effectiveVaultAddress,
         preferredChainId: body.chainId,
       });
       operatorVerified = true;
       verifiedOperatorAddress = headerAuth.address;
-    } else if (headerAuth && body.vaultAddress) {
+    } else if (headerAuth && effectiveVaultAddress) {
       await verifyOperatorAuth({
         operatorAddress: headerAuth.address,
-        vaultAddress: body.vaultAddress,
+        vaultAddress: effectiveVaultAddress,
         authSignature: headerAuth.signature,
         authTimestamp: headerAuth.timestamp,
         preferredChainId: body.chainId,

@@ -29,7 +29,7 @@ import { getRpcProvider } from "./rpcClient.js";
 import { getScaAddress } from "./scaAccount.js";
 import { ExecutionError } from "./executionError.js";
 import { estimateGasFees, type GasFees } from "./gas.js";
-import { getRevertDataFromError, traceRevertReason } from "./errorDecoder.js";
+import { getRevertDataFromError, traceRevertReason, decodeRevertData } from "./errorDecoder.js";
 
 /**
  * Recover the delegated executor from on-chain state when KV has no record for
@@ -293,29 +293,43 @@ export async function prepareTransaction(
       estimateGasFees(publicClient, tx.chainId),
     ]);
   } catch (err) {
-    let msg = err instanceof Error ? err.message : String(err);
+    // Build a clean single-line message — never embed the raw viem "HTTP
+    // request failed" dump: sanitizeError collapses it to the "Details:" line
+    // and the user is left with a bare "execution reverted".
+    const rawMsg = err instanceof Error ? err.message : String(err);
     const revertData = getRevertDataFromError(err);
-    // When the RPC omits revert data (common on HyperEVM), trace the call to
-    // recover the on-chain revert reason so the user gets an actionable error.
-    if (!revertData) {
+    const decoded = revertData ? decodeRevertData(revertData) : null;
+    let msg: string;
+    if (decoded) {
+      msg = `execution reverted — ${decoded.replace(/^Contract reverted: /, "")}`;
+    } else if (revertData) {
+      msg = `execution reverted (raw revert data: ${revertData})`;
+    } else {
+      // When the RPC omits revert data (common on HyperEVM), trace the call to
+      // recover the on-chain revert reason so the user gets an actionable error.
       const reason = await traceRevertReason(tx.chainId, {
         from: executor,
         to: tx.to,
         data: tx.data,
         value: txValue,
       });
-      if (reason) msg = `${msg} — revert reason: ${reason}`;
-    }
-    // No revert data AND no recovered reason means the transaction was never
-    // executed against the chain: the RPC itself failed (node unreachable,
-    // transient degradation). Tell the user exactly that instead of a bare
-    // "fetch failed" — and still block: nothing signable leaves preparation
-    // without a real gas estimate.
-    if (!revertData && !msg.includes("revert reason:")) {
-      msg +=
-        ` — the chain RPC could not simulate the transaction (no revert data was returned, so the node ` +
-        `likely did not execute it). This is usually transient: wait a few seconds and retry. ` +
-        `If it persists, the chain's RPC endpoint is degraded.`;
+      if (reason) {
+        msg = `execution reverted — ${reason}`;
+      } else if (/returned no data/i.test(rawMsg)) {
+        // viem wraps empty-data reverts in a misleading "returned no data"
+        // decoding error — say what actually happened instead.
+        msg = "execution reverted on-chain without a revert reason";
+      } else {
+        // No revert data AND no recovered reason means the transaction was
+        // never executed against the chain: the RPC itself failed (node
+        // unreachable, transient degradation). Tell the user exactly that
+        // instead of a bare "fetch failed" — and still block: nothing signable
+        // leaves preparation without a real gas estimate.
+        msg =
+          `the chain RPC could not simulate the transaction (no revert data was returned, so the node ` +
+          `likely did not execute it). This is usually transient: wait a few seconds and retry. ` +
+          `If it persists, the chain's RPC endpoint is degraded.`;
+      }
     }
     // The AHyperliquid adapter enforces Core account activation on-chain; translate
     // it into the fix. (Deposit is what activates a Core account.)
@@ -329,7 +343,7 @@ export async function prepareTransaction(
       ctx.executionMode !== "manual" &&
       !!ctx.operatorAddress &&
       executor.toLowerCase() !== ctx.operatorAddress.toLowerCase();
-    if (isDelegatedExecutor && !revertData && !msg.includes("revert reason:")) {
+    if (isDelegatedExecutor && !revertData && !msg.startsWith("execution reverted")) {
       msg += " — the agent wallet may not be authorized for this function on this chain. " +
         "Check delegation status for this selector, or switch to manual mode and sign with your wallet.";
     }

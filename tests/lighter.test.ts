@@ -61,21 +61,29 @@ const MARKET_OUT = [
   { type: "uint64" }, { type: "uint32" }, { type: "uint64" }, { type: "uint64" },
 ] as const;
 
-// Live layout (verified against the upgraded devnet 2026-10-20): 8 words WITH
-// the leading int64 lastFundingRatePrefixSum the docs show; the two count
-// fields are in DOCS order — word4 = totalOrderCount (currently open orders),
-// word5 = totalPositionTiedOrderCount (SL/TP tied to a position).
+// Devnet 1.1.0 (post-reset, verified 2026-10-27): 7 words WITHOUT the dropped
+// lastFundingRatePrefixSum; allocatedMargin is 6-dec USDC (was 12-dec).
 const POSITION_OUT = [
-  { type: "int64" }, { type: "int64" }, { type: "uint56" }, { type: "uint16" },
+  { type: "int64" }, { type: "uint56" }, { type: "uint16" },
   { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
 ] as const;
 
+/** Devnet 1.1.0 envelope for every READ_CORE query except tx status. */
+function wrapFound(data: Hex): Hex {
+  return encodeAbiParameters([{ type: "bool" }, { type: "bytes" }], [true, data]);
+}
+
+/** found=false envelope — the "entity does not exist" signal (a SUCCESS). */
+function wrapNotFound(): Hex {
+  return encodeAbiParameters([{ type: "bool" }, { type: "bytes" }], [false, "0x"]);
+}
+
 function encodeAccount(collateral6dec: bigint): Hex {
-  return encodeAbiParameters([...ACCOUNT_OUT], [0, 7, 7, OWNER, VAULT, collateral6dec]);
+  return wrapFound(encodeAbiParameters([...ACCOUNT_OUT], [0, 7, 7, OWNER, VAULT, collateral6dec]) as Hex);
 }
 
 function encodeMarket(markPrice: bigint): Hex {
-  return encodeAbiParameters([...MARKET_OUT], [0, 0, 0, 10, 5, 1000n, 5000n, 50, markPrice + 100n, markPrice]);
+  return wrapFound(encodeAbiParameters([...MARKET_OUT], [0, 0, 0, 10, 5, 1000n, 5000n, 50, markPrice + 100n, markPrice]) as Hex);
 }
 
 function encodePosition(fields: {
@@ -83,15 +91,14 @@ function encodePosition(fields: {
   entryQuote: bigint;
   marginMode?: number;
   allocatedMargin?: bigint;
-  lastFundingRatePrefixSum?: bigint;
   totalOrderCount?: bigint;
   totalPositionTiedOrderCount?: bigint;
 }): Hex {
-  return encodeAbiParameters([...POSITION_OUT], [
-    fields.lastFundingRatePrefixSum ?? 0n, fields.position, fields.entryQuote, 100,
+  return wrapFound(encodeAbiParameters([...POSITION_OUT], [
+    fields.position, fields.entryQuote, 100,
     fields.totalOrderCount ?? 3n, fields.totalPositionTiedOrderCount ?? 1n,
     fields.marginMode ?? 0, fields.allocatedMargin ?? 0n,
-  ]);
+  ]) as Hex);
 }
 
 /** Route eth_calls by READ_CORE query prefix. */
@@ -150,7 +157,12 @@ describe("READ_CORE client", () => {
     expect(data.blockTag).toBe("latest");
   });
 
-  it("account info: a READ_CORE failure (missing account) decodes to null", async () => {
+  it("account info: found=false (missing account) decodes to null", async () => {
+    setupReadCore({ account: () => wrapNotFound() });
+    expect(await readLighterAccount(CHAIN, VAULT)).toBeNull();
+  });
+
+  it("account info: a READ_CORE failure (legacy missing-account error) decodes to null", async () => {
     mockState.call.mockRejectedValue(new Error("READ_CORE query failed: account not found"));
     expect(await readLighterAccount(CHAIN, VAULT)).toBeNull();
   });
@@ -171,14 +183,14 @@ describe("READ_CORE client", () => {
     expect(await readLighterMarketInfo(CHAIN, 0)).toBeNull();
   });
 
-  it("position: packed input (25 bytes), raw 8-word decode WITH the leading funding field", async () => {
+  it("position: packed input (25 bytes), 7-word decode WITHOUT the dropped funding field", async () => {
     setupReadCore({ position: () => encodePosition({ position: -2000n, entryQuote: 4_600_000_000n }) });
     const pos = await readLighterPosition(CHAIN, VAULT, 2);
     expect(pos).not.toBeNull();
     expect(pos!.position).toBe(-2000n);
     expect(pos!.entryQuote).toBe(4_600_000_000n);
     expect(pos!.marginMode).toBe(0);
-    // Count fields in docs order: word4 = open, word5 = tied (SL/TP).
+    // Count fields in docs order: word3 = open, word4 = tied (SL/TP).
     expect(pos!.totalOrderCount).toBe(3n);
     expect(pos!.totalPositionTiedOrderCount).toBe(1n);
     const data = mockState.call.mock.calls[0][0] as { data: Hex };
@@ -186,23 +198,25 @@ describe("READ_CORE client", () => {
     expect((data.data.length - 2) / 2).toBe(25);
   });
 
-  it("position: a nonzero funding word must not leak into position/entryQuote (live regression — the 787299804 funding word read as a LONG 78729.9804 position)", async () => {
-    setupReadCore({
-      position: () => encodePosition({
-        lastFundingRatePrefixSum: 787_299_804n,
-        position: -80n,
-        entryQuote: 20_000_000n,
-        totalOrderCount: 1n,
-        totalPositionTiedOrderCount: 0n,
-      }),
-    });
+  it("position: found=false (no position) decodes to null", async () => {
+    setupReadCore({ position: () => wrapNotFound() });
+    expect(await readLighterPosition(CHAIN, VAULT, 0)).toBeNull();
+  });
+
+  it("position: a legacy funding word in first slot must not leak into position/entryQuote (1.0.0 regression — the 787299804 funding word read as a LONG 78729.9804 position)", async () => {
+    // Devnet 1.1.0 dropped the field entirely: the tuple now starts with the
+    // signed size, so a 1.0.0-shaped payload is rejected by the decoder
+    // (found-byte misread → decode failure → null) instead of misreading.
+    const legacy8Word = encodeAbiParameters(
+      [
+        { type: "int64" }, { type: "int64" }, { type: "uint56" }, { type: "uint16" },
+        { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
+      ],
+      [787_299_804n, -80n, 20_000_000n, 100, 1n, 0n, 0, 0n],
+    ) as Hex;
+    setupReadCore({ position: () => wrapFound(legacy8Word) });
     const pos = await readLighterPosition(CHAIN, VAULT, 0);
-    expect(pos).not.toBeNull();
-    expect(pos!.lastFundingRatePrefixSum).toBe(787_299_804n);
-    expect(pos!.position).toBe(-80n);
-    expect(pos!.entryQuote).toBe(20_000_000n);
-    expect(pos!.totalOrderCount).toBe(1n);
-    expect(pos!.totalPositionTiedOrderCount).toBe(0n);
+    expect(pos).toBeNull();
   });
 
   it("tx status: the ONE query with the (uint8, bytes) envelope, failed carries the error code", async () => {
@@ -228,7 +242,7 @@ describe("READ_CORE client", () => {
   });
 
   it("evm account index: raw uint48 decode; failure (account absent) is null", async () => {
-    setupReadCore({ accountIndex: () => encodeAbiParameters([{ type: "uint48" }], [7]) });
+    setupReadCore({ accountIndex: () => wrapFound(encodeAbiParameters([{ type: "uint48" }], [7]) as Hex) });
     expect(await getLighterAccountIndex(CHAIN, VAULT)).toBe(7n);
     mockState.call.mockRejectedValue(new Error("READ_CORE query failed"));
     expect(await getLighterAccountIndex(CHAIN, VAULT)).toBeNull();
@@ -255,7 +269,13 @@ describe("Core account activation", () => {
     expect(mockState.call).toHaveBeenCalledTimes(1);
   });
 
-  it("false when READ_CORE reports the account missing", async () => {
+  it("false when READ_CORE returns found=false (Devnet 1.1.0 missing-account signal)", async () => {
+    const vault = "0x4444444444444444444444444444444444444444" as Address;
+    setupReadCore({ account: () => wrapNotFound() });
+    expect(await getLighterAccountActivation(CHAIN, vault)).toBe(false);
+  });
+
+  it("false when READ_CORE errors with the legacy missing-account message", async () => {
     const vault = "0x4444444444444444444444444444444444444444" as Address;
     mockState.call.mockRejectedValue(new Error('execution reverted (unknown error: {"code":-32003,"message":"READ_CORE query failed"})'));
     expect(await getLighterAccountActivation(CHAIN, vault)).toBe(false);
@@ -302,13 +322,13 @@ describe("portfolio valuation", () => {
     expect(p.totalValue).toBe(900_000_000n);
   });
 
-  it("isolated positions add allocatedMargin / 1e6 (12-dec → 6-dec)", async () => {
+  it("isolated positions add allocatedMargin (6-dec USDC since Devnet 1.1.0)", async () => {
     setupReadCore({
       account: () => encodeAccount(1_000_000_000n),
       market: () => encodeMarket(235000n),
       position: () => encodePosition({
         position: 2000n, entryQuote: 4_600_000_000n,
-        marginMode: 1, allocatedMargin: 500_000_000_000_000n, // 500 USDC at 1e12
+        marginMode: 1, allocatedMargin: 500_000_000n, // 500 USDC at 1e6
       }),
     });
     const p = await getLighterPortfolio(CHAIN, VAULT, tracked);
