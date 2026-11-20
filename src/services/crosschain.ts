@@ -334,9 +334,11 @@ export async function getAggregatedNav(
     totalSupplyValueUsdc += supplyValueUsdc;
   }
 
+  // With no effective supply there is no computed price yet. Display the
+  // pool's initial unit price (1) instead of a misleading zero.
   const globalUnitaryRaw = totalSupplyValueUsdc > 0n
     ? (totalUsdcNormalized * (10n ** BigInt(GLOBAL_UNITARY_PRECISION))) / totalSupplyValueUsdc
-    : 0n;
+    : 10n ** BigInt(GLOBAL_UNITARY_PRECISION);
 
   const missingDelegationChains = snapshots
     .filter((s) => !s.delegationActive && !s.error && (s.totalValue > 0n || s.effectiveSupply > 0n))
@@ -516,12 +518,16 @@ async function readChainSnapshot(
         };
       }
       try {
-        const totalUsdcRaw = await convertTokenAmountViaOracle(
-          chainId,
-          state.baseToken,
-          state.netTotalValue,
-          usdcToken.address,
-        );
+        // USDC → USDC is a 1:1 denomination change, not an oracle conversion.
+        // This is also what makes USDC-only Lighter pools work without an oracle.
+        const totalUsdcRaw = state.baseToken.toLowerCase() === usdcToken.address.toLowerCase()
+          ? state.netTotalValue
+          : await convertTokenAmountViaOracle(
+            chainId,
+            state.baseToken,
+            state.netTotalValue,
+            usdcToken.address,
+          );
         totalUsdcNormalized = normalizeToDecimals(totalUsdcRaw, usdcToken.decimals, 6);
       } catch (err) {
         return {

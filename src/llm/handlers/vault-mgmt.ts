@@ -207,6 +207,9 @@ export async function handle_fund_pool(
   if (!amountStr) {
     throw new Error("Amount is required. Specify how much base token to deposit (e.g., '1.5' ETH).");
   }
+  if (!ctx.vaultAddress || ctx.vaultAddress.toLowerCase() === "0x0000000000000000000000000000000000000000") {
+    throw new Error("No smart pool selected. Deploy a pool or select an existing vault before funding it.");
+  }
 
   const recipient = (args.recipient as string) || ctx.operatorAddress;
   const chainName = resolveChainName(ctx.chainId);

@@ -68,6 +68,17 @@ beforeEach(() => {
   mockGetVaultTokenBalance.mockResolvedValue({ symbol: "USDC", balance: 0n });
 });
 
+describe("fund_pool input validation", () => {
+  it("rejects the zero vault address with an actionable error instead of an ABI decode 500", async () => {
+    const ctx = { ...makeCtx(), vaultAddress: ZERO as Address };
+    await expect(handle_fund_pool(env, ctx, { amount: "100" }, "fund_pool")).rejects.toThrow(
+      "No smart pool selected",
+    );
+    expect(mockGetPoolData).not.toHaveBeenCalled();
+    expect(mockGetNavData).not.toHaveBeenCalled();
+  });
+});
+
 describe("fund_pool with an ERC-20 base token", () => {
   it("returns the approve transaction when allowance is zero", async () => {
     mockReadContract.mockResolvedValue(0n);

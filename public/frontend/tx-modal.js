@@ -9,6 +9,7 @@ import {
 } from "./state.js";
 
 import { appendMessage } from "./chat-ui.js";
+import { saveVault, renderSavedVaults } from "./vault.js";
 
 import { formatTxMetrics } from "./tx-receipt.js";
 
@@ -170,6 +171,10 @@ async function pollTransactionReceipt(txHash, tx, statusEl) {
             const newPool = extractPoolAddressFromReceipt(receipt);
             if (newPool) {
               vaultInput.value = newPool;
+              // Persist immediately on the confirmed deployment receipt. Do not
+              // depend on a later /api/vault lookup to keep the pool in Saved.
+              saveVault(newPool, tx.chainId);
+              renderSavedVaults();
               appendMessage('system', `🏊 New pool deployed at ${newPool} — address auto-filled above.`);
               if (window.validateVault) window.validateVault();
               if (window.updateOnboardingVisibility) window.updateOnboardingVisibility();

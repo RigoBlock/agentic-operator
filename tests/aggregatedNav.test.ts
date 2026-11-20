@@ -155,6 +155,34 @@ describe("getAggregatedNav global assets", () => {
     await expect(getAggregatedNav(VAULT, makeKV())).rejects.toThrow(/Oracle/);
   });
 
+  it("returns the initial target price of 1 for an unpriced pool", async () => {
+    mockGetEffectivePoolState.mockResolvedValue(null);
+    const nav = await getAggregatedNav(VAULT, makeKV());
+    expect(nav.globalNav.targetPrice).toBe("1");
+    expect(nav.globalNav.totalUsdc).toBe("0");
+  });
+
+  it("reads USDC-denominated Lighter pools without an oracle conversion", async () => {
+    mockGetEffectivePoolState.mockImplementation(async (chainId: number) => {
+      if (chainId === 19529) {
+        return {
+          unitaryValue: 1_000_000n,
+          netTotalValue: 100_000_000n, // 100 USDC
+          effectiveSupply: 100_000_000n,
+          decimals: 6,
+          baseToken: "0xf2A5728d366c6d0f764Af612cD47F3608E2B4d5B" as Address,
+        };
+      }
+      return null;
+    });
+
+    const nav = await getAggregatedNav(VAULT, makeKV());
+    expect(parseFloat(nav.globalNav.totalUsdc)).toBeCloseTo(100, 6);
+    expect(nav.globalNav.targetPrice).toBe("1");
+    expect(mockConvertTokenAmountViaOracle).not.toHaveBeenCalled();
+    expect(nav.chains.find((c) => c.chainId === 19529)?.effectiveSupply).toBe(100_000_000n);
+  });
+
   it("labels HyperEVM (999) snapshots by name instead of the raw chain id", async () => {
     mockGetEffectivePoolState.mockImplementation(async (chainId: number) => {
       if (chainId === 999) {

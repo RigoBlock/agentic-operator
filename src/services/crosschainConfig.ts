@@ -101,6 +101,10 @@ export const CROSSCHAIN_TOKENS: Record<number, BridgeableToken[]> = {
     // Must be the same USDC the Hyperliquid adapter bridges (HYPER_USDC).
     { address: "0xb88339CB7199b77E23DB6E890353E22632Ba630f", type: "USDC", symbol: "USDC", decimals: 6 },
   ],
+  19529: [
+    // Lighter Devnet — USDC-only ALighter pools.
+    { address: "0xf2A5728d366c6d0f764Af612cD47F3608E2B4d5B", type: "USDC", symbol: "USDC", decimals: 6 },
+  ],
 };
 
 // ── Validation helpers ────────────────────────────────────────────────
