@@ -2476,13 +2476,6 @@
     convert-source-map "^2.0.0"
     tinyrainbow "^3.0.3"
 
-"@x402/core@2.31.0", "@x402/core@~2.31.0":
-  version "2.31.0"
-  resolved "https://registry.yarnpkg.com/@x402/core/-/core-2.31.0.tgz#c2e5acb9c7952608babe781fe09482c85fc5e4ab"
-  integrity sha512-7ToCOwHfftfFEERW5Mp6Fc5U1+JrtCLTkbQnEVsBl13IutltP9lWIBYi/J+zy8vQWaLUmACq8A2qywzdt/RRIQ==
-  dependencies:
-    zod "^4.6.6"
-
 "@x402/core@^2.0.0":
   version "2.11.0"
   resolved "https://registry.npmjs.org/@x402/core/-/core-2.11.0.tgz"
@@ -2490,7 +2483,14 @@
   dependencies:
     zod "^3.24.2"
 
-"@x402/evm@2.31.0":
+"@x402/core@^2.31.0", "@x402/core@~2.31.0":
+  version "2.31.0"
+  resolved "https://registry.yarnpkg.com/@x402/core/-/core-2.31.0.tgz#c2e5acb9c7952608babe781fe09482c85fc5e4ab"
+  integrity sha512-7ToCOwHfftfFEERW5Mp6Fc5U1+JrtCLTkbQnEVsBl13IutltP9lWIBYi/J+zy8vQWaLUmACq8A2qywzdt/RRIQ==
+  dependencies:
+    zod "^4.6.6"
+
+"@x402/evm@^2.31.0":
   version "2.31.0"
   resolved "https://registry.yarnpkg.com/@x402/evm/-/evm-2.31.0.tgz#bc7a66a0ace1524f4508ab8a68f45af315ee002c"
   integrity sha512-CCOqou/7f0/5kKQXlcVvWbiVnFmk/CqaSCs8YkJ2GPzxDYoQD13iKAjo0Uv7y/dVlkkOH0p/eJVxgcrO6aagbw==
@@ -2499,7 +2499,7 @@
     viem "^2.48.11"
     zod "^4.6.6"
 
-"@x402/extensions@2.31.0":
+"@x402/extensions@^2.31.0":
   version "2.31.0"
   resolved "https://registry.yarnpkg.com/@x402/extensions/-/extensions-2.31.0.tgz#f70475ecccfc484bf6a400956686a71855ac6728"
   integrity sha512-hFq11UtXNWPirZSZjZuWFHvjetYvFQmkQSZcNEMaQYxOz70ZLNFmIdXfG2J/B8YGE2nS2d223Hz9Lnkrxw+Sqw==
@@ -3455,10 +3455,10 @@ hmac-drbg@^1.0.1:
     minimalistic-assert "^1.0.0"
     minimalistic-crypto-utils "^1.0.1"
 
-hono@^4.12.27:
-  version "4.12.27"
-  resolved "https://registry.yarnpkg.com/hono/-/hono-4.12.27.tgz#d9527b2c6e1da331731610889d1ddaea2c1d2b40"
-  integrity sha512-1yrb/+w6HWQJrUCLkJ2IF5jNIPvvFkblV5RNOYl6bV+OA6p9GLcMpHFFGTosSvHvcAUibuUukRqhlYI4z32C7Q==
+hono@^4.13.16:
+  version "4.13.16"
+  resolved "https://registry.yarnpkg.com/hono/-/hono-4.13.16.tgz#bbcf7651905e06723e1bb25f7f390ee4fb7c181b"
+  integrity sha512-AOLOEhvrV+iH92xXCnFr/5+3KjPKcI3xP63XJtX5spAnkznPdHijlIsUTpi7/9EhWqrTCekw5c5zh1K+YsVw7A==
 
 https-proxy-agent@^5.0.1:
   version "5.0.1"
