@@ -266,15 +266,15 @@ the request — always surface the reqId and point to `lighter_get_request_statu
 order filled (an IOC/market order against an empty book is cancelled — the devnet ships without
 market makers). All Core state reads go through the READ_CORE precompile via `LIGHTER_RPC_URL` —
 no operator-side ledger: tracked markets and decimals come from
-the pool's on-chain view. **Devnet 1.1.0 read ABI (chain reset 2026-10-26):** every read
-EXCEPT tx status (0x0000) returns the documented `(bool found, bytes data)` envelope —
-`found=false` (empty data) is the "entity does not exist" signal, a SUCCESS, not an
-error (1.0.0 returned raw tuples). The position read (0x0007) is a 7-word tuple WITHOUT
-the 1.0.0 leading `lastFundingRatePrefixSum` (dropped), and `allocatedMargin` is 6-dec
-USDC (1.0.0 served 12-dec — no conversion anywhere). Decoders enforce the exact word
-count: viem ignores trailing bytes, so an old-shape payload would otherwise decode
-"successfully" into misaligned garbage. The two order-count fields are in docs order:
-word3 = currently open order count, word4 = position-tied (SL/TP) order count.
+the pool's on-chain view. **Current read ABI:** every read EXCEPT tx status (0x0000)
+returns the documented `(bool found, bytes data)` envelope — `found=false` (empty data)
+is the "entity does not exist" signal, a SUCCESS, not an error. Market info (0x0005)
+is a 13-field tuple including `quoteMultiplier`, `fundingRatePrefixSum`, and
+`lastFundingRoundTimestamp`; position (0x0007) is an 8-field tuple ending with
+`lastFundingRatePrefixSum`. Decoders enforce the exact field count so a changed
+payload shape fails loudly instead of decoding into misaligned garbage. The two
+order-count fields are in docs order: open orders first, position-tied (SL/TP)
+orders second.
 **The 1.1.0 reset wiped all chain state** — pool deployments, Core accounts, adapter
 authorizations on the authority, and delegation grants are all gone and must be
 re-established (pool addresses are deterministic create2 on (name, owner), so recreating

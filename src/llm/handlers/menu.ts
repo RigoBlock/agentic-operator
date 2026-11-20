@@ -13,6 +13,9 @@ import type { ToolResult } from "../client.js";
 import { AGENT_TOOL_DEFINITIONS } from "../tools.js";
 import { SUPPORTED_CHAINS } from "../../config.js";
 import { CROSSCHAIN_TOKENS } from "../../services/crosschainConfig.js";
+import { getLighterAccountActivation } from "../../services/lighter.js";
+import { LIGHTER_CHAIN_ID } from "../../abi/lighter.js";
+import type { Address } from "viem";
 
 export interface ToolCardField {
   name: string;
@@ -355,9 +358,24 @@ export async function handle_get_tool_menu(
     };
   }
 
+  // On a confirmed missing Core account, order/withdraw tools would revert.
+  // Show only read tools plus the deposit that creates the account.
+  let accountMissing = false;
+  if (toolNames === MENU_CATEGORIES.lighter && _ctx.vaultAddress &&
+      _ctx.vaultAddress.toLowerCase() !== "0x0000000000000000000000000000000000000000") {
+    accountMissing = (await getLighterAccountActivation(LIGHTER_CHAIN_ID, _ctx.vaultAddress as Address)) === false;
+  }
+  const ACTIVATION_TOOLS = new Set([
+    "lighter_get_positions",
+    "lighter_get_orders",
+    "lighter_get_markets",
+    "lighter_get_request_status",
+    "lighter_deposit",
+  ]);
+
   const cards = toolNames
     .map(buildCard)
-    .filter((c): c is ToolCard => c !== null);
+    .filter((c): c is ToolCard => c !== null && (!accountMissing || ACTIVATION_TOOLS.has(c.toolName)));
 
   // The cards ARE the answer — the web UI and Telegram render them as boxes, so no
   // filler sentence here. Only the crosschain menu carries essential routing notes.
@@ -371,6 +389,9 @@ export async function handle_get_tool_menu(
   }
   if (toolNames === MENU_CATEGORIES.lighter) {
     message =
+      (accountMissing
+        ? "Your pool has no Lighter Core account yet — run lighter_deposit first; it creates the account automatically. Order and withdrawal tools are hidden until then.\n"
+        : "") +
       `Lighter tools operate on Lighter Devnet (chain 19529) only — switch_chain chain="Lighter Devnet" first.` +
       `\nUSDC only. The first deposit creates the vault's Core account automatically.` +
       `\nMarkets are tracked automatically: the first order on a market tracks it, and idle markets untrack themselves. Just place the order.` +

@@ -59,6 +59,7 @@ const MARKET_OUT = [
   { type: "uint8" }, { type: "uint32" }, { type: "uint32" },
   { type: "uint32" }, { type: "uint32" }, { type: "uint64" },
   { type: "uint64" }, { type: "uint32" }, { type: "uint64" }, { type: "uint64" },
+  { type: "uint32" }, { type: "int64" }, { type: "uint64" },
 ] as const;
 
 // Devnet 1.1.0 (post-reset, verified 2026-10-27): 7 words WITHOUT the dropped
@@ -66,6 +67,7 @@ const MARKET_OUT = [
 const POSITION_OUT = [
   { type: "int64" }, { type: "uint56" }, { type: "uint16" },
   { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
+  { type: "int64" },
 ] as const;
 
 /** Devnet 1.1.0 envelope for every READ_CORE query except tx status. */
@@ -83,7 +85,10 @@ function encodeAccount(collateral6dec: bigint): Hex {
 }
 
 function encodeMarket(markPrice: bigint): Hex {
-  return wrapFound(encodeAbiParameters([...MARKET_OUT], [0, 0, 0, 10, 5, 1000n, 5000n, 50, markPrice + 100n, markPrice]) as Hex);
+  return wrapFound(encodeAbiParameters(
+    [...MARKET_OUT],
+    [0, 0, 0, 10, 5, 1000n, 5000n, 50, markPrice + 100n, markPrice, 1, 0n, 0n],
+  ) as Hex);
 }
 
 function encodePosition(fields: {
@@ -98,6 +103,8 @@ function encodePosition(fields: {
     fields.position, fields.entryQuote, 100,
     fields.totalOrderCount ?? 3n, fields.totalPositionTiedOrderCount ?? 1n,
     fields.marginMode ?? 0, fields.allocatedMargin ?? 0n,
+    // Devnet 1.2.0 trailing lastFundingRatePrefixSum.
+    0n,
   ]) as Hex);
 }
 
@@ -178,12 +185,25 @@ describe("READ_CORE client", () => {
     expect(data.data).toBe("0x00050003");
   });
 
+  it("market info: rejects appended fields instead of decoding a changed tuple shape", async () => {
+    const inner = encodeAbiParameters(
+      [...MARKET_OUT],
+      [0, 0, 0, 10, 5, 1000n, 5000n, 50, 235100n, 235000n, 1, 0n, 0n],
+    ) +
+      "0000000000000000000000000000000000000000000000000000000000000001" +
+      "000000000000000000000000000000000000000000000000000000001c7ac9f0" +
+      "000000000000000000000000000000000000000000000000000001a1fa1d8100";
+    setupReadCore({ market: () => wrapFound(inner as Hex) });
+    const info = await readLighterMarketInfo(CHAIN, 0);
+    expect(info).toBeNull();
+  });
+
   it("market info: failure decodes to null", async () => {
     mockState.call.mockRejectedValue(new Error("READ_CORE query failed"));
     expect(await readLighterMarketInfo(CHAIN, 0)).toBeNull();
   });
 
-  it("position: packed input (25 bytes), 7-word decode WITHOUT the dropped funding field", async () => {
+  it("position: packed input (25 bytes), 8-word decode including trailing funding", async () => {
     setupReadCore({ position: () => encodePosition({ position: -2000n, entryQuote: 4_600_000_000n }) });
     const pos = await readLighterPosition(CHAIN, VAULT, 2);
     expect(pos).not.toBeNull();
@@ -201,22 +221,6 @@ describe("READ_CORE client", () => {
   it("position: found=false (no position) decodes to null", async () => {
     setupReadCore({ position: () => wrapNotFound() });
     expect(await readLighterPosition(CHAIN, VAULT, 0)).toBeNull();
-  });
-
-  it("position: a legacy funding word in first slot must not leak into position/entryQuote (1.0.0 regression — the 787299804 funding word read as a LONG 78729.9804 position)", async () => {
-    // Devnet 1.1.0 dropped the field entirely: the tuple now starts with the
-    // signed size, so a 1.0.0-shaped payload is rejected by the decoder
-    // (found-byte misread → decode failure → null) instead of misreading.
-    const legacy8Word = encodeAbiParameters(
-      [
-        { type: "int64" }, { type: "int64" }, { type: "uint56" }, { type: "uint16" },
-        { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
-      ],
-      [787_299_804n, -80n, 20_000_000n, 100, 1n, 0n, 0, 0n],
-    ) as Hex;
-    setupReadCore({ position: () => wrapFound(legacy8Word) });
-    const pos = await readLighterPosition(CHAIN, VAULT, 0);
-    expect(pos).toBeNull();
   });
 
   it("tx status: the ONE query with the (uint8, bytes) envelope, failed carries the error code", async () => {
@@ -579,6 +583,26 @@ describe("tool registration and catalog", () => {
     expect(result.message).toMatch(/19529/);
     expect(result.message).toMatch(/asynchronous/i);
     expect(result.message).toMatch(/tracked automatically/i);
+  });
+
+  it("the lighter menu shows only view tools plus deposit when the Core account is missing", async () => {
+    const freshVault = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
+    setupReadCore({ account: () => wrapNotFound(), market: () => encodeMarket(246000n) });
+    const result = await handle_get_tool_menu(
+      { KV: createMockKV() } as unknown as Env,
+      { chainId: CHAIN, vaultAddress: freshVault } as never,
+      { category: "lighter" },
+      "get_tool_menu",
+    );
+    const names = (result.metadata as { toolCards: { toolName: string }[] }).toolCards.map((c) => c.toolName);
+    expect(names).toEqual([
+      "lighter_get_positions",
+      "lighter_get_orders",
+      "lighter_get_markets",
+      "lighter_get_request_status",
+      "lighter_deposit",
+    ]);
+    expect(result.message).toMatch(/run lighter_deposit first/);
   });
 
   it("fast paths route unambiguous lighter phrases without the LLM", () => {

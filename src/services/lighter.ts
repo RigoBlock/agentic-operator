@@ -4,13 +4,12 @@
  * Every Lighter Core STATE read goes through the READ_CORE precompile
  * (0x6600…0000) via eth_call on LIGHTER_RPC_URL. Inputs are abi.encodePacked(uint16
  * queryId, args) WITHOUT a function selector. Since the Devnet 1.1.0 reset
- * (2026-10-26) every read except tx status (0x0000) returns the documented
- * (bool found, bytes data) envelope: found=false means the account/asset/market
- * does not exist and data is empty. The position read (0x0007) serves a 7-word
- * tuple WITHOUT the old leading lastFundingRatePrefixSum, and allocatedMargin is
- * in 6-dec USDC (10^6 per USDC — previously 12-dec). Withdrawal Core write type
- * is 0x48 (was 0x4c) with 72xx rejection codes (was 76xx); the app only surfaces
- * the numeric code. Encodings verified live against Devnet 1.1.0 on 2026-10-27.
+ * Every read except tx status (0x0000) returns the documented (bool found,
+ * bytes data) envelope: found=false means the account/asset/market does not
+ * exist and data is empty. The market read (0x0005) serves a 13-field tuple,
+ * and the position read (0x0007) serves an 8-field tuple with a trailing
+ * lastFundingRatePrefixSum. Encodings are validated live against the current
+ * devnet.
  *
  * Tracked markets and their size/price decimals are read from the pool's own
  * on-chain view getLighterTrackedMarkets() (0x5239dd83, EApps) — since
@@ -99,6 +98,9 @@ export interface LighterMarketInfo {
   liquidationFee: number;
   indexPrice: bigint;
   markPrice: bigint;
+  quoteMultiplier: number;
+  fundingRatePrefixSum: bigint;
+  lastFundingRoundTimestamp: bigint;
 }
 
 export interface LighterPosition {
@@ -113,6 +115,8 @@ export interface LighterPosition {
   marginMode: number;
   /** Isolated margin in 6-dec USDC (Devnet 1.1.0 — was 12-dec before the reset). */
   allocatedMargin: bigint;
+  /** Market fundingRatePrefixSum at the position's last funding settlement. */
+  lastFundingRatePrefixSum: bigint;
 }
 
 const ACCOUNT_INFO_OUT = [
@@ -124,18 +128,17 @@ const MARKET_INFO_OUT = [
   { type: "uint8" }, { type: "uint32" }, { type: "uint32" },
   { type: "uint32" }, { type: "uint32" }, { type: "uint64" },
   { type: "uint64" }, { type: "uint32" }, { type: "uint64" }, { type: "uint64" },
+  { type: "uint32" }, { type: "int64" }, { type: "uint64" },
 ] as const;
 
-// Devnet 1.1.0 position layout (Lighter "Reading Core from EVM"): a 7-word
-// tuple WITHOUT the leading int64 lastFundingRatePrefixSum the 1.0.0 docs
-// showed — the field was dropped in the reset. allocatedMargin is 6-dec USDC
-// (10^6 per USDC; 1.0.0 served 12-dec). The two order-count fields are in
-// docs order: word3 = totalOrderCount (currently open/resting orders), word4 =
-// totalPositionTiedOrderCount (SL/TP conditional orders tied to a position's
-// lifecycle). Verified against live state on 2026-10-27.
+// Position layout (Lighter "Reading Core from EVM"): signed size, entry
+// notional, initial margin fraction, open order count, position-tied order
+// count, margin mode, allocated margin, and trailing lastFundingRatePrefixSum.
+// allocatedMargin is 6-dec USDC.
 const POSITION_OUT = [
   { type: "int64" }, { type: "uint56" }, { type: "uint16" },
   { type: "uint64" }, { type: "uint64" }, { type: "uint8" }, { type: "int128" },
+  { type: "int64" },
 ] as const;
 
 // Envelope served by every READ_CORE query except tx status (0x0000) since
@@ -214,10 +217,10 @@ export async function readLighterMarketInfo(
   try {
     const raw = await callReadCore(chainId, packQuery(LIGHTER_QUERIES.marketInfo, hexUint16(marketId)));
     const data = unwrapFoundData(raw);
-    if (data === null || !hasExactWords(data, 10)) return null;
-    const [marketType, baseAssetId, quoteAssetId, takerFee, makerFee, minBaseAmount, minQuoteAmount, liquidationFee, indexPrice, markPrice] =
-      decodeAbiParameters([...MARKET_INFO_OUT], data) as unknown as readonly [number, number, number, number, number, bigint, bigint, number, bigint, bigint];
-    return { marketType, baseAssetId, quoteAssetId, takerFee, makerFee, minBaseAmount, minQuoteAmount, liquidationFee, indexPrice, markPrice };
+    if (data === null || !hasExactWords(data, 13)) return null;
+    const [marketType, baseAssetId, quoteAssetId, takerFee, makerFee, minBaseAmount, minQuoteAmount, liquidationFee, indexPrice, markPrice, quoteMultiplier, fundingRatePrefixSum, lastFundingRoundTimestamp] =
+      decodeAbiParameters([...MARKET_INFO_OUT], data) as unknown as readonly [number, number, number, number, number, bigint, bigint, number, bigint, bigint, number, bigint, bigint];
+    return { marketType, baseAssetId, quoteAssetId, takerFee, makerFee, minBaseAmount, minQuoteAmount, liquidationFee, indexPrice, markPrice, quoteMultiplier, fundingRatePrefixSum, lastFundingRoundTimestamp };
   } catch {
     return null;
   }
@@ -236,9 +239,9 @@ export async function readLighterPosition(
       packQuery(LIGHTER_QUERIES.position, hexAddress(vaultAddress), hexBool(false), hexUint16(marketId)),
     );
     const data = unwrapFoundData(raw);
-    if (data === null || !hasExactWords(data, 7)) return null;
-    const [position, entryQuote, initialMarginFraction, totalOrderCount, totalPositionTiedOrderCount, marginMode, allocatedMargin] =
-      decodeAbiParameters([...POSITION_OUT], data) as unknown as readonly [bigint, number, number, bigint, bigint, number, bigint];
+    if (data === null || !hasExactWords(data, 8)) return null;
+    const [position, entryQuote, initialMarginFraction, totalOrderCount, totalPositionTiedOrderCount, marginMode, allocatedMargin, lastFundingRatePrefixSum] =
+      decodeAbiParameters([...POSITION_OUT], data) as unknown as readonly [bigint, number, number, bigint, bigint, number, bigint, bigint];
     return {
       position,
       entryQuote: BigInt(entryQuote),
@@ -247,6 +250,7 @@ export async function readLighterPosition(
       totalPositionTiedOrderCount,
       marginMode,
       allocatedMargin,
+      lastFundingRatePrefixSum,
     };
   } catch {
     return null;
