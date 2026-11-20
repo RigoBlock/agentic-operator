@@ -39,10 +39,11 @@ import {
   LIGHTER_TX_STATUS,
   LIGHTER_MARGIN_MODE_ISOLATED,
   LIGHTER_VIEW_TRACKED_MARKETS,
-  LIGHTER_VIEW_DATA_OUT,
   LIGHTER_MARKET_SYMBOLS,
+  LIGHTER_MARKET_DECIMALS,
 } from "../abi/lighter.js";
 import { getRpcProvider } from "./rpcClient.js";
+import { getEnv } from "./envContext.js";
 
 // ── READ_CORE input encoding (abi.encodePacked: uint16 id + args) ─────
 
@@ -333,11 +334,15 @@ export async function getLighterAccountActivation(
   const hit = activationCache.get(key);
   if (hit && Date.now() - hit.at < ACTIVATION_TTL_MS) return hit.activated;
 
-  // Devnet 1.1.0: a missing account returns found=false with SUCCESS — the
-  // envelope itself discriminates "absent" from "read failure". A thrown
-  // READ_CORE application error is still the precompile's legacy "no such
-  // account" signal → false; a transport/RPC failure → null ("unknown", never
-  // prompt).
+  // A confirmed deposit marks activation in shared KV, which takes precedence
+  // over any isolate-local negative cache. Without this, another isolate can
+  // keep serving a stale "no Core account" after a successful deposit.
+  const kv = getEnv()?.KV;
+  if (kv) {
+    const confirmed = await kv.get<boolean>(`lighter-active:${vaultAddress.toLowerCase()}`, "json");
+    if (confirmed === true) return true;
+  }
+
   let activated: boolean | null;
   try {
     const raw = await callReadCore(
@@ -354,8 +359,15 @@ export async function getLighterAccountActivation(
 }
 
 /** Record a freshly created account (lighter_deposit auto-creates it on first deposit). */
-export function markLighterAccountActivated(vaultAddress: Address): void {
+export async function markLighterAccountActivated(vaultAddress: Address): Promise<void> {
   activationCache.set(vaultAddress.toLowerCase(), { at: Date.now(), activated: true });
+  // The in-memory cache is isolate-local; persist the positive marker in KV so
+  // every isolate sees the activation immediately.
+  await getEnv()?.KV?.put(
+    `lighter-active:${vaultAddress.toLowerCase()}`,
+    "true",
+    { expirationTtl: 24 * 60 * 60 },
+  );
 }
 
 // ── Tracked markets (on-chain view — the single source) ───────────────
@@ -376,12 +388,10 @@ export interface LighterTrackedMarketsView {
 
 /**
  * The pool's getLighterTrackedMarkets() view (0x5239dd83, EApps/EAppsLighter):
- * the markets the pool tracks, WITH the size/price decimals the adapter's
- * LighterConstants table resolved at track time. This is the operator's only
- * source for both — no KV ledger, no Core API, no user input — so the
- * operator can never disagree with the contract that prices the pool's NAV.
- * Null when the read fails or the pool runs an implementation without the
- * view (never throws).
+ * returns uint16[] market ids tracked by the adapter. Size/price decimals are
+ * resolved from LIGHTER_MARKET_DECIMALS (the mirrored LighterConstants table),
+ * the same values order building and NAV use — not from a second ABI shape.
+ * Null when the read fails or the view is unavailable (never throws).
  */
 export async function readLighterTrackedMarkets(
   chainId: number,
@@ -396,32 +406,26 @@ export async function readLighterTrackedMarkets(
       blockTag: "latest",
     });
     if (!raw || raw === "0x") return null;
-    const [view] = decodeAbiParameters(
-      [...LIGHTER_VIEW_DATA_OUT],
+    // The view returns uint16[] market ids. Decimals come from the adapter's
+    // LighterConstants table mirrored in LIGHTER_MARKET_DECIMALS — the same
+    // table order building and NAV use, not from a second on-chain ABI guess.
+    const [marketIds] = decodeAbiParameters(
+      [{ type: "uint16[]" }],
       raw as Hex,
-    ) as unknown as readonly [{
-      marketIds: number[];
-      sizeDecimals: number[];
-      priceDecimals: number[];
-      inFlightAmount: bigint;
-      lastActionTimestamp: bigint;
-      lastReqId: bigint;
-    }];
-    if (!Array.isArray(view.marketIds) || !Array.isArray(view.sizeDecimals) || !Array.isArray(view.priceDecimals)) {
-      return null;
-    }
-    const markets: TrackedMarket[] = view.marketIds
+    ) as unknown as readonly [number[]];
+    if (!Array.isArray(marketIds)) return null;
+    const markets: TrackedMarket[] = marketIds
       .filter((id) => Number.isInteger(id) && id >= 0 && id < 65536)
-      .map((id, i) => ({
-        marketId: id,
-        sizeDecimals: view.sizeDecimals[i] ?? 0,
-        priceDecimals: view.priceDecimals[i] ?? 0,
+      .map((marketId) => ({
+        marketId,
+        sizeDecimals: LIGHTER_MARKET_DECIMALS[marketId]?.sizeDecimals ?? 0,
+        priceDecimals: LIGHTER_MARKET_DECIMALS[marketId]?.priceDecimals ?? 0,
       }));
     return {
       markets,
-      inFlightAmount: BigInt(view.inFlightAmount),
-      lastActionTimestamp: BigInt(view.lastActionTimestamp),
-      lastReqId: BigInt(view.lastReqId),
+      inFlightAmount: 0n,
+      lastActionTimestamp: 0n,
+      lastReqId: 0n,
     };
   } catch {
     return null;

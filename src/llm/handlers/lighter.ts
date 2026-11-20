@@ -370,7 +370,7 @@ export async function handle_lighter_deposit(
   // follow-up order within the activation-cache window is not gated on a
   // stale found=false. If the deposit never confirms, the gate simply lets
   // the order through to its (already guarded) on-chain revert, as before.
-  markLighterAccountActivated(vault);
+  await markLighterAccountActivated(vault);
 
   const actionLine = txActionLine(ctx);
   return {

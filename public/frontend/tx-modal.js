@@ -10,6 +10,7 @@ import {
 
 import { appendMessage } from "./chat-ui.js";
 import { saveVault, renderSavedVaults } from "./vault.js";
+import { extractLighterReqIdFromReceipt, trackLighterRequest } from "./lighter-receipt.js";
 
 import { formatTxMetrics } from "./tx-receipt.js";
 
@@ -165,6 +166,12 @@ async function pollTransactionReceipt(txHash, tx, statusEl) {
             ? `✅ Swapped ${meta.sellAmount} ${meta.sellToken} for ${meta.buyAmount} ${meta.buyToken}${meta.price ? ' (' + meta.price + ')' : ''} — [${shortHash}](${explorerUrl})`
             : `✅ ${tx.description || 'Transaction'} confirmed — [${shortHash}](${explorerUrl})`;
           appendMessage('assistant', chatMsg);
+          // Lighter: a receipt only proves submission. Track the actual Core
+          // outcome through READ_CORE using the OrderSent reqId.
+          if (tx.chainId === 19529) {
+            const reqId = extractLighterReqIdFromReceipt(receipt);
+            if (reqId) trackLighterRequest(reqId, appendMessage);
+          }
           // Pool deployments: extract the new pool address from the receipt and
           // switch the app to it (same auto-fill the dedicated deploy form did).
           if (/deploy new rigoblock pool/i.test(tx.description || '')) {

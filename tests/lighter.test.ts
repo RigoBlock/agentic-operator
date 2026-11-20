@@ -22,6 +22,11 @@ vi.mock("../src/services/rpcClient.js", () => ({
   getRpcProvider: mockState.getRpcProvider,
 }));
 
+vi.mock("../src/services/vault.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/services/vault.js")>()),
+  getVaultTokenBalance: vi.fn(async () => ({ balance: 100_000_000n, decimals: 6, symbol: "USDC" })),
+}));
+
 import {
   readLighterAccount,
   readLighterMarketInfo,
@@ -29,12 +34,14 @@ import {
   readLighterTxStatus,
   getLighterAccountIndex,
   getLighterAccountActivation,
+  markLighterAccountActivated,
   getLighterPortfolio,
   readLighterTrackedMarkets,
   getLighterTrackedMarkets,
   type TrackedMarket,
 } from "../src/services/lighter.js";
 import { checkNavImpact } from "../src/services/navGuard.js";
+import { withEnv } from "../src/services/envContext.js";
 import { decodeRevertData } from "../src/services/errorDecoder.js";
 import { LIGHTER_VIEW_DATA_OUT } from "../src/abi/lighter.js";
 import { resolveLighterMarketId } from "../src/llm/handlers/lighter.js";
@@ -367,27 +374,11 @@ describe("portfolio valuation", () => {
 // ── Tracked-markets on-chain view (getLighterTrackedMarkets, 0x5239dd83) ──
 
 describe("tracked-markets on-chain view", () => {
-  function encodeTrackedView(
-    marketIds: number[],
-    sizeDecimals: number[],
-    priceDecimals: number[],
-  ): Hex {
-    return encodeAbiParameters([...LIGHTER_VIEW_DATA_OUT], [
-      {
-        marketIds,
-        sizeDecimals,
-        priceDecimals,
-        inFlightAmount: 10_000_000n,
-        lastActionTimestamp: 1_792_495_941n,
-        lastReqId: 6067n,
-      },
-    ]);
-  }
-
-  it("decodes markets with the adapter's decimals plus the NAV meta fields", async () => {
+  it("decodes the uint16[] market-id view and resolves decimals from LighterConstants", async () => {
+    const marketIds = [0, 1];
     mockState.call.mockImplementation(async (args: { to: string; data: Hex }) => {
       expect(args.data).toBe("0x5239dd83");
-      return { data: encodeTrackedView([0, 1], [4, 5], [2, 1]) };
+      return { data: encodeAbiParameters([{ type: "uint16[]" }], [marketIds]) };
     });
     const view = await readLighterTrackedMarkets(CHAIN, VAULT);
     expect(view).not.toBeNull();
@@ -395,13 +386,20 @@ describe("tracked-markets on-chain view", () => {
       { marketId: 0, sizeDecimals: 4, priceDecimals: 2 },
       { marketId: 1, sizeDecimals: 5, priceDecimals: 1 },
     ]);
-    expect(view!.inFlightAmount).toBe(10_000_000n);
-    expect(view!.lastReqId).toBe(6067n);
+    expect(view!.inFlightAmount).toBe(0n);
+    expect(view!.lastReqId).toBe(0n);
     const call = mockState.call.mock.calls[0][0] as { to: string; blockTag?: string };
     expect(call.to.toLowerCase()).toBe(VAULT.toLowerCase());
     expect(call.blockTag).toBe("latest");
 
     expect(await getLighterTrackedMarkets(CHAIN, VAULT)).toEqual(view!.markets);
+  });
+
+  it("rejects a struct-shaped payload instead of decoding the wrong view", async () => {
+    mockState.call.mockResolvedValue({
+      data: encodeAbiParameters([{ type: "uint8" }], [1]),
+    });
+    expect(await readLighterTrackedMarkets(CHAIN, VAULT)).toBeNull();
   });
 
   it("read failure, empty payload, or malformed shape → null view, [] markets", async () => {
@@ -571,6 +569,17 @@ describe("tool registration and catalog", () => {
     }
   });
 
+  it("a confirmed deposit activates the account across isolate-local caches via KV", async () => {
+    const depositVault = "0xcccccccccccccccccccccccccccccccccccccccc" as Address;
+    const kv = createMockKV();
+    await withEnv({ KV: kv } as unknown as Env, async () => {
+      await markLighterAccountActivated(depositVault);
+      expect(await getLighterAccountActivation(CHAIN, depositVault)).toBe(true);
+    });
+    const stored = await kv.get(`lighter-active:${depositVault.toLowerCase()}`, "json");
+    expect(stored).toBe("true");
+  });
+
   it("the lighter menu lists every tool with a note about async Core writes", async () => {
     const result = await handle_get_tool_menu(
       { KV: createMockKV() } as unknown as Env,
@@ -603,6 +612,30 @@ describe("tool registration and catalog", () => {
       "lighter_deposit",
     ]);
     expect(result.message).toMatch(/run lighter_deposit first/);
+  });
+
+  it("deposit immediately unhides order tools in the lighter menu", async () => {
+    const depositVault = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;
+    const { handle_lighter_deposit } = await import("../src/llm/handlers/lighter.js");
+    await handle_lighter_deposit(
+      { KV: createMockKV() } as unknown as Env,
+      {
+        vaultAddress: depositVault, chainId: CHAIN, operatorAddress: OWNER,
+        operatorVerified: true, executionMode: "manual",
+      } as never,
+      { amount: "99" },
+      "lighter_deposit",
+    );
+    const result = await handle_get_tool_menu(
+      { KV: createMockKV() } as unknown as Env,
+      { chainId: CHAIN, vaultAddress: depositVault } as never,
+      { category: "lighter" },
+      "get_tool_menu",
+    );
+    const names = (result.metadata as { toolCards: { toolName: string }[] }).toolCards.map((c) => c.toolName);
+    expect(names).toContain("lighter_limit_order");
+    expect(names).toContain("lighter_withdraw");
+    expect(result.message).not.toMatch(/has no Lighter Core account yet/);
   });
 
   it("fast paths route unambiguous lighter phrases without the LLM", () => {
@@ -697,12 +730,8 @@ describe("chain gating", () => {
   });
 
   it("lighter_get_orders reports on-chain order counts per tracked market", async () => {
-    const trackedView = encodeAbiParameters([...LIGHTER_VIEW_DATA_OUT], [
-      {
-        marketIds: [0], sizeDecimals: [4], priceDecimals: [2],
-        inFlightAmount: 0n, lastActionTimestamp: 0n, lastReqId: 0n,
-      },
-    ]);
+    const trackedIds = [0];
+    const trackedView = encodeAbiParameters([{ type: "uint16[]" }], [trackedIds]);
     mockState.call.mockImplementation(async (args: { data: Hex }) => {
       if (args.data.slice(0, 10) === "0x5239dd83") return { data: trackedView };
       if (args.data.slice(0, 6) === "0x0007") {
@@ -722,12 +751,8 @@ describe("chain gating", () => {
   });
 
   it("lighter_get_orders with zero counts says there are no open orders", async () => {
-    const trackedView = encodeAbiParameters([...LIGHTER_VIEW_DATA_OUT], [
-      {
-        marketIds: [1], sizeDecimals: [5], priceDecimals: [1],
-        inFlightAmount: 0n, lastActionTimestamp: 0n, lastReqId: 0n,
-      },
-    ]);
+    const trackedIds = [1];
+    const trackedView = encodeAbiParameters([{ type: "uint16[]" }], [trackedIds]);
     mockState.call.mockImplementation(async (args: { data: Hex }) => {
       if (args.data.slice(0, 10) === "0x5239dd83") return { data: trackedView };
       if (args.data.slice(0, 6) === "0x0007") {
@@ -746,12 +771,8 @@ describe("chain gating", () => {
     // Fresh vault: the no-account positions test above caches activation=false
     // for VAULT, and a definite false now hard-fails order drafts.
     const orderVault = "0x7777777777777777777777777777777777777777" as Address;
-    const trackedView = encodeAbiParameters([...LIGHTER_VIEW_DATA_OUT], [
-      {
-        marketIds: [0], sizeDecimals: [4], priceDecimals: [2],
-        inFlightAmount: 0n, lastActionTimestamp: 0n, lastReqId: 0n,
-      },
-    ]);
+    const trackedIds = [0];
+    const trackedView = encodeAbiParameters([{ type: "uint16[]" }], [trackedIds]);
     mockState.call.mockImplementation(async (args: { data: Hex }) => {
       if (args.data.slice(0, 10) === "0x5239dd83") return { data: trackedView };
       if (args.data.slice(0, 6) === "0x0001") return { data: encodeAccount(15_000_000n) };
