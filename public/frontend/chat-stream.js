@@ -21,6 +21,7 @@ import {
 } from "./state.js";
 
 import { sendChatMessage, callTool } from "./api.js";
+import { fetchWithPayment } from './x402.js';
 
 import { makeReasoningBlock, appendMessage } from "./chat-ui.js";
 
@@ -166,7 +167,7 @@ async function sendMessage() {
     // Enable SSE streaming for real-time updates
     chatBody.stream = true;
 
-    const res = await fetch('/api/chat', {
+    const res = await fetchWithPayment('/api/chat', {
       method: 'POST',
       headers: apiHeaders(),
       signal: controller.signal,
@@ -194,7 +195,7 @@ async function sendMessage() {
             authSignature,
             authTimestamp,
           };
-          const retryRes = await fetch('/api/chat', {
+          const retryRes = await fetchWithPayment('/api/chat', {
             method: 'POST',
             headers: apiHeaders(),
             signal: controller.signal,

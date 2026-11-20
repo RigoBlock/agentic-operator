@@ -5,6 +5,7 @@
 
 import './state.js';
 import './api.js';
+import './payment-ui.js'; // x402 payment onboarding + auto-pay modal
 
 import {
   chatEl, inputEl, sendBtn, vaultInput,

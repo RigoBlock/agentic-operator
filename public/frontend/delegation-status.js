@@ -87,7 +87,9 @@ export async function refreshDelegationStatus() {
   try {
     const res = await fetch(`/api/delegation/status?vaultAddress=${vault}&chainId=${currentChainId}&verify=true`);
     if (!res.ok) throw new Error('Failed to fetch');
-    setDelegationState(await res.json());
+    const statusJson = await res.json();
+    ownershipByVault.set(ownershipKey(vault, currentChainId), statusJson.isOwner === true);
+    setDelegationState(statusJson);
 
     // Auto-heal: if on-chain delegation is active but KV doesn't have this chain,
     // sync KV by calling the confirm endpoint (handles chat-based delegation setup)
@@ -434,6 +436,9 @@ export async function toggleSponsoredGas(checked, chainId = currentChainId) {
 export async function toggleExecMode(checked) {
   const vault = vaultInput.value.trim();
   if (!vault || !connectedAddress || !authSignature) return;
+  // Same precondition as loadExecMode: never fire a doomed operator-only call.
+  if (Date.now() - Number(authTimestamp) > 24 * 60 * 60 * 1000) return;
+  if (ownershipByVault.get(ownershipKey(vault, currentChainId)) === false) return;
   const mode = checked ? 'autonomous' : 'confirm';
   try {
     const res = await fetch('/api/settings/exec-mode', {
@@ -461,9 +466,30 @@ export async function toggleExecMode(checked) {
   }
 }
 
+// Ownership precondition: the delegation status response tells us whether the
+// authenticated operator owns this vault on this chain. Operator-only settings
+// calls (exec-mode, slippage, …) are gated on it so we never fire requests
+// that would 403 ("not the owner") — the console stays clean.
+const ownershipByVault = new Map();
+function ownershipKey(vault, chainId) {
+  return `${String(vault).toLowerCase()}:${chainId}`;
+}
+
 export async function loadExecMode() {
   const vault = vaultInput.value.trim();
   if (!vault || !connectedAddress || !authSignature) {
+    updateExecModeLabel('confirm');
+    return;
+  }
+  // Never fire with an expired signature (>24h) — the server would 401 and
+  // the chat flow's re-sign handles renewal on the next message.
+  if (Date.now() - Number(authTimestamp) > 24 * 60 * 60 * 1000) {
+    updateExecModeLabel('confirm');
+    return;
+  }
+  // Never call operator-only settings for a vault we know the operator does
+  // not own (e.g. wiped by a devnet reset) — that would 403 by design.
+  if (ownershipByVault.get(ownershipKey(vault, currentChainId)) === false) {
     updateExecModeLabel('confirm');
     return;
   }
@@ -476,7 +502,17 @@ export async function loadExecMode() {
       authTimestamp: String(authTimestamp),
     });
     const res = await fetch(`/api/settings/exec-mode?${params.toString()}`, { headers: apiHeaders() });
+    if (res.status === 403) {
+      // Ownership rejected — remember it so we don't keep firing doomed calls.
+      const data = await res.json().catch(() => null);
+      if (data?.error?.includes('not the owner')) {
+        ownershipByVault.set(ownershipKey(vault, currentChainId), false);
+      }
+      updateExecModeLabel('confirm');
+      return;
+    }
     if (!res.ok) throw new Error('Failed to load');
+    ownershipByVault.set(ownershipKey(vault, currentChainId), true);
     const { mode } = await res.json();
     setAutoExecuteMode(mode === 'autonomous' ? 'autonomous' : 'confirm');
     updateExecModeLabel(autoExecuteMode);

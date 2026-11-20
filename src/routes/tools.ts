@@ -19,7 +19,7 @@ import {
 } from "../services/execution.js";
 import { prepareTransaction } from "../services/transactionPrepare.js";
 import { runTransactionFlow } from "../services/transactionFlow.js";
-import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS } from "../llm/tools.js";
+import { TOOL_DEFINITIONS as BASE_TOOL_DEFINITIONS, getToolX402Price } from "../llm/tools.js";
 import { getSkillTools } from "../skills/index.js";
 import { verifyOperatorAuth, verifyOperatorOwnership, AuthError } from "../services/auth.js";
 import { sanitizeError } from "../config.js";
@@ -100,6 +100,7 @@ tools.get("/", async (c) => {
       parameters: def.function.parameters,
       requiresOperatorAuth: OPERATOR_VERIFIED_TOOLS.has(name),
       readOnly: READONLY_TOOLS.has(name),
+      price: getToolX402Price(name),
     };
   });
 

@@ -1150,13 +1150,13 @@ async function handleMessage(
         const pick = args[0]?.toLowerCase();
         if (!pick) {
           await sendMessage(token, chatId,
-            "Current model: <b>Kimi K2.7 Code</b>.\n\n" +
+            "Current model: <b>Kimi K3.1 Pro Highspeed</b>.\n\n" +
             "The agent handles reasoning, tool calling, and multi-step planning natively.",
           );
           return;
         }
         await sendMessage(token, chatId,
-          "Model switching is no longer supported. Kimi K2.7 Code is the fixed model.",
+          "Model switching is no longer supported. Kimi K3.1 Pro Highspeed is the fixed model.",
         );
         return;
       }

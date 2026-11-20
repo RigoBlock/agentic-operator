@@ -39,6 +39,7 @@ vi.mock("@x402/evm/upto/server", () => ({
 
 vi.mock("@x402/extensions", () => ({
   bazaarResourceServerExtension: { key: "bazaar" },
+  declareEip2612GasSponsoringExtension: vi.fn(() => ({ eip2612GasSponsoring: {} })),
 }));
 
 vi.mock("@x402/extensions/bazaar", () => ({

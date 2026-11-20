@@ -14,6 +14,7 @@
 import { Hono, type Context } from "hono";
 import type { Env, AppVariables, ChatRequest, ChatResponse, RequestContext, ExecutionMode, StreamEvent, ChatMessage } from "../types.js";
 import { processChat } from "../llm/client.js";
+import { getToolX402Price } from "../llm/tools.js";
 import { verifyOperatorAuth, verifyOperatorOwnership, AuthError } from "../services/auth.js";
 import { SETTLEMENT_OVERRIDES_HEADER } from "@x402/core/server";
 
@@ -26,11 +27,19 @@ import type { Address } from "viem";
 /**
  * Estimate inference cost for x402 upto-scheme settlement.
  *
- * Uses a simple token estimate: input chars / 4 ≈ input tokens,
- * output chars / 4 ≈ output tokens. Pricing is $1.50/M input +
- * $5.00/M output (covers Kimi K2.7 Code cost with ~25% margin).
- * Clamped to [$0.003, $0.10] — the min covers overhead and the
- * max must be <= the upto scheme's maxAmountRequired.
+ * Deterministic no-LLM fast paths use the direct endpoint's fixed price:
+ * quote $0.0020, oracle refresh $0.0023, tool menu $0.0024, other tools $0.0025.
+ *
+ * Preferred: actual token usage reported by the LLM provider (Moonshot returns
+ * prompt/completion/cached-token counts, including reasoning tokens in the
+ * completion count). Priced at Moonshot Kimi K3.1 Pro Highspeed rates:
+ * $4.00/M uncached input, $0.20/M cached input, $20.00/M output — plus a ~25%
+ * margin. Clamped to [$0.003, $0.20] — the min covers overhead and the max
+ * must be <= the upto scheme's maxAmountRequired.
+ *
+ * Fallback: a simple char estimate (input chars / 4 ≈ tokens, output chars / 4
+ * ≈ tokens) at the same rates, for user-provided providers that don't report
+ * usage.
  *
  * Returns a dollar string like "$0.0047" for use in Settlement-Overrides header.
  */
@@ -38,18 +47,33 @@ function estimateInferenceCost(
   inputMessages: ChatMessage[],
   response: ChatResponse,
 ): string {
-  const inputChars = inputMessages.reduce(
-    (s, m) => s + (typeof m.content === "string" ? m.content.length : 0),
-    0,
-  );
-  const outputChars =
-    (response.reply?.length || 0) +
-    (response.toolCalls?.reduce((s, tc) => s + JSON.stringify(tc).length, 0) || 0);
+  // Deterministic fast paths execute tools without any LLM call. Charge the
+  // corresponding direct endpoint's fixed price so the settled amount also
+  // identifies the operation. Never estimate "inference" from response size.
+  if (response.finalModel === "tooling" && (response.modelsUsed?.length ?? 0) === 0) {
+    const toolName = response.toolCalls?.[0]?.name || "";
+    return getToolX402Price(toolName);
+  }
 
-  const inputKTokens = inputChars / 4000;
-  const outputKTokens = outputChars / 4000;
-  const cost = Math.max(0.003, Math.min(0.10, inputKTokens * 0.0015 + outputKTokens * 0.005));
-  return `$${cost.toFixed(4)}`;
+  let cost: number;
+  if (response.usage) {
+    const { inputTokens, cachedInputTokens, outputTokens } = response.usage;
+    const uncachedInput = Math.max(0, inputTokens - cachedInputTokens);
+    cost = ((uncachedInput * 4.0 + cachedInputTokens * 0.2 + outputTokens * 20.0) / 1_000_000) * 1.25;
+  } else {
+    const inputChars = inputMessages.reduce(
+      (s, m) => s + (typeof m.content === "string" ? m.content.length : 0),
+      0,
+    );
+    const outputChars =
+      (response.reply?.length || 0) +
+      (response.toolCalls?.reduce((s, tc) => s + JSON.stringify(tc).length, 0) || 0);
+
+    const inputKTokens = inputChars / 4000;
+    const outputKTokens = outputChars / 4000;
+    cost = inputKTokens * 0.004 + outputKTokens * 0.02;
+  }
+  return `$${Math.max(0.003, Math.min(0.20, cost)).toFixed(4)}`;
 }
 
 const chat = new Hono<{ Bindings: Env; Variables: AppVariables }>();
@@ -303,8 +327,13 @@ chat.post("/", async (c) => {
     // calldata-build and broadcast in a single delegated+confirmed transaction.
     const requestEnv: Env = { ...c.env, requestCache: new Map() };
 
-    // ── SSE streaming mode ──
-    if (body.stream) {
+    // ── SSE streaming mode (only when no x402 settlement is required) ──
+    // Settlement-Overrides can only be computed AFTER processChat returns.
+    // A stream sends its headers before that cost exists, so the facilitator
+    // would otherwise settle the full upto ceiling. Paid requests therefore
+    // use the standard JSON path below, which carries the exact charge.
+    const wantsStream = body.stream && !c.get("x402Paid");
+    if (wantsStream) {
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
         async start(controller) {
@@ -459,10 +488,9 @@ chat.post("/", async (c) => {
       }
     }
 
-    // Set Settlement-Overrides header so the x402 upto-scheme middleware
-    // settles for the actual inference cost rather than the full $0.10 max.
-    // Only set for x402-paid requests (external agents). Browser sessions are
-    // exempt from x402 and don't go through upto settlement.
+    // Set Settlement-Overrides so the facilitator charges the actual inference
+    // cost instead of the $0.20 upto ceiling. Every paid request takes this
+    // path; there is no browser-session payment exemption.
     if (c.get("x402Paid")) {
       c.header(SETTLEMENT_OVERRIDES_HEADER, JSON.stringify({ amount: estimateInferenceCost(messages, response) }));
     }

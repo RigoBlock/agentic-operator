@@ -23,6 +23,7 @@ import { delegation } from "./routes/delegation.js";
 import { gasPolicy } from "./routes/gasPolicy.js";
 import { telegram } from "./routes/telegram.js";
 import { settings } from "./routes/settings.js";
+import { billing } from "./routes/billing.js";
 import { tools as toolsRoute } from "./routes/tools.js";
 import { oracle } from "./routes/oracle.js";
 import { SUPPORTED_CHAINS, TESTNET_CHAINS, LIGHTER_DEVNET_CHAIN_ID, sanitizeError } from "./config.js";
@@ -31,6 +32,7 @@ import { getVaultInfo } from "./services/vault.js";
 import { mapWithConcurrencySettled } from "./services/concurrency.js";
 import { withRpcMetrics, getRpcMetrics } from "./services/rpcMetrics.js";
 import { createX402Middleware } from "./middleware/x402.js";
+import { createOperatorAuthMiddleware } from "./middleware/operatorAuth.js";
 
 import { runAllSkills } from "./skills/index.js";
 import { getTwapEvents } from "./skills/twap.js";
@@ -97,8 +99,10 @@ app.use("*", async (c, next) => {
   await withEnv(c.env, next);
 });
 
-// x402 payment gate — charges external agents for /api/chat and /api/quote.
-// Own-user requests (browser UI, Telegram webhook) are exempt.
+// x402 payment gate — charges EVERY caller for /api/chat, /api/quotes, /api/tools.
+// No exemptions: the UI pays through the x402 client like any external agent,
+// and Telegram bot traffic never reaches this middleware (in-worker calls).
+app.use("*", createOperatorAuthMiddleware());
 app.use("*", createX402Middleware());
 
 // ── API Routes ────────────────────────────────────────────────────────
@@ -113,6 +117,7 @@ app.route("/api/delegation", delegation);
 app.route("/api/gas-policy", gasPolicy);
 app.route("/api/telegram", telegram);
 app.route("/api/settings", settings);
+app.route("/api/billing", billing);
 
 // ── Vault info (no auth, no LLM — simple on-chain read) ──────────────
 // Tries the requested chain first, then all other supported chains.

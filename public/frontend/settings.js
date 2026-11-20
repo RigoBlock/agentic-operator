@@ -59,7 +59,7 @@ function onAiProviderChange() {
   const provider = document.getElementById('ai-provider').value;
   aiSettings.provider = provider;
   const showCustom = provider !== 'server';
-  // Routing mode removed -- Kimi K2.7 Code is the fixed default
+  // Routing mode removed -- Kimi K3.1 Pro Highspeed is the fixed default
   document.getElementById('ai-key-row').style.display = showCustom ? '' : 'none';
   document.getElementById('ai-model-row').style.display = showCustom ? '' : 'none';
   if (showCustom) {
@@ -82,7 +82,7 @@ function onAiProviderChange() {
   } else {
     aiSettings.apiKey = '';
     aiSettings.model = '';
-    document.getElementById('ai-status').textContent = 'Using Workers AI Kimi K2.7 Code -- native reasoning + tool calling. No API key needed.';
+    document.getElementById('ai-status').textContent = 'Kimi K3.1 Pro Highspeed (Cloudflare AI) -- native reasoning + tool calling. Paid per call in USDC on Base (x402) from your deposit — fund it once, no per-call prompts.';
   }
   saveAiSettings();
 }
@@ -98,7 +98,7 @@ const modelSel = document.getElementById('ai-model');
 if (modelSel) {
   modelSel.addEventListener('change', () => { aiSettings.model = modelSel.value; saveAiSettings(); });
 }
-// Routing mode removed -- Kimi K2.7 Code is the fixed default
+// Routing mode removed -- Kimi K3.1 Pro Highspeed is the fixed default
 
 function getAiRequestParams() {
   if (aiSettings.provider === 'server') {

@@ -8,7 +8,6 @@ declare namespace Cloudflare {
 	interface Env {
 		KV: KVNamespace;
 		AI: Ai;
-		AI_GATEWAY_ID: string;
 		ASSETS: Fetcher;
 		OPENAI_API_KEY: string;
 		CDP_API_KEY_ID: string;

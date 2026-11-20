@@ -48,7 +48,7 @@ const POOL_ERROR_SELECTORS: Record<string, string> = {
 
 /**
  * Reject a promise after `ms` milliseconds so long-running external calls
- * (Workers AI, DEX APIs, RPC) cannot stall the Worker until wall-time limits.
+ * (LLM APIs, DEX APIs, RPC) cannot stall the Worker until wall-time limits.
  */
 function withTimeout<T>(promise: Promise<T>, ms: number, context: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -341,308 +341,220 @@ function extractBalancedBraces(s: string): string | null {
 }
 
 /**
- * Adapter: calls Workers AI via the binding and wraps the response in
- * OpenAI-compatible format so the rest of processChat() works unchanged.
+ * Adapter: calls a model directly through the Cloudflare AI binding (Workers AI
+ * catalog, e.g. moonshotai/kimi-k3.1-pro-highspeed) and normalizes the response
+ * via normalizeChatCompletion(). The direct binding is required for catalog
+ * models when the AI Gateway has no Moonshot provider credentials configured
+ * (it otherwise fails with AiGatewayError 7007).
  *
- * Extracts <think>...</think> reasoning blocks and stores them in a custom
- * `_reasoning` field on the response for the caller.
+ * Streaming returns an SSE byte stream: reasoning streams through
+ * delta.reasoning_content, tool calls through structured delta.tool_calls.
  */
-async function callWorkersAI(
+async function callAiBinding(
   ai: Ai,
-  model: string,
-  messages: OpenAI.ChatCompletionMessageParam[],
-  tools?: OpenAI.ChatCompletionTool[],
+  params: {
+    model: string;
+    messages: OpenAI.ChatCompletionMessageParam[];
+    tools?: OpenAI.ChatCompletionTool[];
+    tool_choice?: "auto" | "none";
+  },
   onStreamEvent?: (event: StreamEvent) => void,
-  gatewayId?: string,
 ): Promise<OpenAI.ChatCompletion> {
-  const gatewayOpts = gatewayId ? { gateway: { id: gatewayId } } : undefined;
-  // Workers AI rejects null content (which the OpenAI spec allows for assistant
+  const isKimi = params.model.includes('kimi') || params.model.includes('moonshotai');
+  // Providers reject null content (allowed by the OpenAI spec for assistant
   // messages that contain tool_calls). Normalise to "" before sending so the
   // model receives a valid message structure in multi-turn tool loops.
-  const sanitizedMessages = messages.map((m) => ({
+  const sanitizedMessages = params.messages.map((m) => ({
     ...m,
     content: m.content === null ? "" : m.content,
   }));
+  const runParams: Record<string, unknown> = {
+    messages: sanitizedMessages as any,
+    ...(params.tools ? { tools: params.tools } : {}),
+    ...(params.tool_choice ? { tool_choice: params.tool_choice } : {}),
+    ...(isKimi ? { max_tokens: 4096 } : {}),
+  };
 
-  // For Kimi K2.7 Code: keep internal thinking enabled so the model can reason
-  // about tool selection, parameter extraction, and multi-step plans. Streaming
-  // surfaces reasoning tokens in real time, so the user sees progress instead of
-  // a silent wait.
-  const isKimi = model.includes('kimi') || model.includes('moonshotai');
-
-  // ── Streaming mode (all models when callback provided) ──
-  // Streams tokens in real-time so the user sees progress immediately.
-  // Kimi K2.7 Code: emits native delta tool_calls; plain-text replies stream as text tokens.
+  // ── Streaming mode — surfaces reasoning/text/tool-call progress in real time ──
   if (onStreamEvent) {
     return await withTimeout(
       (async () => {
-        const stream = await (ai as any).run(model, {
-          messages: sanitizedMessages as any,
-          ...(tools ? { tools: tools as any } : {}),
-          max_tokens: 16384,
-          stream: true,
-          ...(isKimi ? { chat_template_kwargs: { thinking: { type: "enabled" } } } : {}),
-        }, gatewayOpts);
-
-        // Parse the SSE stream and emit reasoning tokens in real-time
+        const stream = await (ai as any).run(params.model, { ...runParams, stream: true });
         const reader = (stream as ReadableStream).getReader();
-    const decoder = new TextDecoder();
-    let fullText = '';
-    let lineBuffer = '';
-    let reasoningAcc = '';
-    // Throttle reasoning/text events: emit at most every 150ms to avoid flooding the SSE pipe
-    let lastEmitTime = 0;
-    // Collect native tool_call deltas (OpenAI streaming format)
-    // index → {id, name, arguments}
-    const deltaToolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
-    const tFirstToken = Date.now();
-    let firstTokenLogged = false;
+        const decoder = new TextDecoder();
+        let fullText = '';
+        let lineBuffer = '';
+        // Throttle reasoning/text events: emit at most every 150ms to avoid flooding the SSE pipe
+        let lastEmitTime = 0;
+        let reasoningAcc = '';
+        // Collect native tool_call deltas (OpenAI streaming format)
+        // index → {id, name, arguments}
+        const deltaToolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
+        let usage: any = null;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (!firstTokenLogged && (done || value)) {
-        firstTokenLogged = true;
-      }
-      if (done) break;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-      lineBuffer += decoder.decode(value, { stream: true });
-      const lines = lineBuffer.split('\n');
-      lineBuffer = lines.pop() || ''; // keep incomplete line in buffer
+          lineBuffer += decoder.decode(value, { stream: true });
+          const lines = lineBuffer.split('\n');
+          lineBuffer = lines.pop() || ''; // keep incomplete line in buffer
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed === 'data: [DONE]') continue;
-        if (!trimmed.startsWith('data: ')) continue;
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed === 'data: [DONE]') continue;
+            if (!trimmed.startsWith('data: ')) continue;
 
-        try {
-          const json = JSON.parse(trimmed.slice(6));
+            try {
+              const json = JSON.parse(trimmed.slice(6));
+              if (json.usage) usage = json.usage;
 
-          // Collect native tool_call deltas (Kimi K2.7 Code uses OpenAI structured format)
-          const deltaToolCalls = json.choices?.[0]?.delta?.tool_calls;
-          if (Array.isArray(deltaToolCalls)) {
-            for (const tc of deltaToolCalls) {
-              const idx: number = tc.index ?? 0;
-              if (!deltaToolCallMap.has(idx)) {
-                deltaToolCallMap.set(idx, { id: tc.id || '', name: '', arguments: '' });
+              // Collect native tool_call deltas
+              const deltaToolCalls = json.choices?.[0]?.delta?.tool_calls;
+              if (Array.isArray(deltaToolCalls)) {
+                for (const tc of deltaToolCalls) {
+                  const idx: number = tc.index ?? 0;
+                  if (!deltaToolCallMap.has(idx)) {
+                    deltaToolCallMap.set(idx, { id: tc.id || '', name: '', arguments: '' });
+                  }
+                  const entry = deltaToolCallMap.get(idx)!;
+                  if (tc.id) entry.id = tc.id;
+                  if (tc.function?.name) entry.name += tc.function.name;
+                  if (tc.function?.arguments) entry.arguments += tc.function.arguments;
+                }
               }
-              const entry = deltaToolCallMap.get(idx)!;
-              if (tc.id) entry.id = tc.id;
-              if (tc.function?.name) entry.name += tc.function.name;
-              if (tc.function?.arguments) entry.arguments += tc.function.arguments;
-            }
-          }
 
-          // Kimi K2.7 Code streams chain-of-thought through delta.reasoning_content
-          // before emitting delta.content. Surface it as a real-time reasoning stream.
-          const reasoningToken: string = json.choices?.[0]?.delta?.reasoning_content || '';
-          if (reasoningToken) {
-            reasoningAcc += reasoningToken;
-            const now = Date.now();
-            if (now - lastEmitTime > 150) {
-              onStreamEvent({ type: 'reasoning', content: reasoningAcc.trim() });
-              lastEmitTime = now;
-            }
-          }
-
-          // Workers AI uses json.response (legacy) or json.choices[0].delta.content (OpenAI-compat)
-          const token: string = json.response || json.choices?.[0]?.delta?.content || '';
-          if (token) {
-            fullText += token;
-
-            // Some models emit chain-of-thought inside <think>...</think> tags in delta.content
-            // instead of a separate reasoning_content field. Surface it as a real-time reasoning stream.
-            const thinkOpen = fullText.indexOf('<think>');
-            const thinkClose = fullText.indexOf('</think>');
-            if (thinkOpen !== -1) {
-              const thinkEnd = thinkClose !== -1 ? thinkClose : fullText.length;
-              const thinkBody = fullText.slice(thinkOpen + '<think>'.length, thinkEnd).trim();
-              if (thinkBody && thinkBody !== reasoningAcc) {
-                reasoningAcc = thinkBody;
+              // Reasoning models stream chain-of-thought through delta.reasoning_content
+              // before emitting delta.content. Surface it as a real-time reasoning stream.
+              const reasoningToken: string = json.choices?.[0]?.delta?.reasoning_content || '';
+              if (reasoningToken) {
+                reasoningAcc += reasoningToken;
                 const now = Date.now();
                 if (now - lastEmitTime > 150) {
-                  onStreamEvent({ type: 'reasoning', content: reasoningAcc });
+                  onStreamEvent({ type: 'reasoning', content: reasoningAcc.trim() });
                   lastEmitTime = now;
                 }
               }
-            }
 
-            // Display text strips any closed or still-open <think> block so reasoning
-            // does not leak into the public plan text.
-            let displayText = fullText.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
-            const openThink = displayText.indexOf('<think>');
-            if (openThink !== -1) displayText = displayText.slice(0, openThink).trim();
+              const token: string = json.response || json.choices?.[0]?.delta?.content || '';
+              if (token) {
+                fullText += token;
 
-            // Kimi K2.7 Code: emit text tokens until tool-call JSON starts.
-            const jsonStarted = displayText.startsWith('{') ||
-              /\{[^}]*"(?:name|type|function|parameters|arguments)"\s*:/.test(displayText);
-            if (displayText && !jsonStarted) {
-              const now = Date.now();
-              if (now - lastEmitTime > 150) {
-                onStreamEvent({ type: 'text', content: displayText });
-                lastEmitTime = now;
+                // Some models emit chain-of-thought inside <think>...</think> tags in delta.content
+                // instead of a separate reasoning_content field. Surface it as a real-time reasoning stream.
+                const thinkOpen = fullText.indexOf('<think>');
+                const thinkClose = fullText.indexOf('</think>');
+                if (thinkOpen !== -1) {
+                  const thinkEnd = thinkClose !== -1 ? thinkClose : fullText.length;
+                  const thinkBody = fullText.slice(thinkOpen + '<think>'.length, thinkEnd).trim();
+                  if (thinkBody && thinkBody !== reasoningAcc) {
+                    reasoningAcc = thinkBody;
+                    const now = Date.now();
+                    if (now - lastEmitTime > 150) {
+                      onStreamEvent({ type: 'reasoning', content: reasoningAcc });
+                      lastEmitTime = now;
+                    }
+                  }
+                }
+
+                // Display text strips any closed or still-open <think> block so reasoning
+                // does not leak into the public plan text.
+                let displayText = fullText.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+                const openThink = displayText.indexOf('<think>');
+                if (openThink !== -1) displayText = displayText.slice(0, openThink).trim();
+
+                // Emit text tokens until tool-call JSON starts.
+                const jsonStarted = displayText.startsWith('{') ||
+                  /\{[^}]*"(?:name|type|function|parameters|arguments)"\s*:/.test(displayText);
+                if (displayText && !jsonStarted) {
+                  const now = Date.now();
+                  if (now - lastEmitTime > 150) {
+                    onStreamEvent({ type: 'text', content: displayText });
+                    lastEmitTime = now;
+                  }
+                }
               }
-            }
-          }
-        } catch {
-          // Malformed JSON chunk — skip
-        }
-      }
-    }
-
-    // Final reasoning emit (un-throttled)
-    if (reasoningAcc.trim()) {
-      onStreamEvent({ type: 'reasoning', content: reasoningAcc.trim() });
-    }
-
-    // Now process the accumulated fullText exactly like the non-streaming path
-    let hasToolCalls = false;
-    let toolCalls: any[] | undefined;
-    let textContent: string | null = fullText || null;
-
-    // Extract reasoning from the accumulated text
-    let extractedReasoning: string | null = null;
-    if (textContent) {
-      const thinkMatch = textContent.match(/<think>([\s\S]*?)<\/think>/);
-      if (thinkMatch) {
-        extractedReasoning = thinkMatch[1].trim();
-        textContent = textContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim() || null;
-      }
-    }
-
-    // Prefer native delta tool_calls over text-embedded extraction.
-    // Kimi K2.7 Code returns structured tool_calls in the streaming delta —
-    // these are more reliable than the regex text-extraction fallback.
-    if (deltaToolCallMap.size > 0) {
-      const assembled = Array.from(deltaToolCallMap.entries())
-        .sort(([a], [b]) => a - b)
-        .map(([, tc]) => ({
-          id: tc.id || `call_stream_${Date.now()}`,
-          type: 'function' as const,
-          function: { name: tc.name, arguments: tc.arguments || '{}' },
-        }))
-        .filter(tc => tc.function.name.length > 0);
-      if (assembled.length > 0) {
-        hasToolCalls = true;
-        toolCalls = assembled;
-        textContent = null; // discard text — native tool_calls take precedence
-      }
-    }
-
-    // Extract text-embedded tool calls (same logic as non-streaming path)
-    if (!hasToolCalls && textContent) {
-      const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
-      const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
-      const isValidTool = (n: string) => validTools.includes(n) || validTools.includes(TOOL_NAME_ALIASES[n] || '');
-      const resolveTool = (n: string) => validTools.includes(n) ? n : (TOOL_NAME_ALIASES[n] || n);
-
-      let extractedFnName: string | undefined;
-      let extractedFnArgs: string | undefined;
-
-      // Pattern 1: name/function key before parameters/arguments
-      const fwdPattern = /\{\s*(?:"type"\s*:\s*"function"\s*,\s*)?"(?:function_name|function|name)"\s*:\s*"([^"]+)"\s*,\s*"(?:parameters|arguments)"\s*:\s*/;
-      const fwdMatch = cleaned.match(fwdPattern);
-      if (fwdMatch) {
-        const fnName = fwdMatch[1];
-        const afterKey = cleaned.slice(fwdMatch.index! + fwdMatch[0].length);
-        const args = extractBalancedBraces(afterKey);
-        if (args !== null && isValidTool(fnName)) {
-          extractedFnName = resolveTool(fnName);
-          extractedFnArgs = args;
-        }
-      }
-
-      // Pattern 2: parameters/arguments before name (reversed key order)
-      if (!extractedFnName) {
-        const revPattern = /\{\s*(?:"type"\s*:\s*"function"\s*,\s*)?"(?:parameters|arguments)"\s*:\s*/;
-        const revMatch = cleaned.match(revPattern);
-        if (revMatch) {
-          const afterParams = cleaned.slice(revMatch.index! + revMatch[0].length);
-          const args = extractBalancedBraces(afterParams);
-          if (args !== null) {
-            const rest = afterParams.slice(args.length).replace(/^\s*}\s*/, '');
-            const nameAfter = rest.match(/,\s*"(?:function_name|function|name)"\s*:\s*"([^"]+)"/);
-            if (nameAfter && isValidTool(nameAfter[1])) {
-              extractedFnName = resolveTool(nameAfter[1]);
-              extractedFnArgs = args;
+            } catch {
+              // Malformed JSON chunk — skip
             }
           }
         }
-      }
 
-      if (extractedFnName && extractedFnArgs) {
-        hasToolCalls = true;
-        toolCalls = [{ function: { name: extractedFnName, arguments: extractedFnArgs } }];
-        textContent = null;
-      }
-    }
+        // Final reasoning emit (un-throttled)
+        if (reasoningAcc.trim()) {
+          onStreamEvent({ type: 'reasoning', content: reasoningAcc.trim() });
+        }
 
-    return {
-      id: `chatcmpl-wai-${Date.now()}`,
-      object: "chat.completion",
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [{
-        index: 0,
-        message: {
-          role: "assistant" as const,
-          content: hasToolCalls ? null : textContent,
-          ...(hasToolCalls ? {
-            tool_calls: toolCalls!.map((tc: any, i: number) => ({
-              id: tc.id || `call_${Date.now()}_${i}`,
-              type: "function" as const,
-              function: {
-                name: tc.function?.name || tc.name || "",
-                arguments: typeof tc.function?.arguments === "string"
-                  ? tc.function.arguments
-                  : JSON.stringify(tc.function?.arguments || tc.arguments || {}),
-              },
-            })),
-          } : {}),
-        },
-        finish_reason: (hasToolCalls ? "tool_calls" : "stop") as any,
-      }],
-      _reasoning: reasoningAcc || extractedReasoning,
-    } as any;
+        // Prefer native delta tool_calls over text-embedded extraction.
+        const assembled = Array.from(deltaToolCallMap.entries())
+          .sort(([a], [b]) => a - b)
+          .map(([, tc]) => ({
+            id: tc.id || `call_stream_${Date.now()}`,
+            type: 'function' as const,
+            function: { name: tc.name, arguments: tc.arguments || '{}' },
+          }))
+          .filter(tc => tc.function.name.length > 0);
+
+        return normalizeChatCompletion({
+          model: params.model,
+          text: fullText || null,
+          reasoning: reasoningAcc || null,
+          structuredToolCalls: assembled.length > 0 ? assembled : undefined,
+          usage,
+        }, params.tools);
       })(),
-      40_000,
-      "Workers AI streaming",
+      90_000,
+      "LLM streaming",
     );
   }
 
-  // ── Non-streaming path (all models when no streaming callback provided) ──
-  // Keep Kimi's internal thinking enabled so the model can reason through the
-  // request even when the caller is not consuming the streaming deltas.
-  const tNonStream = Date.now();
+  // ── Non-streaming path ──
   const result = (await withTimeout(
-    (ai as any).run(model, {
-      messages: sanitizedMessages as any,
-      ...(tools ? { tools: tools as any } : {}),
-      max_tokens: isKimi ? 8192 : 4096,
-      ...(isKimi ? { chat_template_kwargs: { thinking: { type: "enabled" } } } : {}),
-    }, gatewayOpts),
-    40_000,
-    "Workers AI",
+    (ai as any).run(params.model, runParams),
+    100_000,
+    "LLM",
   )) as any;
 
-  // Workers AI returns text in different fields depending on model:
+  // Providers return text in different fields depending on model:
   // - Legacy format: result.response (string)
-  // - OpenAI-compat format (Kimi K2.7 Code, newer models): result.choices[0].message.content
-  const rawToolCalls = result.tool_calls ?? result.choices?.[0]?.message?.tool_calls;
-  let hasToolCalls = Array.isArray(rawToolCalls) && rawToolCalls.length > 0;
-  let toolCalls = hasToolCalls ? rawToolCalls : undefined;
-  const rawText = (typeof result.response === 'string' && result.response)
+  // - OpenAI-compat format (Kimi catalog models, newer models): result.choices[0].message.content
+  const message: any = result.choices?.[0]?.message ?? {};
+  const rawToolCalls = result.tool_calls ?? message.tool_calls;
+  const text = (typeof result.response === 'string' && result.response)
     ? result.response
-    : (typeof result.choices?.[0]?.message?.content === 'string' ? result.choices[0].message.content : null);
-  let textContent: string | null = rawText;
+    : (typeof message.content === 'string' ? message.content : null);
 
-  // Kimi K2.7 Code may return reasoning in a separate field even in non-streaming mode.
-  const rawReasoning = result.choices?.[0]?.message?.reasoning_content
-    || result.reasoning_content
-    || result.reasoning
-    || null;
-  if (typeof rawReasoning === 'string' && rawReasoning.trim()) {
-    (onStreamEvent as ((e: StreamEvent) => void) | undefined)?.({ type: "reasoning", content: rawReasoning.trim() });
-  }
+  return normalizeChatCompletion({
+    model: params.model,
+    text,
+    reasoning: message.reasoning_content || result.reasoning_content || null,
+    structuredToolCalls: Array.isArray(rawToolCalls) && rawToolCalls.length > 0 ? rawToolCalls : undefined,
+    usage: result.usage ?? null,
+  }, params.tools, onStreamEvent);
+}
+
+/**
+ * Shared post-processing for OpenAI-compatible chat completions, covering both
+ * streaming and non-streaming responses:
+ *   - extracts <think>...</think> reasoning blocks from text
+ *   - resolves hallucinated tool-name aliases in structured tool_calls
+ *   - falls back to text-embedded tool-call JSON extraction
+ *
+ * Returns an OpenAI-compatible ChatCompletion with custom `_reasoning` and
+ * `usage` fields for the caller.
+ */
+function normalizeChatCompletion(input: {
+  model: string;
+  text: string | null;
+  reasoning: string | null;
+  structuredToolCalls: any[] | undefined;
+  usage: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } | null;
+}, tools: OpenAI.ChatCompletionTool[] | undefined, onStreamEvent?: (event: StreamEvent) => void): OpenAI.ChatCompletion {
+  const { model } = input;
+  let hasToolCalls = Array.isArray(input.structuredToolCalls) && input.structuredToolCalls.length > 0;
+  let toolCalls = hasToolCalls ? input.structuredToolCalls : undefined;
+  let textContent: string | null = input.text;
+  let reasoning: string | null = input.reasoning;
 
   // Resolve tool name aliases in structured tool_calls (e.g. "swap" → "build_vault_swap").
   // If ALL tool_calls have unknown names even after aliasing, discard them and try
@@ -665,28 +577,29 @@ async function callWorkersAI(
     // If all structured tool_calls are for unknown tools, discard them so
     // text-embedded extraction has a chance to find the correct tool.
     if (allUnknown && textContent) {
-      console.warn(`[Workers AI] All structured tool_calls have unknown names — discarding, will try text extraction`);
+      console.warn(`[LLM] All structured tool_calls have unknown names — discarding, will try text extraction`);
       hasToolCalls = false;
       toolCalls = undefined;
     }
   }
 
-  // ── Extract reasoning from <think>...</think> blocks or dedicated field ──
+  // ── Extract reasoning from <think>...</think> blocks ──
   // The reasoning trace is stored on the response object for the caller to surface.
-  let reasoning: string | null = null;
   if (textContent) {
     const thinkMatch = textContent.match(/<think>([\s\S]*?)<\/think>/);
     if (thinkMatch) {
-      reasoning = thinkMatch[1].trim();
+      reasoning = reasoning || thinkMatch[1].trim();
       textContent = textContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim() || null;
     }
   }
-  if (!reasoning && typeof rawReasoning === 'string' && rawReasoning.trim()) {
-    reasoning = rawReasoning.trim();
+
+  // Some models stream reasoning separately (reasoning_content field) — emit it.
+  if (reasoning && onStreamEvent) {
+    onStreamEvent({ type: "reasoning", content: reasoning.trim() });
   }
 
-  // Workers AI sometimes embeds tool calls as JSON text instead of structured
-  // tool_calls. Detect and extract them so they get executed properly.
+  // Some providers embed tool calls as JSON text instead of structured tool_calls.
+  // Detect and extract them so they get executed properly.
   // Matches: {"function": "name", "parameters": {...}}
   //          {"function_name": "name", "parameters": {...}}
   //          {"name": "name", "parameters": {...}}
@@ -694,7 +607,6 @@ async function callWorkersAI(
   //          ```json\n{"name": ...}\n``` (markdown code blocks)
   //          Also handles reversed key order (parameters before name).
   if (!hasToolCalls && textContent) {
-    // Strip markdown code fences if present
     const cleaned = textContent.replace(/```(?:json)?\s*\n?/g, '');
     const validTools = tools?.map(t => t.function?.name).filter(Boolean) || [];
     const isValidTool = (n: string) => validTools.includes(n) || validTools.includes(TOOL_NAME_ALIASES[n] || '');
@@ -743,8 +655,9 @@ async function callWorkersAI(
     }
   }
 
+  const usage = input.usage;
   return {
-    id: `chatcmpl-wai-${Date.now()}`,
+    id: `chatcmpl-${Date.now()}`,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,
@@ -752,8 +665,8 @@ async function callWorkersAI(
       index: 0,
       message: {
         role: "assistant" as const,
-        // When the model returns tool_calls, discard text content — Workers AI
-        // often echoes the tool call as text (e.g. '{"function": ...}') which
+        // When the model returns tool_calls, discard text content — providers
+        // often echo the tool call as text (e.g. '{"function": ...}') which
         // gets shown to the user as garbage.
         content: hasToolCalls ? null : textContent,
         ...(hasToolCalls ? {
@@ -771,9 +684,186 @@ async function callWorkersAI(
       },
       finish_reason: (hasToolCalls ? "tool_calls" : "stop") as any,
     }],
-    // Custom field: reasoning trace (not part of OpenAI spec)
+    // Custom fields: reasoning trace + token usage (not part of the client spec)
     _reasoning: reasoning,
+    usage: usage
+      ? {
+        prompt_tokens: usage.prompt_tokens ?? 0,
+        completion_tokens: usage.completion_tokens ?? 0,
+        prompt_tokens_details: { cached_tokens: usage.prompt_tokens_details?.cached_tokens ?? 0 },
+      }
+      : undefined,
   } as any;
+}
+
+/**
+ * Call an OpenAI-compatible chat completions endpoint (Moonshot, OpenAI, or any
+ * user-provided provider) and normalize the response.
+ *
+ * When `onStreamEvent` is provided, streams SSE deltas and surfaces reasoning /
+ * text / tool-call progress in real time. Reasoning models emit
+ * `delta.reasoning_content` before `delta.content`; tool calls arrive as
+ * structured `delta.tool_calls` (Kimi, OpenAI) and fall back to text-embedded
+ * JSON extraction.
+ */
+async function callOpenAICompat(
+  openai: OpenAI,
+  params: {
+    model: string;
+    messages: OpenAI.ChatCompletionMessageParam[];
+    tools?: OpenAI.ChatCompletionTool[];
+    tool_choice?: "auto" | "none";
+  },
+  onStreamEvent?: (event: StreamEvent) => void,
+): Promise<OpenAI.ChatCompletion> {
+  const isKimi = params.model.includes('kimi') || params.model.includes('moonshotai');
+  // Some providers reject null content (allowed by the OpenAI spec for assistant
+  // messages that contain tool_calls). Normalise to "" before sending so the
+  // model receives a valid message structure in multi-turn tool loops.
+  const sanitizedMessages = params.messages.map((m) => ({
+    ...m,
+    content: m.content === null ? "" : m.content,
+  }));
+
+  const requestParams = {
+    model: params.model,
+    messages: sanitizedMessages as any,
+    ...(params.tools ? { tools: params.tools } : {}),
+    ...(params.tool_choice ? { tool_choice: params.tool_choice } : {}),
+    ...(isKimi ? { max_tokens: 4096 } : {}),
+  };
+
+  // ── Streaming mode — surfaces reasoning/text/tool-call progress in real time ──
+  if (onStreamEvent) {
+    return await withTimeout(
+      (async () => {
+        const stream = await openai.chat.completions.create({
+          ...requestParams,
+          stream: true,
+          stream_options: { include_usage: true },
+        } as OpenAI.ChatCompletionCreateParamsStreaming);
+
+        let fullText = '';
+        // Throttle reasoning/text events: emit at most every 150ms to avoid flooding the SSE pipe
+        let lastEmitTime = 0;
+        let reasoningAcc = '';
+        // Collect native tool_call deltas (OpenAI streaming format)
+        // index → {id, name, arguments}
+        const deltaToolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
+        let usage: any = null;
+
+        for await (const chunk of stream) {
+          if (chunk.usage) usage = chunk.usage;
+          const delta: any = chunk.choices?.[0]?.delta ?? {};
+
+          // Collect native tool_call deltas
+          if (Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+              const idx: number = tc.index ?? 0;
+              if (!deltaToolCallMap.has(idx)) {
+                deltaToolCallMap.set(idx, { id: tc.id || '', name: '', arguments: '' });
+              }
+              const entry = deltaToolCallMap.get(idx)!;
+              if (tc.id) entry.id = tc.id;
+              if (tc.function?.name) entry.name += tc.function.name;
+              if (tc.function?.arguments) entry.arguments += tc.function.arguments;
+            }
+          }
+
+          // Reasoning models stream chain-of-thought through delta.reasoning_content
+          // before emitting delta.content. Surface it as a real-time reasoning stream.
+          const reasoningToken: string = delta.reasoning_content || '';
+          if (reasoningToken) {
+            reasoningAcc += reasoningToken;
+            const now = Date.now();
+            if (now - lastEmitTime > 150) {
+              onStreamEvent({ type: 'reasoning', content: reasoningAcc.trim() });
+              lastEmitTime = now;
+            }
+          }
+
+          const token: string = delta.content || '';
+          if (token) {
+            fullText += token;
+
+            // Some models emit chain-of-thought inside <think>...</think> tags in delta.content
+            // instead of a separate reasoning_content field. Surface it as a real-time reasoning stream.
+            const thinkOpen = fullText.indexOf('<think>');
+            const thinkClose = fullText.indexOf('</think>');
+            if (thinkOpen !== -1) {
+              const thinkEnd = thinkClose !== -1 ? thinkClose : fullText.length;
+              const thinkBody = fullText.slice(thinkOpen + '<think>'.length, thinkEnd).trim();
+              if (thinkBody && thinkBody !== reasoningAcc) {
+                reasoningAcc = thinkBody;
+                const now = Date.now();
+                if (now - lastEmitTime > 150) {
+                  onStreamEvent({ type: 'reasoning', content: reasoningAcc });
+                  lastEmitTime = now;
+                }
+              }
+            }
+
+            // Display text strips any closed or still-open <think> block so reasoning
+            // does not leak into the public plan text.
+            let displayText = fullText.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+            const openThink = displayText.indexOf('<think>');
+            if (openThink !== -1) displayText = displayText.slice(0, openThink).trim();
+
+            // Emit text tokens until tool-call JSON starts.
+            const jsonStarted = displayText.startsWith('{') ||
+              /\{[^}]*"(?:name|type|function|parameters|arguments)"\s*:/.test(displayText);
+            if (displayText && !jsonStarted) {
+              const now = Date.now();
+              if (now - lastEmitTime > 150) {
+                onStreamEvent({ type: 'text', content: displayText });
+                lastEmitTime = now;
+              }
+            }
+          }
+        }
+
+        // Final reasoning emit (un-throttled)
+        if (reasoningAcc.trim()) {
+          onStreamEvent({ type: 'reasoning', content: reasoningAcc.trim() });
+        }
+
+        // Prefer native delta tool_calls over text-embedded extraction.
+        const assembled = Array.from(deltaToolCallMap.entries())
+          .sort(([a], [b]) => a - b)
+          .map(([, tc]) => ({
+            id: tc.id || `call_stream_${Date.now()}`,
+            type: 'function' as const,
+            function: { name: tc.name, arguments: tc.arguments || '{}' },
+          }))
+          .filter(tc => tc.function.name.length > 0);
+
+        return normalizeChatCompletion({
+          model: params.model,
+          text: fullText || null,
+          reasoning: reasoningAcc || null,
+          structuredToolCalls: assembled.length > 0 ? assembled : undefined,
+          usage,
+        }, params.tools);
+      })(),
+      90_000,
+      "LLM streaming",
+    );
+  }
+
+  // ── Non-streaming path ──
+  const result = await withTimeout(
+    openai.chat.completions.create(requestParams as any),
+    100_000,
+    "LLM",
+  );
+  const message: any = result.choices[0]?.message;
+  return normalizeChatCompletion({
+    model: params.model,
+    text: typeof message?.content === 'string' ? message.content : null,
+    reasoning: typeof message?.reasoning_content === 'string' ? message.reasoning_content : null,
+    structuredToolCalls: message?.tool_calls,
+    usage: result.usage ?? null,
+  }, params.tools, onStreamEvent);
 }
 
 /**
@@ -792,13 +882,16 @@ export async function processChat(
   onStreamEvent?.({ type: "status", message: "Analyzing request..." });
 
   // ── LLM provider resolution ──
-  // Priority: 1) User-provided key → 2) Workers AI binding (zero-config) → 3) Server OpenAI key
-  // Like MetaMask's default RPC: works out of the box, but users can bring their own key.
+  // Priority: 1) User-provided key → 2) Cloudflare AI binding (default, via AI
+  // Gateway) → 3) Server OpenAI key. Like MetaMask's default RPC: works out of
+  // the box, but users can bring their own key.
   //
-  // Workers AI strategy:
-  //   - Kimi K2.7 Code (1T param MoE, 262k context): primary model — handles reasoning,
-  //     tool calling, and multi-step planning natively in a single call.
-  const KIMI_MODEL = "@cf/moonshotai/kimi-k2.7-code";
+  // Default model: moonshotai/kimi-k3.1-pro-highspeed (Cloudflare AI catalog) —
+  // reasoning + tool calling in a single call, ~2-3x faster output than the
+  // standard variant, with automatic prompt caching on the static system-prompt
+  // prefix (cached input is 20x cheaper than uncached, which matters because the
+  // tool catalog makes every request carry a large prefix).
+  const KIMI_MODEL = "moonshotai/kimi-k3.1-pro-highspeed";
 
   let openai: OpenAI | null = null;
   let useBinding = false;
@@ -808,6 +901,10 @@ export async function processChat(
   const recordModel = (model: string) => {
     if (!modelsUsed.includes(model)) modelsUsed.push(model);
   };
+
+  // Token usage accumulated across every LLM call in this request (first call +
+  // multi-round tool loop), reported on the ChatResponse for settlement pricing.
+  const usageAcc = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
 
   if (ctx.aiApiKey) {
     // User provided their own key (OpenRouter, OpenAI, etc.)
@@ -819,8 +916,8 @@ export async function processChat(
     llmModel = ctx.aiModel || "gpt-5-mini";
     // User-provided key: same model for all calls
   } else if (env.AI) {
-    // Workers AI via binding (default — no API key needed, zero-config)
-    // Kimi K2.7 Code as primary: natively handles reasoning + tool calling in one call.
+    // Cloudflare AI binding (default) — catalog models run directly through
+    // Cloudflare AI. No API token needed and no gateway credentials required.
     useBinding = true;
     llmModel = KIMI_MODEL;
   } else if (env.OPENAI_API_KEY) {
@@ -829,41 +926,56 @@ export async function processChat(
     llmModel = ctx.aiModel || "gpt-5-mini";
     // Server OpenAI key: same model for all calls
   } else {
-    throw new Error("No AI provider configured. Add [ai] binding to wrangler.toml, or set OPENAI_API_KEY.");
+    throw new Error("No AI provider configured. Add the [ai] binding to wrangler.toml, set OPENAI_API_KEY, or pass aiApiKey in the request.");
   }
 
-  // Unified LLM caller — routes to AI binding adapter or OpenAI SDK
+  // Unified LLM caller — Cloudflare AI binding adapter or OpenAI-compatible
+  // SDK. Streams reasoning/text/tool-call progress when the caller provided an
+  // event callback, non-streaming otherwise.
   const callLLM = async (params: {
     model: string;
     messages: OpenAI.ChatCompletionMessageParam[];
     tools?: OpenAI.ChatCompletionTool[];
     tool_choice?: "auto" | "none";
-  }, streamReasoning?: boolean) => {
+  }) => {
     recordModel(params.model);
-    if (useBinding) {
-      // Stream when the caller provided an event callback and this is a Kimi
-      // reasoning-capable model. Workers AI streams reasoning_content deltas
-      // for Kimi K2.7 Code, which callWorkersAI surfaces as reasoning/text events.
-      const isStreamingModel = params.model.includes('kimi') || params.model.includes('moonshotai');
-      const shouldStream = (streamReasoning || isStreamingModel) && onStreamEvent;
-      return callWorkersAI(
-        env.AI!,
-        params.model,
-        params.messages,
-        params.tools,
-        shouldStream ? onStreamEvent : undefined,
-        env.AI_GATEWAY_ID,
-      );
+    const response = useBinding
+      ? await callAiBinding(env.AI!, params, onStreamEvent)
+      : await callOpenAICompat(openai!, params, onStreamEvent);
+    const u = (response as any).usage;
+    if (u) {
+      usageAcc.inputTokens += u.prompt_tokens ?? 0;
+      usageAcc.cachedInputTokens += u.prompt_tokens_details?.cached_tokens ?? 0;
+      usageAcc.outputTokens += u.completion_tokens ?? 0;
     }
-    return openai!.chat.completions.create(params);
+    return response;
   };
 
-  // Keep conversation history short to protect Workers AI latency budget.
-  // The system prompt carries all static policy; only recent turns need context.
+  // Keep conversation history short to protect the LLM latency and inference
+  // budget. Bound both per-message size and total history so a rogue API call
+  // cannot turn a $0.20-max request into an unbounded-context inference.
   const MAX_HISTORY_MESSAGES = 10;
-  const recentMessages = messages.length > MAX_HISTORY_MESSAGES
-    ? messages.slice(-MAX_HISTORY_MESSAGES)
-    : messages;
+  const MAX_MESSAGE_CHARS = 4000;
+  const MAX_HISTORY_CHARS = 12000;
+  const boundedMessages = messages.map((m) => ({
+    ...m,
+    content: typeof m.content === "string" && m.content.length > MAX_MESSAGE_CHARS
+      ? m.content.slice(0, MAX_MESSAGE_CHARS)
+      : m.content,
+  }));
+  const recentMessages = boundedMessages.length > MAX_HISTORY_MESSAGES
+    ? boundedMessages.slice(-MAX_HISTORY_MESSAGES)
+    : boundedMessages;
+  let historyChars = recentMessages.reduce(
+    (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
+    0,
+  );
+  while (recentMessages.length > 1 && historyChars > MAX_HISTORY_CHARS) {
+    historyChars -= typeof recentMessages[0].content === "string"
+      ? (recentMessages[0].content as string).length
+      : 0;
+    recentMessages.shift();
+  }
 
   // Build system prompt with vault context — MODULAR: only load relevant domain sections
   const detectedDomains = detectDomains(recentMessages as Array<{ role: string; content: string }>);
@@ -925,7 +1037,7 @@ ${executionModeNote}${contextDocsBlock}`;
   // ── Fast-path routing ──
   // Deterministic commands (chain switch, simple swaps, LP, GMX) bypass the LLM
   // entirely — they are unambiguous and require no reasoning. This prevents LLM
-  // timeouts (Workers AI can take 30-50s with 55 tools in context) for trivial ops.
+  // latency (reasoning models can take 30-50s with 55 tools in context) for trivial ops.
   //
   // Chain switch: always immediate — "switch to arbitrum" has zero ambiguity.
   // Swaps/LP/GMX: still defer to LLM first as a fallback for when the LLM produces
@@ -987,7 +1099,7 @@ ${executionModeNote}${contextDocsBlock}`;
   // Immediate fast-path: deterministic commands that never need an LLM call.
   // Simple swaps, settings toggles, TWAP creation, bridge, and GMX increase are
   // included here — they have unambiguous regex shapes. Bypassing the LLM avoids
-  // the 30-50s Workers AI latency with the full 55-tool catalog and prevents the
+  // the 30-50s reasoning-model latency with the full 55-tool catalog and prevents the
   // model from hallucinating tool calls on trivial requests.
   // NOTE: only the NO-AMOUNT form of crosschain_sync is fast-pathed ("sync nav
   // from X to Y") — the tool computes the equalizing amount deterministically,
@@ -1009,6 +1121,7 @@ ${executionModeNote}${contextDocsBlock}`;
     tryFastPathGmxIncrease(effectiveMsg) ||
     tryFastPathHyperliquid(effectiveMsg) ||
     tryFastPathLighter(effectiveMsg) ||
+    tryFastPathDeployPool(effectiveMsg) ||
     tryFastPathFundPool(effectiveMsg) ||
     tryFastPathStrategyQueries(effectiveMsg) ||
     tryFastPathPendingTx(effectiveMsg) ||
@@ -1066,7 +1179,7 @@ ${executionModeNote}${contextDocsBlock}`;
 
   // First LLM call
   // User-friendly model label for status messages
-  const modelLabel = llmModel.includes('kimi') || llmModel.includes('moonshotai') ? 'Kimi K2.7 Code'
+  const modelLabel = llmModel.includes('kimi') || llmModel.includes('moonshotai') ? 'Kimi K3.1 Pro Highspeed'
     : llmModel.split('/').pop() || llmModel;
   onStreamEvent?.({ type: "status", message: `Thinking (${modelLabel})…` });
   const tLlmStart = Date.now();
@@ -1090,7 +1203,7 @@ ${executionModeNote}${contextDocsBlock}`;
   }
   // Emit the model's text content (its plan/analysis) so the user sees it in real time.
   // For models that return both text + tool_calls (OpenRouter, OpenAI), this shows the
-  // model's plan before tool execution starts. Workers AI discards text when tool_calls
+  // model's plan before tool execution starts. Some providers discard text when tool_calls
   // are present, so this is a no-op for the default path.
   // SKIP text that's just a JSON tool call recommendation — it's noise, not analysis.
   const firstCallText = choice.message.content?.trim();
@@ -1456,6 +1569,7 @@ ${executionModeNote}${contextDocsBlock}`;
           reasoning: orchestrationReasoning,
           modelsUsed,
           finalModel,
+          usage: { ...usageAcc },
         };
       }
     }
@@ -1471,6 +1585,7 @@ ${executionModeNote}${contextDocsBlock}`;
       reasoning: orchestrationReasoning,
       modelsUsed,
       finalModel: "orchestrator",
+      usage: { ...usageAcc },
     };
   }
 
@@ -1482,6 +1597,7 @@ ${executionModeNote}${contextDocsBlock}`;
     reasoning,
     modelsUsed,
     finalModel,
+    usage: { ...usageAcc },
   };
 }
 
@@ -2684,6 +2800,29 @@ export function tryFastPathHyperliquid(msg: string): FastPathResult | null {
 }
 
 // ── Fast-path: Lighter (Lighter EVM devnet) ───────────────────────────
+
+// ── Fast-path: pool deployment ─────────────────────────────────────────
+
+/**
+ * Deploy only when BOTH name and symbol are explicit. Everything else stays
+ * with the LLM so it can ask for the missing details or clarify intent.
+ * Example: "deploy a smart pool called earnest with symbol ESP"
+ */
+export function tryFastPathDeployPool(msg: string): FastPathResult | null {
+  const m = msg.trim();
+  const match = m.match(
+    /^(?:deploy|create)(?:\s+a)?(?:\s+new)?\s+(?:smart\s+)?pool\s+(?:called|named)\s+(.+?)\s+(?:with\s+)?(?:symbol|ticker)\s+([A-Za-z0-9 ]{3,5})(?:\s+(?:with|using)\s+(?:base\s+token\s+)?(ETH|USDC))?[\s?.!]*$/i,
+  );
+  if (!match) return null;
+  return {
+    name: "deploy_smart_pool",
+    args: {
+      name: match[1].trim(),
+      symbol: match[2].trim(),
+      ...(match[3] ? { baseToken: match[3].toUpperCase() } : {}),
+    },
+  };
+}
 
 // ── Fast-path: pool funding (mint) ─────────────────────────────────────
 

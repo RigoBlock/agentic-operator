@@ -274,6 +274,145 @@ describe("POST /api/chat auth gate", () => {
     expect(ctx.executionMode).toBe("manual");
   });
 
+  it("charges the fixed direct-tool price for a no-LLM fast path", async () => {
+    mockVerifyOperatorAuth.mockResolvedValue(undefined);
+    mockProcessChat.mockResolvedValue({
+      reply: "tool menu",
+      toolCalls: [{ name: "get_tool_menu", arguments: { category: "lighter" }, result: "cards", error: false }],
+      modelsUsed: [],
+      finalModel: "tooling",
+      // Deliberately large tool-native output: must NOT be priced by characters.
+      metadata: { toolCards: new Array(50).fill({ title: "card", summary: "x".repeat(100) }) },
+    } as ChatResponse);
+    const app = createApp();
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-operator-address": ATTACKER_ADDRESS,
+          "x-auth-signature": "0x1234",
+          "x-auth-timestamp": String(Date.now()),
+          "x-simulate-x402-paid": "1",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "what are my lighter tools?" }],
+          chainId: CHAIN_ID,
+          vaultAddress: VICTIM_VAULT,
+          stream: true,
+        }),
+      },
+      { KV: createMockKV() } as Env,
+    );
+    expect(res.status).toBe(200);
+    const overrides = JSON.parse(res.headers.get("Settlement-Overrides")!);
+    expect(overrides.amount).toBe("$0.0024");
+  });
+
+  it("uses each deterministic tool's direct endpoint price", async () => {
+    mockVerifyOperatorAuth.mockResolvedValue(undefined);
+    const cases = [
+      ["get_swap_quote", "$0.0020"],
+      ["refresh_oracle_feed", "$0.0023"],
+      ["deploy_smart_pool", "$0.0026"],
+    ] as const;
+    for (const [toolName, expectedAmount] of cases) {
+      mockProcessChat.mockResolvedValue({
+        reply: "done",
+        toolCalls: [{ name: toolName, arguments: {}, result: "ok", error: false }],
+        modelsUsed: [],
+        finalModel: "tooling",
+      } as ChatResponse);
+      const app = createApp();
+      const res = await app.request(
+        "/api/chat",
+        {
+          method: "POST",
+          headers: {
+            "x-operator-address": ATTACKER_ADDRESS,
+            "x-auth-signature": "0x1234",
+            "x-auth-timestamp": String(Date.now()),
+            "x-simulate-x402-paid": "1",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            messages: [{ role: "user", content: toolName }],
+            chainId: CHAIN_ID,
+            vaultAddress: VICTIM_VAULT,
+          }),
+        },
+        { KV: createMockKV() } as Env,
+      );
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.headers.get("Settlement-Overrides")!).amount).toBe(expectedAmount);
+    }
+  });
+
+  it("returns JSON with the actual Settlement-Overrides amount for a paid stream request", async () => {
+    mockVerifyOperatorAuth.mockResolvedValue(undefined);
+    mockProcessChat.mockResolvedValue({
+      reply: "ok",
+      toolCalls: [],
+      usage: { inputTokens: 1000, cachedInputTokens: 500, outputTokens: 100 },
+    } as ChatResponse);
+    const app = createApp();
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-operator-address": ATTACKER_ADDRESS,
+          "x-auth-signature": "0x1234",
+          "x-auth-timestamp": String(Date.now()),
+          "x-simulate-x402-paid": "1",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "what are my lighter tools?" }],
+          chainId: CHAIN_ID,
+          vaultAddress: VICTIM_VAULT,
+          stream: true,
+        }),
+      },
+      { KV: createMockKV() } as Env,
+    );
+    expect(res.status).toBe(200);
+    // Streaming would lose the cost header and charge the full upto ceiling.
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const overrides = JSON.parse(res.headers.get("Settlement-Overrides")!);
+    // uncached 500*$4 + cached 500*$0.20 + output 100*$20, plus 25% margin
+    expect(overrides.amount).toBe("$0.0051");
+  });
+
+  it("keeps SSE streaming only when no x402 settlement is required", async () => {
+    mockVerifyOperatorAuth.mockResolvedValue(undefined);
+    const app = createApp();
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: {
+          "x-operator-address": ATTACKER_ADDRESS,
+          "x-auth-signature": "0x1234",
+          "x-auth-timestamp": String(Date.now()),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hello" }],
+          chainId: CHAIN_ID,
+          vaultAddress: VICTIM_VAULT,
+          stream: true,
+        }),
+      },
+      { KV: createMockKV() } as Env,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const text = await res.text();
+    expect(text).toContain('"type":"done"');
+  });
+
   it("still enforces ownership for a REAL vault address (zero-address fix is not a bypass)", async () => {
     mockVerifyOperatorAuth.mockRejectedValue(new AuthError("Access denied: not owner", 403));
     const app = createApp();

@@ -14,11 +14,23 @@
  * strategy lists) are NOT given to the LLM so a prompt-injected agent cannot
  * change safety settings even inside a verified operator session.
  */
+/** Default direct-tool invocation price (POST /api/tools). */
+export const DEFAULT_TOOL_X402_PRICE = "$0.0025";
+
+/** Fixed x402 price declared by the tool itself, or the direct-tool default. */
+export function getToolX402Price(toolName: string): string {
+  const def = TOOL_DEFINITIONS.find((d) => d.function.name === toolName) as
+    | { function: { x402Price?: string } }
+    | undefined;
+  return def?.function.x402Price || DEFAULT_TOOL_X402_PRICE;
+}
+
 export const TOOL_DEFINITIONS = [
   {
     type: "function" as const,
     function: {
       name: "get_swap_quote",
+      x402Price: "$0.0020", // GET /api/quote
       description:
         "Get a price-only quote WITHOUT building a transaction. Use ONLY when the user explicitly asks for a price or quote without wanting to execute. " +
         "For actual conversions (swap/buy/sell/wrap/unwrap), use build_vault_swap instead.",
@@ -138,6 +150,7 @@ export const TOOL_DEFINITIONS = [
     type: "function" as const,
     function: {
       name: "get_tool_menu",
+      x402Price: "$0.0024", // GET /api/tools (catalog)
       description:
         "Return the menu of directly-invokable tools for a category (e.g. 'hyperliquid', 'lighter', 'gmx', 'swap', " +
         "'lp'/'uniswap', 'crosschain') as structured cards " +
@@ -907,6 +920,7 @@ export const TOOL_DEFINITIONS = [
     type: "function" as const,
     function: {
       name: "deploy_smart_pool",
+      x402Price: "$0.0026", // Deployment-specific fixed price (not the generic tool price)
       description:
         "Deploy a new Rigoblock smart pool via the RigoblockPoolProxyFactory. " +
         "Returns an unsigned createPool() transaction for the operator to sign. " +
@@ -1796,6 +1810,7 @@ export const TOOL_DEFINITIONS = [
     type: "function" as const,
     function: {
       name: "refresh_oracle_feed",
+      x402Price: "$0.0023", // POST /api/oracle/refresh
       description:
         "Swap on the BackgeoOracle's dedicated Uniswap V4 oracle pool to refresh a stale TWAP price feed. " +
         "This is the ONLY tool that routes through the BackgeoOracle hook. " +
@@ -1895,7 +1910,7 @@ export const AGENT_TOOL_DEFINITIONS = TOOL_DEFINITIONS.filter(
 );
 
 /**
- * System prompt — kept concise for fast inference with Workers AI (default) / gpt-5-mini (fallback).
+ * System prompt — kept concise for fast inference with Kimi (default) / gpt-5-mini (fallback).
  */
 export const RUNTIME_CONTEXT_PACK = `
 RIGOBLOCK OPERATOR CONTEXT PACK (derived from AGENTS.md and CLAUDE.md):

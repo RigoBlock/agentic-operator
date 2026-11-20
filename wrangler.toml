@@ -9,10 +9,10 @@ workers_dev = true
 preview_urls = true
 
 [vars]
-AI_GATEWAY_ID = "dragon"
 
-# Workers AI binding — enables zero-config LLM access (no API tokens needed).
-# The Worker authenticates automatically via the binding.
+# Cloudflare AI binding — runs catalog models (default LLM:
+# moonshotai/kimi-k3.1-pro-highspeed) directly through Cloudflare AI.
+# Bindings don't require an API token.
 [ai]
 binding = "AI"
 
@@ -34,7 +34,7 @@ id = "2c0f24cd5916471ab4e2cd8d3fd1b1b7"
 # preview_id = ""  # optional: separate namespace for `wrangler dev --remote`
 
 # Secrets (set via `wrangler secret put <KEY>`):
-# OPENAI_API_KEY        — (Optional) Fallback LLM provider if Workers AI binding not available
+# OPENAI_API_KEY        — (Optional) Fallback LLM provider if the AI binding is unavailable
 # UNISWAP_API_KEY       — Uniswap Trading API key (https://developers.uniswap.org)
 # ZEROX_API_KEY         — 0x Swap API key (https://dashboard.0x.org)
 # ALCHEMY_API_KEY       — Alchemy RPC key

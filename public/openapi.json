@@ -405,7 +405,7 @@
       "post": {
         "operationId": "agentChat",
         "summary": "AI-powered DeFi agent chat",
-        "description": "Natural language DeFi interface. Send a message describing a trading intent and receive unsigned swap calldata, position summaries, bridge transactions, or market analysis. The agent internally uses Kimi K2.7 Code for reasoning and tool calling.\n\n**Price:** up to $0.10 USDC per request (x402 `upto` scheme, eip155:8453) — billed by actual inference cost, typical $0.003–$0.015\n\n**Supported operations (one per request):**\n- Swap tokens via Uniswap v4 or 0x aggregator\n- Bridge tokens cross-chain via Across Protocol\n- Add/remove Uniswap v4 LP positions\n- Open/close GMX perpetual positions (Arbitrum)\n- Trade Hyperliquid perpetuals: deposit/withdraw USDC, limit orders, cancel (HyperEVM)\n- Stake/unstake GRG governance tokens\n- Deploy and fund Rigoblock smart pool vaults\n- Query vault NAV, token balances, active positions\n- Create/manage automated trading strategies\n- Schedule TWAP orders (time-weighted average price execution)\n\n**Execution modes:**\n- manual (default): Returns unsigned calldata — operator signs and broadcasts\n- delegated: Agent wallet executes on-chain directly (requires operator auth + on-chain delegation)\n\n**Safety:** Every transaction passes NAV shield (≤10% loss), Swap Shield (oracle price check), 7-point execution validation, and on-chain selector whitelist.",
+        "description": "Natural language DeFi interface. Send a message describing a trading intent and receive unsigned swap calldata, position summaries, bridge transactions, or market analysis. The agent internally uses Kimi K3.1 Pro Highspeed for reasoning and tool calling.\n\n**Price:** up to $0.20 USDC per request (x402 `upto` scheme, eip155:8453) — billed by actual inference cost, typical $0.01–$0.06\n\n**Supported operations (one per request):**\n- Swap tokens via Uniswap v4 or 0x aggregator\n- Bridge tokens cross-chain via Across Protocol\n- Add/remove Uniswap v4 LP positions\n- Open/close GMX perpetual positions (Arbitrum)\n- Trade Hyperliquid perpetuals: deposit/withdraw USDC, limit orders, cancel (HyperEVM)\n- Stake/unstake GRG governance tokens\n- Deploy and fund Rigoblock smart pool vaults\n- Query vault NAV, token balances, active positions\n- Create/manage automated trading strategies\n- Schedule TWAP orders (time-weighted average price execution)\n\n**Execution modes:**\n- manual (default): Returns unsigned calldata — operator signs and broadcasts\n- delegated: Agent wallet executes on-chain directly (requires operator auth + on-chain delegation)\n\n**Safety:** Every transaction passes NAV shield (≤10% loss), Swap Shield (oracle price check), 7-point execution validation, and on-chain selector whitelist.",
         "tags": [
           "Agent"
         ],
@@ -472,7 +472,9 @@
         "operationId": "setSlippage",
         "summary": "Set default slippage tolerance",
         "description": "Operator-only endpoint to set the default slippage tolerance (0.1%–5%). Does not involve the chat LLM; the UI settings panel calls this directly.",
-        "tags": ["Operator Settings"],
+        "tags": [
+          "Operator Settings"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -523,7 +525,9 @@
         "operationId": "setSyncTolerance",
         "summary": "Set default sync tolerance",
         "description": "Operator-only endpoint to set the default sync tolerance for NAV syncs with an explicit amount (0.1%–100%, default 1%). Separate from the NAV shield (10%). Does not involve the chat LLM; the UI settings panel calls this directly.",
-        "tags": ["Operator Settings"],
+        "tags": [
+          "Operator Settings"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -574,7 +578,9 @@
         "operationId": "setSwapShieldTolerance",
         "summary": "Set or reset Swap Shield tolerance",
         "description": "Operator-only endpoint to temporarily raise the Swap Shield tolerance (up to 50% for 10 minutes) or reset it to the default 5%. Does not involve the chat LLM.",
-        "tags": ["Operator Settings"],
+        "tags": [
+          "Operator Settings"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -625,7 +631,9 @@
         "operationId": "setNavShieldThreshold",
         "summary": "Set or reset NAV Shield threshold",
         "description": "Operator-only endpoint to set the NAV Shield maximum loss threshold (1%–100%) or reset it to the default 10%. Does not involve the chat LLM.",
-        "tags": ["Operator Settings"],
+        "tags": [
+          "Operator Settings"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -676,13 +684,50 @@
         "operationId": "getExecMode",
         "summary": "Get execution mode preference",
         "description": "Returns the operator's current auto-execute preference (autonomous or confirm). Shared between the web UI and Telegram.",
-        "tags": ["Operator Settings"],
+        "tags": [
+          "Operator Settings"
+        ],
         "parameters": [
-          { "name": "vaultAddress", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "chainId", "in": "query", "required": true, "schema": { "type": "integer" } },
-          { "name": "operatorAddress", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "authSignature", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "authTimestamp", "in": "query", "required": true, "schema": { "type": "integer" } }
+          {
+            "name": "vaultAddress",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chainId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "operatorAddress",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "authSignature",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "authTimestamp",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
         ],
         "responses": {
           "200": {
@@ -714,7 +759,9 @@
         "operationId": "setExecMode",
         "summary": "Set execution mode preference",
         "description": "Sets whether the operator's trades execute immediately (autonomous) or require confirmation (confirm). Shared between the web UI and Telegram.",
-        "tags": ["Operator Settings"],
+        "tags": [
+          "Operator Settings"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1668,6 +1715,227 @@
           }
         }
       }
+    },
+    "/api/billing/status": {
+      "get": {
+        "operationId": "getBillingStatus",
+        "summary": "Auto-pay deposit status",
+        "description": "Returns the operator's USDC deposit address on Base, the current balance, and a ready-to-submit top-up transaction. Requires operator authentication (session token or signature). The deposit funds standard x402 payments signed server-side — it is a funding source, never a payment bypass.",
+        "tags": [
+          "Billing"
+        ],
+        "responses": {
+          "200": {
+            "description": "Deposit status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "depositAddress": {
+                      "type": "string"
+                    },
+                    "balanceUSDC": {
+                      "type": "string"
+                    },
+                    "asset": {
+                      "type": "string"
+                    },
+                    "network": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          }
+        }
+      }
+    },
+    "/api/billing/payment-header": {
+      "post": {
+        "operationId": "createBillingPayment",
+        "summary": "Sign an x402 payment from the deposit (auto-pay)",
+        "description": "Prepares a standard x402 payment signature (USDC EIP-3009 for exact endpoints, Permit2 witness for the chat upto scheme) signed by the operator's server-side billing wallet. The facilitator verifies and settles it like any x402 payment. Rate-limited per operator. Returns 402 (error: insufficient_deposit) when the deposit cannot cover the route's amount.",
+        "tags": [
+          "Billing"
+        ],
+        "responses": {
+          "200": {
+            "description": "Signed payment payload (base64 PAYMENT-SIGNATURE value)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "paymentSignature": {
+                      "type": "string"
+                    },
+                    "amountUSDC": {
+                      "type": "string"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "balanceUSDC": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "402": {
+            "description": "insufficient_deposit (includes balanceUSDC)"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "method": {
+                    "type": "string",
+                    "example": "POST"
+                  },
+                  "path": {
+                    "type": "string",
+                    "example": "/api/chat"
+                  }
+                },
+                "required": [
+                  "method",
+                  "path"
+                ]
+              },
+              "example": {
+                "method": "POST",
+                "path": "/api/chat"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/billing/withdraw": {
+      "post": {
+        "operationId": "withdrawBillingDeposit",
+        "summary": "Withdraw the deposit back to the operator",
+        "description": "Builds a USDC transferWithAuthorization (signed by the server-side billing wallet) that moves the deposit — or the requested amount — back to the authenticated operator only. The operator broadcasts the returned transaction with their own wallet and pays the gas.",
+        "tags": [
+          "Billing"
+        ],
+        "responses": {
+          "200": {
+            "description": "Ready-to-submit transaction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "to": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "string"
+                    },
+                    "amountUSDC": {
+                      "type": "string"
+                    },
+                    "note": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "402": {
+            "description": "Nothing to withdraw / amount exceeds balance"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "amountUSDC": {
+                    "type": "string",
+                    "example": "5.0"
+                  }
+                }
+              },
+              "example": {}
+            }
+          }
+        }
+      }
+    },
+    "/api/billing/topup": {
+      "get": {
+        "operationId": "getBillingTopUp",
+        "summary": "Prepare a top-up transaction",
+        "description": "Encodes a USDC transfer of the requested amount (query param `amount`, decimal USDC) to the operator's deposit address. Submit the returned `to`/`data` with the operator's wallet (Base network). Requires operator authentication.",
+        "tags": [
+          "Billing"
+        ],
+        "parameters": [
+          {
+            "name": "amount",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "USDC amount, e.g. 2 or 2.5"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ready-to-submit transaction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "to": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "string"
+                    },
+                    "amountUSDC": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "400": {
+            "description": "Invalid amount"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1781,7 +2049,6 @@
               "type": "string"
             }
           },
-
           "chain": {
             "type": "string",
             "description": "Target chain context",
@@ -2033,7 +2300,13 @@
       },
       "OperatorSettingsRequest": {
         "type": "object",
-        "required": ["vaultAddress", "chainId", "operatorAddress", "authSignature", "authTimestamp"],
+        "required": [
+          "vaultAddress",
+          "chainId",
+          "operatorAddress",
+          "authSignature",
+          "authTimestamp"
+        ],
         "properties": {
           "vaultAddress": {
             "type": "string",
@@ -2075,7 +2348,14 @@
       },
       "ExecModeRequest": {
         "type": "object",
-        "required": ["vaultAddress", "chainId", "operatorAddress", "authSignature", "authTimestamp", "mode"],
+        "required": [
+          "vaultAddress",
+          "chainId",
+          "operatorAddress",
+          "authSignature",
+          "authTimestamp",
+          "mode"
+        ],
         "properties": {
           "vaultAddress": {
             "type": "string",
@@ -2099,7 +2379,10 @@
           },
           "mode": {
             "type": "string",
-            "enum": ["autonomous", "confirm"],
+            "enum": [
+              "autonomous",
+              "confirm"
+            ],
             "description": "Autonomous executes trades immediately; confirm requires an explicit approval"
           }
         }
@@ -2112,7 +2395,10 @@
           },
           "mode": {
             "type": "string",
-            "enum": ["autonomous", "confirm"]
+            "enum": [
+              "autonomous",
+              "confirm"
+            ]
           }
         }
       },

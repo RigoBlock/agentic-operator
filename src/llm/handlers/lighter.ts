@@ -182,14 +182,17 @@ export async function handle_lighter_get_markets(
     if (!info) continue;
     known.push(id);
     const t = tracked.find((m) => m.marketId === id) ?? LIGHTER_MARKET_DECIMALS[id];
-    const label = DEVNET_PERP_LABELS[id] ? `${DEVNET_PERP_LABELS[id]} (docs-derived, unverified)` : "—";
+    const label = DEVNET_PERP_LABELS[id] ?? "—";
     const typeLabel = info.marketType === 0 ? "perp" : `type ${info.marketType}`;
     const fmtPx = (raw: bigint) =>
       t ? (Number(raw) / 10 ** t.priceDecimals).toLocaleString("en-US", { maximumFractionDigits: t.priceDecimals }) : `${raw} (raw)`;
     const fmtBase = (raw: bigint) =>
       t ? (Number(raw) / 10 ** t.sizeDecimals).toLocaleString("en-US", { maximumFractionDigits: t.sizeDecimals }) : `${raw} (raw)`;
+    // Core serves fee caps in units of 10^-6 (500 = 0.05%).
+    const fmtFee = (raw: number) => `${(raw / 1e4).toLocaleString("en-US", { maximumFractionDigits: 4 })}%`;
+    const fmtUsd = (raw: bigint) => `$${(Number(raw) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
     rows.push(
-      `| ${id} | ${label} | ${typeLabel} | ${info.takerFee} | ${info.makerFee} | ${fmtBase(info.minBaseAmount)} | ${fmtPx(info.indexPrice)} | ${fmtPx(info.markPrice)} |`,
+      `| ${id} | ${label} | ${typeLabel} | ${fmtFee(info.takerFee)} | ${fmtFee(info.makerFee)} | ${fmtBase(info.minBaseAmount)} | ${fmtUsd(info.minQuoteAmount)} | ${fmtPx(info.indexPrice)} | ${fmtPx(info.markPrice)} |`,
     );
   }
 
@@ -197,14 +200,16 @@ export async function handle_lighter_get_markets(
   if (rows.length === 0) {
     lines.push("No Lighter perp markets could be read from Core state.");
   } else {
-    lines.push("| Id | Market | Type | Taker fee | Maker fee | Min size | Index price | Mark price |");
-    lines.push("|----|--------|------|-----------|-----------|----------|-------------|------------|");
+    lines.push("| Id | Market | Type | Taker fee (max) | Maker fee (max) | Min size | Min notional | Index price | Mark price |");
+    lines.push("|----|--------|------|-----------------|-----------------|----------|--------------|-------------|------------|");
     lines.push(...rows);
   }
   lines.push("");
   lines.push(
+    "All numbers are live from Lighter Core state. Fees are each market's MAXIMUM rate (the fee actually charged is at the sequencer's discretion and is usually substantially lower — often zero); " +
+    "sizes and notionals below the market's minimums are rejected by the order tools before submission. " +
     "Prices/sizes use the market decimals from the adapter's LighterConstants table (mirrored in the app); " +
-    "markets outside the table show raw market units. Symbols for ids 0..3 are per the Lighter devnet docs.",
+    "markets outside the table show raw market units. Symbols for ids 0..3 are per the Lighter devnet docs (unverified — ids are the canonical identifier).",
   );
   if (tracked.length > 0) {
     lines.push(`Markets with pool activity (auto-tracked): ${tracked.map((m) => marketLabel(m.marketId)).join(", ")}.`);

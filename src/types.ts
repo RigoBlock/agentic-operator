@@ -46,12 +46,12 @@ export interface Env {
   // KV namespace (stores per-user vault lists, delegation config, agent wallets)
   KV: KVNamespace;
 
-  // Workers AI binding (configured in wrangler.toml [ai] — zero-config, no secrets needed)
+  // Cloudflare AI binding (configured in wrangler.toml [ai]) — runs catalog models
+  // (default: moonshotai/kimi-k3.1-pro-highspeed) directly through Cloudflare AI.
   AI?: Ai;
-  AI_GATEWAY_ID?: string;
 
   // Secrets (wrangler secret put)
-  OPENAI_API_KEY?: string;  // Optional — fallback if AI binding not available
+  OPENAI_API_KEY?: string;  // Optional fallback LLM provider
   UNISWAP_API_KEY: string;  // Uniswap Trading API key (developers.uniswap.org)
   ZEROX_API_KEY: string;    // 0x Swap API key (dashboard.0x.org)
   ALCHEMY_API_KEY: string;  // Alchemy RPC key (avoids public RPC rate limits)
@@ -179,7 +179,7 @@ export interface ChatRequest {
   stream?: boolean;
   /** User-provided AI API key (OpenRouter, Anthropic, or OpenAI) */
   aiApiKey?: string;
-  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "@cf/moonshotai/kimi-k2.7-code") */
+  /** AI model identifier (e.g. "anthropic/claude-sonnet-4" or "kimi-k3.1-pro-highspeed") */
   aiModel?: string;
   /** AI provider base URL (e.g. "https://openrouter.ai/api/v1") */
   aiBaseUrl?: string;
@@ -293,6 +293,8 @@ export interface ChatResponse {
   finalModel?: string;
   /** Protocol-specific structured metadata (e.g. GMX positions) for frontend rendering */
   metadata?: Record<string, unknown>;
+  /** Token usage across every LLM call in this request (drives x402 settlement on /api/chat) */
+  usage?: { inputTokens: number; cachedInputTokens: number; outputTokens: number };
 }
 
 // ── SSE Stream Events ─────────────────────────────────────────────────

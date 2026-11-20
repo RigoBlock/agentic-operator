@@ -1,12 +1,17 @@
 /**
- * x402 Payment Middleware
+ * x402 Payment Middleware — NO exemptions. Everyone pays.
  *
  * Gates premium API endpoints behind x402 micropayments (USDC on Base mainnet).
- * Own-user requests (browser UI, Telegram) are exempt via the onProtectedRequest hook.
- * External AI agents pay per call using the x402 protocol.
+ * There is deliberately NO payment bypass in this middleware: the first-party
+ * UI pays through the x402 client (public/frontend/x402.js) like any external
+ * agent, and the Telegram bot never passes through here (in-worker processChat
+ * calls + public /api/telegram/* routes). Operator authentication (sessions,
+ * signature redemption) lives in middleware/operatorAuth.ts and has no effect
+ * on payment — this split exists so the "authenticated users skip payment"
+ * bug class cannot reappear.
  *
  * Pricing:
- *   POST /api/chat          → upto $0.10 USDC (actual cost billed; ~$0.003–$0.015 typical)
+ *   POST /api/chat          → upto $0.20 USDC (actual cost billed; ~$0.01–$0.06 typical)
  *   GET  /api/quote         → exact $0.0020 USDC (DEX price quote)
  *   POST /api/quote/uniswap → exact $0.0021 USDC (Uniswap Trading API quote)
  *   GET  /api/quote/0x      → exact $0.0022 USDC (0x API quote)
@@ -14,14 +19,19 @@
  *   GET  /api/tools         → exact $0.0024 USDC (tool discovery)
  *   POST /api/tools         → exact $0.0025 USDC (direct tool invocation)
  *
- * The /api/chat endpoint uses the "upto" scheme — clients authorise up to $0.10
+ * The /api/chat endpoint uses the "upto" scheme — clients authorise up to $0.20
  * but are only charged the actual inference cost (determined by token usage).
  * The Settlement-Overrides response header carries the exact dollar amount back
- * to the x402 facilitator. Callers never pay more than $0.10 per call.
+ * to the facilitator. Callers never pay more than $0.20 per call.
  *
- * Uses @x402/core SDK with ExactEvmScheme (quotes) and UptoEvmScheme (chat).
- * CDP facilitator at api.cdp.coinbase.com handles verification and settlement.
- * Bazaar discovery metadata is declared via @x402/extensions declareDiscoveryExtension.
+ * The hosted CDP facilitator verifies and settles everything, INCLUDING upto
+ * (usage-based). Its /supported document is pinned in KV (services/cdpFacilitator.ts)
+ * because CDP rotates the upto facilitatorAddress per call and each worker
+ * isolate otherwise caches its own — unmatchable across isolates. With the pin,
+ * every isolate signs and validates against the same address for 24h.
+ *
+ * Uses @x402/core SDK with ExactEvmScheme + UptoEvmScheme. Bazaar discovery
+ * metadata is declared via @x402/extensions declareDiscoveryExtension.
  *
  * @see https://docs.cdp.coinbase.com/x402/quickstart-for-sellers
  */
@@ -39,25 +49,28 @@ import type {
 } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { UptoEvmScheme } from "@x402/evm/upto/server";
-import { bazaarResourceServerExtension } from "@x402/extensions";
+import { pinSupportedInKv } from "../services/cdpFacilitator.js";
+import { getToolX402Price, DEFAULT_TOOL_X402_PRICE } from "../llm/tools.js";
+import { bazaarResourceServerExtension, declareEip2612GasSponsoringExtension } from "@x402/extensions";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import type { MiddlewareHandler, Context } from "hono";
 import type { Env, AppVariables } from "../types.js";
-import { verifyOperatorSignatureOnly, computeNetworkHash, verifySessionToken, redeemSignatureForSession, mintSessionToken } from "../services/auth.js";
+// Auth (sessions, signature redemption) is handled by middleware/operatorAuth.ts.
+// This middleware is payment-only by design.
 import { isDevEscapeHatchEnabled } from "../services/devMode.js";
 
 // ── Payment configuration ─────────────────────────────────────────────
 
 /** Wallet receiving x402 payments (same EOA on all chains) */
-const PAY_TO = "0xA0F9C380ad1E1be09046319fd907335B2B452B37";
+export const PAY_TO = "0xA0F9C380ad1E1be09046319fd907335B2B452B37";
 
 /** Base mainnet — USDC payments (CAIP-2) */
 const BASE_NETWORK = "eip155:8453";
 
 // ── Public API routes (free by design) ────────────────────────────────
 // These /api/* routes are intentionally unprotected. All OTHER /api/* routes
-// must be explicitly listed in PROTECTED_ROUTES or they are blocked (fail closed).
+// must be explicitly listed in getProtectedRoutes() or they are blocked (fail closed).
 export const PUBLIC_API_ROUTES: ReadonlySet<string> = new Set([
   "GET /api/health",
   "GET /api/chains",
@@ -76,6 +89,10 @@ const PUBLIC_API_PREFIXES: ReadonlyArray<{ method: string; prefix: string }> = [
   { method: "GET", prefix: "/api/telegram/" },
   { method: "POST", prefix: "/api/settings/" },
   { method: "GET", prefix: "/api/settings/" },
+  // Billing: operator-scoped deposit status / payment signing / withdrawals.
+  // Authenticated via operatorAuth middleware — NEVER a payment exemption.
+  { method: "POST", prefix: "/api/billing/" },
+  { method: "GET", prefix: "/api/billing/" },
 ];
 
 export function isPublicApiRoute(method: string, path: string): boolean {
@@ -84,34 +101,37 @@ export function isPublicApiRoute(method: string, path: string): boolean {
 }
 
 export function isProtectedRoute(method: string, path: string): boolean {
-  return `${method} ${path}` in PROTECTED_ROUTES;
+  return `${method} ${path}` in getProtectedRoutes();
 }
 
-/** Returns all HTTP methods for which a given path is registered in PROTECTED_ROUTES. */
+/** Returns all HTTP methods for which a given path is registered in getProtectedRoutes(). */
 function getProtectedMethodsForPath(path: string): string[] {
-  return Object.keys(PROTECTED_ROUTES)
+  return Object.keys(getProtectedRoutes())
     .filter((key) => key.endsWith(` ${path}`))
     .map((key) => key.split(" ")[0]);
 }
 
 // ── Protected route config (v2 format) ────────────────────────────────
+// Every route here requires x402 payment. Prices for tool-backed routes are
+// read from the tool definitions at module load — x402Price is the ONLY price
+// source. Do not re-declare a different amount here or in settlement code.
 
-export const PROTECTED_ROUTES: RoutesConfig = {
+function buildProtectedRoutes(): RoutesConfig {
+  return {
   "POST /api/chat": {
     resource: "https://trader.rigoblock.com/api/chat",
     accepts: [
       {
         scheme: "upto",
         payTo: PAY_TO,
-        price: "$0.10",
+        price: "$0.20",
         network: BASE_NETWORK,
       },
     ],
     description:
       "AI-powered DeFi trading agent for Rigoblock smart vaults. Natural language to safe swap/bridge " +
       "calldata or delegated execution. Supports Uniswap, 0x, GMX perpetuals, Hyperliquid perpetuals, " +
-      "Across bridging, Uniswap v4 LP, GRG staking, and pool deployment across 8 chains. Protected by " +
-      "NAV Shield " +
+      "Across bridging, Uniswap v4 LP, GRG staking, and pool deployment across 8 chains. Protected by NAV Shield " +
       "(10% max loss per trade), Swap Shield (oracle vs DEX price divergence check), slippage " +
       "protection, delegation verification, and transaction simulation.",
     mimeType: "application/json",
@@ -122,6 +142,9 @@ export const PROTECTED_ROUTES: RoutesConfig = {
     // inputSchema is a real JSON Schema rather than a description map. The
     // bazaarResourceServerExtension enriches the HTTP method at request time.
     extensions: {
+      // Allow the facilitator to sponsor the one-time USDC → Permit2 approval
+      // via EIP-2612, so a freshly-funded deposit wallet needs no gas token.
+      ...declareEip2612GasSponsoringExtension(),
       ...declareDiscoveryExtension({
         bodyType: "json",
         input: {
@@ -208,7 +231,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.0020",
+        price: getToolX402Price("get_swap_quote"),
         network: BASE_NETWORK,
       },
     ],
@@ -474,7 +497,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.0023",
+        price: getToolX402Price("refresh_oracle_feed"),
         network: BASE_NETWORK,
       },
     ],
@@ -558,7 +581,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.0024",
+        price: getToolX402Price("get_tool_menu"),
         network: BASE_NETWORK,
       },
     ],
@@ -608,7 +631,7 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       {
         scheme: "exact",
         payTo: PAY_TO,
-        price: "$0.0025",
+        price: DEFAULT_TOOL_X402_PRICE,
         network: BASE_NETWORK,
       },
     ],
@@ -698,7 +721,16 @@ export const PROTECTED_ROUTES: RoutesConfig = {
       }),
     },
   },
-};
+  };
+}
+
+let protectedRoutesCache: RoutesConfig | undefined;
+
+/** Derived from the tool definitions — the single pricing registry. */
+export function getProtectedRoutes(): RoutesConfig {
+  if (!protectedRoutesCache) protectedRoutesCache = buildProtectedRoutes();
+  return protectedRoutesCache;
+}
 
 // ── Build x402 v2 server (lazy-initialized) ───────────────────────────
 
@@ -706,19 +738,25 @@ let httpServer: x402HTTPResourceServer | null = null;
 let initPromise: Promise<void> | null = null;
 
 function buildHttpServer(env: Env): x402HTTPResourceServer {
-  // CDP facilitator (Base mainnet — USDC payments)
+  // CDP facilitator (Base mainnet — USDC payments) with its /supported
+  // document pinned in KV: every isolate sees the same upto facilitatorAddress,
+  // so deposit-signed payments validate in any isolate while verification and
+  // settlement stay with the hosted facilitator.
   const facilitatorConfig = createFacilitatorConfig(
     env.CDP_API_KEY_ID,
     env.CDP_API_KEY_SECRET,
   );
-  const cdpFacilitator = new HTTPFacilitatorClient(facilitatorConfig);
+  const cdpFacilitator = pinSupportedInKv(
+    env.KV,
+    new HTTPFacilitatorClient(facilitatorConfig) as any,
+  );
 
   const resourceServer = new x402ResourceServer([cdpFacilitator])
     .register(BASE_NETWORK, new ExactEvmScheme())
     .register(BASE_NETWORK, new UptoEvmScheme())
     .registerExtension(bazaarResourceServerExtension);
 
-  const server = new x402HTTPResourceServer(resourceServer, PROTECTED_ROUTES);
+  const server = new x402HTTPResourceServer(resourceServer, getProtectedRoutes());
   return server;
 }
 
@@ -735,6 +773,80 @@ async function getHttpServer(env: Env): Promise<x402HTTPResourceServer> {
   }
   await initPromise;
   return httpServer;
+}
+
+/**
+ * Build the EXACT payment requirements the x402 gate will validate a payment
+ * against for a protected route — same singleton server, same requirement
+ * pipeline (normalizePaymentOptions → buildPaymentRequirementsFromOptions →
+ * createPaymentRequiredResponse with scheme enrichment).
+ *
+ * Used by the billing service to sign deposit payments: the signed payload
+ * (incl. facilitator metadata) is derived from these requirements, so a
+ * deposit-signed payment always matches what findMatchingRequirements checks.
+ * Never trusts client-supplied terms.
+ */
+export async function getRoutePaymentRequirements(
+  env: Env,
+  method: string,
+  pathname: string,
+): Promise<{
+  accepts: Array<Record<string, unknown>>;
+  resource: Record<string, unknown>;
+  extensions: Record<string, unknown>;
+}> {
+  const server = (await getHttpServer(env)) as any;
+  const routeMatch = server.getRouteConfig(pathname, method);
+  if (!routeMatch) {
+    throw Object.assign(new Error(`${method} ${pathname} is not a paid route`), { code: "unknown_route" });
+  }
+  const { config: routeConfig } = routeMatch;
+  const context = {
+    method,
+    path: pathname,
+    adapter: {
+      getHeader: () => undefined,
+      getMethod: () => method,
+      getPath: () => pathname,
+      getUrl: () => `https://trader.rigoblock.com${pathname}`,
+      getAcceptHeader: () => "",
+      getUserAgent: () => "rigoblock-billing",
+      getQueryParams: () => ({}),
+      getQueryParam: () => undefined,
+    },
+  };
+  const paymentOptions = server.normalizePaymentOptions(routeConfig);
+  const requirements = await server.ResourceServer.buildPaymentRequirementsFromOptions(
+    paymentOptions,
+    context,
+  );
+  // Must match the resourceInfo used by processHTTPRequest exactly — the
+  // payment payload echoes this object, and any missing fields fail the
+  // facilitator's echo validation.
+  const resourceInfo = {
+    url: routeConfig.resource || context.adapter.getUrl(),
+    description: routeConfig.description || "",
+    mimeType: routeConfig.mimeType || "",
+    ...(routeConfig.serviceName !== undefined && { serviceName: routeConfig.serviceName }),
+    ...(routeConfig.tags !== undefined && { tags: routeConfig.tags }),
+    ...(routeConfig.iconUrl !== undefined && { iconUrl: routeConfig.iconUrl }),
+  };
+  let extensions = routeConfig.extensions;
+  if (extensions) {
+    extensions = server.ResourceServer.enrichExtensions(extensions, context);
+  }
+  const paymentRequired = await server.ResourceServer.createPaymentRequiredResponse(
+    requirements,
+    resourceInfo,
+    undefined,
+    extensions,
+    { request: context },
+  );
+  return {
+    accepts: paymentRequired.accepts as Array<Record<string, unknown>>,
+    resource: paymentRequired.resource as Record<string, unknown>,
+    extensions: (paymentRequired.extensions || {}) as Record<string, unknown>,
+  };
 }
 
 // ── Hono HTTPAdapter ──────────────────────────────────────────────────
@@ -766,89 +878,16 @@ function honoAdapter(c: { req: { header(name: string): string | undefined; metho
  *    - "payment-verified"     → next(), then settle
  *    - "payment-error"        → return 402 with payment instructions
  */
-// ── Rate limiting (non-paid requests only) ────────────────────────────
-
-const RATE_LIMIT_WINDOW_MS = 4 * 60 * 60 * 1000; // 4 hours
-const RATE_LIMIT_MAX = 100;
-const RATE_LIMIT_WARNING_THRESHOLD = 10;
-
-interface RateLimitState {
-  count: number;
-  windowStart: number;
-}
-
-async function checkRateLimit(
-  kv: KVNamespace | undefined,
-  operatorAddress: string,
-): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
-  if (!kv) {
-    return { allowed: true, remaining: RATE_LIMIT_MAX, resetAt: Date.now() + RATE_LIMIT_WINDOW_MS };
-  }
-  const key = `rate-limit:${operatorAddress.toLowerCase()}`;
-  const now = Date.now();
-  const data = await kv.get<RateLimitState>(key, "json");
-
-  if (!data || now - data.windowStart > RATE_LIMIT_WINDOW_MS) {
-    // New window
-    const state: RateLimitState = { count: 1, windowStart: now };
-    await kv.put(key, JSON.stringify(state), {
-      expirationTtl: Math.ceil(RATE_LIMIT_WINDOW_MS / 1000) + 60,
-    });
-    return { allowed: true, remaining: RATE_LIMIT_MAX - 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
-  }
-
-  if (data.count >= RATE_LIMIT_MAX) {
-    return { allowed: false, remaining: 0, resetAt: data.windowStart + RATE_LIMIT_WINDOW_MS };
-  }
-
-  const state: RateLimitState = { count: data.count + 1, windowStart: data.windowStart };
-  await kv.put(key, JSON.stringify(state), {
-    expirationTtl: Math.ceil((data.windowStart + RATE_LIMIT_WINDOW_MS - now) / 1000) + 60,
-  });
-  return { allowed: true, remaining: RATE_LIMIT_MAX - data.count - 1, resetAt: data.windowStart + RATE_LIMIT_WINDOW_MS };
-}
-
-function setRateLimitHeaders(
-  c: { header: (k: string, v: string) => void },
-  remaining: number,
-  resetAt: number,
-): void {
-  c.header("X-RateLimit-Limit", String(RATE_LIMIT_MAX));
-  c.header("X-RateLimit-Remaining", String(remaining));
-  c.header("X-RateLimit-Reset", String(Math.ceil(resetAt / 1000)));
-  if (remaining < RATE_LIMIT_WARNING_THRESHOLD) {
-    const resetIso = new Date(resetAt).toISOString();
-    c.header("X-RateLimit-Warning", `${remaining} requests remaining before rate limit. Resets at ${resetIso}`);
-  }
-}
-
-/**
- * Session binding context: salted hash of the caller's device ID and
- * User-Agent. The device ID comes from the client-generated `x-device-id`
- * header — deliberately not the egress IP, which rotates between requests
- * on IPv6 privacy extensions / dual-stack clients and made IP-bound
- * sessions fail every other request (continuous re-sign loop). Clients
- * without the header (curl, outdated frontends) bind to the UA alone.
- * Only a hash is ever stored (no raw device IDs/UA in KV).
- */
-function requestNetworkHash(
-  c: Context<{ Bindings: Env; Variables: AppVariables }>,
-): string {
-  const raw = c.req.header("x-device-id") || "";
-  const deviceId = /^0x[0-9a-fA-F]{32}$/.test(raw) ? raw.toLowerCase() : "";
-  const ua = c.req.header("user-agent") || "";
-  return computeNetworkHash(deviceId, ua);
-}
 
 /**
  * Fail-closed helper for payment-verification outages.
  *
  * Paid endpoints must never be served for free just because payment cannot be
  * VERIFIED (missing CDP credentials, facilitator unreachable, processing error).
- * For routes in PROTECTED_ROUTES this returns a 503; public routes and the
- * operator header-auth bypass are unaffected. X402_RELAXED=1 restores the old
- * fail-open behavior, but only together with APP_ENV=development — the gate in
- * devMode.ts cannot be bypassed by the flag alone.
+ * For routes in getProtectedRoutes() this returns a 503; public routes are
+ * unaffected. X402_RELAXED=1 restores the old fail-open behavior, but only
+ * together with APP_ENV=development — the gate in devMode.ts cannot be
+ * bypassed by the flag alone.
  *
  * Returns null when the request may proceed (non-protected route or relaxed mode).
  */
@@ -877,146 +916,6 @@ function blockIfPaymentUnverifiable(
 
 export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
   return async (c, next) => {
-    const reqPath0 = new URL(c.req.url).pathname;
-    const reqMethod0 = c.req.method;
-
-    // Fast path 0: opaque session token minted by a previous signature
-    // redemption (KV-gated production only). Bound to a salted hash of the
-    // caller's IP + User-Agent; a token presented from a different network is
-    // rejected with 401 so the client re-signs.
-    if (c.env.KV) {
-      const sessionToken = c.req.header("x-session-token");
-      if (sessionToken && isProtectedRoute(reqMethod0, reqPath0)) {
-        const netHash = requestNetworkHash(c);
-        const sess = await verifySessionToken(c.env.KV, sessionToken, netHash);
-        if (!sess) {
-          return c.json(
-            {
-              error: "Session expired",
-              detail: "Your session is invalid, expired, or was created on a different network. Please sign again to authenticate.",
-            },
-            401,
-          );
-        }
-        const rateLimit = await checkRateLimit(c.env.KV, sess.address);
-        if (!rateLimit.allowed) {
-          setRateLimitHeaders(c, 0, rateLimit.resetAt);
-          const retryAfterSec = Math.ceil((rateLimit.resetAt - Date.now()) / 1000);
-          c.header("Retry-After", String(retryAfterSec));
-          return c.json(
-            {
-              error: "Rate limit exceeded",
-              detail: `Authenticated operators are limited to ${RATE_LIMIT_MAX} requests per 4-hour window.`,
-              retryAfter: retryAfterSec,
-            },
-            429,
-          );
-        }
-        c.set("operatorAuthVerified", true);
-        c.set("operatorAuth", { address: sess.address, signature: "", timestamp: 0, viaSession: true });
-        setRateLimitHeaders(c, rateLimit.remaining, rateLimit.resetAt);
-        return next();
-      }
-    }
-
-    // Fast path 1: authenticated operators skip x402 payment.
-    // The frontend sends the operator's EIP-191 signature in headers only.
-    // If valid (timestamp within 24h + signature verifies), the signature is
-    // REDEEMED once for a session token (returned as X-Session-Token). The
-    // raw signature alone does not skip payment again — a captured signature
-    // is worthless once redeemed. Without KV (dev/test), the legacy
-    // replayable behavior remains and no session is minted.
-    const operatorAddress = c.req.header("x-operator-address");
-    const authSignature = c.req.header("x-auth-signature");
-    const authTimestamp = c.req.header("x-auth-timestamp");
-
-    if (operatorAddress && authSignature && authTimestamp) {
-      const ts = Number(authTimestamp);
-      if (!isNaN(ts)) {
-        let valid = false;
-        try {
-          valid = await verifyOperatorSignatureOnly(operatorAddress, authSignature, ts);
-        } catch {
-          // signature verification threw — treat as invalid
-        }
-
-        if (valid) {
-          // Fail-closed safety: only bypass x402 for explicitly protected routes.
-          const path = new URL(c.req.url).pathname;
-          const method = c.req.method;
-          if (!isProtectedRoute(method, path)) {
-            // Signature is valid but route is not protected — fall through to normal flow
-          } else {
-            // Rate limit check (non-paid requests only)
-            const rateLimit = await checkRateLimit(c.env.KV, operatorAddress);
-            if (!rateLimit.allowed) {
-              setRateLimitHeaders(c, 0, rateLimit.resetAt);
-              const retryAfterSec = Math.ceil((rateLimit.resetAt - Date.now()) / 1000);
-              c.header("Retry-After", String(retryAfterSec));
-              return c.json(
-                {
-                  error: "Rate limit exceeded",
-                  detail: `Authenticated operators are limited to ${RATE_LIMIT_MAX} requests per 4-hour window.`,
-                  retryAfter: retryAfterSec,
-                },
-                429,
-              );
-            }
-
-            if (c.env.KV) {
-              const netHash = requestNetworkHash(c);
-              const redemption = await redeemSignatureForSession(
-                c.env.KV,
-                authSignature,
-                ts,
-                netHash,
-                () => mintSessionToken(c.env.KV!, operatorAddress, netHash),
-              );
-              if (redemption.status === "network-mismatch") {
-                return c.json(
-                  {
-                    error: "Signature already used",
-                    detail: "This signature was already redeemed from a different network. Please sign again to authenticate this device.",
-                  },
-                  401,
-                );
-              }
-              c.set("operatorAuthVerified", true);
-              c.set("operatorAuth", {
-                address: operatorAddress,
-                signature: authSignature,
-                timestamp: ts,
-              });
-              setRateLimitHeaders(c, rateLimit.remaining, rateLimit.resetAt);
-              await next();
-              c.header("X-Session-Token", redemption.token);
-              return;
-            }
-
-            c.set("operatorAuthVerified", true);
-            c.set("operatorAuth", {
-              address: operatorAddress,
-              signature: authSignature,
-              timestamp: ts,
-            });
-            setRateLimitHeaders(c, rateLimit.remaining, rateLimit.resetAt);
-            return next();
-          }
-        } else {
-          // Auth headers were sent but signature is invalid or expired.
-          // Return 401 so the frontend knows to re-authenticate instead of
-          // confusing the user with a 402 "Payment Required".
-          return c.json(
-            {
-              error: "Authentication expired",
-              detail: "Your session signature is invalid or expired. Please re-authenticate.",
-            },
-            401,
-          );
-        }
-      }
-    }
-
     // Fast path: discovery/health routes and public API routes don't need x402 at all.
     const reqPath = new URL(c.req.url).pathname;
     const reqMethod = c.req.method;
@@ -1167,8 +1066,8 @@ export function createX402Middleware(): MiddlewareHandler<{ Bindings: Env; Varia
 
     // Settle the payment after a successful response.
     // For upto-scheme routes (/api/chat), the route sets a Settlement-Overrides header
-    // with the actual inference cost, which the SDK reads from responseHeaders and uses
-    // as the settlement amount (always <= maxAmountRequired).
+    // with the actual inference cost, which the SDK resolves into the requirements
+    // amount before invoking the (local) facilitator's settle.
     const responseHeaders = Object.fromEntries(c.res.headers.entries());
     const settleResult = await server.processSettlement(
       paymentPayload,

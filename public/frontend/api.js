@@ -6,13 +6,14 @@ import {
   apiHeaders, connectedAddress, authSignature, authTimestamp,
   lastEventTimestamp, setLastEventTimestamp, captureSessionToken, clearSessionToken,
 } from './state.js';
+import { fetchWithPayment } from './x402.js';
 
 /**
  * POST /api/chat with SSE streaming.
  * Returns the final parsed response object.
  */
 export async function sendChatMessage(body, onStreamEvent, signal) {
-  const res = await fetch('/api/chat', {
+  const res = await fetchWithPayment('/api/chat', {
     method: 'POST',
     headers: apiHeaders(),
     signal,
@@ -89,7 +90,7 @@ export async function sendChatMessage(body, onStreamEvent, signal) {
  * POST /api/tools?toolName={name}
  */
 export async function callTool(toolName, body, signal) {
-  const res = await fetch(`/api/tools?toolName=${toolName}`, {
+  const res = await fetchWithPayment(`/api/tools?toolName=${toolName}`, {
     method: 'POST',
     headers: apiHeaders(),
     signal,

@@ -16,7 +16,7 @@ The service exposes x402-gated endpoints on `https://trader.rigoblock.com`. Ever
 | `/api/oracle/refresh` | POST | $0.0023 USDC | Oracle refresh transaction builder |
 | `/api/tools` | GET | $0.0024 USDC | Tool catalog with JSON schemas |
 | `/api/tools?toolName={name}` | POST | $0.0025 USDC | Direct tool execution |
-| `/api/chat` | POST | up to $0.10 USDC (billed by actual usage) | Natural-language DeFi response |
+| `/api/chat` | POST | up to $0.20 USDC (billed by actual usage) | Natural-language DeFi response |
 
 Payments are in USDC on **Base mainnet** (`eip155:8453`) via the [x402 protocol](https://x402.org). `/api/chat` uses the `upto` scheme; all quote/tool endpoints use the `exact` scheme.
 

@@ -11,7 +11,7 @@ import {
   bazaarResourceServerExtension,
   validateDiscoveryExtension,
 } from "@x402/extensions/bazaar";
-import { PROTECTED_ROUTES } from "../src/middleware/x402.js";
+import { getProtectedRoutes } from "../src/middleware/x402.js";
 
 function createMockAdapter(method: string, path: string) {
   return {
@@ -40,7 +40,7 @@ function enrichDeclaration(
 }
 
 describe("x402 Bazaar discovery extensions", () => {
-  for (const [key, config] of Object.entries(PROTECTED_ROUTES)) {
+  for (const [key, config] of Object.entries(getProtectedRoutes())) {
     const [method, ...pathParts] = key.split(" ");
     const path = pathParts.join(" ");
 

@@ -17,7 +17,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { app } from "../src/index.js";
-import { PROTECTED_ROUTES, PUBLIC_API_ROUTES, isPublicApiRoute } from "../src/middleware/x402.js";
+import { getProtectedRoutes, PUBLIC_API_ROUTES, isPublicApiRoute } from "../src/middleware/x402.js";
 
 const SRC_DIR = join(__dirname, "../src");
 const PUBLIC_DIR = join(__dirname, "../public");
@@ -119,7 +119,7 @@ function openApiHasPathMethod(openapi: Record<string, unknown>, path: string, me
 
 describe("API Consistency", () => {
   const discoveredRoutes = discoverRoutes();
-  const protectedKeys = Object.keys(PROTECTED_ROUTES);
+  const protectedKeys = Object.keys(getProtectedRoutes());
   const openapi = loadOpenApi();
 
   // ── 1. Route coverage ──

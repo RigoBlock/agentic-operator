@@ -58,7 +58,7 @@ function showTransactionModal(tx) {
   confirmBtn.disabled = false;
   // Set button label based on transaction type
   const desc = (tx.description || '').toLowerCase();
-  confirmBtn.textContent = desc.includes('deploy') ? 'Deploy Pool'
+  confirmBtn.textContent = desc.includes('deploy') ? 'Deploy'
     : desc.includes('liquidity') ? 'Add Liquidity'
     : desc.includes('bridge') || desc.includes('transfer') ? 'Transfer'
     : desc.includes('stake') || desc.includes('unstake') ? 'Confirm'

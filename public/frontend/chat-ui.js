@@ -13,6 +13,7 @@ import {
 } from "./state.js";
 
 import { openWalletPicker, signAuthMessage, authKey } from "./wallet.js";
+import { fetchWithPayment } from './x402.js';
 
 import { showTransactionModal } from "./tx-modal.js";
 
@@ -604,7 +605,7 @@ async function invokeDirectTool(toolInfo) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 60000);
   try {
-    const res = await fetch(`/api/tools?toolName=${toolInfo.toolName}`, {
+    const res = await fetchWithPayment(`/api/tools?toolName=${toolInfo.toolName}`, {
       method: 'POST',
       headers: apiHeaders(),
       signal: controller.signal,
@@ -915,7 +916,7 @@ async function refreshGmxPositions(msgDiv) {
       body.authSignature = authSignature;
       body.authTimestamp = authTimestamp;
     }
-    const res = await fetch('/api/tools?toolName=gmx_get_positions', {
+    const res = await fetchWithPayment('/api/tools?toolName=gmx_get_positions', {
       method: 'POST',
       headers: apiHeaders(),
       body: JSON.stringify(body),
@@ -1124,7 +1125,7 @@ async function refreshHyperliquidPositions(msgDiv) {
       body.authSignature = authSignature;
       body.authTimestamp = authTimestamp;
     }
-    const res = await fetch('/api/tools?toolName=hyperliquid_get_positions', {
+    const res = await fetchWithPayment('/api/tools?toolName=hyperliquid_get_positions', {
       method: 'POST',
       headers: apiHeaders(),
       body: JSON.stringify(body),

@@ -16,8 +16,8 @@
  */
 
 import { Hono } from "hono";
-import type { Env, UnsignedTransaction } from "../types.js";
-import { verifyOperatorAuth, AuthError } from "../services/auth.js";
+import type { Env, AppVariables, UnsignedTransaction } from "../types.js";
+import { verifyOperatorAuth, verifyOperatorOwnership, AuthError } from "../services/auth.js";
 import {
   prepareDelegation,
   confirmDelegation,
@@ -39,10 +39,9 @@ import { prepareTransaction } from "../services/transactionPrepare.js";
 import { ExecutionError } from "../services/executionError.js";
 import { sanitizeError } from "../config.js";
 import { getTelegramUser, getTelegramUserIdByAddress } from "../services/telegramPairing.js";
-import { getVaultInfo } from "../services/vault.js";
 import type { Address, Hex } from "viem";
 
-const delegation = new Hono<{ Bindings: Env }>();
+const delegation = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 /**
  * POST /api/delegation/setup
@@ -381,18 +380,28 @@ delegation.get("/status", async (c) => {
     }
   }
 
-  // Check Telegram pairing status via operator address (only when verify=true
-  // so we have a synced wallet and can infer the operator address from vault owner)
+  // Check Telegram pairing status — OPERATOR-PRIVATE. This endpoint is public,
+  // so telegramPaired/isOwner are only revealed when the requester is
+  // authenticated (session/signature via the operatorAuth middleware) AND is
+  // the owner of this vault. Everyone else (including scripts enumerating
+  // vaults) sees false. The Telegram bot itself never reads this endpoint — it
+  // authenticates operators through the pairing-code flow in
+  // services/telegramPairing.ts.
   let telegramPaired = false;
-  if (verifyOnChain && walletInfo?.address) {
+  let isOwner = false;
+  const operatorAuth = c.get("operatorAuth");
+  if (operatorAuth?.address) {
     try {
-      const vaultInfo = await getVaultInfo(chainId || 1, vaultAddress as Address);
-      if (vaultInfo?.owner) {
-        const tgUserId = await getTelegramUserIdByAddress(c.env.KV, vaultInfo.owner);
-        telegramPaired = !!tgUserId;
-      }
+      await verifyOperatorOwnership({
+        operatorAddress: operatorAuth.address,
+        vaultAddress: vaultAddress as Address,
+        preferredChainId: chainId || 1,
+      });
+      isOwner = true;
+      const tgUserId = await getTelegramUserIdByAddress(c.env.KV, operatorAuth.address);
+      telegramPaired = !!tgUserId;
     } catch {
-      // ignore — telegram status is best-effort
+      // Not the vault owner (or ownership check failed) — stays false.
     }
   }
 
@@ -434,6 +443,10 @@ delegation.get("/status", async (c) => {
       : null,
     allChainsStatus,
     telegramPaired,
+    // True only when the authenticated requester owns this vault — lets the
+    // UI gate operator-only calls (settings, exec-mode) without firing
+    // requests that would 403.
+    isOwner,
     // Wallet change fields — non-null only when CDP credential rotation detected
     walletChanged: walletChanged || false,
     previousAgentAddress: previousAgentAddress ?? null,

@@ -1,4 +1,5 @@
 import { apiHeaders } from './state.js';
+import { fetchWithPayment } from './x402.js';
 
 // WebMCP — expose site tools to AI agents via the browser (WebMCP API).
 // See https://webmachinelearning.github.io/webmcp/
@@ -24,7 +25,7 @@ import { apiHeaders } from './state.js';
       if (amountIn) args.amountIn = amountIn;
       if (amountOut) args.amountOut = amountOut;
       if (chain) args.chain = chain;
-      const res = await fetch('/api/tools?toolName=get_swap_quote', {
+      const res = await fetchWithPayment('/api/tools?toolName=get_swap_quote', {
         method: 'POST',
         headers: apiHeaders(),
         body: JSON.stringify({ arguments: args, chainId: 8453 }),
@@ -45,7 +46,7 @@ import { apiHeaders } from './state.js';
       required: ['vaultAddress', 'chainId'],
     },
     execute: async (args) => {
-      const res = await fetch('/api/tools?toolName=get_vault_info', {
+      const res = await fetchWithPayment('/api/tools?toolName=get_vault_info', {
         method: 'POST',
         headers: apiHeaders(),
         body: JSON.stringify({ arguments: args, chainId: args.chainId, vaultAddress: args.vaultAddress }),
