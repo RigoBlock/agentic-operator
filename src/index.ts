@@ -31,7 +31,7 @@ import { initTokenResolver } from "./services/tokenResolver.js";
 import { getVaultInfo } from "./services/vault.js";
 import { mapWithConcurrencySettled } from "./services/concurrency.js";
 import { withRpcMetrics, getRpcMetrics } from "./services/rpcMetrics.js";
-import { createX402Middleware } from "./middleware/x402.js";
+import { createX402Middleware, getProtectedRoutes } from "./middleware/x402.js";
 import { createOperatorAuthMiddleware } from "./middleware/operatorAuth.js";
 
 import { runAllSkills } from "./skills/index.js";
@@ -234,7 +234,7 @@ app.get("/api/health", (c) =>
       ],
       payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37",
       paidRoutes: {
-        "POST /api/chat": "up to $0.10 (billed by usage, ~$0.003-$0.015)",
+        "POST /api/chat": "up to $0.20 (billed by usage, ~$0.003-$0.015)",
         "GET /api/quote": "$0.0020",
         "POST /api/quote/uniswap": "$0.0021",
         "GET /api/quote/0x": "$0.0022",
@@ -274,15 +274,12 @@ app.get("/api", (c) => {
         "Pay per request in USDC on Base. See /.well-known/x402.json for endpoint list.",
       discoveryUrl: "https://trader.rigoblock.com/.well-known/x402.json",
       openApiUrl: "https://trader.rigoblock.com/openapi.json",
-      endpoints: {
-        "POST /api/chat": { price: "up to $0.10 (billed by usage)", description: "Natural language DeFi agent — swap/bridge/LP/stake calldata" },
-        "GET /api/quote": { price: "$0.0020", description: "DEX price quote across 7 chains" },
-        "POST /api/quote/uniswap": { price: "$0.0021", description: "Uniswap Trading API quote with on-chain oracle price comparison" },
-        "GET /api/quote/0x": { price: "$0.0022", description: "0x API quote with on-chain oracle price comparison" },
-        "POST /api/oracle/refresh": { price: "$0.0023", description: "On-chain oracle pool refresh transaction builder" },
-        "POST /api/tools": { price: "$0.0025", description: "Direct tool invocation — structured input/output" },
-        "GET /api/tools": { price: "$0.0024", description: "Tool discovery with full parameter schemas" },
-      },
+      endpoints: Object.fromEntries(
+        x402EndpointMetadata().map((endpoint) => [
+          `${endpoint.method.toUpperCase()} ${endpoint.path}`,
+          { price: endpoint.price, description: endpoint.description },
+        ]),
+      ),
       accepts: [
         { scheme: "exact", network: "eip155:8453", amount: "2000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37", maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" } },
         { scheme: "upto", network: "eip155:8453", maxAmount: "100000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0xA0F9C380ad1E1be09046319fd907335B2B452B37", maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" } },
@@ -304,6 +301,7 @@ app.get("/", async (c) => {
       '</openapi.json>; rel="service-desc"',
       '</.well-known/ai-plugin.json>; rel="describedby"',
       '</.well-known/api-catalog>; rel="api-catalog"',
+      '</llms.txt>; rel="llms"',
       '</sitemap.xml>; rel="sitemap"',
     ].join(", "),
   );
@@ -316,6 +314,34 @@ app.get("/", async (c) => {
   );
   headers.set("Expires", "0");
   return new Response(response.body, { status: response.status, headers });
+});
+
+// llms.txt — concise agent guide with operation-specific prices and discovery links.
+app.get("/llms.txt", (c) => {
+  c.header("content-type", "text/plain; charset=utf-8");
+  const lines = [
+    "# Rigoblock Agentic Operator",
+    "",
+    "AI-powered DeFi trading for Rigoblock smart vaults: swaps, cross-chain bridges, Uniswap v4 LP, GMX and Hyperliquid perpetuals, GRG staking, vault deployment, and aggregated NAV.",
+    "",
+    "## Paid operations (USDC on Base via x402)",
+    "",
+    ...x402EndpointMetadata().map((endpoint) =>
+      `- ${endpoint.method.toUpperCase()} ${endpoint.path} — ${endpoint.price}: ${endpoint.description}`,
+    ),
+    "",
+    "## Discovery",
+    "",
+    "- OpenAPI: https://trader.rigoblock.com/openapi.json",
+    "- Agent integration guide: https://github.com/rigoblock/agentic-operator/blob/main/AGENTS.md",
+    "- x402 endpoint list: https://trader.rigoblock.com/.well-known/x402.json",
+    "- Tool catalog: https://trader.rigoblock.com/api/tools",
+    "- AI plugin manifest: https://trader.rigoblock.com/.well-known/ai-plugin.json",
+    "- Supported chains: https://trader.rigoblock.com/api/chains",
+    "",
+    "Direct tool invocation is POST /api/tools?toolName={name}. Tool discovery is GET /api/tools. They are separate operations with separate prices.",
+  ];
+  return c.text(lines.join("\n"));
 });
 
 // sitemap.xml — lists canonical public URLs for crawlers and agents
@@ -337,6 +363,11 @@ app.get("/sitemap.xml", (c) => {
       "  </url>",
       "  <url>",
       "    <loc>https://trader.rigoblock.com/.well-known/ai-plugin.json</loc>",
+      "    <changefreq>monthly</changefreq>",
+      "    <priority>0.8</priority>",
+      "  </url>",
+      "  <url>",
+      "    <loc>https://trader.rigoblock.com/llms.txt</loc>",
       "    <changefreq>monthly</changefreq>",
       "    <priority>0.8</priority>",
       "  </url>",
@@ -372,6 +403,9 @@ app.get("/robots.txt", (c) => {
       "# ai-train=no: do not use our content to train AI models",
       "Content-Signal: ai-train=no, search=yes, ai-input=yes",
       "",
+      "# LLM integration guide",
+      "LLMs: https://trader.rigoblock.com/llms.txt",
+      "",
       "Sitemap: https://trader.rigoblock.com/sitemap.xml",
     ].join("\n"),
   );
@@ -392,7 +426,7 @@ app.get("/.well-known/ai-plugin.json", (c) =>
       "GRG staking, vault deployment, " +
       "and aggregated NAV across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Unichain, HyperEVM. " +
       "All vault-modifying operations require operator authentication and are protected by a 10% NAV shield. " +
-      "Payment: up to $0.10 USDC per chat request (billed by inference usage, ~$0.003–$0.015), $0.0020–$0.0025 per endpoint (exact amount depends on endpoint), via x402 on Base.",
+      "Payment: up to $0.20 USDC per chat request (billed by inference usage, ~$0.003–$0.015), $0.0020–$0.0025 per endpoint (exact amount depends on endpoint), via x402 on Base.",
     auth: {
       type: "none",
     },
@@ -400,11 +434,31 @@ app.get("/.well-known/ai-plugin.json", (c) =>
       type: "openapi",
       url: "https://trader.rigoblock.com/openapi.json",
     },
-    logo_url: "https://trader.rigoblock.com/favicon.ico",
+    logo_url: "https://trader.rigoblock.com/favicon.png",
     contact_email: "info@rigoblock.com",
     legal_info_url: "https://rigoblock.com",
   }),
 );
+
+// Derived discovery metadata: same route config and prices as the payment gate.
+function x402EndpointMetadata() {
+  const routes = getProtectedRoutes() as Record<string, {
+    description?: string;
+    accepts: Array<{ price: string; scheme: string }>;
+  }>;
+  return Object.entries(routes).map(([key, config]) => {
+    const [method, path] = key.split(" ");
+    const accept = config.accepts[0];
+    return {
+      method: method.toLowerCase(),
+      path,
+      price: accept.scheme === "upto"
+        ? `up to ${accept.price} (billed by actual usage)`
+        : accept.price,
+      description: config.description || "",
+    };
+  });
+}
 
 // x402 discovery — machine-readable list of paid endpoints
 app.get("/.well-known/x402.json", (c) =>
@@ -415,50 +469,7 @@ app.get("/.well-known/x402.json", (c) =>
     asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     assetName: "USDC",
     facilitator: "https://api.cdp.coinbase.com/platform/v2/x402",
-    endpoints: [
-      {
-        path: "/api/chat",
-        method: "POST",
-        price: "up to $0.10 (billed by usage, ~$0.003-$0.015)",
-        description: "AI-powered DeFi chat — natural language to swap/bridge/LP calldata",
-      },
-      {
-        path: "/api/quote",
-        method: "GET",
-        price: "$0.0020",
-        description: "DEX price quote across 7 chains (Uniswap + 0x aggregator)",
-      },
-      {
-        path: "/api/quote/uniswap",
-        method: "POST",
-        price: "$0.0021",
-        description: "Uniswap Trading API quote with on-chain oracle price comparison",
-      },
-      {
-        path: "/api/quote/0x",
-        method: "GET",
-        price: "$0.0022",
-        description: "0x API v2 quote with on-chain oracle price comparison",
-      },
-      {
-        path: "/api/oracle/refresh",
-        method: "POST",
-        price: "$0.0023",
-        description: "On-chain oracle pool refresh transaction builder",
-      },
-      {
-        path: "/api/tools",
-        method: "GET",
-        price: "$0.0024",
-        description: "Tool discovery — returns full catalog with JSON schemas for all 40+ direct-invocation tools",
-      },
-      {
-        path: "/api/tools",
-        method: "POST",
-        price: "$0.0025",
-        description: "Direct tool invocation without LLM — get_swap_quote, get_vault_info, build_vault_swap, etc.",
-      },
-    ],
+    endpoints: x402EndpointMetadata(),
   }),
 );
 
